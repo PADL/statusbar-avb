@@ -461,6 +461,16 @@ class AemCommandHandler
     /// Longest command body a deferred command keeps for its echoed responses
     /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
     static constexpr size_t MAX_PENDING_BODY = 64;
+    /// How long a deferred command waits for complete_pending_command() before
+    /// tick() answers it PENDING_COMMAND_EXPIRED_STATUS with the value in force
+    /// and frees its slot. Twice the SRP re-registration the corrigendum
+    /// anticipates (Cor 1-2025 7.4.9.3: two LeaveAll periods, about 30 s), so
+    /// a hook that is still working is never cut short, and one that never
+    /// finishes does not hold its slot and its controller for ever.
+    static constexpr uint32_t PENDING_COMMAND_DEADLINE_MS = 60'000;
+    /// What an expired deferred command is answered: whatever it was waiting
+    /// for (a reservation, the application) was not had in time.
+    static constexpr uint8_t PENDING_COMMAND_EXPIRED_STATUS = AEM_STATUS_NO_RESOURCES;
 
     /// Finish the deferred (@p command_type, @p descriptor_type, @p descriptor_index):
     /// send its final response with @p status and @p response_body (the echoed
@@ -477,8 +487,8 @@ class AemCommandHandler
     [[nodiscard]] auto pending_command_count() const noexcept -> size_t { return pending_commands_.size(); }
 
     /// Periodic tick: lock timeout (with its unsolicited LOCK_ENTITY release
-    /// notification), pending acquire timeout and the IN_PROGRESS repeats of
-    /// deferred commands.
+    /// notification), pending acquire timeout, the IN_PROGRESS repeats of
+    /// deferred commands and the deadline of those nobody completed.
     void tick(sm::TimePoint now);
 
     /// Get the current configuration index
@@ -695,9 +705,10 @@ class AemCommandHandler
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> std::optional<AemCommandResponse>;
 
-    /// What a value SET is answered without its hook running: NO_RESOURCES
-    /// when no pending slot is left for it, or unchanged_set_answer(); nullopt
-    /// when the hook is to run.
+    /// What a value SET is answered without its hook running: IN_PROGRESS
+    /// again for the retransmit of a deferred command, NO_RESOURCES when no
+    /// pending slot is left for it, or unchanged_set_answer(); nullopt when
+    /// the hook is to run.
     [[nodiscard]] auto answered_before_hook(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> std::optional<AemCommandResponse>;
@@ -832,8 +843,19 @@ class AemCommandHandler
         std::array<uint8_t, MAX_PENDING_BODY> body{};
         size_t body_size{0};
         sm::TimePoint next_in_progress{};
+        /// When tick() gives up on it (PENDING_COMMAND_DEADLINE_MS after deferral).
+        sm::TimePoint deadline{};
     };
     SlotTable<PendingCommand, MAX_PENDING_COMMANDS> pending_commands_{};
+
+    /// The deferred command the dispatch in progress repeats, if it is one:
+    /// same controller, sequence_id and command as a slot already holds (a
+    /// controller's retransmit, 9.2.2.3.1.2), else nullptr.
+    [[nodiscard]] auto repeated_pending(uint16_t command_type) const noexcept -> PendingCommand const*;
+
+    /// Answer every deferred command past its deadline with
+    /// PENDING_COMMAND_EXPIRED_STATUS and the value in force, freeing its slot.
+    void expire_pending_commands(sm::TimePoint now);
 
     /// Send a completed deferred command's final response (and its unsolicited
     /// notification on SUCCESS); see complete_pending_command() for the body.

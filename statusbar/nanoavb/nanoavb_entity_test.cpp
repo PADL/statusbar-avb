@@ -8,6 +8,7 @@
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
@@ -2285,6 +2286,84 @@ TEST(nanoavb_entity_in_progress, deferred_set_repeats_in_progress_until_complete
     EXPECT_TRUE(std::equal(kSetFormatOut0.begin(), kSetFormatOut0.end(), body_of(*reply).begin()));
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB), 1);
 
+    EXPECT_FALSE(handler.complete_pending_command(AEM_COMMAND_SET_STREAM_FORMAT, DESCRIPTOR_STREAM_OUTPUT, 0, AEM_STATUS_SUCCESS));
+}
+
+// 9.2.2.3.1.2: a controller that heard nothing within 250 ms sends its
+// command again under the same sequence_id. The deferred command it repeats
+// is answered IN_PROGRESS once more from its slot: the hook does not run
+// twice and no second slot is taken. A different sequence_id is a new command.
+TEST(nanoavb_entity_in_progress, a_retransmitted_deferred_set_is_answered_from_its_slot)
+{
+    DeferringHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    handler.set_event_time(sm::TimePoint{});
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 7);
+    EXPECT_EQ(app.set_calls, 1);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    sends.clear();
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 7);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(header_of(sends[0]).sequence_id.get(), 7);
+    EXPECT_TRUE(std::equal(kSetFormatOut0.begin(), kSetFormatOut0.end(), body_of(sends[0]).begin()));
+    EXPECT_EQ(app.set_calls, 1);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    // The same command from another controller, or under another sequence_id,
+    // is not a retransmit of it.
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 7);
+    EXPECT_EQ(app.set_calls, 2);
+    EXPECT_EQ(handler.pending_command_count(), size_t{2});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 8);
+    EXPECT_EQ(app.set_calls, 3);
+    EXPECT_EQ(handler.pending_command_count(), size_t{3});
+}
+
+// A deferred command the application never completes is not held for ever:
+// at its deadline it is answered PENDING_COMMAND_EXPIRED_STATUS with the value
+// in force, nobody is notified, and its slot is free again.
+TEST(nanoavb_entity_in_progress, a_deferred_set_nobody_completes_is_answered_at_its_deadline)
+{
+    DeferringHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    auto const now = sm::TimePoint{};
+    handler.set_event_time(now);
+    auto const deadline = std::chrono::milliseconds(AemCommandHandler::PENDING_COMMAND_DEADLINE_MS);
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0, 7);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    // Up to the deadline: IN_PROGRESS repeats, nothing final.
+    sends.clear();
+    handler.tick(now + deadline - std::chrono::milliseconds(1));
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+    for (auto const& s : sends) {
+        EXPECT_EQ(header_of(s).status(), AEM_STATUS_IN_PROGRESS);
+    }
+
+    // At the deadline: one final response to A with the value in force, no
+    // notification to B, the slot given back.
+    sends.clear();
+    handler.tick(now + deadline);
+    EXPECT_EQ(handler.pending_command_count(), size_t{0});
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(sends[0].dest, kMacA);
+    EXPECT_EQ(header_of(sends[0]).status(), AemCommandHandler::PENDING_COMMAND_EXPIRED_STATUS);
+    EXPECT_EQ(header_of(sends[0]).sequence_id.get(), 7);
+    EXPECT_EQ(body_of(sends[0]).size(), AemStreamFormatPayload::LENGTH);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB), 0);
+
+    // A completion that comes late finds nothing to complete.
     EXPECT_FALSE(handler.complete_pending_command(AEM_COMMAND_SET_STREAM_FORMAT, DESCRIPTOR_STREAM_OUTPUT, 0, AEM_STATUS_SUCCESS));
 }
 

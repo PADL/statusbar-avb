@@ -410,6 +410,13 @@ auto AemCommandHandler::answered_before_hook(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> std::optional<AemCommandResponse>
 {
+    // A controller that heard nothing for 250 ms sends its command again
+    // (9.2.2.3.1.2) under the same sequence_id: the one already deferred is
+    // answered IN_PROGRESS once more from its slot, its hook not run twice.
+    if (auto const* repeat = repeated_pending(command_type)) {
+        std::copy_n(repeat->body.begin(), repeat->body_size, out_buffer.begin());
+        return AemCommandResponse{.status = AEM_STATUS_IN_PROGRESS, .size = repeat->body_size};
+    }
     // A hook that answers IN_PROGRESS needs a pending slot to be finished from,
     // so the slot is spoken for before the hook runs: with none free the SET is
     // refused NO_RESOURCES here, and no work is begun that nothing could report.
@@ -574,12 +581,35 @@ auto AemCommandHandler::defer_command(uint16_t const command_type, std::span<uin
         .mac = current_src_mac_,
         .body = {},
         .body_size = echoed_body.size(),
-        .next_in_progress = event_time_ + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS)};
+        .next_in_progress = event_time_ + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS),
+        .deadline = event_time_ + std::chrono::milliseconds(PENDING_COMMAND_DEADLINE_MS)};
     std::copy(echoed_body.begin(), echoed_body.end(), pending.body.begin());
     if (!pending_commands_.add(pending)) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
     }
     return {.status = AEM_STATUS_IN_PROGRESS, .size = echoed_body.size()};
+}
+
+auto AemCommandHandler::repeated_pending(uint16_t const command_type) const noexcept -> PendingCommand const*
+{
+    auto const idx = pending_commands_.find_if([&](PendingCommand const& p) {
+        return p.header.controller_entity_id == current_header_.controller_entity_id &&
+            p.header.sequence_id == current_header_.sequence_id && p.header.command_code() == command_type;
+    });
+    return pending_commands_.get(idx);
+}
+
+void AemCommandHandler::expire_pending_commands(sm::TimePoint const now)
+{
+    // One at a time from the table: answering one may not be interleaved with
+    // walking it (SlotTable::remove moves the last entry into the freed index).
+    auto idx = pending_commands_.find_if([now](PendingCommand const& p) { return now >= p.deadline; });
+    while (idx < pending_commands_.capacity()) {
+        PendingCommand const done = pending_commands_[idx];
+        pending_commands_.remove(idx);
+        answer_completed(done, PENDING_COMMAND_EXPIRED_STATUS, {});
+        idx = pending_commands_.find_if([now](PendingCommand const& p) { return now >= p.deadline; });
+    }
 }
 
 auto AemCommandHandler::complete_pending_command(
@@ -654,6 +684,9 @@ void AemCommandHandler::tick(sm::TimePoint const now)
     if (pending_acquire_.active && now >= pending_acquire_.timeout) {
         controller_available_timed_out();
     }
+    // A deferred command nobody completed is answered and let go of first, so
+    // it is not told IN_PROGRESS once more on its way out.
+    expire_pending_commands(now);
     // IEEE 1722.1 9.2.2.3.1.2: a deferred command repeats IN_PROGRESS every
     // AEM_IN_PROGRESS_TIMEOUT_MS so the controller keeps waiting.
     for (auto& p : pending_commands_) {
