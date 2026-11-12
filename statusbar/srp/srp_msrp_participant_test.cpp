@@ -2217,4 +2217,100 @@ TEST(msrp_participant, transmit_pending_sends_a_withdrawal_without_waiting_for_t
     }
 }
 
+namespace {
+/// Fill @p a with 32 Talker Advertises and 15 Talker Faileds beside the one under
+/// test, each on its own stream id two apart so no two coalesce into one vector.
+/// On the wire that is 903 bytes of Talker Advertise and 600 of Talker Failed: the
+/// second message does not fit beside the first in one 1500-byte PDU and waits
+/// for a later one.
+auto overflow_msrp_config() -> MsrpConfig
+{
+    return MsrpConfig{
+        .max_talker_advertise = 32,
+        .max_talker_failed = 16,
+        .max_listeners = 8,
+        .max_domains = 2,
+        .max_observers = 4,
+        .max_interesting_stream_ids = 4,
+    };
+}
+
+void declare_a_full_pdu_of_talkers(MsrpParticipant& a, TimePoint now)
+{
+    for (uint16_t i = 0; i < 32; ++i) {
+        EXPECT_TRUE(static_cast<bool>(a.declare_talker_advertise(make_talker_adv(static_cast<uint16_t>(0x1000 + 2 * i)), now)));
+    }
+    for (uint16_t i = 0; i < 15; ++i) {
+        TalkerFailedFirstValue fv{};
+        fv.advertise = make_talker_adv(static_cast<uint16_t>(0x2000 + 2 * i));
+        fv.failure_code = 1;
+        EXPECT_TRUE(static_cast<bool>(a.declare_talker_failed(fv, now)));
+    }
+}
+
+/// The event the PDUs in @p pdus carry for Talker Failed @p uid, if any.
+auto talker_failed_event(std::vector<std::vector<uint8_t>> const& pdus, uint16_t uid) -> std::optional<AttributeEvent>
+{
+    for (auto const& pdu : pdus) {
+        for (auto const& carried : talker_failed_carried(pdu)) {
+            if (carried.unique_id == uid) {
+                return carried.event;
+            }
+        }
+    }
+    return std::nullopt;
+}
+}  // namespace
+
+// IEEE 802.1Q 10.7.6.3: an attribute type that does not fit in this PDU waits
+// for the next. The Applicants of its records had already taken their tx!
+// transition when the message was built, so on the next pass they used to be
+// dispatched tx! again from the new state: a Talker Failed whose Lv was skipped
+// for space (La + tx! had gone to Vo) came out as an In, or not at all, and the
+// peer kept the registration. A skipped message now puts its Applicants back
+// where they stood, and the settled talkers' optional JoinIn refreshes yield
+// the room: the next PDU carries the Lv.
+TEST(msrp_participant, a_leave_skipped_for_space_rides_the_next_pdu)
+{
+    MsrpParticipant a{overflow_msrp_config(), 0xcc33};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+
+    // The Talker Failed under test is declared alone first, so it is the one
+    // record whose Applicant is settled (Qa) before the withdrawal.
+    TalkerFailedFirstValue const under_test = [] {
+        TalkerFailedFirstValue fv{};
+        fv.advertise = make_talker_adv(0x0777);
+        fv.failure_code = 1;
+        return fv;
+    }();
+    EXPECT_TRUE(static_cast<bool>(a.declare_talker_failed(under_test, clock.now)));
+    for (int i = 0; i < 3; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    EXPECT_TRUE(talker_failed_event(fab.a_to_b, 0x0777).has_value());
+    fab.a_to_b.clear();
+
+    // Withdraw it, and in the same join period fill the PDU with talkers so
+    // the Talker Failed message (its Lv among them) does not fit this time.
+    EXPECT_TRUE(static_cast<bool>(a.withdraw_talker(make_stream_id(0x0777), clock.now)));
+    declare_a_full_pdu_of_talkers(a, clock.now);
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
+    EXPECT_FALSE(fab.a_to_b.empty());
+    EXPECT_TRUE(a.pdu_message_skip_count() >= 1U);
+    EXPECT_FALSE(talker_failed_event(fab.a_to_b, 0x0777).has_value());
+
+    // The Talker Advertises need three passes to settle; the Talker Failed
+    // message rides the first PDU with room for it, Lv intact.
+    std::optional<AttributeEvent> lv_seen{};
+    for (int i = 0; i < 4 && !lv_seen.has_value(); ++i) {
+        fab.a_to_b.clear();
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+        lv_seen = talker_failed_event(fab.a_to_b, 0x0777);
+    }
+    EXPECT_TRUE(lv_seen.has_value() && *lv_seen == AttributeEvent::Lv);
+}
+
 TEST_MAIN(statusbar_srp, srp_msrp_participant_test)

@@ -790,9 +790,44 @@ class MsrpParticipantT
     // PDU encode
     //
     void build_and_send_pdu(TimePoint now, bool leave_all = false);
-    /// The PDU itself: tx! to every applicant, then one message per attribute
-    /// type with what they asked for, through send_pdu.
+    /// The PDU itself: one message per attribute type, each type's applicants
+    /// given tx! as its message is built, through send_pdu.
     void encode_and_send_pdu(TimePoint now, bool leave_all);
+
+    /// The Applicant state of every record as a transmit pass found it: what
+    /// a message skipped for space is rolled back to (transmit_attribute_type).
+    struct ApplicantSnapshot
+    {
+        statusbar::sg14::inplace_vector<applicant_sm::Machine, Limits::max_talker_advertise> talker_adv;
+        statusbar::sg14::inplace_vector<applicant_sm::Machine, Limits::max_talker_failed> talker_failed;
+        statusbar::sg14::inplace_vector<applicant_sm::Machine, Limits::max_listeners> listeners;
+        statusbar::sg14::inplace_vector<applicant_sm::Machine, Limits::max_domains> domains;
+    };
+    struct PassResult
+    {
+        bool any_message;
+        bool skipped;  ///< a message did not fit (pdu_message_skip_count moved)
+    };
+    [[nodiscard]] auto snapshot_applicants() const -> ApplicantSnapshot;
+    void restore_applicants(ApplicantSnapshot const& before);
+    [[nodiscard]] auto transmit_pass_shedding_optional(
+        ApplicantSnapshot const& before, bool leave_all, TimePoint now, bool& la_remaining) -> bool;
+    [[nodiscard]] auto transmit_pass(
+        ApplicantSnapshot const& before, bool leave_all, TimePoint now, bool shed_optional, bool& la_remaining) -> PassResult;
+    [[nodiscard]] auto begin_pdu() -> bool;
+    template <class Table, class Saved>
+    [[nodiscard]] auto transmit_attribute_type(
+        Table& records,
+        Saved const& before,
+        AttributeType type,
+        uint8_t attr_length,
+        bool& la_remaining,
+        TimePoint now,
+        bool shed_optional) -> bool;
+    template <class Table, class Saved>
+    [[nodiscard]] auto append_or_roll_back(
+        Table& records, Saved const& before, AttributeType type, uint8_t attr_length, bool carry_la) -> bool;
+    void finish_pdu(bool any_message, bool la_remaining);
 
     template <typename RecordVec>
     auto append_attribute_message(

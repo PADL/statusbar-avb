@@ -555,9 +555,9 @@ void MsrpParticipantT<Limits>::change_declared_value(AttributeRecord<FirstValue>
 }
 
 /// After a PDU has been built: a record whose Lv went out in it (La + tx! is
-/// Vo, and the emit loop cleared tx_pending only for what it wrote; a message
-/// skipped for space keeps the flag and waits) takes its pending value and
-/// declares it New!, to ride the next PDU. A LeaveAll of ours in between
+/// Vo; a message skipped for space put its Applicants back in La, see
+/// transmit_attribute_type, and waits) takes its pending value and declares
+/// it New!, to ride the next PDU. A LeaveAll of ours in between
 /// (La + txLA! is Lo, with no Lv owed) completes the change the same way.
 /// Returns whether any record did.
 template <class Limits>
@@ -1283,6 +1283,10 @@ void MsrpParticipantT<Limits>::handle_domain_rx(
 // PDU encode
 // ============================================================
 
+/// One attribute type's message into @p out. A message that would not fit whole
+/// is skipped and counted in pdu_message_skip_count_; append_or_roll_back sees
+/// the count move and puts the records' Applicants back as the pass found them,
+/// so the next pass dispatches tx! to them again (see transmit_attribute_type).
 template <class Limits>
 template <typename RecordVec>
 auto MsrpParticipantT<Limits>::append_attribute_message(
@@ -1517,69 +1521,213 @@ void MsrpParticipantT<Limits>::build_and_send_pdu(TimePoint now, bool leave_all)
     complete_pending_changes(now);
 }
 
+namespace {
+/// Whether any record of @p recs is about to re-declare something. The
+/// LeaveAll flag must ride a non-empty vector (with a FirstValue): a
+/// standalone EMPTY LeaveAll vector (NumberOfValues=0) for a type we have no
+/// records of -- e.g. TalkerFailed on a pure talker -- is mis-parsed by some
+/// peers (some AVB switches) AND tshark: they read a FirstValue for the
+/// 0-value vector and consume the following Listener/Domain messages' bytes,
+/// DESTROYING the rest of the PDU. A LeaveAll PDU must re-declare every
+/// active attribute in the same packet (IEEE 802.1Q 10.7.6.2); losing the
+/// Domain re-declaration makes the bridge treat our port as non-AVB and fail
+/// the talker with code 8.
+template <class Table>
+auto has_emittable(Table const& recs) -> bool
+{
+    for (auto const& r : recs) {
+        if (r.applicant_ctx.tx_pending && r.operation == Operation::Declare) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// The Applicant state of every record of @p recs, in order, into @p out.
+template <class Table, class Saved>
+void save_applicants(Table const& recs, Saved& out)
+{
+    out.clear();
+    for (auto const& rec : recs) {
+        out.push_back(rec.applicant_sm);
+    }
+}
+
+/// Every record of @p recs back to the Applicant state @p saved holds for it,
+/// with no transmit outputs: as if this pass had never given it tx!.
+template <class Table, class Saved>
+void restore_applicants_of(Table& recs, Saved const& saved)
+{
+    for (size_t i = 0; i < recs.size() && i < saved.size(); ++i) {
+        recs[i].applicant_sm = saved[i];
+        recs[i].applicant_ctx.clear_outputs();
+    }
+}
+}  // namespace
+
 template <class Limits>
 void MsrpParticipantT<Limits>::encode_and_send_pdu(TimePoint now, bool leave_all)
 {
-    // First, dispatch the appropriate TX event to every attribute's
-    // Applicant to generate tx outputs. We pick TxRegistrarIn vs
-    // TxRegistrarMt per-attribute based on the paired Registrar's
-    // state (Clause 10.7.7 Note 8).
-    auto drive_tx = [&](auto& records) {
-        for (auto& rec : records) {
-            mrp::dispatch_applicant_tx(rec, now);
-        }
-    };
-    drive_tx(talker_adv_);
-    drive_tx(talker_failed_);
-    drive_tx(listeners_);
-    drive_tx(domains_);
+    ApplicantSnapshot const before = snapshot_applicants();
+    bool la_remaining = false;
+    bool const any_message = transmit_pass_shedding_optional(before, leave_all, now, la_remaining);
+    finish_pdu(any_message, la_remaining);
+}
 
-    // Did the LeaveAll FSM ask us to tag this PDU? on_leaveall_timer passes the
-    // leaveall_sm's tx_leaveall_pending here; the join/periodic TX paths pass
-    // false. (Previously hardcoded false -> our LeaveAll was never transmitted.)
-    //
-    // The LeaveAll must ride the FIRST attribute type that actually re-declares a
-    // record, so the flag is always carried by a non-empty vector (with a
-    // FirstValue). Emitting a standalone EMPTY LeaveAll vector (NumberOfValues=0)
-    // for a type we have no records of -- e.g. TalkerFailed on a pure talker --
-    // is mis-parsed by some peers (some AVB switches) AND tshark: they read a
-    // FirstValue for the 0-value vector and consume the following Listener/Domain
-    // messages' bytes, DESTROYING the rest of the PDU. A LeaveAll PDU must
-    // re-declare every active attribute in the same packet (IEEE 802.1Q
-    // 10.7.6.2); losing the Domain re-declaration makes the bridge treat our port
-    // as non-AVB and fail the talker with code 8. So: carry the LeaveAll on the
-    // first re-declaring message, and never synthesize an empty LeaveAll vector
-    // ahead of other messages.
-    auto has_emittable = [](auto const& recs) {
-        for (auto const& r : recs) {
-            if (r.applicant_ctx.tx_pending && r.operation == Operation::Declare) {
-                return true;
-            }
-        }
-        return false;
-    };
-    bool la_remaining = leave_all;
+template <class Limits>
+auto MsrpParticipantT<Limits>::snapshot_applicants() const -> ApplicantSnapshot
+{
+    ApplicantSnapshot snap{};
+    save_applicants(talker_adv_, snap.talker_adv);
+    save_applicants(talker_failed_, snap.talker_failed);
+    save_applicants(listeners_, snap.listeners);
+    save_applicants(domains_, snap.domains);
+    return snap;
+}
 
-    // Reuse the participant's pre-allocated PDU buffer; no per-tx heap.
-    pdu_buffer_.rewind();
-    if (!append_u8(pdu_buffer_, PROTOCOL_VERSION)) {
-        return;
+template <class Limits>
+void MsrpParticipantT<Limits>::restore_applicants(ApplicantSnapshot const& before)
+{
+    restore_applicants_of(talker_adv_, before.talker_adv);
+    restore_applicants_of(talker_failed_, before.talker_failed);
+    restore_applicants_of(listeners_, before.listeners);
+    restore_applicants_of(domains_, before.domains);
+}
+
+/// The transmit pass, twice at most. First with every encoding; when a message
+/// did not fit, again from the same Applicant states with the optional
+/// encodings left out (Table 10-3's [sJ] and [sIn]: the settled talkers'
+/// JoinIn refreshes, which would otherwise take the whole PDU every pass and
+/// starve a required Leave for ever), so the required ones have the room. A
+/// message that does not fit even then has its Applicants rolled back and
+/// waits for the next join period.
+template <class Limits>
+auto MsrpParticipantT<Limits>::transmit_pass_shedding_optional(
+    ApplicantSnapshot const& before, bool leave_all, TimePoint now, bool& la_remaining) -> bool
+{
+    PassResult const full = transmit_pass(before, leave_all, now, /*shed_optional=*/false, la_remaining);
+    if (!full.skipped) {
+        return full.any_message;
     }
+    restore_applicants(before);
+    PassResult const required = transmit_pass(before, leave_all, now, /*shed_optional=*/true, la_remaining);
+    if (required.skipped) {
+        port_.timers().start_join(now);
+    }
+    return required.any_message;
+}
 
+/// One message per attribute type, each type's Applicants given tx! as its
+/// message is built, in the PDU's order. The LeaveAll flag rides the first
+/// message that re-declares a record (see has_emittable).
+template <class Limits>
+auto MsrpParticipantT<Limits>::transmit_pass(
+    ApplicantSnapshot const& before, bool leave_all, TimePoint now, bool shed_optional, bool& la_remaining) -> PassResult
+{
+    la_remaining = leave_all;
+    size_t const skips_before = pdu_message_skip_count_;
     bool any_message = false;
-    auto emit_msg = [&](auto& recs, AttributeType type, uint8_t len) {
-        bool const carry_la = la_remaining && has_emittable(recs);
-        bool const emitted = append_attribute_message(pdu_buffer_, recs, type, len, carry_la);
-        if (carry_la && emitted) {
-            la_remaining = false;  // LeaveAll consumed by this non-empty message
-        }
-        any_message |= emitted;
-    };
-    emit_msg(talker_adv_, AttributeType::TalkerAdvertise, static_cast<uint8_t>(AttributeLength::TalkerAdvertise));
-    emit_msg(talker_failed_, AttributeType::TalkerFailed, static_cast<uint8_t>(AttributeLength::TalkerFailed));
-    emit_msg(listeners_, AttributeType::Listener, static_cast<uint8_t>(AttributeLength::Listener));
-    emit_msg(domains_, AttributeType::Domain, static_cast<uint8_t>(AttributeLength::Domain));
+    if (begin_pdu()) {
+        any_message |= transmit_attribute_type(
+            talker_adv_,
+            before.talker_adv,
+            AttributeType::TalkerAdvertise,
+            static_cast<uint8_t>(AttributeLength::TalkerAdvertise),
+            la_remaining,
+            now,
+            shed_optional);
+        any_message |= transmit_attribute_type(
+            talker_failed_,
+            before.talker_failed,
+            AttributeType::TalkerFailed,
+            static_cast<uint8_t>(AttributeLength::TalkerFailed),
+            la_remaining,
+            now,
+            shed_optional);
+        any_message |= transmit_attribute_type(
+            listeners_,
+            before.listeners,
+            AttributeType::Listener,
+            static_cast<uint8_t>(AttributeLength::Listener),
+            la_remaining,
+            now,
+            shed_optional);
+        any_message |= transmit_attribute_type(
+            domains_,
+            before.domains,
+            AttributeType::Domain,
+            static_cast<uint8_t>(AttributeLength::Domain),
+            la_remaining,
+            now,
+            shed_optional);
+    }
+    return PassResult{.any_message = any_message, .skipped = pdu_message_skip_count_ != skips_before};
+}
 
+/// The PDU's head in the participant's pre-allocated buffer (no per-tx heap).
+template <class Limits>
+auto MsrpParticipantT<Limits>::begin_pdu() -> bool
+{
+    pdu_buffer_.rewind();
+    return append_u8(pdu_buffer_, PROTOCOL_VERSION);
+}
+
+/// One attribute type's share of a transmit pass: tx! to its Applicants, then
+/// their message into the PDU. The transition an Applicant takes on tx! IS its
+/// message going out (10.7.7, Table 10-3), so a message skipped for space
+/// (10.7.6.3: it waits for a later PDU) rolls its Applicants back to where they
+/// stood, and the next pass dispatches tx! to them again from there: a Leave
+/// stays a Leave. Dispatching from the state the transition had reached would
+/// replace the owed Leave with that state's optional In, or with nothing, and
+/// the peers would never hear it. With @p shed_optional the optional encodings
+/// are left out: their tx! transitions are self-loops, so not sending them
+/// changes no state, which is the permission the brackets in Table 10-3 give.
+template <class Limits>
+template <class Table, class Saved>
+auto MsrpParticipantT<Limits>::transmit_attribute_type(
+    Table& records,
+    Saved const& before,
+    AttributeType type,
+    uint8_t attr_length,
+    bool& la_remaining,
+    TimePoint now,
+    bool shed_optional) -> bool
+{
+    for (auto& rec : records) {
+        mrp::dispatch_applicant_tx(rec, now);
+        if (shed_optional && rec.applicant_ctx.encode == applicant_sm::Encoding::Optional) {
+            rec.applicant_ctx.clear_outputs();
+        }
+    }
+    bool const carry_la = la_remaining && has_emittable(records);
+    bool const emitted = append_or_roll_back(records, before, type, attr_length, carry_la);
+    if (carry_la && emitted) {
+        la_remaining = false;  // LeaveAll consumed by this non-empty message
+    }
+    return emitted;
+}
+
+/// The message into the PDU, or, when it did not fit, the Applicants back to
+/// @p before: they did not transmit, so they did not see tx!.
+template <class Limits>
+template <class Table, class Saved>
+auto MsrpParticipantT<Limits>::append_or_roll_back(
+    Table& records, Saved const& before, AttributeType type, uint8_t attr_length, bool carry_la) -> bool
+{
+    size_t const skips_before = pdu_message_skip_count_;
+    bool const emitted = append_attribute_message(pdu_buffer_, records, type, attr_length, carry_la);
+    if (pdu_message_skip_count_ != skips_before) {
+        restore_applicants_of(records, before);
+        return false;
+    }
+    return emitted;
+}
+
+/// The PDU's tail: a LeaveAll still owed with nothing re-declared, the final
+/// EndMark, and the send.
+template <class Limits>
+void MsrpParticipantT<Limits>::finish_pdu(bool any_message, bool la_remaining)
+{
     // Empty-database LeaveAll: we owe a LeaveAll but have nothing to re-declare.
     // A single standalone empty LeaveAll is safe here -- there are no later
     // messages in the PDU for a mis-parsing peer to run into.
@@ -1587,18 +1735,14 @@ void MsrpParticipantT<Limits>::encode_and_send_pdu(TimePoint now, bool leave_all
         any_message |= append_attribute_message(
             pdu_buffer_, talker_adv_, AttributeType::TalkerAdvertise, static_cast<uint8_t>(AttributeLength::TalkerAdvertise), true);
     }
-
     if (!any_message) {
         return;
     }
     // Final message EndMark
     (void)append_be16(pdu_buffer_, mrp::END_MARK);
-
     if (send_pdu_) {
         (void)send_pdu_(pdu_buffer_.get_span());
     }
-
-    (void)now;
 }
 
 // ============================================================
