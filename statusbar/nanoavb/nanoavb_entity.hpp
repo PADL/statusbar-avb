@@ -845,8 +845,18 @@ class AemCommandHandler
         PendingCommand const& done, uint8_t status, std::span<uint8_t const> response_body, std::span<uint8_t> in_force)
         -> std::span<uint8_t const>;
 
+    /// emit_unsolicited() for a deferred command's answer, with @p requester
+    /// (its controller) left out under milan13 as handle_command() would.
+    void emit_unsolicited_for(Eui64 const& requester, uint16_t command_type, std::span<uint8_t const> body);
+
+    /// The one switch over the command codes behind handle_command().
+    [[nodiscard]] auto dispatch_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
     /// The controller whose command is being answered, for the unsolicited
-    /// fan-out to leave out under milan13; zero for a change nobody asked for.
+    /// fan-out to leave out under milan13. Set for the span of one dispatch
+    /// (handle_command, answer_completed) and zero between: a notification
+    /// the entity originates itself has no requester to leave out.
     Eui64 requester_{};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.

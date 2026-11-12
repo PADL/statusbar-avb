@@ -110,9 +110,24 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
 auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
     -> AemCommandResponse
 {
-    auto const cmd = header.command_code();
+    // The command's controller is the requester for the unsolicited fan-out
+    // this dispatch makes (Milan v1.3 5.4.5.3), and for that alone: what the
+    // entity notifies later on its own (a lock expiring, a front-panel change,
+    // a timer) is for every registered controller, this one included. A
+    // dispatch nested in another (read_back's GET twin) hands back the
+    // requester it found, so the outer command's fan-out still leaves out its own.
+    Eui64 const outer_requester = requester_;
     current_header_ = header;
     requester_ = header.controller_entity_id;
+    auto const response = dispatch_command(header, command_data, out_buffer);
+    requester_ = outer_requester;
+    return response;
+}
+
+auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const cmd = header.command_code();
 
     switch (cmd) {
         case AEM_COMMAND_READ_DESCRIPTOR:
@@ -595,14 +610,22 @@ auto AemCommandHandler::complete_pending_command(
 
 void AemCommandHandler::answer_completed(PendingCommand const& done, uint8_t const status, std::span<uint8_t const> response_body)
 {
-    requester_ = done.header.controller_entity_id;
     auto const command_type = done.header.command_code();
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
     auto const body = completion_body(done, status, response_body, in_force);
     (void)send_response(done.mac, done.header, status, body);
     if (status == AEM_STATUS_SUCCESS) {
-        emit_unsolicited(command_type, body);
+        emit_unsolicited_for(done.header.controller_entity_id, command_type, body);
     }
+}
+
+void AemCommandHandler::emit_unsolicited_for(Eui64 const& requester, uint16_t const command_type, std::span<uint8_t const> body)
+{
+    // The requester is left out of this fan-out alone (handle_command says
+    // why); it is nobody again once the fan-out is done.
+    requester_ = requester;
+    emit_unsolicited(command_type, body);
+    requester_ = {};
 }
 
 auto AemCommandHandler::completion_body(

@@ -1575,6 +1575,67 @@ TEST(nanoavb_entity_unsolicited_notify, controller_set_notifies_subscribers)
     EXPECT_TRUE(unsolicited_to_sub);
 }
 
+TEST(nanoavb_entity_unsolicited_notify, milan13_tells_the_locking_controller_its_lock_expired)
+{
+    // Milan v1.3 5.4.5.3 leaves the controller whose command it is out of
+    // that command's fan-out. The lock expiring later is nobody's command:
+    // the controller that locked must hear it, or it never learns the lock
+    // is gone. Before, the requester of the last command stayed excluded.
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x04};
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(entity_id);
+    handler.set_profile(AemCommandHandler::Profile::milan13);
+
+    std::vector<CapturedSend> sends;
+    handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return true;
+    }});
+
+    Eui48 const mac_a{0x02, 0, 0, 0, 0, 0x0A};
+    Eui64 const ctrl_a{0xC0, 0, 0, 0, 0, 0, 0, 0x0A};
+    register_controller(handler, entity_id, ctrl_a, mac_a);
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+
+    auto const now = sm::TimePoint{} + std::chrono::seconds(10);
+    handler.set_event_time(now);
+    sends.clear();
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_LOCK_ENTITY, AemDu::AEM_DATA_LENGTH + AemLockEntityPayload::LENGTH);
+    cmd.target_entity_id = entity_id;
+    cmd.controller_entity_id = ctrl_a;
+    std::array<uint8_t, AemDu::LENGTH + AemLockEntityPayload::LENGTH> packet{};
+    span_copy(make_span(packet).first(AemDu::LENGTH), make_const_span(cmd));
+    EXPECT_TRUE(handler.process_packet(mac_a, packet, entity_id));
+    EXPECT_TRUE(handler.is_locked());
+
+    // The LOCK itself: its response to A, and no unsolicited copy to A (5.4.5.3).
+    size_t unsolicited_locks = 0;
+    for (auto const& s : sends) {
+        AemDu hdr{};
+        span_copy(make_span(hdr), std::span<uint8_t const>(s.bytes).first(AemDu::LENGTH));
+        if (hdr.is_unsolicited()) {
+            ++unsolicited_locks;
+        }
+    }
+    EXPECT_EQ(unsolicited_locks, size_t{0});
+
+    // The lock expires on a tick, nobody's command: A is told.
+    sends.clear();
+    handler.tick(now + std::chrono::seconds(61));
+    EXPECT_FALSE(handler.is_locked());
+    bool a_told = false;
+    for (auto const& s : sends) {
+        AemDu hdr{};
+        span_copy(make_span(hdr), std::span<uint8_t const>(s.bytes).first(AemDu::LENGTH));
+        if (s.dest == mac_a && hdr.is_unsolicited() && hdr.command_code() == AEM_COMMAND_LOCK_ENTITY) {
+            a_told = true;
+        }
+    }
+    EXPECT_TRUE(a_told);
+}
+
 TEST(nanoavb_entity_unsolicited_notify, identify_control_change_hits_identify_multicast)
 {
     Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x04};
