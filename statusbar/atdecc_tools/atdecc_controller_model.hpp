@@ -10,6 +10,7 @@
 /// These types carry no UI state. They are the command/event/data protocol
 /// between the business logic and whatever drives it.
 
+#include "statusbar/atdecc/atdecc_acmp_types.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aem_controller.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/sg14/inplace_vector.h"
@@ -239,6 +240,26 @@ struct AcmpTraceEvent
     uint16_t listener_unique_id{0};
 };
 
+/// The outcome of one ACMP command THIS controller sent: the response its
+/// controller state machine matched to the command (controller id, sequence id
+/// and message type, IEEE 1722.1-2021 8.2.3), or the command's timeout after
+/// its retry. Unlike ConnectionAddedEvent / ConnectionRemovedEvent, which are
+/// passive observations of any controller's traffic (the talker's *_TX_RESPONSE
+/// leg of our own handshake included), this answers exactly one command of ours.
+struct AcmpCommandCompletedEvent
+{
+    uint8_t message_type{0};  ///< the response's ACMP_MESSAGE_TYPE_*; the command's on a timeout
+    uint8_t status{0};        ///< ACMP_STATUS_* (meaningful when !timed_out)
+    bool timed_out{false};
+    ieee::Eui64 talker_entity_id{};
+    uint16_t talker_unique_id{0};
+    ieee::Eui64 listener_entity_id{};
+    uint16_t listener_unique_id{0};
+
+    /// True when the command was answered with SUCCESS.
+    [[nodiscard]] auto ok() const noexcept -> bool { return !timed_out && status == atdecc::ACMP_STATUS_SUCCESS; }
+};
+
 /// An unsolicited AEM response (U bit set): a change made by another
 /// controller or by the entity itself, delivered after RegisterUnsolicited.
 /// `response` is the response payload after the AemDu header (e.g. a
@@ -261,6 +282,7 @@ using ControllerEvent = std::variant<
     RxStateEvent,
     CountersReadyEvent,
     AcmpTraceEvent,
+    AcmpCommandCompletedEvent,
     UnsolicitedEvent>;
 
 }  // namespace statusbar::atdecc_tools

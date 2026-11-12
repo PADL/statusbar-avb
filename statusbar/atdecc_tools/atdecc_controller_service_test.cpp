@@ -574,6 +574,62 @@ TEST(controller_service_seam, an_error_stream_format_response_with_zeroed_echo_c
     }
 }
 
+// Responses to OUR ACMP commands surface as AcmpCommandCompletedEvents; passive
+// observations of the bus (any controller's traffic, the talker's TX leg) do not.
+TEST(controller_service_seam, our_acmp_responses_surface_as_command_completed_events)
+{
+    Harness h;
+    auto& sink = h.fake->sink();
+    EXPECT_TRUE(static_cast<bool>(sink.on_acmp_response));
+    EXPECT_TRUE(static_cast<bool>(sink.on_acmp_timeout));
+
+    auto count_completed = [](std::vector<atdecc_tools::ControllerEvent> const& events) {
+        int n = 0;
+        for (auto const& ev : events) {
+            n += std::holds_alternative<AcmpCommandCompletedEvent>(ev) ? 1 : 0;
+        }
+        return n;
+    };
+
+    // Observed on the bus only: a connection event, no command outcome.
+    sink.on_acmp_observed(make_acmp_response(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE, ACMP_STATUS_SUCCESS));
+    EXPECT_EQ(count_completed(h.ctrl->drain_events()), 0);
+
+    // Our command's response: one outcome naming the sink.
+    AcmpCommandResponse resp{};
+    resp.init_response(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS);
+    resp.talker_entity_id = ENTITY_A;
+    resp.listener_entity_id = ENTITY_B;
+    resp.listener_unique_id = 3;
+    sink.on_acmp_response(resp);
+    auto events = h.ctrl->drain_events();
+    EXPECT_EQ(count_completed(events), 1);
+    for (auto const& ev : events) {
+        if (auto const* c = std::get_if<AcmpCommandCompletedEvent>(&ev)) {
+            EXPECT_TRUE(c->ok());
+            EXPECT_EQ(c->message_type, ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+            EXPECT_TRUE(c->listener_entity_id == ENTITY_B);
+            EXPECT_EQ(c->listener_unique_id, 3);
+        }
+    }
+
+    // Our command's timeout: an outcome that is not ok.
+    AcmpCommandResponse cmd{};
+    cmd.init_command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    cmd.listener_entity_id = ENTITY_B;
+    cmd.listener_unique_id = 3;
+    sink.on_acmp_timeout(cmd);
+    events = h.ctrl->drain_events();
+    EXPECT_EQ(count_completed(events), 1);
+    for (auto const& ev : events) {
+        if (auto const* c = std::get_if<AcmpCommandCompletedEvent>(&ev)) {
+            EXPECT_TRUE(c->timed_out);
+            EXPECT_FALSE(c->ok());
+            EXPECT_TRUE(c->listener_entity_id == ENTITY_B);
+        }
+    }
+}
+
 //
 // Test Runner
 //

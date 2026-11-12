@@ -628,6 +628,24 @@ void ControllerSimple::queue_rx_state_for_all()
 // Private implementation
 //
 
+namespace {
+
+/// The typed outcome of one of our ACMP commands, from the matched response or
+/// from the command that timed out.
+auto acmp_command_completed(AcmpCommandResponse const& pdu, bool const timed_out) -> AcmpCommandCompletedEvent
+{
+    return AcmpCommandCompletedEvent{
+        .message_type = pdu.message_type(),
+        .status = pdu.status(),
+        .timed_out = timed_out,
+        .talker_entity_id = pdu.talker_entity_id,
+        .talker_unique_id = pdu.talker_unique_id.get(),
+        .listener_entity_id = pdu.listener_entity_id,
+        .listener_unique_id = pdu.listener_unique_id.get()};
+}
+
+}  // namespace
+
 void ControllerSimple::wire_service()
 {
     service_->set_sink({
@@ -699,6 +717,7 @@ void ControllerSimple::wire_service()
             },
         .on_acmp_response =
             [this](AcmpCommandResponse const& resp) {
+                pending_events_.emplace_back(acmp_command_completed(resp, /*timed_out=*/false));
                 auto const mt = resp.message_type();
                 auto const st = resp.status();
                 auto name_or_id = [this](Eui64 const& id) -> std::string {
@@ -728,7 +747,11 @@ void ControllerSimple::wire_service()
                     emit_status(std::format("ACMP {}: {}", acmp_message_type_name(mt), acmp_status_name(st)));
                 }
             },
-        .on_acmp_timeout = [this](AcmpCommandResponse const&) { emit_status("ACMP timeout"); },
+        .on_acmp_timeout =
+            [this](AcmpCommandResponse const& cmd) {
+                pending_events_.emplace_back(acmp_command_completed(cmd, /*timed_out=*/true));
+                emit_status("ACMP timeout");
+            },
         .on_acmp_observed = [this](AcmpDu const& acmp) { handle_acmp_observed(acmp); },
     });
 }

@@ -381,4 +381,53 @@ TEST(atdecc_ctl_batch, identify_rejects_bad_state_and_missing_entity)
     EXPECT_FALSE(parse_batch_ops(*no_entity, err).has_value());
 }
 
+//
+// confirms_sink_command: connect/disconnect succeed on OUR command's RX response
+//
+
+namespace {
+
+auto completed(uint8_t message_type, uint8_t status, Eui64 const& listener, uint16_t uid, bool timed_out = false)
+    -> AcmpCommandCompletedEvent
+{
+    AcmpCommandCompletedEvent ev{};
+    ev.message_type = message_type;
+    ev.status = status;
+    ev.timed_out = timed_out;
+    ev.listener_entity_id = listener;
+    ev.listener_unique_id = uid;
+    return ev;
+}
+
+}  // namespace
+
+TEST(atdecc_ctl_handshake, only_our_rx_response_for_the_sink_confirms)
+{
+    using namespace statusbar::atdecc;
+    Eui64 const sink{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+    Eui64 const other{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x78};
+
+    // The talker's TX leg of our own handshake names the sink too: not a confirmation.
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 1), true, sink, 1));
+    // Another sink, a failure, a timeout, the other command: no.
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, other, 1), true, sink, 1));
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 2), true, sink, 1));
+    EXPECT_FALSE(confirms_sink_command(
+        completed(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_LISTENER_EXCLUSIVE, sink, 1), true, sink, 1));
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, ACMP_STATUS_SUCCESS, sink, 1, true), true, sink, 1));
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 1), true, sink, 1));
+    // Our CONNECT_RX_RESPONSE / DISCONNECT_RX_RESPONSE with SUCCESS for the sink: yes.
+    EXPECT_TRUE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 1), true, sink, 1));
+    EXPECT_TRUE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 1), false, sink, 1));
+    EXPECT_FALSE(
+        confirms_sink_command(completed(ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE, ACMP_STATUS_SUCCESS, sink, 1), false, sink, 1));
+}
+
 TEST_MAIN(statusbar_atdecc_tools, atdecc_ctl_resolve_test)

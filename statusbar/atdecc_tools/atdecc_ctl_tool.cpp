@@ -59,10 +59,16 @@ using namespace statusbar::atdecc;
 using namespace statusbar::ieee;
 using namespace statusbar::net;
 
+using atdecc_tools::AcmpCommandCompletedEvent;
+using atdecc_tools::AcmpTraceEvent;
+using atdecc_tools::ControllerAction;
+using atdecc_tools::ControllerActionKind;
 using atdecc_tools::ControllerSimple;
 using atdecc_tools::EntityDisplayInfo;
+using atdecc_tools::HandshakeLegs;
 using atdecc_tools::Op;
 using atdecc_tools::OpKind;
+using atdecc_tools::StatusChangedEvent;
 
 auto const g_start_time = std::chrono::steady_clock::now();
 auto elapsed_ns() -> int64_t
@@ -303,95 +309,164 @@ auto await_command(MessageReactor& reactor, ControllerSimple& ctrl, uint16_t com
     return done;
 }
 
+// The message types of one (dis)connect handshake's three observable legs.
+struct HandshakeLegTypes
+{
+    uint8_t relay{0};              ///< the *_TX_COMMAND the listener relays to the talker
+    uint8_t talker_response{0};    ///< the talker's *_TX_RESPONSE
+    uint8_t listener_response{0};  ///< the listener's *_RX_RESPONSE to us
+};
+
+auto leg_types(bool is_connect) -> HandshakeLegTypes
+{
+    if (is_connect) {
+        return {ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE, ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE};
+    }
+    return {
+        ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND,
+        ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE,
+        ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE};
+}
+
+/// Both endpoints of a stream op resolved against the snapshot (talker, listener),
+/// or nullopt after reporting the one that did not resolve.
+auto resolve_stream_endpoints(Op const& op, std::vector<EntityDisplayInfo> const& snap) -> std::optional<std::pair<Eui64, Eui64>>
+{
+    auto const tid = resolve_or_report(op.talker.name, snap);
+    auto const lid = resolve_or_report(op.listener.name, snap);
+    if (!tid || !lid) {
+        return std::nullopt;
+    }
+    return std::pair{*tid, *lid};
+}
+
+void set_stream_endpoints(atdecc_tools::StreamRequest& request, Op const& op, Eui64 const& tid, Eui64 const& lid)
+{
+    request.talker_entity_id = tid;
+    request.talker_unique_id = op.talker.unique_id;
+    request.listener_entity_id = lid;
+    request.listener_unique_id = op.listener.unique_id;
+}
+
+auto make_stream_action(Op const& op, Eui64 const& tid, Eui64 const& lid, bool is_connect) -> ControllerAction
+{
+    ControllerAction action{};
+    action.kind = is_connect ? ControllerActionKind::ConnectStream : ControllerActionKind::DisconnectStream;
+    set_stream_endpoints(action.request, op, tid, lid);
+    return action;
+}
+
+/// One (dis)connect handshake: dispatches the command (a few attempts), watches
+/// the controller's events for OUR command's outcome and, when tracing, for the
+/// handshake's legs, and prints the result.
+class HandshakeWatch
+{
+  public:
+    HandshakeWatch(Op const& op, Eui64 const& lid, bool is_connect, bool trace)
+        : op_{op}
+        , lid_{lid}
+        , is_connect_{is_connect}
+        , trace_{trace}
+        , types_{leg_types(is_connect)}
+    {}
+
+    /// Run the handshake to a verdict; true on success.
+    auto run(MessageReactor& reactor, ControllerSimple& ctrl, ControllerAction const& action) -> bool
+    {
+        std::println(
+            "{} {}:{} -> {}:{} ...",
+            is_connect_ ? "connect" : "disconnect",
+            op_.talker.name,
+            op_.talker.unique_id,
+            op_.listener.name,
+            op_.listener.unique_id);
+        ctrl.set_acmp_trace(trace_);
+        // Some listeners (notably the DSP processor) only respond on a later attempt, so
+        // re-issue the command up to a few times across the budget. Re-sending
+        // a CONNECT/DISCONNECT for the same stream is idempotent.
+        constexpr int kAttempts = 4;
+        for (int attempt = 0; attempt < kAttempts && !done_; ++attempt) {
+            ctrl.dispatch(action, elapsed_ns());
+            (void)pump(reactor, ctrl, 2500, [this] { return done_; }, [this](auto const& ev) { on_event(ev); });
+        }
+        ctrl.set_acmp_trace(false);
+        return finish();
+    }
+
+  private:
+    auto finish() -> bool
+    {
+        std::println("  {}", done_ ? "OK" : "FAILED (no response after retries)");
+        if (trace_) {
+            print_trace_verdict(op_, is_connect_, legs_, done_);
+        }
+        return done_;
+    }
+
+    // Success is the listener's *_RX_RESPONSE to OUR command (matched by the
+    // controller state machine on controller id, sequence id and message
+    // type), naming the sink we asked about. Passive ConnectionAdded/Removed
+    // observations would also fire on the talker's TX leg and on other
+    // controllers' transactions. The sink, not the talker fields: not every
+    // device echoes those faithfully.
+    void on_event(atdecc_tools::ControllerEvent const& ev)
+    {
+        if (auto const* c = std::get_if<AcmpCommandCompletedEvent>(&ev)) {
+            done_ = done_ || atdecc_tools::confirms_sink_command(*c, is_connect_, lid_, op_.listener.unique_id);
+        }
+        if (auto const* t = std::get_if<AcmpTraceEvent>(&ev); trace_ && t != nullptr) {
+            note_leg(*t);
+        }
+    }
+
+    // Leg matching: the relayed command, talker response and listener response
+    // all carry OUR listener id+uid (the talker fields aren't faithfully echoed
+    // by every device, so we key on the listener sink).
+    void note_leg(AcmpTraceEvent const& t)
+    {
+        if (t.listener_entity_id != lid_ || t.listener_unique_id != op_.listener.unique_id) {
+            return;
+        }
+        if (t.message_type == types_.relay) {
+            legs_.relay_seen = true;
+        } else if (t.message_type == types_.talker_response) {
+            legs_.talker_status = t.status;
+        } else if (t.message_type == types_.listener_response) {
+            legs_.listener_status = t.status;
+        }
+    }
+
+    Op const& op_;
+    Eui64 lid_;
+    bool is_connect_;
+    bool trace_;
+    HandshakeLegTypes types_;
+    HandshakeLegs legs_{};
+    bool done_{false};
+};
+
+/// Execute a connect or disconnect op. Returns true on success. When `trace` is
+/// set, prints a per-leg ACMP handshake verdict for diagnosis.
+auto execute_stream_op(
+    MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, bool trace, std::vector<EntityDisplayInfo> const& snap) -> bool
+{
+    auto const ids = resolve_stream_endpoints(op, snap);
+    if (!ids) {
+        return false;
+    }
+    bool const is_connect = (op.kind == OpKind::Connect);
+    HandshakeWatch watch{op, ids->second, is_connect, trace};
+    return watch.run(reactor, ctrl, make_stream_action(op, ids->first, ids->second, is_connect));
+}
+
 auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, bool trace = false) -> bool
 {
     auto const snap = ctrl.get_display_entities();
-    using atdecc_tools::AcmpTraceEvent;
-    using atdecc_tools::ConnectionAddedEvent;
-    using atdecc_tools::ConnectionRemovedEvent;
-    using atdecc_tools::ControllerAction;
-    using atdecc_tools::ControllerActionKind;
-    using atdecc_tools::HandshakeLegs;
-    using atdecc_tools::StatusChangedEvent;
 
     switch (op.kind) {
         case OpKind::Connect:
-        case OpKind::Disconnect: {
-            auto const tid = resolve_or_report(op.talker.name, snap);
-            auto const lid = resolve_or_report(op.listener.name, snap);
-            if (!tid || !lid) {
-                return false;
-            }
-            bool const is_connect = (op.kind == OpKind::Connect);
-            ControllerAction action{};
-            action.kind = is_connect ? ControllerActionKind::ConnectStream : ControllerActionKind::DisconnectStream;
-            action.request.talker_entity_id = *tid;
-            action.request.talker_unique_id = op.talker.unique_id;
-            action.request.listener_entity_id = *lid;
-            action.request.listener_unique_id = op.listener.unique_id;
-            std::println(
-                "{} {}:{} -> {}:{} ...",
-                is_connect ? "connect" : "disconnect",
-                op.talker.name,
-                op.talker.unique_id,
-                op.listener.name,
-                op.listener.unique_id);
-
-            // Leg matching: the relayed command, talker response and listener
-            // response all carry OUR listener id+uid (the talker fields aren't
-            // faithfully echoed by every device, so we key on the listener sink).
-            uint8_t const relay_mt = is_connect ? ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND : ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND;
-            uint8_t const tresp_mt = is_connect ? ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE : ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE;
-            uint8_t const lresp_mt = is_connect ? ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE : ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE;
-
-            HandshakeLegs legs{};
-            ctrl.set_acmp_trace(trace);
-
-            bool done = false;
-            // Match on the LISTENER sink we asked to (dis)connect — the response's
-            // talker fields aren't faithfully echoed by every device (e.g. the DSP processor),
-            // so requiring talker_entity_id equality dropped real successes.
-            auto const on_event = [&](auto const& ev) {
-                if (is_connect) {
-                    if (auto const* c = std::get_if<ConnectionAddedEvent>(&ev)) {
-                        if (c->connection.listener_entity_id == *lid && c->connection.listener_unique_id == op.listener.unique_id) {
-                            done = true;
-                        }
-                    }
-                } else if (auto const* r = std::get_if<ConnectionRemovedEvent>(&ev)) {
-                    if (r->listener_entity_id == *lid && r->listener_unique_id == op.listener.unique_id) {
-                        done = true;
-                    }
-                }
-                if (trace) {
-                    if (auto const* t = std::get_if<AcmpTraceEvent>(&ev)) {
-                        if (t->listener_entity_id == *lid && t->listener_unique_id == op.listener.unique_id) {
-                            if (t->message_type == relay_mt) {
-                                legs.relay_seen = true;
-                            } else if (t->message_type == tresp_mt) {
-                                legs.talker_status = t->status;
-                            } else if (t->message_type == lresp_mt) {
-                                legs.listener_status = t->status;
-                            }
-                        }
-                    }
-                }
-            };
-            // Some listeners (notably the DSP processor) only respond on a later attempt, so
-            // re-issue the command up to a few times across the budget. Re-sending
-            // a CONNECT/DISCONNECT for the same stream is idempotent.
-            constexpr int kAttempts = 4;
-            for (int attempt = 0; attempt < kAttempts && !done; ++attempt) {
-                ctrl.dispatch(action, elapsed_ns());
-                (void)pump(reactor, ctrl, 2500, [&] { return done; }, on_event);
-            }
-            ctrl.set_acmp_trace(false);
-            std::println("  {}", done ? "OK" : "FAILED (no response after retries)");
-            if (trace) {
-                print_trace_verdict(op, is_connect, legs, done);
-            }
-            return done;
-        }
+        case OpKind::Disconnect:
+            return execute_stream_op(reactor, ctrl, op, trace, snap);
         case OpKind::SetClockSource:
         case OpKind::GetClockSource: {
             auto const eid = resolve_or_report(op.entity, snap);

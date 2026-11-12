@@ -500,6 +500,20 @@ enum class HandshakeFault : uint8_t
     return HandshakeFault::None;
 }
 
+/// Whether the outcome of one of our ACMP commands confirms the (dis)connect of
+/// one listener sink: it must be OUR *_RX_RESPONSE, with SUCCESS, for that sink.
+/// The talker's *_TX_RESPONSE leg of the same handshake, and every other
+/// controller's transaction, are seen on the bus too (as ConnectionAdded /
+/// ConnectionRemoved events) and confirm nothing about our command.
+[[nodiscard]] inline auto confirms_sink_command(
+    AcmpCommandCompletedEvent const& ev, bool is_connect, ieee::Eui64 const& listener_id, uint16_t listener_unique_id) -> bool
+{
+    uint8_t const wanted =
+        is_connect ? atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE : atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE;
+    return ev.ok() && ev.message_type == wanted && ev.listener_entity_id == listener_id &&
+        ev.listener_unique_id == listener_unique_id;
+}
+
 /// A stream is "stale" when the second counter sample did not increase over the
 /// first. Equal (frozen) or decreasing (counter reset / wrap with no progress)
 /// both count as stale; a strict increase means the stream is live.
