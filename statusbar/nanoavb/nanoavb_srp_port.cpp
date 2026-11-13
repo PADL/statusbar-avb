@@ -37,9 +37,8 @@ void SrpPort::wire()
             },
     });
     msrp_.set_adopt_domain(true);
-    msrp_.set_on_domain_adopted([this](DomainInfo const& d, TimePoint const t) {
-        on_domain_moved(std::exchange(vid_, d.sr_class_vid), t);
-    });
+    msrp_.set_on_domain_adopted(
+        [this](DomainInfo const& d, TimePoint const t) { on_domain_moved(std::exchange(vid_, d.sr_class_vid), t); });
     (void)msrp_.subscribe(statusbar::srp::msrp::Observer{
         .on_talker_advertise =
             [this](statusbar::srp::msrp::TalkerAdvertiseFirstValue const& fv, statusbar::srp::msrp::Operation) {
