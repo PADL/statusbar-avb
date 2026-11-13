@@ -3806,6 +3806,28 @@ TEST(avb_entity_kit_counters, the_default_gptp_wiring_notifies_the_path_and_name
     EXPECT_EQ(adp.adpdu().gptp_grandmaster_id.to_uint64(), own.to_uint64());
 }
 
+// An adopted Domain is told to GET_AVB_INFO's subscribers through the host's refresh (Milan v1.3 Table 5.20),
+// so only a changed answer is notified, and once: here no MSRP socket is open, the answer lists no
+// msrp_mappings, and neither the adoption nor a later refresh notifies anything.
+TEST(avb_entity_kit_domain, an_adopted_domain_notifies_avb_info_only_for_a_changed_answer)
+{
+    MilanKit m{std::nullopt, 0x34};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    DomainBridge b{m};
+    m.aem.clear();
+    auto const before = m.kit.host().avb_info(0);
+    EXPECT_TRUE(before.msrp_mappings.empty());
+    (void)b.bridge.declare_domain(srp::msrp::DomainFirstValue{.sr_class_vid = 100}, b.now);
+    b.exchange();
+    EXPECT_TRUE(b.all_on(100));
+    EXPECT_EQ(m.kit.host().avb_info(0).msrp_mappings.size(), before.msrp_mappings.size());  // none listed
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 0);
+    m.kit.host().notify_port_as_capable(std::nullopt);  // a refresh with nothing changed
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 0);
+}
+
 namespace {
 
 /// Whether the kit's talker sets AVTP tu now and one second from now (past Milan v1.3 Annex B.1.1's window).

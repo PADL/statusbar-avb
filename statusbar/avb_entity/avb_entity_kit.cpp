@@ -1106,7 +1106,7 @@ void AvbEntityKit::follow_domain(DomainInfo const& domain, TimePoint const now)
     vlan_filters_.hold(domain.sr_class_vid);
     vlan_filters_.drop(std::exchange(class_a_filtered_, domain.sr_class_vid));
 #endif
-    (void)host_.components().aem_handler.notify_avb_info_changed(0);
+    host_.refresh_avb_info();  // the msrp_mappings moved: notified once, as the host's last
 }
 
 void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint const now)

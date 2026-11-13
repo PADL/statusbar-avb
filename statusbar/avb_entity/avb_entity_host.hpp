@@ -370,6 +370,9 @@ class AvbEntityHost
     /// AS_CAPABLE (IEEE 1722.1-2021 Clause 7.4.40.2) follows it, not the entity's gPTP lock; nullopt
     /// returns to the entity's own state. Never while the link is down. Reactor thread.
     void notify_port_as_capable(std::optional<bool> as_capable);
+    /// Notify GET_AVB_INFO of interface 0 asynchronously (Milan v1.2 Table 5.22) when a listed field
+    /// differs from the last one sent, ADP's grandmaster with it; e.g. after the SR class Domain moved.
+    void refresh_avb_info();
     [[nodiscard]] auto mvrp_joined() const noexcept -> bool { return mvrp_ctx_.joined; }
 
     // --- Typed stream hooks (the stream-specific bits of the SM wiring) ---------
@@ -514,9 +517,6 @@ class AvbEntityHost
     };
     std::vector<MirroredInterface> mirrored_{};
     nanoavb::AvbInfo last_avb_info_{};  ///< what the last notification carried
-    /// Notify GET_AVB_INFO of interface 0 asynchronously (Milan v1.2 Table 5.22)
-    /// when a listed field differs from the last one sent.
-    void refresh_avb_info();
     /// The gPTP lock state changed: CLOCK_DOMAIN 0's lock unless the entity drives it, and asCapable.
     void notify_media_clock_locked(bool locked);
     /// Count CLOCK_DOMAIN @p index's transition to @p locked, if one, and notify it.
