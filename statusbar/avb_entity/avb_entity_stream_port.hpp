@@ -141,7 +141,7 @@ class StreamPort
     };
 
     [[nodiscard]] auto open(StreamPortConfig const& config) -> Status
-    {
+    {  // NOLINT(statusbar-block-statements) the port's open steps, in order
         if (config.backend == STREAM_BACKEND_AUTO) {
             return open_resolved(config);
         }

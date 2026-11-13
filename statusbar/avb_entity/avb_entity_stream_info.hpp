@@ -183,13 +183,8 @@ template <size_t N>
 /// connected talker's stream_id and destination, the current format; @p milan adds Milan v1.2
 /// Section 5.4.2.10.1's fields, mapped from the classic listener and MSRP.
 [[nodiscard]] inline auto fill_listener_stream_info(
-    AvbEntityHost const& host,
-    uint16_t const descriptor_index,
-    bool const milan,
-    atdecc::aem::AemStreamInfoPayload& out,
-    atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
-{
-    using atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     namespace stream_info_flags = atdecc::aem::stream_info_flags;
     namespace probing_status = atdecc::aem::probing_status;
 
@@ -282,7 +277,7 @@ template <size_t N>
     atdecc::aem::StreamInfoLayout const layout,
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     auto const* sink = host.components().acmp_listener.milan_sinks().sink(descriptor_index);
     if (sink == nullptr) {
         return false;
