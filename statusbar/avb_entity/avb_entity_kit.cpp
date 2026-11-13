@@ -195,6 +195,33 @@ void AvbEntityKit::configure_talker_streams()
     // The name the entity was given (a saved one replaces it only while the
     // configuration still says this).
     configured_entity_name_ = std::string{storage_handler_.entity_name().as_string_view()};
+    host_.set_on_grandmaster_transition([this](GrandmasterTransition const transition) { follow_grandmaster(transition); });
+}
+
+void AvbEntityKit::follow_grandmaster(GrandmasterTransition const transition) noexcept
+{
+    switch (transition) {  // NOLINT(statusbar-block-statements) one case per transition
+        case GrandmasterTransition::changed:
+            talker_->notify_grandmaster_changed(net::monotonic_ns());  // Milan v1.3 Annex B.1.1's window
+            return;
+        case GrandmasterTransition::lost:
+            talker_->notify_grandmaster_lost();
+            return;
+        case GrandmasterTransition::own:
+            talker_->notify_own_grandmaster();
+            return;
+        case GrandmasterTransition::unchanged:
+            return;
+    }
+}
+
+void AvbEntityKit::lose_announced_grandmaster()
+{
+    if (host_.own_grandmaster_in_force()) {
+        talker_->notify_own_grandmaster();  // a running window cut short
+        return;
+    }
+    talker_->notify_grandmaster_lost();
 }
 
 void AvbEntityKit::notify_talker_interface(uint16_t const index)
