@@ -4176,6 +4176,84 @@ TEST(avb_entity_kit_counters, the_default_gptp_wiring_notifies_the_path_and_name
 
 namespace {
 
+/// A bridge port declaring Class A Domains to a started kit, and registering the kit's.
+struct DomainBridge
+{
+    explicit DomainBridge(MilanKit& kit)
+        : m{kit}
+    {
+        bridge.set_send_pdu([this](std::span<uint8_t const> p) {
+            to_entity.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        (void)bridge.subscribe(srp::msrp::Observer{.on_domain = [this](srp::msrp::DomainFirstValue const& fv, srp::mrp::Operation) {
+            registered.push_back(fv.sr_class_vid.get());
+        }});
+        m.kit.host().components().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
+            to_bridge.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        bridge.start(now);
+    }
+    /// A second of MRP traffic both ways.
+    void exchange()
+    {
+        for (int i = 0; i < 4; ++i) {
+            now += std::chrono::milliseconds(250);
+            bridge.tick(now);
+            m.kit.host().components().msrp_handler.tick(now);
+            for (auto const& p : std::exchange(to_entity, {})) {
+                m.kit.host().components().msrp_handler.receive_packet(p, now);
+            }
+            for (auto const& p : std::exchange(to_bridge, {})) {
+                bridge.receive_pdu(p, now);
+            }
+        }
+    }
+    /// The kit's streams, ACMP, Talker Advertise and MVRP all on @p vid.
+    [[nodiscard]] auto all_on(uint16_t const vid) const -> bool
+    {
+        auto& c = m.kit.host().components();
+        auto const* stream = c.acmp_talker.get_stream(0);
+        return c.msrp_handler.domain().sr_class_vid == vid && m.kit.talker().vlan_id() == vid && stream != nullptr &&
+            stream->stream_vlan_id == vid && m.kit.make_talker_srp_info(m.kit.talker_specs()[0]).vlan_id == vid &&
+            c.mvrp_handler.get_vlan_state(vid) != nanoavb::VlanState::Unregistered;
+    }
+
+    MilanKit& m;
+    sm::TimePoint now{sm::Clock::now()};
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9f};
+    std::vector<std::vector<uint8_t>> to_entity;
+    std::vector<std::vector<uint8_t>> to_bridge;
+    std::vector<uint16_t> registered;  ///< the VIDs of the kit's Domain declarations, as the bridge registered them
+};
+
+}  // namespace
+
+// An adopted Domain is told to GET_AVB_INFO's subscribers through the host's refresh (Milan v1.3 Table 5.20),
+// so only a changed answer is notified, and once: here no MSRP socket is open, the answer lists no
+// msrp_mappings, and neither the adoption nor a later refresh notifies anything.
+TEST(avb_entity_kit_domain, an_adopted_domain_notifies_avb_info_only_for_a_changed_answer)
+{
+    MilanKit m{std::nullopt, 0x34};
+    EXPECT_TRUE(m.start_ready());
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    DomainBridge b{m};
+    m.aem.clear();
+    auto const before = m.kit.host().avb_info(0);
+    EXPECT_TRUE(before.msrp_mappings.empty());
+    (void)b.bridge.declare_domain(srp::msrp::DomainFirstValue{.sr_class_vid = 100}, b.now);
+    b.exchange();
+    EXPECT_TRUE(b.all_on(100));
+    EXPECT_EQ(m.kit.host().avb_info(0).msrp_mappings.size(), before.msrp_mappings.size());  // none listed
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 0);
+    m.kit.host().notify_port_as_capable(std::nullopt);  // a refresh with nothing changed
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 0);
+}
+
+namespace {
+
 /// Whether the kit's talker sets AVTP tu now and one second from now (past Milan v1.3 Annex B.1.1's window).
 auto tu_now_and_later(MilanKit& m) -> std::pair<bool, bool>
 {
