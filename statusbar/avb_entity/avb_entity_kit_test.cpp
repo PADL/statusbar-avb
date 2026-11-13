@@ -247,6 +247,9 @@ auto stream_id(uint64_t const value) -> tsn::StreamId
 
 namespace {
 
+/// The controller the fixtures' AEM commands come from.
+ieee::Eui64 const TEST_CONTROLLER{0x02, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x01};
+
 struct MilanKit
 {
     explicit MilanKit(
@@ -360,6 +363,7 @@ struct MilanKit
     {
         nanoavb::AemDu header{};
         header.init_command(command, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + body.size()));
+        header.controller_entity_id = TEST_CONTROLLER;  // a real one: zero is nobody's (Milan v1.3 5.4.5.3)
         std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
         auto const r = kit.host().components().aem_handler.handle_command(header, body, out);
         return {.status = r.status, .body = std::vector<uint8_t>(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(r.size))};
@@ -738,6 +742,26 @@ TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
     }
 }
 
+// A Milan model with no atdecc.profile runs milan13, as its MRP timers do: its AEM handler answers
+// as Milan v1.3 and it adopts the bridge's Class A Domain (Milan v1.3 Section 4.2.7.2.1).
+TEST(avb_entity_kit_domain, a_milan_model_without_a_profile_runs_milan13)
+{
+    KitUnderTest kit{make_config(7, "")};
+    EXPECT_TRUE(kit->host().components().profile.milan);
+    EXPECT_TRUE(kit->host().components().aem_handler.profile() == nanoavb::AemCommandHandler::Profile::milan13);
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    EXPECT_EQ(kit->talker().vlan_id(), 5U);
+    EXPECT_EQ(kit->host().components().msrp_handler.domain().sr_class_vid, 5U);
+}
+
+// An explicit atdecc.profile outranks the model's: "classic" on a Milan model keeps 1722.1's answers.
+TEST(avb_entity_kit_domain, an_explicit_profile_outranks_the_models)
+{
+    KitUnderTest kit{make_config(7, "classic")};
+    EXPECT_TRUE(kit->host().components().profile.milan);
+    EXPECT_TRUE(kit->host().components().aem_handler.profile() == nanoavb::AemCommandHandler::Profile::classic);
+}
+
 }  // namespace kit_domain
 
 // Talker admission through the kit, driven by MSRP listener events and grace
@@ -881,6 +905,9 @@ TEST(avb_entity_kit_profile, the_models_profile_symbol_decides)
         EXPECT_EQ(kit.host().components().profile.milan, expected);
         EXPECT_EQ(kit.host().components().aem_handler.entity_profile().milan, expected);
         EXPECT_EQ(kit.host().components().mvu_handler.profile().milan, expected);
+        // No atdecc.profile: the AEM handler's follows the model's.
+        auto const aem = expected ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic;
+        EXPECT_TRUE(kit.host().components().aem_handler.profile() == aem);
     }
 }
 
@@ -1537,6 +1564,7 @@ struct PersistentKit : MilanKit
         nanoavb::AemDu header{};
         header.init_command(command, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + body.size()));
         header.target_entity_id = config.entity_id;
+        header.controller_entity_id = TEST_CONTROLLER;
         std::vector<uint8_t> frame(nanoavb::AemDu::LENGTH + body.size());
         span_store(std::span<uint8_t>{frame}.first(nanoavb::AemDu::LENGTH), header);
         std::ranges::copy(body, frame.begin() + nanoavb::AemDu::LENGTH);
@@ -1731,6 +1759,7 @@ TEST(avb_entity_kit_lock, a_local_identify_is_refused_while_locked)
     MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
     EXPECT_TRUE(m.start_ready());
     auto& aem = m.kit.host().components().aem_handler;
+    aem.set_profile(nanoavb::AemCommandHandler::Profile::classic);  // as atdecc.profile = "classic"
     std::vector<bool> told;
     aem.set_identify_changed([&told](bool const on) { told.push_back(on); });
     EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_SUCCESS);
@@ -1774,6 +1803,8 @@ TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
     m.handler.set_on_name_changed(
         [&told](uint16_t, uint16_t, atdecc::aem::AtdeccString const& name) { told.emplace_back(name.as_string_view()); });
     EXPECT_TRUE(m.start_ready());
+    m.kit.host().components().aem_handler.set_profile(
+        nanoavb::AemCommandHandler::Profile::classic);  // as atdecc.profile = "classic"
     m.aem.clear();
     EXPECT_EQ(m.kit.request_entity_name("Stage bridge"), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.entity_name() == "Stage bridge");

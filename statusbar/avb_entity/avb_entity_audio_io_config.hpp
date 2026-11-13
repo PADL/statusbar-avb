@@ -196,11 +196,10 @@ struct AvbEntityAudioIOConfig
     /// entity refuses every other controller's SET_CONTROL, IDENTIFY included.
     bool identify_bypasses_lock{false};
 
-    /// The specification the entity answers to where IEEE 1722.1-2021 and
-    /// Milan v1.3 differ: "classic" (default) reads 1722.1 as written;
-    /// "milan13" applies Milan v1.3 where it says otherwise (a SET to the
-    /// value already in force is not notified, 5.4.5.3).
-    std::string atdecc_profile{"classic"};
+    /// Where IEEE 1722.1-2021 and Milan v1.3 differ: "classic" reads 1722.1 as written, "milan13"
+    /// applies Milan v1.3 (an unchanged SET is not notified, 5.4.5.3). Empty (default): the model's
+    /// ENTITY profile decides, milan13 for a Milan model, as its MRP timers do.
+    std::string atdecc_profile{};
 
     /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
     /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan only.

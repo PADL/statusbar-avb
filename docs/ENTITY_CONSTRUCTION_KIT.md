@@ -291,8 +291,9 @@ in the field.
 ## Profiles: classic and milan13
 
 IEEE 1722.1-2021 and Milan v1.3 disagree in a few places, so the entity kit
-answers to one of them at a time: `atdecc.profile = "classic"` (the default,
-1722.1 as written) or `"milan13"`. The AEM handler
+answers to one of them at a time: `atdecc.profile = "classic"` (1722.1 as
+written) or `"milan13"`. Unset, the model's ENTITY profile decides: a Milan
+model runs milan13, as its MRP timers do, a classic one classic. The AEM handler
 (`AemCommandHandler::set_profile`) and the MSRP handler take the choice from
 the kit. Everything not listed here is the same under both.
 

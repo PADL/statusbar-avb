@@ -717,7 +717,7 @@ class AvbEntityKit
     void configure_talker_streams();
     /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
     void notify_talker_interface(uint16_t index);
-    /// The AEM and SRP behaviour the configured atdecc_profile selects (classic or milan13).
+    /// The AEM and SRP behaviour atdecc_profile selects (classic or milan13), the model's profile when empty.
     void configure_profile();
     /// MVRP/MSRP for the configured Class A VLAN, and following a Domain's VID.
     void configure_class_a_domain();

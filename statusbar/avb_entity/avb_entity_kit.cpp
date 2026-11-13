@@ -219,7 +219,7 @@ void AvbEntityKit::configure_profile()
     // Where 1722.1 and Milan differ, the configured profile decides: the AEM
     // handler's answers, and on the SRP side the Class A Domain adopted from
     // the wire (4.2.7.2.1) and the instant leave (4.2.7.2.2).
-    bool const milan = config_.atdecc_profile == "milan13";
+    bool const milan = config_.atdecc_profile.empty() ? host_.components().profile.milan : config_.atdecc_profile == "milan13";
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
     host_.components().msrp_handler.set_adopt_domain(milan);

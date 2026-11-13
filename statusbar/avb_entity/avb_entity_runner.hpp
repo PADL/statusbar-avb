@@ -157,7 +157,7 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "atdecc.profile",
         "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
         "is notified, 7.5.2); 'milan13' applies Milan v1.3 (a SET to the value already in force is not notified, "
-        "5.4.5.3). Default classic.",
+        "5.4.5.3). Default: the model's ENTITY profile (milan13 for a Milan model, else classic).",
         entity.atdecc_profile,
         [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
