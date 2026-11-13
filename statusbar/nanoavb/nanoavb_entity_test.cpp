@@ -2996,6 +2996,191 @@ TEST(nanoavb_entity_in_progress, table_full_answers_no_resources)
 
 namespace {
 
+/// Accepts every SET, raising @p side_effects notifications of its own from the hook.
+class NotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        for (size_t n = 0; n < side_effects; ++n) {
+            std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, static_cast<uint8_t>(n)};  // STREAM_OUTPUT n
+            aem->emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, body);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    size_t side_effects{0};
+};
+
+}  // namespace
+
+// Milan v1.3 Section 5.4.5.1: however many notifications a hook raises, the command's own follows its response.
+TEST(nanoavb_entity_unsolicited_notify, the_commands_own_notification_follows_its_response)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 6;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_EQ(sends.size(), size_t{8});
+    auto const response = std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); });
+    EXPECT_TRUE(response != sends.end() && response->dest == kMacA);
+    EXPECT_TRUE(header_of(sends.back()).is_unsolicited());
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_EQ(
+        std::ranges::count_if(response, sends.end(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }),
+        4);  // n3, n4, n5 and its own
+}
+
+namespace {
+
+/// Accepts every SET, its hook raising a notification of the command's type, its own (true), or a side
+/// effect (false), in turn.
+class ScriptedNotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
+        for (bool const own : script) {
+            aem->emit_unsolicited(own ? command_type : AEM_COMMAND_GET_STREAM_INFO, body);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    std::vector<bool> script;
+};
+
+}  // namespace
+
+// Milan v1.3 Section 5.4.5.1: a command's own notification follows its response even when side effects fill the queue.
+TEST(nanoavb_entity_unsolicited_notify, every_own_notification_follows_the_response)
+{
+    ScriptedNotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.script = {true, false, false, true};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    auto const response = std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); });
+    EXPECT_TRUE(response != sends.end());
+    auto const own_before = std::ranges::count_if(
+        sends.begin(), response, [](CapturedSend const& s) { return header_of(s).command_code() != AEM_COMMAND_GET_STREAM_INFO; });
+    EXPECT_EQ(own_before, 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB), 3);
+}
+
+// Notifications a hook raises past the queue keep the order they were raised in; the command's own is last.
+TEST(nanoavb_entity_unsolicited_notify, notifications_past_the_queue_keep_their_order)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 7;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    std::vector<uint8_t> raised;
+    for (auto const& s : sends) {
+        if (header_of(s).is_unsolicited() && header_of(s).command_code() == AEM_COMMAND_GET_STREAM_INFO) {
+            raised.push_back(body_of(s)[3]);
+        }
+    }
+    EXPECT_TRUE(raised == (std::vector<uint8_t>{0, 1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_TRUE(
+        std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); }) < sends.end() - 1);
+}
+
+namespace {
+
+/// Defers every SET (as an entity applying a large control value off the event loop would).
+class DeferringEveryHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        return AEM_STATUS_IN_PROGRESS;
+    }
+};
+
+}  // namespace
+
+// IEEE 1722.1-2021 Table 7-141: a deferred SET with a body over 64 octets is held, completed and answered.
+TEST(nanoavb_entity_in_progress, a_deferred_set_with_a_long_body_is_completed_and_answered)
+{
+    DeferringEveryHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 100> body{0x00, static_cast<uint8_t>(DESCRIPTOR_CONTROL), 0x00, 0x00};
+    std::ranges::fill(std::span{body}.subspan(4), uint8_t{0x5A});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, body);
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 0, AEM_STATUS_SUCCESS));
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    if (reply != nullptr) {
+        EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(std::ranges::equal(body_of(*reply), body));
+    }
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+// IEEE 1722.1-2021 Clause 9.2.1.1.7: octets past control_data_length are not the command's, nor echoed or held.
+TEST(nanoavb_entity_in_progress, octets_past_control_data_length_are_ignored)
+{
+    DeferringEveryHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    std::array<uint8_t, 8> const body{0x00, static_cast<uint8_t>(DESCRIPTOR_CONTROL), 0x00, 0x00, 0x01, 0x02, 0x03, 0x04};
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_SET_CONTROL, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body.size()));
+    cmd.target_entity_id = kEntity;
+    cmd.controller_entity_id = kControllerA;
+    std::vector<uint8_t> packet(AemDu::LENGTH + body.size() + 80, uint8_t{0xEE});  // 80 trailing octets
+    span_copy(std::span<uint8_t>{packet}.first(AemDu::LENGTH), make_const_span(cmd));
+    std::ranges::copy(body, packet.begin() + static_cast<std::ptrdiff_t>(AemDu::LENGTH));
+    (void)handler.process_packet(kMacA, packet, kEntity);
+
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), body));
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 0, AEM_STATUS_SUCCESS));
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), body));
+}
+
+namespace {
+
 /// Refuses every SET, and serves GET_CONTROL and GET_MATRIX so a refused SET has
 /// a value in force to answer with. Records what each GET asked.
 class RefusingHandler : public AemEntityHandler
