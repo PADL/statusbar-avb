@@ -117,7 +117,7 @@ void SrpPort::tick(TimePoint const now)
 }
 
 auto SrpPort::declare_domain(TimePoint const now) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the Domain declared and MVRP joined, in order
     bool const moved = domain().sr_class_priority != config_.domain.sr_class_priority || vid_ != config_.domain.sr_class_vid;
     msrp_.set_domain(config_.domain);
     auto status = msrp_.declare_domain(now);

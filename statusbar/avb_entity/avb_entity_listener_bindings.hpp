@@ -115,7 +115,7 @@ inline constexpr std::string_view LISTENER_BINDINGS_MAGIC = "statusbar-listener-
 /// Load bindings from @p path. A missing file is an empty table (first
 /// boot), not an error; a present-but-corrupt file is an error.
 [[nodiscard]] inline auto load_listener_bindings(std::string const& path) -> StatusValue<ListenerBindings>
-{
+{  // NOLINT(statusbar-block-statements) the bindings file read and checked, in order
     std::FILE* const f = std::fopen(path.c_str(), "rb");
     if (f == nullptr) {
         return success(ListenerBindings{});
