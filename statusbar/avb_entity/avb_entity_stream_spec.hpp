@@ -250,9 +250,17 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 /// frame after the minimum-size rule (step 3).
 inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
 
-/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence: the AVTPDU (Milan
-/// v1.3 Section 4.3.3.2, Table 4.4). Returns 0 for StreamKind::other or an unknown rate.
+/// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:
+/// L2 payload bytes of the largest AVTP frame the stream can emit. Audio
+/// kinds reserve one extra sample per channel over the nominal cadence — the
+/// gPTP-paced media clock may emit nominal+1 samples on a wake. CRF is sized
+/// exactly from its timestamps-per-PDU. Returns 0 for StreamKind::other or a
+/// format with an unknown rate.
 [[nodiscard]] auto srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
+
+/// As srp_max_frame_size, for a Milan entity: an AAF frame is exactly its frames per PDU, the
+/// AVTPDU (Milan v1.3 Section 4.3.3.2, Table 4.4); the drift byte is MILAN_TSPEC_SPARE_BYTES.
+[[nodiscard]] auto milan_srp_max_frame_size(StreamFormatFields const& format) noexcept -> uint16_t;
 
 /// One stream's MSRP TSpec (IEEE 802.1Q 35.2.2.8.4).
 struct TSpec

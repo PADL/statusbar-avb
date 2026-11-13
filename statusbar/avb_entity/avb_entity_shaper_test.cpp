@@ -31,6 +31,9 @@ using namespace statusbar::avb_entity;
 
 namespace {
 
+/// The Milan profile, whose TSpecs (Milan v1.3 Table 4.4) these tests size.
+constexpr nanoavb::EntityProfile MILAN{.milan = true};
+
 /// 8 channels of 48 kHz INT_24 AAF, as the bridge's AVB outputs declare it.
 auto aaf_8ch_48k_int24() -> StreamSpec
 {
@@ -57,7 +60,7 @@ auto crf_one_timestamp() -> StreamSpec
 /// CBS arithmetic below and docs/SHAPER.md's worked examples use these.
 auto worked_tspec(StreamSpec const& spec) -> TSpec
 {
-    return TSpec{.max_frame_size = static_cast<uint16_t>(srp_max_frame_size(spec.format) + 1), .max_interval_frames = 1};
+    return TSpec{.max_frame_size = static_cast<uint16_t>(milan_srp_max_frame_size(spec.format) + 1), .max_interval_frames = 1};
 }
 
 }  // namespace
@@ -239,7 +242,7 @@ TEST(shaper_mqprio, refuses_bad_priorities)
 TEST(shaper_talker_latency, an_unshaped_port_sends_the_mtu_frame_then_the_class_s_frames_at_the_link_speed)
 {
     // AAF 8 ch: 168 + 42 + 1 spare = 211 octets an interval; 1542 + 211 = 1753 octets, 14024 ns at 1 Gbit/s.
-    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
+    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), MILAN));
     EXPECT_EQ(aaf, uint64_t{211});
     EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500}, aaf, aaf), uint32_t{14024 + 500});
     EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 100, .mtu = 1500}, aaf, aaf), uint32_t{140240 + 500});
@@ -257,7 +260,7 @@ TEST(shaper_talker_latency, an_unshaped_port_sends_the_mtu_frame_then_the_class_
 // over the interval; only the MTU frame and the stream's own leave at the link speed.
 TEST(shaper_talker_latency, a_cbs_port_drains_the_class_s_other_frames_at_idle_slope)
 {
-    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
+    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), MILAN));
     // Twelve streams at 1 Gbit/s (idleSlope 162 Mbit/s): 14024 ns, then 11/12 of 125 us = 114583.3 -> 114584 ns.
     EXPECT_EQ(talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = 1500, .cbs = true}, 12 * aaf, aaf), uint32_t{129108});
     EXPECT_EQ(cbs_drain_ns(11 * aaf, 12 * aaf, CLASS_A_INTERVALS_PER_SEC), uint64_t{114584});
@@ -272,7 +275,7 @@ TEST(shaper_talker_latency, a_cbs_port_drains_the_class_s_other_frames_at_idle_s
 
 TEST(shaper_talker_latency, an_unknown_link_speed_or_mtu_counts_as_1000_mbit_s_and_1500_octets)
 {
-    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24()));
+    auto const aaf = interval_wire_octets(AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), MILAN));
     EXPECT_EQ(
         talker_port_latency_ns(TalkerPort{}, aaf, aaf),
         talker_port_latency_ns(TalkerPort{.link_mbps = 1000, .mtu = FALLBACK_MTU}, aaf, aaf));
@@ -284,11 +287,11 @@ TEST(shaper_talker_latency, an_unknown_link_speed_or_mtu_counts_as_1000_mbit_s_a
 
 TEST(shaper_cbs, frame_sizes_and_bandwidth)
 {
-    // The TSpecs the kit advertises (srp_max_frame_size, Milan v1.3 Table 4.4):
+    // The TSpecs the kit advertises (milan_srp_max_frame_size, Milan v1.3 Table 4.4):
     //   AAF 8 ch INT_24 48 kHz: 24-byte AAF header + 6 samples x 8 ch x 3 B = 18*8 + 24 = 168
     //   CRF, one timestamp a PDU: 20-byte CRF header + 1 x 8 = 28
-    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24());
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
+    auto const aaf = AvbEntityKit::talker_tspec(aaf_8ch_48k_int24(), MILAN);
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), MILAN);
     EXPECT_EQ(aaf.max_frame_size, uint16_t{168});
     EXPECT_EQ(aaf.max_interval_frames, uint16_t{1});
     EXPECT_EQ(crf.max_frame_size, uint16_t{28});
@@ -340,7 +343,7 @@ TEST(shaper_cbs, milan_table_4_4)
             if (mfs > 1500) {
                 continue;  // past the MTU: not a stream the model allows
             }
-            auto const tspec = AvbEntityKit::talker_tspec(spec);
+            auto const tspec = AvbEntityKit::talker_tspec(spec, MILAN);
             EXPECT_EQ(uint32_t{tspec.max_frame_size}, mfs);
             EXPECT_EQ(tspec.max_interval_frames, uint16_t{1});
             // The column's linear formula holds while the frame is past the
@@ -349,7 +352,7 @@ TEST(shaper_cbs, milan_table_4_4)
             EXPECT_EQ(stream_bandwidth_kbps(tspec, CLASS_A_INTERVALS_PER_SEC), expected);
         }
     }
-    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp());
+    auto const crf = AvbEntityKit::talker_tspec(crf_one_timestamp(), MILAN);
     EXPECT_EQ(crf.max_frame_size, uint16_t{28});
     EXPECT_EQ(stream_bandwidth_kbps(crf, CLASS_A_INTERVALS_PER_SEC), uint32_t{5696});
 }

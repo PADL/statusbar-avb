@@ -508,14 +508,22 @@ class AvbEntityKit
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
-    /// The MSRP TSpec advertised for talker stream @p spec: srp_max_frame_size at the class A
-    /// cadence, one frame per interval, by Milan v1.3 Table 4.4. Also the shaper's input.
-    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec) noexcept -> TSpec
+    /// The MSRP TSpec advertised for talker stream @p spec, one frame per class A interval: Milan v1.3
+    /// Table 4.4's frame and drift byte for a Milan @p profile, else srp_max_frame_size. The shaper's too.
+    [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, nanoavb::EntityProfile const& profile) noexcept -> TSpec
     {
+        if (!profile.milan) {
+            return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
+        }
         return TSpec{
-            .max_frame_size = srp_max_frame_size(spec.format),
+            .max_frame_size = milan_srp_max_frame_size(spec.format),
             .max_interval_frames = 1,
             .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
+    }
+    /// talker_tspec under this entity's profile (the model's, nanoavb::EntityProfile).
+    [[nodiscard]] auto talker_tspec(StreamSpec const& spec) const noexcept -> TSpec
+    {
+        return talker_tspec(spec, host_.components().profile);
     }
 
     // --- Stream socket health (after start()) ---------------------------------

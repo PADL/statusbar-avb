@@ -43,15 +43,18 @@ stream list (one address per talker stream, CRF included: one block of up to
 20), the shaper's admitted set and the tone generator's renders. Collaborators
 sized elsewhere are checked against it in `avb_entity_kit.hpp`.
 
-`srp_max_frame_size` follows Milan v1.3 Section 4.3.3.2, Table 4.4: the AVTPDU
-header plus the payload, MaxIntervalFrames 1. AAF reserves exactly the class A
-samples per PDU the talker sends (AAF PCM32 48 kHz N channels: 24*N + 24); CRF
-its timestamps (28 for one). The byte for a sampling clock a little faster than
-nominal (`MILAN_TSPEC_SPARE_BYTES`) is the shaper's, added to the frame after
-the 68-octet minimum (`TSpec::clock_drift_bytes`, Table 4.4 step 3): the CRF's
-5696 kbit/s. A classic entity sizes its TSpecs the same way. AM824, not a
-Milan format, reserves a spare sample instead: its talker may send nominal+1
-samples on a wake.
+A talker's TSpec (`AvbEntityKit::talker_tspec`, MaxIntervalFrames 1) follows
+the model's profile. A Milan entity's is `milan_srp_max_frame_size`, Milan
+v1.3 Section 4.3.3.2, Table 4.4: the AVTPDU header plus the payload. AAF
+reserves exactly the class A samples per PDU the talker sends (AAF PCM32 48 kHz
+N channels: 24*N + 24); CRF its timestamps (28 for one). The byte for a
+sampling clock a little faster than nominal (`MILAN_TSPEC_SPARE_BYTES`) is the
+shaper's, added to the frame after the 68-octet minimum
+(`TSpec::clock_drift_bytes`, Table 4.4 step 3): the CRF's 5696 kbit/s. A
+classic entity's is `srp_max_frame_size`: IEEE 1722-2016 Table 18's samples
+per PDU and one spare sample, no drift byte. AM824, not a Milan format,
+reserves the spare sample under both: its talker may send nominal+1 samples on
+a wake.
 
 The raw TX render (`StreamRawRenderFn`) is the fast path alongside the float
 `StreamRenderFn`: the payload is interleaved big-endian samples of the

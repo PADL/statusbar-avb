@@ -555,7 +555,7 @@ TEST(avb_entity_kit_bounds, every_stream_of_a_full_model_opens)
         nanoavb::TalkerStreamSrpInfo info{};
         info.stream_id = stream_id(0x0200000000000100ULL + spec.index);
         info.vlan_id = 2;
-        info.max_frame_size = AvbEntityKit::talker_tspec(spec).max_frame_size;
+        info.max_frame_size = kit.talker_tspec(spec).max_frame_size;
         info.max_interval_frames = 1;
         EXPECT_TRUE(components.msrp_handler.talker_advertise(info, now).has_value());
     }
@@ -1179,7 +1179,7 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     // Every talker's frames queue in class A behind one 1542-octet frame; 80 ns an octet at 100 Mbit/s.
     uint64_t octets = 1542;
     for (auto const& spec : m.kit.talker_specs()) {
-        octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
+        octets += interval_wire_octets(m.kit.talker_tspec(spec));
     }
     auto const at_100 = static_cast<uint32_t>((octets * 80) + PROPAGATION_DELAY_NS);
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100);  // not declared yet
@@ -1187,7 +1187,7 @@ TEST(avb_entity_kit_milan_talker, a_talker_advertise_declares_the_port_latency_a
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), at_100 + (7500 * 80));
     m.kit.set_mtu(1500);
     // Under the shaper's cbs the other talkers' frames leave at idleSlope; this one's at the link speed.
-    uint64_t const own = interval_wire_octets(AvbEntityKit::talker_tspec(m.kit.talker_specs()[0]));
+    uint64_t const own = interval_wire_octets(m.kit.talker_tspec(m.kit.talker_specs()[0]));
     auto const shaped = (1542 + own) * 80 + cbs_drain_ns(octets - 1542 - own, octets - 1542, CLASS_A_INTERVALS_PER_SEC);
     m.kit.set_class_a_cbs(true);
     EXPECT_EQ(load_info(m.stream_info(0).body).first.msrp_accumulated_latency.get(), shaped + PROPAGATION_DELAY_NS);
@@ -1245,7 +1245,7 @@ TEST(avb_entity_kit_milan_talker, the_2021_layout_reports_the_declared_accumulat
     EXPECT_EQ(payload.msrp_accumulated_latency.get(), declared != nullptr ? declared->accumulated_latency : 1U);
     uint64_t octets = 1542;  // one interfering frame, then every talker's frames; 8 ns an octet at 1 Gbit/s
     for (auto const& spec : m.kit.talker_specs()) {
-        octets += interval_wire_octets(AvbEntityKit::talker_tspec(spec));
+        octets += interval_wire_octets(m.kit.talker_tspec(spec));
     }
     EXPECT_EQ(payload.msrp_accumulated_latency.get(), static_cast<uint32_t>((octets * 8) + PROPAGATION_DELAY_NS));
 
@@ -2390,7 +2390,7 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
         m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, 8))),
         atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(m.kit.talker().slot_for(0)->aaf->format == avtp::AafFormat::int_32bit);
-    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{(6 * 8 * 4) + 24});
+    EXPECT_EQ(m.kit.talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{(6 * 8 * 4) + 24});
 
     // Refused: an unlisted format (the handler), the CRF's, and the entity's
     // own refusal (nothing changes).
@@ -3484,11 +3484,25 @@ TEST(avb_entity_kit_counters, milan_v1_3_output_counters_and_signal_presence)
 TEST(avb_entity_kit_formats, milan_v1_3_tspec)
 {
     MilanKit m{std::nullopt, 0x65, true, make_blob(1, 1), std::nullopt, net::monotonic_ns};
-    auto const tspec = AvbEntityKit::talker_tspec(m.kit.talker_specs().front());
-    EXPECT_EQ(tspec.max_frame_size, srp_max_frame_size(m.kit.talker_specs().front().format));
+    auto const tspec = m.kit.talker_tspec(m.kit.talker_specs().front());
+    EXPECT_EQ(tspec.max_frame_size, milan_srp_max_frame_size(m.kit.talker_specs().front().format));
     EXPECT_EQ(tspec.clock_drift_bytes, MILAN_TSPEC_SPARE_BYTES);
     EXPECT_TRUE(m.kit.host().components().profile.milan);
     EXPECT_TRUE(m.kit.host().components().aem_handler.stream_info_layout() == atdecc::aem::StreamInfoLayout::ieee_2021);
+}
+
+// A classic entity keeps IEEE 1722-2016 Table 18's frames and one spare sample, with no drift byte,
+// in its Talker Advertise and its shaper's TSpec
+TEST(avb_entity_kit_formats, a_classic_tspec_reserves_a_spare_sample)
+{
+    MilanKit m{false, 0x66};
+    auto const& spec = m.kit.talker_specs().front();
+    auto const tspec = m.kit.talker_tspec(spec);
+    EXPECT_FALSE(m.kit.host().components().profile.milan);
+    EXPECT_EQ(tspec.max_frame_size, srp_max_frame_size(spec.format));
+    EXPECT_EQ(tspec.max_frame_size, uint16_t{24 + (7 * 32 * 3)});  // 32 ch INT_24: 6 frames and 1, not Milan's 6
+    EXPECT_EQ(tspec.clock_drift_bytes, uint16_t{0});
+    EXPECT_EQ(m.kit.make_talker_srp_info(spec).max_frame_size, tspec.max_frame_size);
 }
 
 // Milan v1.2 Table 5.16: the input's ten counters; zeroed when it becomes
@@ -4366,7 +4380,7 @@ TEST(avb_entity_kit_mixed_rates, a_dynamic_output_identity_follows_the_rate)
     EXPECT_TRUE(m.kit.output_mappings(0).empty());
     EXPECT_TRUE((output_map(m) == std::pair{atdecc::AEM_STATUS_SUCCESS, uint16_t{0}}));
     EXPECT_EQ(m.kit.talker().slot_for(0)->spec.format.sample_rate_hz, 96000U);
-    EXPECT_EQ(AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{(12 * 8 * 3) + 24});
+    EXPECT_EQ(m.kit.talker_tspec(m.kit.talker_specs().front()).max_frame_size, uint16_t{(12 * 8 * 3) + 24});
     EXPECT_EQ(m.kit.talker().config_.sample_rate, 48000U);  // the media clock stays at the unit's rate
     // Back at the unit's rate the identity returns.
     EXPECT_EQ(
@@ -4557,8 +4571,7 @@ TEST(avb_entity_kit_kind, an_audio_stream_switches_between_aaf_and_am824)
     EXPECT_EQ(out->am824->sequence_num, uint8_t{41});
     EXPECT_EQ(out->am824->running_dbc, uint32_t{600});
     EXPECT_EQ(
-        AvbEntityKit::talker_tspec(m.kit.talker_specs().front()).max_frame_size,
-        srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
+        m.kit.talker_tspec(m.kit.talker_specs().front()).max_frame_size, srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
 
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     auto const* in = m.kit.listener()->slot_for(0);

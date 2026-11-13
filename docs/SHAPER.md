@@ -308,7 +308,8 @@ queue then only keeps PTP clear of the legacy ring's backlog.
 ## The cbs parameters - IEEE 802.1Q-2022 Annex L
 
 Per admitted talker stream, from the TSpec the kit advertises
-(`srp_max_frame_size(format)`, MaxIntervalFrames 1):
+(`milan_srp_max_frame_size(format)` for a Milan entity, `srp_max_frame_size(format)` for a classic
+one, MaxIntervalFrames 1):
 
 ```
 wire frame    = max(MaxFrameSize + 4 (VLAN) + 18 (L2), 68) + 20 (L1)
@@ -351,7 +352,7 @@ talker gated for want of a listener, 1 Gbit/s, MTU 1500; the i210 capture
 under "Verifying on a target":
 
 ```
-MaxFrameSize = 24 + 6 x 8 x 4                 = 216 octets (srp_max_frame_size)
+MaxFrameSize = 24 + 6 x 8 x 4                 = 216 octets (milan_srp_max_frame_size)
 wire frame   = 216 + 22 + 1 + 20              = 259 octets
 idleSlope    = 259 x 8 x 8000 / 1000          = 16576 kbit/s
 sendSlope    = 16576 - 1000000                = -983424 kbit/s
@@ -396,7 +397,7 @@ The kit's bound: MAX_ENTITY_AUDIO_STREAMS 32-channel 48 kHz INT_24 AAF talkers
 and MAX_ENTITY_CRF_STREAMS CRF talkers, on a gigabit link:
 
 ```
-AAF TSpec  = 18 x 32 + 24 + 1                 = 601 octets (srp_max_frame_size)
+AAF TSpec  = 18 x 32 + 24 + 1                 = 601 octets (milan_srp_max_frame_size)
 wire frame = 601 + 22 + 20                    = 643 octets
 bandwidth  = 643 x 8 x 8000                   = 41152 kbit/s a stream
 idleSlope  = 16 x 41152 + 4 x 5632 (the CRFs) = 680960 kbit/s (68.1% of the link)

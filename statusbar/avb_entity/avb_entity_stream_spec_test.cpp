@@ -164,14 +164,15 @@ TEST(stream_spec_derive, audio_blob_three_out_three_in)
     EXPECT_EQ(*rate, 96'000U);
 }
 
-TEST(stream_spec_tspec, milan_table_4_4_sizes)
+TEST(stream_spec_tspec, matches_wire_registered_sizes)
 {
-    // Milan v1.3 Section 4.3.3.2, Table 4.4: AVTPDU header + payload.
-    // AAF PCM32 96 kHz 8 ch: 48*8 + 24 = 408; CRF 1 ts/pdu: 28.
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
+    // These are the MSRP TSpec frame sizes real bridges registered for the
+    // tone entity's streams (talker declarations observed on an AVB switch):
+    // AAF 8ch 96 kHz int32 -> 440 bytes; Milan CRF 1 ts/pdu -> 28 bytes.
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
 
-    // AM824 (not a Milan format) 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
+    // AM824 48k 8ch: 32-byte header + (6+1 samples * 8ch * 4B) = 256.
     EXPECT_EQ(srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
 
     // Unknown formats size to 0 (callers must treat as authoring error).
@@ -209,10 +210,24 @@ TEST(stream_spec_tspec, aaf_is_sized_by_its_format_word_then_by_table_18)
     EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 5U);
     EXPECT_EQ(aaf_samples_per_pdu(decode_stream_format(AAF_96K_INT32_8CH)), 12U);
 
-    // The TSpec frame follows (Milan v1.3 Table 4.4): 24-byte header + frames * 8ch * 4B.
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), 24 + (6 * 8 * 4));      // 216
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 24 + (5 * 8 * 4));  // 184
-    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
+    // The TSpec frame follows: 24-byte header + (frames+1) * 8ch * 4B.
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), 24 + (7 * 8 * 4));      // 248, was 216 at 5
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 24 + (6 * 8 * 4));  // 216
+    EXPECT_EQ(srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 440);                    // unchanged
+}
+
+// Milan v1.3 Section 4.3.3.2, Table 4.4: a Milan AAF frame is the AVTPDU header plus exactly its frames
+// (AAF PCM32 96 kHz 8 ch: 12*8*4 + 24 = 408); CRF 1 ts/pdu is 28, and AM824 (not a Milan format) as classic.
+TEST(stream_spec_tspec, milan_table_4_4_sizes)
+{
+    constexpr uint64_t AAF_44K1_INT32_8CH = 0x0204022002000000ULL;      // 44.1k, samples_per_frame unspecified
+    constexpr uint64_t AAF_48K_INT32_8CH_5SPF = 0x0205022002005000ULL;  // 48k, 5 named
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_96K_INT32_8CH)), 408);
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_44K1_INT32_8CH)), 24 + (6 * 8 * 4));      // 216
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AAF_48K_INT32_8CH_5SPF)), 24 + (5 * 8 * 4));  // 184
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(CRF_MILAN_48K)), 28);
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(AM824_48K_8CH)), 256);
+    EXPECT_EQ(milan_srp_max_frame_size(decode_stream_format(0)), 0);
 }
 
 TEST(stream_spec_rate, mixed_audio_rates_rejected)
