@@ -70,14 +70,15 @@ auto wire(Descriptor const& desc) -> std::span<uint8_t const>
     return std::span{reinterpret_cast<uint8_t const*>(&desc), desc.wire_size()};
 }
 
-/// ENTITY + CONFIGURATION + AVB_INTERFACE (with @p priority1), @p audio AAF streams then @p crf CRF
+/// ENTITY + CONFIGURATION + AVB_INTERFACE (with @p priority1, @p clock_identity), @p audio AAF streams then @p crf CRF
 /// streams in each direction; with @p identify, CONTROL 0 is an IDENTIFY control.
 auto make_blob(
     uint16_t const audio_outputs,
     uint16_t const audio_inputs,
     uint16_t const crf = 1,
     bool const identify = false,
-    uint8_t const priority1 = 0) -> std::vector<uint8_t>
+    uint8_t const priority1 = 0,
+    ieee::Eui64 const clock_identity = {}) -> std::vector<uint8_t>
 {
     nanoavb::AemBlobWriter w;
     atdecc::aem::DescriptorEntity entity{};
@@ -99,6 +100,7 @@ auto make_blob(
     }
     atdecc::aem::DescriptorAvbInterface iface{};
     iface.priority1 = priority1;
+    iface.clock_identity = clock_identity;
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
     if (identify) {
         atdecc::aem::DescriptorControl control{};
@@ -3771,6 +3773,37 @@ TEST(avb_entity_kit_counters, gptp_gm_changed_follows_the_grandmaster_in_force)
     announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'6677ULL};
     announces.observe_announce(t + 1'000'000'000, announce);
     EXPECT_EQ(counters_of(m, DESCRIPTOR_AVB_INTERFACE, 0).counters[5].get(), 3U);
+}
+
+// The control plane's own gPTP wiring (setup_nanoavb_callbacks): a new path trace is an unsolicited GET_AS_PATH
+// (IEEE 1722.1-2021 Clause 7.4.41), and a lost grandmaster leaves ADP naming what GET_AVB_INFO answers, a
+// grandmaster-capable entity's own clock (Milan v1.3 Section 4.2.6.2.1), not zero.
+TEST(avb_entity_kit_counters, the_default_gptp_wiring_notifies_the_path_and_names_the_own_clock)
+{
+    auto const own = ieee::Eui64{}.from_uint64(0x0200'00FF'FE00'00C1ULL);
+    MilanKit m{std::nullopt, 0xC1, true, make_blob(1, 1, 1, false, 0, own)};
+    EXPECT_TRUE(m.start_ready());
+    auto* handlers = m.kit.host().net_handlers();
+    EXPECT_TRUE(handlers != nullptr);
+    std::array<uint8_t, 0> none{};
+    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    m.aem.clear();
+    auto const& adp = m.kit.host().components().adp_advertiser;
+
+    gptp::AnnounceMessage announce{};
+    announce.init();
+    announce.grandmaster_identity = gptp::ClockIdentity{0x0011'22FF'FE33'4455ULL};
+    nanoavb::AsPath trace{};
+    trace.push_back(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
+    int64_t const t0 = MilanKit::steady_ns();
+    handlers->gptp_handler().observe_announce(t0, announce, trace);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
+    EXPECT_EQ(adp.adpdu().gptp_grandmaster_id.to_uint64(), 0x0011'22FF'FE33'4455ULL);
+
+    handlers->gptp_handler().tick(t0 + 10'000'000'000);
+    EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 2);  // the path cleared
+    EXPECT_EQ(m.kit.host().avb_info(0).gptp_grandmaster_id.to_uint64(), own.to_uint64());
+    EXPECT_EQ(adp.adpdu().gptp_grandmaster_id.to_uint64(), own.to_uint64());
 }
 
 namespace {

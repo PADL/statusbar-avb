@@ -840,10 +840,20 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
             auto const* last = handlers.gptp_handler().last_announce();
             report_grandmaster(
                 components,
-                gptp::ClockIdentity{},
+                grandmaster_after_loss(components),
                 last != nullptr ? last->header.domain_number.get() : 0,
                 sm::TimePoint{std::chrono::nanoseconds{now_ns}});
-        }});
+        },
+        // A new path, or none: GET_AS_PATH's subscribers are told (IEEE 1722.1-2021 Clause 7.4.41).
+        .path_trace_changed = [&components](int64_t) { (void)components.aem_handler.notify_as_path_changed(0); }});
+}
+
+auto grandmaster_after_loss(NanoAvbComponents const& components) -> gptp::ClockIdentity
+{
+    // ADP names what GET_AVB_INFO answers: the entity's own clock while it is grandmaster (Milan v1.3
+    // Section 4.2.6.2.1), else none.
+    auto const info = components.aem_handler.avb_info(0);
+    return info.has_value() ? gptp::ClockIdentity{info->gptp_grandmaster_id.to_uint64()} : gptp::ClockIdentity{};
 }
 
 void report_grandmaster(

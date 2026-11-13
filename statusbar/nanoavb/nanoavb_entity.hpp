@@ -640,6 +640,17 @@ class AemCommandHandler
     /// callback; same return values as notify_counters_changed().
     [[nodiscard]] auto notify_avb_info_changed(uint16_t descriptor_index) -> uint8_t;
 
+    /// What GET_AVB_INFO answers for AVB_INTERFACE @p descriptor_index (IEEE 1722.1-2021 Clause 7.4.40),
+    /// through the get_avb_info callback; nullopt when none is set or it declines.
+    [[nodiscard]] auto avb_info(uint16_t const descriptor_index) const -> std::optional<AvbInfo>
+    {
+        AvbInfo info{};
+        if (!callbacks_.get_avb_info || !callbacks_.get_avb_info(descriptor_index, info)) {
+            return std::nullopt;
+        }
+        return info;
+    }
+
     /// Push an unsolicited GET_STREAM_INFO response for a stream descriptor
     /// (talker advertise/failure, listener connection changes). Reads the
     /// parameters through the get_stream_info callback; same return values as

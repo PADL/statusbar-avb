@@ -643,6 +643,10 @@ template <typename T>
 void report_grandmaster(
     NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t domain, sm::TimePoint now);
 
+/// The grandmaster ADP names once no Announce names one: GET_AVB_INFO's for AVB_INTERFACE 0 (the
+/// entity's own clock while it is grandmaster), else none (no get_avb_info wired).
+[[nodiscard]] auto grandmaster_after_loss(NanoAvbComponents const& components) -> gptp::ClockIdentity;
+
 /// Wire up all callbacks between NanoAvbComponents and NanoAvbNetHandlers
 /// @param components The NanoAVB protocol components to wire up
 /// @param handlers The network handlers to connect to the components
