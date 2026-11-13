@@ -30,6 +30,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_am824_v1.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
 #include "statusbar/net/net_interface_info.hpp"
@@ -140,7 +141,7 @@ inline constexpr size_t ETHERNET_PAYLOAD_MAX = 1500;
             f.aaf_samples_per_frame = aaf.samples_per_frame();
             break;
         }
-        case avtp::AvtpSubtype::iec_61883_iidc: {
+        case avtp::AvtpSubtype::iec_61883_iidc: {  // NOLINT(statusbar-block-statements) one AM824 header field per statement
             auto const am824 = avtp::Am824StreamFormat::from_u64(fmt);
             if (!am824_format_supported(am824)) {
                 break;

@@ -292,13 +292,8 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
 /// then Table 5.8's and @p stopped is not read. nullopt for an IEEE 1722.1
 /// listener.
 [[nodiscard]] inline auto fill_listener_stream_info(
-    AvbEntityHost const& host,
-    uint16_t const descriptor_index,
-    bool const stopped,
-    std::optional<MilanSinkStreamInfo> const& milan,
-    atdecc::aem::AemStreamInfoPayload& out) -> bool
-{
-    using atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     namespace stream_info_flags = atdecc::aem::stream_info_flags;
     namespace probing_status = atdecc::aem::probing_status;
 
@@ -391,7 +386,7 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
     atdecc::aem::StreamInfoLayout const layout,
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     auto const* sink = host.components().acmp_listener.milan_sinks().sink(descriptor_index);
     if (sink == nullptr) {
         return false;
