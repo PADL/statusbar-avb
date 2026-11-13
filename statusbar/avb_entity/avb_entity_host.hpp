@@ -86,6 +86,16 @@ using statusbar::Status;
 [[nodiscard]] auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity)
     -> nanoavb::AsPath;
 
+/// What a gPTP stack's report did to the grandmaster the entity follows (AvbEntityHost::use_parent_grandmaster),
+/// for AVTP tu (IEEE 1722-2016 Clause 4.4.4.7).
+enum class GrandmasterTransition : uint8_t
+{
+    unchanged,  ///< the same one again
+    changed,    ///< another one, the stack's first, or one named after none or after this entity's own
+    lost,       ///< none named, or none yet
+    own,        ///< this entity's own clock, first named: its time base does not step
+};
+
 /// The shared AVB entity control plane: state machines + NanoAvbComponents + net
 /// handlers + lifecycle. Owned by a concrete entity (composition). Non-copyable and
 /// non-movable (NanoAvbComponents pins itself), so build it in place in the entity's
@@ -166,9 +176,12 @@ class AvbEntityHost
     /// entity is its own grandmaster in force from now; GET_AVB_INFO and ADP name none on one that
     /// is not. Reactor thread.
     void notify_grandmaster_lost();
-    /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity (its own clock while it is grandmaster): from
-    /// the first call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
+    /// The gPTP stack's PARENT_DATA_SET grandmasterIdentity, another clock than its own: from the first
+    /// call, GPTP_GM_CHANGED follows these instead of the Announce handler. Reactor thread.
     void notify_parent_grandmaster(ieee::Eui64 const& grandmaster);
+    /// As notify_parent_grandmaster, for a stack naming its own clock @p grandmaster: this entity is the
+    /// grandmaster (the integrator knows; a boundary clock's identity need not be this NIC's). Reactor thread.
+    void notify_own_grandmaster(ieee::Eui64 const& grandmaster);
     /// The gPTP stack's PARENT_DATA_SET names no grandmaster now (a clientOnly stack naming its own
     /// clock): GET_AVB_INFO and ADP name none, and GPTP_GM_CHANGED compares the next with the last named.
     void notify_parent_grandmaster_loss();
@@ -176,6 +189,17 @@ class AvbEntityHost
     /// even if none ever comes: a gPTP stack that never answers leaves it unchanged. The first call drops
     /// the Announce handler's grandmaster, so the stack's first report is no change.
     void use_parent_grandmaster();
+    /// Whether the gPTP stack's reports, not the Announce handler's, give the grandmaster in force.
+    [[nodiscard]] auto follows_parent_grandmaster() const noexcept -> bool { return grandmaster_from_parent_; }
+    /// Whether this entity is the grandmaster in force: a grandmaster-capable one whose Announces timed
+    /// out, or one the stack names (notify_own_grandmaster).
+    [[nodiscard]] auto own_grandmaster_in_force() const noexcept -> bool { return own_grandmaster_; }
+    /// Told each transition of notify_parent_grandmaster, notify_own_grandmaster and
+    /// notify_parent_grandmaster_loss, and `lost` at the first use_parent_grandmaster. Reactor thread.
+    void set_on_grandmaster_transition(statusbar::sg14::inplace_function<void(GrandmasterTransition), 32> fn)
+    {
+        on_grandmaster_transition_ = std::move(fn);
+    }
     /// The Announces' path trace changed: an unsolicited GET_AS_PATH (Milan
     /// v1.2 Table 5.22). Reactor thread.
     void notify_as_path_changed();
@@ -403,6 +427,14 @@ class AvbEntityHost
     /// @p grandmaster is in force: GPTP_GM_CHANGED counts it when another one was in force (the
     /// first is no change).
     void notify_grandmaster_in_force(ieee::Eui64 const& grandmaster);
+    /// The gPTP stack names @p grandmaster, this entity's own clock when @p own.
+    void follow_parent_grandmaster(ieee::Eui64 const& grandmaster, bool own);
+    /// A gPTP stack report: it is followed from now, naming none (@p names_none) or this entity (@p own).
+    void record_parent_report(bool names_none, bool own) noexcept;
+    /// What the stack naming @p grandmaster (@p own) does to the grandmaster followed, before it is recorded.
+    [[nodiscard]] auto parent_transition(ieee::Eui64 const& grandmaster, bool own) const -> GrandmasterTransition;
+    /// on_grandmaster_transition_ told @p transition, if set.
+    void tell_grandmaster_transition(GrandmasterTransition transition);
     /// GET_AVB_INFO's and ADP's gptp_grandmaster_id: the parent data set's (zero while it names none),
     /// else the Announces', else the entity's own clock when grandmaster-capable and its link is up, else zero.
     [[nodiscard]] auto reported_grandmaster() const -> ieee::Eui64;
@@ -467,6 +499,7 @@ class AvbEntityHost
     statusbar::sg14::inplace_function<void(TimePoint), 64> advertise_streams_{};
     statusbar::sg14::inplace_function<void(TimePoint), 64> withdraw_streams_{};
     statusbar::sg14::inplace_function<void(nanoavb::StreamId const&, bool, TimePoint), 64> on_listener_ready_{};
+    statusbar::sg14::inplace_function<void(GrandmasterTransition), 32> on_grandmaster_transition_{};
 
     std::string interface_name_{};
     net::MessageReactor* reactor_{nullptr};  ///< set while the control plane is up
@@ -512,6 +545,7 @@ class AvbEntityHost
     std::optional<ieee::Eui64> announced_grandmaster_{};  ///< the Announces' while one is known (notify_grandmaster_*)
     bool grandmaster_from_parent_{false};                 ///< notify_parent_grandmaster has been told
     bool parent_names_none_{false};  ///< notify_parent_grandmaster_loss, until the next notify_parent_grandmaster
+    bool own_grandmaster_{false};    ///< this entity is the grandmaster in force (own_grandmaster_in_force)
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::optional<bool> port_as_capable_{};                   ///< see notify_port_as_capable

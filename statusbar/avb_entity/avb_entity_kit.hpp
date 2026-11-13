@@ -151,17 +151,21 @@ class AvbEntityKit
     /// and MTU read again, a change declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 35.2.2.8.6).
     void on_link_up(TimePoint time);
     /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
-    /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED follows the
-    /// grandmaster in force (AvbEntityHost::notify_grandmaster_lost). Reactor thread.
+    /// handler): drives AVTP tu (Milan v1.3 Section 4.3.5.2, Annex B.1.1) until the host follows the gPTP
+    /// stack (follow_grandmaster); GPTP_GM_CHANGED follows the grandmaster in force. Reactor thread.
     void notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
     {
         host_.notify_grandmaster_changed(grandmaster);
-        talker_->notify_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
+        if (!host_.follows_parent_grandmaster()) {
+            talker_->notify_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
+        }
     }
     void notify_grandmaster_lost()
     {
-        talker_->notify_grandmaster_lost();
         host_.notify_grandmaster_lost();
+        if (!host_.follows_parent_grandmaster()) {
+            lose_announced_grandmaster();
+        }
     }
     /// The Announces' gPTP path trace changed (GET_AS_PATH). Reactor thread.
     void notify_as_path_changed() { host_.notify_as_path_changed(); }
@@ -736,6 +740,12 @@ class AvbEntityKit
     void configure_profile();
     /// MVRP/MSRP for the configured Class A VLAN, and following a Domain's VID.
     void configure_class_a_domain();
+    /// AVTP tu after a gPTP stack's @p transition (IEEE 1722-2016 Clause 4.4.4.7): the usual window for
+    /// a change, set while none is named, clear while this entity is the grandmaster.
+    void follow_grandmaster(GrandmasterTransition transition) noexcept;
+    /// AVTP tu after the Announces timed out: clear at once when this entity is now its own grandmaster
+    /// (its time base does not step), else set until a grandmaster is found.
+    void lose_announced_grandmaster();
     /// The storage handler's, the dynamic mappings' and the Milan talker's and listener's hooks.
     void wire_controller_hooks();
     void wire_storage_hooks();

@@ -504,6 +504,7 @@ void AvbEntityHost::notify_grandmaster_changed(gptp::ClockIdentity const& grandm
 {
     announced_grandmaster_ = grandmaster.to_eui64();
     if (!grandmaster_from_parent_) {
+        own_grandmaster_ = false;
         notify_grandmaster_in_force(grandmaster.to_eui64());
     }
     refresh_avb_info();
@@ -514,6 +515,7 @@ void AvbEntityHost::notify_grandmaster_lost()
     // Nothing announced: a grandmaster-capable entity is grandmaster itself (Milan v1.3 Section 4.2.6.2.1).
     announced_grandmaster_.reset();
     if (!grandmaster_from_parent_ && grandmaster_capable()) {
+        own_grandmaster_ = true;
         notify_grandmaster_in_force(own_clock());
     }
     refresh_avb_info();
@@ -523,23 +525,60 @@ void AvbEntityHost::use_parent_grandmaster()
 {
     if (!std::exchange(grandmaster_from_parent_, true)) {
         grandmaster_in_force_.reset();
+        own_grandmaster_ = false;
         refresh_avb_info();
+        tell_grandmaster_transition(GrandmasterTransition::lost);  // uncertain until the stack names one
     }
 }
 
 void AvbEntityHost::notify_parent_grandmaster(ieee::Eui64 const& grandmaster)
 {
-    grandmaster_from_parent_ = true;
-    parent_names_none_ = false;
+    follow_parent_grandmaster(grandmaster, false);
+}
+
+void AvbEntityHost::notify_own_grandmaster(ieee::Eui64 const& grandmaster)
+{
+    follow_parent_grandmaster(grandmaster, true);
+}
+
+void AvbEntityHost::follow_parent_grandmaster(ieee::Eui64 const& grandmaster, bool const own)
+{
+    auto const transition = parent_transition(grandmaster, own);
+    record_parent_report(false, own);
     notify_grandmaster_in_force(grandmaster);
     refresh_avb_info();
+    tell_grandmaster_transition(transition);
 }
 
 void AvbEntityHost::notify_parent_grandmaster_loss()
 {
-    grandmaster_from_parent_ = true;
-    parent_names_none_ = true;  // the one in force stays, for GPTP_GM_CHANGED's next comparison
+    record_parent_report(true, false);  // the one in force stays, for GPTP_GM_CHANGED's next comparison
     refresh_avb_info();
+    tell_grandmaster_transition(GrandmasterTransition::lost);  // uncertain until one is named
+}
+
+void AvbEntityHost::record_parent_report(bool const names_none, bool const own) noexcept
+{
+    grandmaster_from_parent_ = true;
+    parent_names_none_ = names_none;
+    own_grandmaster_ = own;
+}
+
+auto AvbEntityHost::parent_transition(ieee::Eui64 const& grandmaster, bool const own) const -> GrandmasterTransition
+{
+    bool const same = grandmaster_from_parent_ && !parent_names_none_ && own == own_grandmaster_ &&
+        grandmaster_in_force_.has_value() && grandmaster == *grandmaster_in_force_;
+    if (same) {
+        return GrandmasterTransition::unchanged;
+    }
+    return own ? GrandmasterTransition::own : GrandmasterTransition::changed;
+}
+
+void AvbEntityHost::tell_grandmaster_transition(GrandmasterTransition const transition)
+{
+    if (on_grandmaster_transition_) {
+        on_grandmaster_transition_(transition);
+    }
 }
 
 void AvbEntityHost::notify_grandmaster_in_force(ieee::Eui64 const& grandmaster)

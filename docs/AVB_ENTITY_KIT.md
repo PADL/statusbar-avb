@@ -460,7 +460,8 @@ valid. Only configuration 0 is served.
 
 The grandmaster in force is the gPTP stack's PARENT_DATA_SET
 grandmasterIdentity, its own clock while it is grandmaster, once the
-integrator reports it with `AvbEntityHost::notify_parent_grandmaster`; a proxy
+integrator reports it with `AvbEntityHost::notify_parent_grandmaster` (or
+`notify_own_grandmaster` for the stack's own clock); a proxy
 entity's AVB info mirror reports the mirrored device's. Until then the
 Announce handler's grandmaster stands, and an Announce receipt timeout makes
 a grandmaster-capable entity (AVB_INTERFACE 0 priority1 below 255, IEEE
@@ -469,6 +470,20 @@ two changes. An integrator that follows a gPTP stack calls
 `use_parent_grandmaster` first, so the Announce handler counts nothing even
 before the stack names a grandmaster; the first call drops the grandmaster the
 handler had in force, so the stack's first report is no change.
+
+AVTP tu (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2) follows
+the same source. A grandmaster change sets tu for 0.25 s (Milan v1.3 Annex
+B.1.1). While no grandmaster is known, and the entity is not its own, tu stays
+set until one is: an Announce receipt timeout on an entity that cannot be
+grandmaster, and, once the stack is followed, `use_parent_grandmaster` until
+the stack names one and `notify_parent_grandmaster_loss`. When the entity
+becomes the grandmaster itself, tu clears at once, a running window cut short,
+and stays clear, since its own time base does not step: a grandmaster-capable
+entity whose Announces time out, or the stack naming its own clock through
+`notify_own_grandmaster`. The integrator says which clock is its own; a
+boundary clock's identity need not be the AVB NIC's. Once the stack is followed,
+the host tells the kit each `GrandmasterTransition` and the Announce handler
+no longer touches tu.
 
 CRF: a CRF STREAM_INPUT hands each timestamp to its `StreamCrfFn` with the
 PDU's mr bit, so the entity sees a media clock restart as a toggle (IEEE
