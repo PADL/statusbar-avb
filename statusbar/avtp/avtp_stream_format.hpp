@@ -249,7 +249,7 @@ static_assert(offsetof(Am824StreamFormat, label_midi_smpte_cnt) == 7);
 /// Decode an IEC 61883-6 stream format (layout: Am824StreamFormat) as "AM824 <DBS>ch <rate>";
 /// a word whose byte 1 is not IEC 61883-6 falls back to hex.
 [[nodiscard]] inline auto decode_am824_stream_format(uint64_t fmt) -> std::string
-{
+{  // NOLINT(statusbar-block-statements) one format field per statement
     auto const f = Am824StreamFormat::from_u64(fmt);
     if (!f.is_61883_6()) {
         return std::format("0x{:016x}", fmt);
