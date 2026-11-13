@@ -140,7 +140,7 @@ inline constexpr size_t ETHERNET_PAYLOAD_MAX = 1500;
             f.aaf_samples_per_frame = aaf.samples_per_frame();
             break;
         }
-        case avtp::AvtpSubtype::iec_61883_iidc: {
+        case avtp::AvtpSubtype::iec_61883_iidc: {  // NOLINT(statusbar-block-statements) one AM824 header field per statement
             auto const am824 = avtp::Am824StreamFormat::from_u64(fmt);
             if (!am824_format_supported(am824)) {
                 break;

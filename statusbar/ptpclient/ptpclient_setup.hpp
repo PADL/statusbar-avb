@@ -314,7 +314,7 @@ struct GptpContext
 /// @return Reference to specs for chaining
 template <typename Config>
 auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::ArgumentSpecs&
-{
+{  // NOLINT(statusbar-block-statements) one argument spec per statement
 #if defined(__linux__)
     specs.add_choice("ptp.driver", "PTP driver", {"linuxptp", "ntpshm", "system"}, "linuxptp", [&](std::string_view v) -> void {
         config.driver_name = std::string{v};

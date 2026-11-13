@@ -155,7 +155,7 @@ inline auto make_local_controller_entity_id(uint8_t tool_id, uint8_t instance) -
 /// @param config Common CLI config with interface name and optional entity ID override
 /// @param tool_id Tool identifier byte for entity ID generation
 [[nodiscard]] inline auto resolve_controller_id(CommonConfig const& config, uint8_t tool_id) -> statusbar::StatusValue<Eui64>
-{
+{  // NOLINT(statusbar-block-statements) the controller id's sources, in order of precedence
     if (config.entity_id_override) {
         return statusbar::success(config.controller_entity_id);
     }
