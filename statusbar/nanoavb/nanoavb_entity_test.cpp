@@ -2834,8 +2834,7 @@ namespace {
 class ScriptedNotifyingHandler : public AemEntityHandler
 {
   public:
-    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
-        -> uint8_t override
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
     {
         std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
         for (bool const own : script) {
