@@ -205,8 +205,8 @@ struct TalkerStreams
         std::span<float const> src);
 
     /// How long AVTP tu stays set after a grandmaster change (Milan v1.2 Section 4.3.5.2, Annex
-    /// B.1.1); tu is also set while no grandmaster is known. Reactor thread writes, media thread
-    /// reads; an entity that never reports gPTP state never sets tu.
+    /// B.1.1); tu is also set while no grandmaster is known at all. Reactor thread writes,
+    /// media thread reads; an entity that never reports gPTP state never sets tu.
     static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
     /// A grandmaster was found or changed at steady-clock time @p now_ns.
     void notify_grandmaster_changed(int64_t const now_ns) noexcept
@@ -214,8 +214,14 @@ struct TalkerStreams
         tu_until_ns_.store(now_ns + TU_AFTER_GM_CHANGE_NS, std::memory_order_relaxed);
         gptp_lost_.store(false, std::memory_order_relaxed);
     }
-    /// No grandmaster is known (the Announces stopped).
+    /// No grandmaster is known (the Announces stopped, or a gPTP stack names none): tu until one is.
     void notify_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
+    /// This entity is the grandmaster: its time base does not step, so tu is clear, a window cut short.
+    void notify_own_grandmaster() noexcept
+    {
+        tu_until_ns_.store(0, std::memory_order_relaxed);
+        gptp_lost_.store(false, std::memory_order_relaxed);
+    }
     /// Whether a PDU stamped at steady-clock time @p now_ns carries tu = 1.
     [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
     {
