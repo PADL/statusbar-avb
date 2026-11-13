@@ -1112,7 +1112,7 @@ auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
 
 void ListenerStreams::on_listener_connected(
     uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 const dest_mac, sm::TimePoint const now)
-{
+{  // NOLINT(statusbar-block-statements) the CONNECT's bookkeeping: count, attach, take, publish, log
     auto* slot = slot_for(stream_index);
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for

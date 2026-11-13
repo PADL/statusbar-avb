@@ -762,7 +762,7 @@ auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uin
 
 auto AemCommandHandler::handle_set_descriptor_value(
     uint16_t const command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
-{
+{  // NOLINT(statusbar-block-statements) the SET's refusals, hook and answer, in order
     // A value already in force changes nothing to save (process_packet).
     setting_unchanged_ = is_persistent_setting_command(command_type) && value_is_in_force(command_type, command_data);
     if (auto const early = answered_before_hook(command_type, command_data, out_buffer)) {
@@ -912,7 +912,7 @@ auto AemCommandHandler::completion_body(
 }
 
 void AemCommandHandler::tick(sm::TimePoint const now)
-{
+{  // NOLINT(statusbar-block-statements) each timed duty of the tick, in order
     now_ = now;
     have_now_ = true;
     if (locked_ && now >= lock_expiry_time_) {
@@ -1819,7 +1819,7 @@ auto AemCommandHandler::local_mappings(
 
 auto AemCommandHandler::commit_local_mappings(
     uint16_t const port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t
-{
+{  // NOLINT(statusbar-block-statements) the mappings checked, stored and told, in order
     if (std::ranges::equal(next, current)) {
         return AEM_STATUS_SUCCESS;  // nothing to route, tell or save
     }
@@ -1854,7 +1854,7 @@ auto AemCommandHandler::set_output_mappings(uint16_t const port_index, std::span
 }
 
 auto AemCommandHandler::keep_output_mappings(uint16_t const port_index, DynamicAudioMaps::Mappings const& next) -> uint8_t
-{
+{  // NOLINT(statusbar-block-statements) the mappings checked, stored and told, in order
     auto const current = output_maps_.port(DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
     if (std::ranges::equal(next, current)) {
         return AEM_STATUS_SUCCESS;

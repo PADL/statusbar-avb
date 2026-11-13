@@ -476,7 +476,7 @@ class MsrpHandler
     /// Declare (or update) @p info's Talker Advertise and record it Advertising. Returns its entry's
     /// index. Errors: NanoAvbError::SrpRegistrationFailed (table full), the participant's.
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
-    {
+    {  // NOLINT(statusbar-block-statements) the Advertise's checks, record and declaration, in order
         auto const idx = stream_slot(talker_streams_, info.stream_id, TalkerReservationState::Idle);
         if (!idx) {
             return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
@@ -575,7 +575,7 @@ class MsrpHandler
     /// and the first to unbind must not take it from the other. A stream no
     /// input is attached to is left as it is, and the call succeeds.
     [[nodiscard]] auto listener_withdraw(StreamId const& stream_id, TimePoint now) -> Status
-    {
+    {  // NOLINT(statusbar-block-statements) the counted record released, then the wire's Leave
         size_t const idx = listener_index(stream_id);
         if (idx == listener_streams_.size() || listener_streams_[idx].attached == 0) {
             return success();
@@ -595,7 +595,7 @@ class MsrpHandler
     /// declared, and send their Leaves now (a Leave left for the join timer never goes from a stopping
     /// reactor). A listener attached Waiting stays attached, for the next run's declare_domain().
     void withdraw_all(TimePoint now)
-    {
+    {  // NOLINT(statusbar-block-statements) every declaration withdrawn, kind by kind
         withdrawn_ = true;
         if (!started_) {
             return;
@@ -924,7 +924,7 @@ class MsrpHandler
     /// state: Ready or Asking Failed is a fact about the talker's
     /// registration, not about the input. Fails when the table is full.
     [[nodiscard]] auto attach_listener_record(StreamId const& stream_id, ListenerReservationState state) -> StatusValue<size_t>
-    {
+    {  // NOLINT(statusbar-block-statements) the counted record found or made, in order
         auto const idx = stream_slot(listener_streams_, stream_id, ListenerReservationState::Idle);
         if (!idx) {
             // Reject rather than throw when the reservation table is full (reactor path).
@@ -992,7 +992,7 @@ class MsrpHandler
     /// class whose priority or VLAN differs from ours becomes ours (see
     /// set_adopt_domain); anything else is noted and left alone.
     void on_remote_domain(statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation const op)
-    {
+    {  // NOLINT(statusbar-block-statements) the adoption's checks, then the new Domain declared
         bool const our_class = fv.sr_class_id.get() == domain_.sr_class_id;
         bool const same = fv.sr_class_priority.get() == domain_.sr_class_priority && fv.sr_class_vid.get() == domain_.sr_class_vid;
         if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !our_class || same) {

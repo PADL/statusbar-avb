@@ -236,7 +236,7 @@ auto format_stream_descriptor(
     char const* type_name,
     size_t const data_size = sizeof(DescriptorStream),
     std::span<uint8_t const> const received = {}) -> OutputIt
-{
+{  // NOLINT(statusbar-block-statements) one descriptor field printed per statement
     out = std::format_to(out, "        {} Descriptor [{}]:\n", type_name, d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          clock_domain_index: {}\n", d.clock_domain_index.get());

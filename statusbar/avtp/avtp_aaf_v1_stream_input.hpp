@@ -86,7 +86,7 @@ void aaf_v1_stream_deserialize(
     std::span<uint8_t const> payload,
     uint64_t gptp_now_ns,
     AudioCallback const& on_audio)
-{
+{  // NOLINT(statusbar-block-statements) one PDU decoded in order: checks, header, lanes, hand-off
     uint16_t const channels = ctx.channel_count;
     size_t const bps = aaf_bytes_per_sample(ctx.format);
     if (!is_valid_aaf_deserialize_params<MaxChannels>(channels, bps)) {

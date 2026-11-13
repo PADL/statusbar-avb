@@ -144,7 +144,7 @@ AvbEntityKit::AvbEntityKit(
           memory_resource)}
     , active_clock_source_{initial_clock_source}
     , crf_clock_source_index_{crf_clock_source_index}
-{
+{  // NOLINT(statusbar-block-statements) the kit's construction phases, in order
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns, audio_sink);
         listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
@@ -1035,7 +1035,7 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
 }
 
 void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
-{
+{  // NOLINT(statusbar-block-statements) MVRP, the streams, the VLAN filter and the controllers follow the Domain
     // Milan v1.3 4.2.7.2.1: the Class A Domain registered from the wire has
     // replaced ours and the SRP handler has re-declared it. MVRP follows the
     // VLAN, the streams move (move_talker_streams_to), and the registered

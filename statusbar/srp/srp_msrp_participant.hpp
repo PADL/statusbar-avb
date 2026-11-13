@@ -944,7 +944,7 @@ class MsrpParticipantT
     auto find_or_create(
         Container& table, size_t cap, size_t unowned_cap, bool local, Key const& key, KeyOf key_of, KeySet key_set, Owned owned) ->
         typename Container::value_type*
-    {
+    {  // NOLINT(statusbar-block-statements) the record found or made, in order
         for (auto& rec : table) {
             if (key_of(rec) == key) {
                 return &rec;

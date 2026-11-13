@@ -82,7 +82,7 @@ auto aaf_v1_stream_serialize(
     uint16_t samples_per_channel,
     uint64_t gptp_now_ns,
     AudioSource const& get_audio) -> size_t
-{
+{  // NOLINT(statusbar-block-statements) one PDU built in order: header, samples, length
     uint16_t const channels = ctx.channel_count;
     size_t const bps = aaf_bytes_per_sample(ctx.format);
     if (!is_valid_aaf_serialize_params<MaxChannels, MaxSamples>(samples_per_channel, channels, bps)) {

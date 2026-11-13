@@ -684,7 +684,7 @@ void MsrpParticipantT<Limits>::complete_pending_changes(TimePoint now)
 
 template <class Limits>
 auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status
-{
+{  // NOLINT(statusbar-block-statements) the declaration's checks and its record, in order
     auto* rec_ptr = find_or_create_talker_failed(fv.advertise.stream_id, true);
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));

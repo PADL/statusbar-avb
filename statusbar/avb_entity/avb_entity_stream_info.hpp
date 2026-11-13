@@ -188,7 +188,7 @@ template <size_t N>
 /// when connected, plus current_format.
 [[nodiscard]] inline auto fill_listener_stream_info(
     AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     namespace stream_info_flags = atdecc::aem::stream_info_flags;
 
     auto const* sink = host.components().acmp_listener.get_stream(descriptor_index);
@@ -275,7 +275,7 @@ template <size_t N>
     atdecc::aem::StreamInfoLayout const layout,
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
-{
+{  // NOLINT(statusbar-block-statements) one GET_STREAM_INFO field per statement
     auto const* sink = host.components().acmp_listener.milan_sinks().sink(descriptor_index);
     if (sink == nullptr) {
         return false;

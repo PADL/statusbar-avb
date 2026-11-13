@@ -89,7 +89,7 @@ auto am824_serialize_mbla(
     uint8_t samples_per_channel,
     uint64_t gptp_now_ns,
     AudioSource const& get_audio) -> size_t
-{
+{  // NOLINT(statusbar-block-statements) one PDU built in order: header, samples, length
     uint8_t const channels = ctx.config.channel_count;
     if (!is_valid_am824_serialize_params<MaxChannels, MaxSamples>(samples_per_channel, channels)) {
         return 0;
@@ -158,7 +158,7 @@ auto am824_serialize_mixed(
     AudioSource const& get_audio,
     MidiSource const& get_midi,
     SmpteSource const& get_smpte) -> size_t
-{
+{  // NOLINT(statusbar-block-statements) one PDU built in order: header, samples, length
     uint8_t const channels = ctx.config.channel_count;
     if (!is_valid_am824_serialize_params<MaxChannels, MaxSamples>(samples_per_channel, channels)) {
         return 0;
