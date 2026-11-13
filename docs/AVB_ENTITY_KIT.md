@@ -195,11 +195,13 @@ SET_MAX_TRANSIT_TIME) when the entity applies it
 
 ## Class A VID changes
 
-The Class A VID in use is adopted from the bridge's MSRP Domain, or restored
-to the configured VID on link up (Milan v1.2 Section 4.2.7.2.1). The host then
-joins the new VLAN (Milan v1.2 Section 4.3.2), moves every ACMP talker stream's
-stream_vlan_id, lets the entity re-tag its stream frames
-(`TalkerStreams::set_vlan_id`) and re-advertises the talker streams.
+The Class A VID in use is adopted from the bridge's MSRP Domain (milan13), and
+restored to the configured Domain at each Link Up and each start() (Milan v1.3
+Section 4.2.7.2.1). A Link Up declares that Domain at once, not at Ready, and
+forgets the peer's Domain registrations, so the bridge's next declaration is
+adopted afresh. Either way the kit joins the new VLAN (Milan v1.2 Section
+4.3.2), moves every ACMP talker stream's stream_vlan_id, re-tags its stream
+frames (`TalkerStreams::set_vlan`) and re-advertises the talker streams.
 
 start() after a stop() declares the Domain again, which resumes MSRP (every
 peer registration flushed, then a LeaveAll): a restart with the link up reports

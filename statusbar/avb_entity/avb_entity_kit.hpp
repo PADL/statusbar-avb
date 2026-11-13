@@ -147,8 +147,8 @@ class AvbEntityKit
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    /// A link up: an unshaped port's speed and MTU read again (a link may still be down at start()), a change
-    /// declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified.
+    /// A link up: the configured Class A Domain declared at once (Milan v1.3 4.2.7.2.1); an unshaped port's speed
+    /// and MTU read again, a change declared again in each talker's AccumulatedLatency (IEEE 802.1Q-2022 35.2.2.8.6).
     void on_link_up(TimePoint time);
     /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
     /// handler): drives AVTP tu (Milan v1.2 Section 4.3.5.2, Annex B.1.1); GPTP_GM_CHANGED follows the
@@ -550,6 +550,13 @@ class AvbEntityKit
     /// The SRP handler adopted a Class A Domain from the wire (Milan v1.3
     /// 4.2.7.2.1): move the stream frames, MVRP and GET_AVB_INFO to it.
     void adopt_domain(nanoavb::DomainInfo const& domain, TimePoint now);
+    /// The Class A Domain the configuration names (SRclassID 6, priority 3, config's VLAN).
+    [[nodiscard]] auto configured_domain() const noexcept -> nanoavb::DomainInfo;
+    /// Back to configured_domain() from an adopted one, the SRP handler, MVRP, the streams and
+    /// GET_AVB_INFO with it (Milan v1.3 4.2.7.2.1: at Link Up and at start). Declares nothing.
+    void return_to_configured_domain(TimePoint now);
+    /// MVRP, the streams, the VLAN filter and GET_AVB_INFO moved to @p domain, the SRP handler's now.
+    void follow_domain(nanoavb::DomainInfo const& domain, TimePoint now);
 
     /// Move the data plane, ACMP's stream picture and the Talker Advertises
     /// to @p domain's VLAN and priority (the adopt_domain half that is the

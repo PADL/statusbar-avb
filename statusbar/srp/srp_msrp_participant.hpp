@@ -493,6 +493,9 @@ class MsrpParticipantT
     /// Listeners and Domains, is forgotten and reported as a leave (Flush!, Clause 10.7.5.2), then leave_all()
     /// asks the peer for what it still declares; a talker gone meanwhile is not treated as registered.
     void resume(TimePoint now);
+    /// Every peer Domain registration forgotten and reported as a leave (Flush!, Clause 10.7.5.2): the
+    /// peer's next declaration registers afresh (a Domain adopter's Link Up, Milan v1.3 4.2.7.2.1).
+    void forget_domains(TimePoint now);
     /// A LeaveAll sent now (Clause 10.7.5.8), suppress_leaveall() or not: our declarations re-declared in it,
     /// the peer asked to re-declare its own.
     void leave_all(TimePoint now);

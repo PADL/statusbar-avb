@@ -229,8 +229,7 @@ void AvbEntityKit::configure_profile()
 void AvbEntityKit::configure_class_a_domain()
 {
     // The VID itself is registered at start() (stop() withdraws it).
-    host_.components().msrp_handler.set_domain(
-        DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
+    host_.components().msrp_handler.set_domain(configured_domain());
     host_.components().msrp_handler.set_on_domain_adopted(
         [this](DomainInfo const& domain, TimePoint const now) { adopt_domain(domain, now); });
     host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
@@ -1035,11 +1034,35 @@ auto AvbEntityKit::talker_kind_of(uint16_t const index) const noexcept -> Stream
 }
 
 void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
-{  // NOLINT(statusbar-block-statements) MVRP, the streams, the VLAN filter and the controllers follow the Domain
+{
     // Milan v1.3 4.2.7.2.1: the Class A Domain registered from the wire has
-    // replaced ours and the SRP handler has re-declared it. MVRP follows the
-    // VLAN, the streams move (move_talker_streams_to), and the registered
-    // controllers hear the new mapping (GET_AVB_INFO, Table 5.20).
+    // replaced ours and the SRP handler has re-declared it.
+    follow_domain(domain, now);
+    host_.ctl_log().status(
+        "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);
+}
+
+auto AvbEntityKit::configured_domain() const noexcept -> DomainInfo
+{
+    return DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id};
+}
+
+void AvbEntityKit::return_to_configured_domain(TimePoint const now)
+{
+    // Milan v1.3 4.2.7.2.1: a Link Up (and a start) returns to the configured Class A Domain.
+    auto& msrp = host_.components().msrp_handler;
+    if (msrp.domain() == configured_domain()) {
+        return;
+    }
+    msrp.return_to_domain(configured_domain(), now);
+    follow_domain(configured_domain(), now);
+    host_.ctl_log().status("msrp: back to the configured Class A domain: vlan {}", config_.vlan_id);
+}
+
+void AvbEntityKit::follow_domain(DomainInfo const& domain, TimePoint const now)
+{  // NOLINT(statusbar-block-statements) MVRP, the streams, the VLAN filter and the controllers follow the Domain
+    // MVRP follows the VLAN, the streams move (move_talker_streams_to), and the registered
+    // controllers are told the new mapping (GET_AVB_INFO, Milan v1.3 Table 5.20).
     uint16_t const old_vlan = current_vlan_id();
     if (domain.sr_class_vid != old_vlan) {
         (void)host_.components().mvrp_handler.withdraw_vlan(old_vlan, now);
@@ -1057,8 +1080,6 @@ void AvbEntityKit::adopt_domain(DomainInfo const& domain, TimePoint const now)
     vlan_filters_.drop(std::exchange(class_a_filtered_, domain.sr_class_vid));
 #endif
     (void)host_.components().aem_handler.notify_avb_info_changed(0);
-    host_.ctl_log().status(
-        "msrp: adopted the Class A domain from the wire: priority {} vlan {}", domain.sr_class_priority, domain.sr_class_vid);
 }
 
 void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint const now)
@@ -1797,6 +1818,10 @@ auto AvbEntityKit::read_port() -> bool
 void AvbEntityKit::on_link_up(TimePoint const time)
 {
     bool const changed = !class_a_cbs_ && read_port();  // a shaper keeps its own
+    if (!host_.link_up() && host_.is_running()) {
+        return_to_configured_domain(time);
+        (void)host_.components().msrp_handler.declare_domain(time);  // at once, not at Ready (Milan v1.3 4.2.7.2.1)
+    }
     host_.on_link_up(time);
     if (!changed) {
         return;
@@ -1839,7 +1864,8 @@ auto AvbEntityKit::start_control(net::MessageReactor& reactor, TimePoint const n
 
 void AvbEntityKit::declare_vid_and_domain(TimePoint const now)
 {
-    // The Class A VID in force (configured or adopted), registered on every start: stop() withdraws it.
+    // A run starts on the configured Class A Domain (Milan v1.3 4.2.7.2.1), its VID registered: stop() withdrew it.
+    return_to_configured_domain(now);
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
     // After a stop, declaring the Domain resumes the run: a link already up
     // reports no link up and a Ready control plane runs no advertise hook.

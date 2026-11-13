@@ -911,6 +911,12 @@ void MsrpParticipantT<Limits>::resume(TimePoint now)
 }
 
 template <class Limits>
+void MsrpParticipantT<Limits>::forget_domains(TimePoint now)
+{
+    flush_registered(domains_, now, [&](auto const& rec) { notify_domain_leave(rec.first_value); });
+}
+
+template <class Limits>
 void MsrpParticipantT<Limits>::leave_all(TimePoint now)
 {
     port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::LvaTimer, now);

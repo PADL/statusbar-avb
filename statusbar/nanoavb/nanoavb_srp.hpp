@@ -123,6 +123,8 @@ struct DomainInfo
     uint8_t sr_class_id = 6;  // Class A
     uint8_t sr_class_priority = 3;
     uint16_t sr_class_vid = 2;
+
+    auto operator==(DomainInfo const&) const noexcept -> bool = default;
 };
 
 /// The default Class B Domain (IEEE 802.1Q-2022 Clause 35.2.2.9): SRclassID 5, priority 2, VID 2.
@@ -457,6 +459,13 @@ class MsrpHandler
     }
     void set_domain(DomainInfo const& domain) noexcept { domain_ = domain; }
     [[nodiscard]] auto domain() const noexcept -> DomainInfo const& { return domain_; }
+    /// Back to @p domain, the configured one, after a Link Up (Milan v1.3 4.2.7.2.1); a peer's Domain
+    /// registered before is forgotten, so its next declaration is adopted afresh. Declares nothing.
+    void return_to_domain(DomainInfo const& domain, TimePoint now)
+    {
+        domain_ = domain;
+        participant_.forget_domains(now);
+    }
 
     /// Sticky-Listener workaround passthrough. When enabled, registered Listener
     /// attributes are re-declared on every periodic/LeaveAll pass so a bridge

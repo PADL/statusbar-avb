@@ -207,6 +207,8 @@ class AvbEntityHost
 
     // --- State queries ---------------------------------------------------------
     [[nodiscard]] auto is_ready() const noexcept -> bool;
+    /// Whether the last link report was a Link Up (on_link_up, until on_link_down).
+    [[nodiscard]] auto link_up() const noexcept -> bool { return supervisor_ctx_.link_up; }
     [[nodiscard]] auto state_string() const -> std::string_view;
 
     // --- Control-plane access for the entity's stream wiring -------------------

@@ -537,7 +537,9 @@ talker's attribute is registered).
   class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5): `talker_advertise()`
   declares at the Domain's priority. The VID is the same at every position
   of a Domain vector (a bridge's default `{5,2,VID},{6,3,VID}`); the
-  participant hands over the per-position value.
+  participant hands over the per-position value. `return_to_domain()` puts
+  the configured Domain back at a Link Up and forgets the peer's Domain
+  registrations (`MsrpParticipant::forget_domains`), so the next is adopted afresh.
 - **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
   Section 5.3.8.5) an attached listener declares Listener Ready while the
   talker's Advertise is registered, Asking Failed while its Talker Failed is,

@@ -870,6 +870,103 @@ TEST(avb_entity_kit_domain, a_restart_with_the_link_up_adopts_a_bridges_vid)
     EXPECT_TRUE(components.mvrp_handler.get_vlan_state(7) != nanoavb::VlanState::Unregistered);
 }
 
+namespace {
+
+/// A bridge port declaring Class A Domains to a started kit, and registering the kit's.
+struct DomainBridge
+{
+    explicit DomainBridge(MilanKit& kit)
+        : m{kit}
+    {
+        bridge.set_send_pdu([this](std::span<uint8_t const> p) {
+            to_entity.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        (void)bridge.subscribe(srp::msrp::Observer{.on_domain = [this](srp::msrp::DomainFirstValue const& fv, srp::mrp::Operation) {
+            registered.push_back(fv.sr_class_vid.get());
+        }});
+        m.kit.host().components().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
+            to_bridge.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        bridge.start(now);
+    }
+    /// A second of MRP traffic both ways.
+    void exchange()
+    {
+        for (int i = 0; i < 4; ++i) {
+            now += std::chrono::milliseconds(250);
+            bridge.tick(now);
+            m.kit.host().components().msrp_handler.tick(now);
+            for (auto const& p : std::exchange(to_entity, {})) {
+                m.kit.host().components().msrp_handler.receive_packet(p, now);
+            }
+            for (auto const& p : std::exchange(to_bridge, {})) {
+                bridge.receive_pdu(p, now);
+            }
+        }
+    }
+    /// The kit's streams, ACMP, Talker Advertise and MVRP all on @p vid.
+    [[nodiscard]] auto all_on(uint16_t const vid) const -> bool
+    {
+        auto& c = m.kit.host().components();
+        auto const* stream = c.acmp_talker.get_stream(0);
+        return c.msrp_handler.domain().sr_class_vid == vid && m.kit.talker().vlan_id() == vid && stream != nullptr &&
+            stream->stream_vlan_id == vid && m.kit.make_talker_srp_info(m.kit.talker_specs()[0]).vlan_id == vid &&
+            c.mvrp_handler.get_vlan_state(vid) != nanoavb::VlanState::Unregistered;
+    }
+
+    MilanKit& m;
+    sm::TimePoint now{sm::Clock::now()};
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9f};
+    std::vector<std::vector<uint8_t>> to_entity;
+    std::vector<std::vector<uint8_t>> to_bridge;
+    std::vector<uint16_t> registered;  ///< the VIDs of the kit's Domain declarations, as the bridge registered them
+};
+
+}  // namespace
+
+// Milan v1.3 4.2.7.2.1: a Link Up returns an adopted Domain to the configured one and declares it at once, the
+// frames, ACMP, the Talker Advertise and MVRP with it; the bridge's Domain, declared again, is adopted afresh.
+TEST(avb_entity_kit_domain, a_link_up_returns_to_the_configured_domain)
+{
+    MilanKit m{std::nullopt, 0x32};
+    EXPECT_TRUE(m.start_ready());
+    DomainBridge b{m};
+    (void)b.bridge.declare_domain(srp::msrp::DomainFirstValue{.sr_class_vid = 100}, b.now);
+    b.exchange();
+    EXPECT_TRUE(b.all_on(100));
+
+    m.kit.on_link_down(b.now);
+    m.kit.on_link_up(b.now);
+    EXPECT_TRUE(b.all_on(2));
+    EXPECT_TRUE(m.kit.host().components().mvrp_handler.get_vlan_state(100) != nanoavb::VlanState::Registered);
+    b.registered.clear();
+    b.exchange();
+    EXPECT_TRUE(std::ranges::find(b.registered, uint16_t{2}) != b.registered.end());
+    EXPECT_TRUE(b.all_on(100));  // the bridge's, declared again after the Link Up
+}
+
+// The first Link Up declares the configured Domain at once, before gPTP brings the entity to Ready
+// (Milan v1.3 4.2.7.2.1); a stop and a start return an adopted Domain to the configured one.
+TEST(avb_entity_kit_domain, the_domain_is_declared_at_link_up_and_reset_by_a_restart)
+{
+    MilanKit m{std::nullopt, 0x33};
+    EXPECT_TRUE(m.kit.start(m.reactor));
+    DomainBridge b{m};
+    m.kit.on_link_up(b.now);
+    EXPECT_FALSE(m.kit.host().is_ready());
+    b.exchange();
+    EXPECT_TRUE(std::ranges::find(b.registered, uint16_t{2}) != b.registered.end());
+
+    (void)b.bridge.declare_domain(srp::msrp::DomainFirstValue{.sr_class_vid = 100}, b.now);
+    b.exchange();
+    EXPECT_TRUE(b.all_on(100));
+    EXPECT_TRUE(m.kit.stop().has_value());
+    EXPECT_TRUE(m.kit.start(m.reactor));
+    EXPECT_TRUE(b.all_on(2));
+}
+
 // The model's ENTITY profile symbol is the entity profile every handler reads
 // (nanoavb::EntityProfile): a model that says nothing is Milan, the classic
 // symbol runs classic IEEE 1722.1.
