@@ -1144,7 +1144,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     /// Apply a SET_CLOCK_SOURCE value (clock_source_index doublet) to the
     /// CLOCK_DOMAIN at @p ref.
     [[nodiscard]] auto set_clock_source(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
-    {
+    {  // NOLINT(statusbar-block-statements) the SET's checks and its write, in order
         if (value.size() < 2) {
             return atdecc::AEM_STATUS_BAD_ARGUMENTS;
         }
@@ -1784,7 +1784,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     /// Apply a SET_SAMPLING_RATE (Clause 7.4.21). @p value is the payload after the 4-byte
     /// descriptor header; the state is written only once the application's hook has accepted the rate.
     [[nodiscard]] auto set_sampling_rate(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
-    {
+    {  // NOLINT(statusbar-block-statements) the SET's checks and its write, in order
         auto const requested = listed_sampling_rate(ref, value);
         if (!requested) {
             return requested.error();
@@ -1806,7 +1806,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     /// AEM status refusing it.
     [[nodiscard]] auto listed_sampling_rate(DescriptorRef ref, std::span<uint8_t const> value) const
         -> std::expected<uint32_t, uint8_t>
-    {
+    {  // NOLINT(statusbar-block-statements) the rate's checks, in order
         if (value.size() < 4) {
             return std::unexpected(atdecc::AEM_STATUS_BAD_ARGUMENTS);
         }

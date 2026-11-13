@@ -123,7 +123,7 @@ auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept
 }
 
 void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace)
-{
+{  // NOLINT(statusbar-block-statements) the Announce recorded, then each observer told
     // Record first: a callback that asks last_announce() must be told the
     // Announce that named the grandmaster it is being told about.
     last_announce_time_ns_ = now_ns;
