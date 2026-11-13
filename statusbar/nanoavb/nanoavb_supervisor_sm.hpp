@@ -80,7 +80,7 @@ void degrade_stop_streams(Context& ctx, TimePoint time);
 void stop_all(Context& ctx, TimePoint time);
 void timeout_gptp(Context& ctx, TimePoint time);
 
-inline constexpr auto table = []() -> TransitionTable<Def> {
+inline constexpr auto table = []() -> TransitionTable<Def> {  // NOLINT(statusbar-block-statements) the transition table
     using S = Def::State;
     using E = Def::Event;
     using T = Transitions<Def>;
