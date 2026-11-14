@@ -3416,7 +3416,7 @@ auto max_transit_body(uint16_t const type, uint16_t const index, uint64_t const 
     return bytes;
 }
 
-auto status_of(std::vector<CapturedSend> const& sends) -> int
+auto status_for(std::vector<CapturedSend> const& sends) -> int
 {
     auto const* reply = solicited(sends);
     return reply != nullptr ? header_of(*reply).status() : -1;
@@ -3441,7 +3441,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
 
     auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 1, stream_info_flags::MSRP_ACC_LAT_VALID, 3'000'000);
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.offsets[1], 3'000'000U);
     EXPECT_EQ(store.offsets[0], 2'000'000U);
     // The response echoes MSRP_ACC_LAT_VALID and the offset.
@@ -3459,7 +3459,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
     // The same offset again changes nothing: no notification.
     sends.clear();
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_INFO, kMacB), 0);
 
     // Both ends of the range are accepted.
@@ -3472,7 +3472,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
             kMacA,
             AEM_COMMAND_SET_STREAM_INFO,
             set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, ns));
-        EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+        EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
         EXPECT_EQ(store.offsets[0], ns);
     }
 }
@@ -3488,7 +3488,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_refusals)
     auto const run = [&](std::array<uint8_t, AemStreamInfoPayload::LENGTH> const& body) {
         sends.clear();
         inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-        return status_of(sends);
+        return status_for(sends);
     };
     using namespace stream_info_flags;
 
@@ -3538,17 +3538,17 @@ TEST(nanoavb_entity_presentation_offset, refused_while_another_controller_holds_
     auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, 5'000'000);
     sends.clear();
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_ENTITY_LOCKED});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_ENTITY_LOCKED});
     sends.clear();
     inject_command(
         handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_MAX_TRANSIT_TIME, max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 1));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_ENTITY_LOCKED});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_ENTITY_LOCKED});
     EXPECT_EQ(store.offsets[0], 2'000'000U);
 
     // The locking controller may.
     sends.clear();
     inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.offsets[0], 5'000'000U);
 }
 
@@ -3582,7 +3582,7 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
         kMacA,
         AEM_COMMAND_SET_MAX_TRANSIT_TIME,
         max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 1, 4'250'000));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.offsets[1], 4'250'000U);
     AemSetMaxTransitTimePayload echoed{};
     span_load(echoed, body_of(*solicited(sends)).first(AemSetMaxTransitTimePayload::LENGTH));
@@ -3596,7 +3596,7 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
     sends.clear();
     std::array<uint8_t, AemGetMaxTransitTimeCommandPayload::LENGTH> get{0x00, 0x06, 0x00, 0x01};
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_MAX_TRANSIT_TIME, get);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     AemGetMaxTransitTimeResponsePayload resp{};
     span_load(resp, body_of(*solicited(sends)).first(AemGetMaxTransitTimeResponsePayload::LENGTH));
     EXPECT_EQ(resp.descriptor_index.get(), uint16_t{1});
@@ -3611,15 +3611,15 @@ TEST(nanoavb_entity_presentation_offset, max_transit_time_sets_and_gets_it)
         kMacA,
         AEM_COMMAND_SET_MAX_TRANSIT_TIME,
         max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, uint64_t{0x80000000}));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_BAD_ARGUMENTS});
     sends.clear();
     std::array<uint8_t, AemGetMaxTransitTimeCommandPayload::LENGTH> get_input{0x00, 0x05, 0x00, 0x00};
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_MAX_TRANSIT_TIME, get_input);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_NOT_SUPPORTED});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_NOT_SUPPORTED});
     sends.clear();
     std::array<uint8_t, AemGetMaxTransitTimeCommandPayload::LENGTH> get_missing{0x00, 0x06, 0x00, 0x07};
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_MAX_TRANSIT_TIME, get_missing);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_NO_SUCH_DESCRIPTOR});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_NO_SUCH_DESCRIPTOR});
 }
 
 TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_time_only)
@@ -3636,7 +3636,7 @@ TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_
     // Milan v1.3 Section 5.4.2.9: MSRP_ACC_LAT_VALID is BAD_ARGUMENTS, the offset unchanged.
     auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, 3'000'000);
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_BAD_ARGUMENTS});
     EXPECT_EQ(store.sets, 0);
     EXPECT_EQ(store.offsets[0], 2'000'000U);
 
@@ -3649,7 +3649,7 @@ TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_
         kMacA,
         AEM_COMMAND_SET_MAX_TRANSIT_TIME,
         max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 3'000'000));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.offsets[0], 3'000'000U);
 
     // Milan v1.2's layout keeps SET_STREAM_INFO's offset (v1.2 Section 5.4.2.9).
@@ -3662,7 +3662,7 @@ TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_
         kMacA,
         AEM_COMMAND_SET_STREAM_INFO,
         set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, stream_info_flags::MSRP_ACC_LAT_VALID, 2'500'000));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.offsets[0], 2'500'000U);
 }
 
@@ -3677,7 +3677,7 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_in_the_2021_layout)
     auto const run = [&](std::span<uint8_t const> const body) {
         sends.clear();
         inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-        return status_of(sends);
+        return status_for(sends);
     };
     using namespace stream_info_flags;
 
@@ -3774,7 +3774,7 @@ TEST(nanoavb_entity_presentation_offset, a_refused_set_stream_info_answers_the_v
     using namespace stream_info_flags;
     auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID, 3'000'000);
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_BAD_ARGUMENTS});
     EXPECT_EQ(body_of(*solicited(sends)).size(), AEM_STREAM_INFO_2021_LENGTH);
     AemStreamInfoPayload answered{};
     span_load(answered, body_of(*solicited(sends)).first(AemStreamInfoPayload::LENGTH));
@@ -3804,7 +3804,7 @@ TEST(nanoavb_entity_presentation_offset, a_refused_set_max_transit_time_answers_
         kMacA,
         AEM_COMMAND_SET_MAX_TRANSIT_TIME,
         max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 0, 0x80000000));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_BAD_ARGUMENTS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_BAD_ARGUMENTS});
     EXPECT_EQ(answered(), uint64_t{2'000'000});
     sends.clear();
     store.set_status = AEM_STATUS_STREAM_IS_RUNNING;
@@ -3815,7 +3815,7 @@ TEST(nanoavb_entity_presentation_offset, a_refused_set_max_transit_time_answers_
         kMacA,
         AEM_COMMAND_SET_MAX_TRANSIT_TIME,
         max_transit_body(DESCRIPTOR_STREAM_OUTPUT, 1, 3'000'000));
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_STREAM_IS_RUNNING});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_STREAM_IS_RUNNING});
     EXPECT_EQ(answered(), uint64_t{2'000'000});
 }
 
@@ -3831,11 +3831,11 @@ TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)
     for (uint16_t const command : {AEM_COMMAND_START_STREAMING, AEM_COMMAND_STOP_STREAMING}) {
         sends.clear();
         inject_command(handler, kEntity, kControllerA, kMacA, command, output);
-        EXPECT_EQ(status_of(sends), int{AEM_STATUS_NOT_SUPPORTED});
+        EXPECT_EQ(status_for(sends), int{AEM_STATUS_NOT_SUPPORTED});
         // Inputs still reach the entity's handler.
         sends.clear();
         inject_command(handler, kEntity, kControllerA, kMacA, command, input);
-        EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+        EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     }
     EXPECT_EQ(app.set_count, 2);
 
@@ -3843,7 +3843,7 @@ TEST(nanoavb_entity_milan, start_stop_streaming_not_supported_on_outputs)
     handler.set_entity_profile(EntityProfile{.milan = false});
     sends.clear();
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_STOP_STREAMING, output);
-    EXPECT_EQ(status_of(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_EQ(status_for(sends), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(app.set_count, 3);
 }
 

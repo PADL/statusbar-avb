@@ -393,8 +393,8 @@ struct MvuStreamInputInfoExPayload
     /// Byte 47: reserved
     octet_t reserved{0};
 
-    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return aem::probing_status_of(pbsta_acmpsta.get()); }
-    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return aem::acmp_status_of(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return aem::probing_status_for(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return aem::acmp_status_for(pbsta_acmpsta.get()); }
     constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
     {
         pbsta_acmpsta = aem::pack_probing(pbsta, acmpsta);
