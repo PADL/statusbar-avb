@@ -88,6 +88,11 @@ downstream tree meets: **[`docs/RELEASE_2_4_0.md`](docs/RELEASE_2_4_0.md)**.
 What 2.5.0 changed, the IEEE 1722 security work (ECC1 corrected, HPKE
 ECC2/ECC3 and Ed25519 ESCF) and the IEEE 1722.1-2021 conformance fixes:
 **[`docs/RELEASE_2_5_0.md`](docs/RELEASE_2_5_0.md)**.
+What 2.7.0 changed, the whole-tree code review's 5 high and 38 medium
+fixes with the test that pins each: **[`docs/RELEASE_2_7_0.md`](docs/RELEASE_2_7_0.md)**.
+What 2.8.0 changed, the Milan device (GET_MILAN_INFO, the profile from the
+model, the Link Up Domain return) and core's netlink, netdev and RX flow
+steering: **[`docs/RELEASE_2_8_0.md`](docs/RELEASE_2_8_0.md)**.
 
 - **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
   AM824 + AAF + CRF; the `statusbar-avb-entity` service),
