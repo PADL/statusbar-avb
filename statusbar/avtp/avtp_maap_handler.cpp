@@ -3,8 +3,10 @@
 
 #include "statusbar/avtp/avtp_maap_handler.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
+#include <utility>
 
 namespace statusbar::avtp {
 
@@ -25,11 +27,24 @@ using sm::TimePoint;
     return TimePoint{std::chrono::nanoseconds{ns}};
 }
 
+/// [first, end) of the `count` addresses from `start`, as integers.
+[[nodiscard]] auto address_span(Eui48 const& start, uint16_t count) noexcept -> std::pair<uint64_t, uint64_t>
+{
+    uint64_t const first = start.to_uint64();
+    return {first, first + count};
+}
+
+[[nodiscard]] auto eui48_from(uint64_t const value) noexcept -> Eui48
+{
+    Eui48 addr{};
+    addr.from_uint64(value);
+    return addr;
+}
+
 }  // namespace
 
-MaapHandler::MaapHandler(Eui48 const& our_mac, StreamId const& stream_id, uint64_t seed) noexcept
-    : stream_id_{stream_id}
-    , rng_{seed != 0 ? seed : (our_mac.to_uint64() | 1U)}
+MaapHandler::MaapHandler(Eui48 const& our_mac, uint64_t seed) noexcept
+    : rng_{seed != 0 ? seed : (our_mac.to_uint64() | 1U)}
 {
     ctx_.our_mac = our_mac;
     wire_callbacks();
@@ -38,55 +53,60 @@ MaapHandler::MaapHandler(Eui48 const& our_mac, StreamId const& stream_id, uint64
 void MaapHandler::wire_callbacks()
 {
     ctx_.callbacks.generate_address = [this](Context&, TimePoint) { pick_address(); };
+    wire_timer_callbacks();
+    wire_send_callbacks();
+}
 
+void MaapHandler::wire_timer_callbacks()
+{
     ctx_.callbacks.start_probe_timer = [this](Context&, TimePoint tp) {
         probe_deadline_ns_ = to_ns(tp) + probe_interval_ns();
         probe_timer_active_ = true;
     };
     ctx_.callbacks.stop_probe_timer = [this](Context&, TimePoint) { probe_timer_active_ = false; };
-
     ctx_.callbacks.start_announce_timer = [this](Context&, TimePoint tp) {
         announce_deadline_ns_ = to_ns(tp) + announce_interval_ns();
         announce_timer_active_ = true;
     };
     ctx_.callbacks.stop_announce_timer = [this](Context&, TimePoint) { announce_timer_active_ = false; };
+}
 
+void MaapHandler::wire_send_callbacks()
+{
+    // B.2.1: PROBE and ANNOUNCE go to the MAAP group; a DEFEND goes to the station
+    // whose PROBE it answers. B.2.4: the stream_id is not used and is zero.
     ctx_.callbacks.send_probe = [this](Context& c, TimePoint) {
         MaapDu du{};
-        du.init_probe(stream_id_, c.requested_start, c.requested_count);
-        std::array<uint8_t, MaapDu::LENGTH> buf{};
-        (void)store_unchecked(buf, du);
-        if (send_) {
-            (void)send_(buf);
-        }
+        du.init_probe(StreamId{}, c.requested_start, c.requested_count);
+        send_pdu(ieee::protocols::MAAP_MULTICAST_MAC, du);
     };
-
     ctx_.callbacks.send_announce = [this](Context& c, TimePoint) {
         MaapDu du{};
-        du.init_announce(stream_id_, c.requested_start, c.requested_count);
-        std::array<uint8_t, MaapDu::LENGTH> buf{};
-        (void)store_unchecked(buf, du);
-        if (send_) {
-            (void)send_(buf);
-        }
+        du.init_announce(StreamId{}, c.requested_start, c.requested_count);
+        send_pdu(ieee::protocols::MAAP_MULTICAST_MAC, du);
     };
+    ctx_.callbacks.send_defend = [this](Context& c, TimePoint) { send_pdu(c.last_received_sender, make_defend()); };
+}
 
-    ctx_.callbacks.send_defend = [this](Context& c, TimePoint) {
-        // B.3.6.6: DEFEND echoes the conflicting station's requested range in the
-        // conflict fields, taken from the PDU that triggered the defense.
-        MaapDu du{};
-        du.init_defend(
-            stream_id_,
-            c.requested_start,
-            c.requested_count,
-            c.last_received_pdu.requested_start_address,
-            c.last_received_pdu.requested_count.get());
-        std::array<uint8_t, MaapDu::LENGTH> buf{};
-        (void)store_unchecked(buf, du);
-        if (send_) {
-            (void)send_(buf);
-        }
-    };
+void MaapHandler::send_pdu(Eui48 const& dest, MaapDu const& du)
+{
+    std::array<uint8_t, MaapDu::LENGTH> buf{};
+    (void)store_unchecked(buf, du);
+    if (send_) {
+        (void)send_(dest, buf);
+    }
+}
+
+auto MaapHandler::make_defend() const noexcept -> MaapDu
+{
+    // B.2.5/B.2.6: the requested fields are the PROBE's own. B.2.7/B.2.8: the
+    // conflict fields are the first of OUR allocated addresses the PROBE covers
+    // and how many of ours it covers from there.
+    auto const& probe = ctx_.last_received_pdu;
+    auto const [conflict_start, conflict_count] = conflict_range(probe.requested_start_address, probe.requested_count.get());
+    MaapDu du{};
+    du.init_defend(StreamId{}, probe.requested_start_address, probe.requested_count.get(), conflict_start, conflict_count);
+    return du;
 }
 
 void MaapHandler::acquire(uint16_t count, int64_t now_ns)
@@ -109,21 +129,26 @@ void MaapHandler::release(int64_t now_ns)
 
 void MaapHandler::tick(int64_t now_ns)
 {
-    using E = maap_sm::Def::Event;
-
     if (probe_timer_active_ && now_ns >= probe_deadline_ns_) {
         probe_timer_active_ = false;  // the SM action re-arms if it needs another probe
-        // While probes remain, keep probing; once exhausted with no conflict, claim it.
-        if (ctx_.maap_probe_count > 0) {
-            dispatch(E::ProbeTimer, now_ns);
-        } else {
-            dispatch(E::ProbeCount, now_ns);
-        }
+        serve_probe_deadline(now_ns);
     }
-
     if (announce_timer_active_ && now_ns >= announce_deadline_ns_) {
         announce_timer_active_ = false;
-        dispatch(E::AnnounceTimer, now_ns);
+        dispatch(maap_sm::Def::Event::AnnounceTimer, now_ns);
+    }
+}
+
+void MaapHandler::serve_probe_deadline(int64_t now_ns)
+{
+    using E = maap_sm::Def::Event;
+    // Table B.7 probeTimer!: another PROBE, and dec_maap_probe_count.
+    dispatch(E::ProbeTimer, now_ns);
+    // B.3.6.3: the decrement that leaves maap_probe_count at zero raises
+    // probeCount! there and then, so the ANNOUNCE follows the last PROBE at
+    // once rather than one probe interval later.
+    if (ctx_.maap_probe_count == 0 && sm_.current_state() == maap_sm::Def::State::Probe) {
+        dispatch(E::ProbeCount, now_ns);
     }
 }
 
@@ -284,6 +309,15 @@ auto MaapHandler::overlaps(Eui48 const& their_start, uint16_t their_count) const
     uint64_t const their0 = their_start.to_uint64();
     uint64_t const their1 = their0 + their_count;
     return our0 < their1 && their0 < our1;
+}
+
+auto MaapHandler::conflict_range(Eui48 const& their_start, uint16_t their_count) const noexcept -> std::pair<Eui48, uint16_t>
+{
+    auto const [our0, our1] = address_span(ctx_.requested_start, ctx_.requested_count);
+    auto const [their0, their1] = address_span(their_start, their_count);
+    uint64_t const first = std::max(our0, their0);
+    uint64_t const end = std::min(our1, their1);
+    return {eui48_from(first), static_cast<uint16_t>(end > first ? end - first : 0U)};
 }
 
 }  // namespace statusbar::avtp

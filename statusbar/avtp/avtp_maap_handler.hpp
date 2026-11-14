@@ -20,7 +20,9 @@
 ///
 /// This mirrors the MvrpHandler/MsrpHandler facade pattern so a Pollable can host
 /// it in the reactor (Phase 2). The handler is transport-agnostic: it frames PDUs
-/// and hands the bytes to a `SendFn`; the caller sends them to MAAP_MULTICAST_MAC.
+/// and hands the bytes and their destination to a `SendFn`. A PROBE or ANNOUNCE
+/// goes to MAAP_MULTICAST_MAC; a DEFEND goes to the station whose PROBE it
+/// answers (IEEE 1722-2025 B.2.1). Every PDU carries a zero stream_id (B.2.4).
 ///
 /// Thread model: single-threaded, like the other protocol handlers — acquire(),
 /// release(), tick(), and receive() must be serialized on one thread.
@@ -52,9 +54,10 @@ using tsn::StreamId;
 class MaapHandler
 {
   public:
-    /// Send a framed (28-byte) MAAP PDU. The caller sends it to MAAP_MULTICAST_MAC.
-    /// Return true on success.
-    using SendFn = statusbar::sg14::inplace_function<bool(std::span<uint8_t const>), 64>;
+    /// Send a framed (28-byte) MAAP PDU to @p dest: MAAP_MULTICAST_MAC for a PROBE
+    /// or an ANNOUNCE, the prober's own MAC for a DEFEND (B.2.1). Return true on
+    /// success.
+    using SendFn = statusbar::sg14::inplace_function<bool(Eui48 const& dest, std::span<uint8_t const>), 64>;
 
     /// The contiguous range [start, start+count) is now defended and usable as a
     /// stream destination address. Told the @p now_ns of the tick()/receive()
@@ -67,9 +70,8 @@ class MaapHandler
     using LostFn = statusbar::sg14::inplace_function<void(Eui48 const& start, uint16_t count), 64>;
 
     /// @param our_mac    this station's MAC (conflict tie-break + self-frame filtering)
-    /// @param stream_id  stream id placed in emitted MAAP PDUs
     /// @param seed       PRNG seed for address/jitter selection; 0 => derive from our_mac
-    explicit MaapHandler(Eui48 const& our_mac, StreamId const& stream_id, uint64_t seed = 0) noexcept;
+    explicit MaapHandler(Eui48 const& our_mac, uint64_t seed = 0) noexcept;
 
     // Self-referential: the SM callbacks (ctx_.callbacks) capture `this`, so a
     // default move/copy would leave them pointing at the moved-from object. The
@@ -93,7 +95,9 @@ class MaapHandler
     /// Drive the probe/announce timers. Call at or soon after
     /// next_deadline_ns(): a PDU goes out on the tick that finds its deadline
     /// passed, and the deadlines are drawn so a tick up to
-    /// MAAP_LATE_TICK_ALLOWANCE_US late still lands it inside its window.
+    /// MAAP_LATE_TICK_ALLOWANCE_US late still lands it inside its window. The
+    /// probe whose decrement empties maap_probe_count is followed by the
+    /// ANNOUNCE in the same tick (B.3.6.3 probeCount!).
     void tick(int64_t now_ns);
 
     /// When the next tick() has something to send: the nearer of the armed
@@ -124,6 +128,19 @@ class MaapHandler
 
   private:
     void wire_callbacks();
+    void wire_timer_callbacks();
+    void wire_send_callbacks();
+
+    /// Frame @p du and hand it to the send callback for @p dest.
+    void send_pdu(Eui48 const& dest, MaapDu const& du);
+
+    /// B.3.6.6 sDefend: the DEFEND answering the PROBE held in ctx_.last_received_pdu,
+    /// echoing its requested range and naming the first of our addresses it conflicts
+    /// with and how many of ours it covers.
+    [[nodiscard]] auto make_defend() const noexcept -> MaapDu;
+
+    /// The probe timer has run out: the next PROBE, and the ANNOUNCE after the last.
+    void serve_probe_deadline(int64_t now_ns);
 
     /// Dispatch an SM event, firing on_acquired/on_lost on a Defend boundary.
     void dispatch(maap_sm::Def::Event ev, int64_t now_ns);
@@ -153,9 +170,13 @@ class MaapHandler
     /// True if [their_start, their_start+their_count) overlaps our current range.
     [[nodiscard]] auto overlaps(Eui48 const& their_start, uint16_t their_count) const noexcept -> bool;
 
+    /// The part of our range that [their_start, their_start+their_count) covers:
+    /// its first address and its length (B.2.7, B.2.8). Only meaningful when
+    /// overlaps() holds.
+    [[nodiscard]] auto conflict_range(Eui48 const& their_start, uint16_t their_count) const noexcept -> std::pair<Eui48, uint16_t>;
+
     maap_sm::Context ctx_{};
     maap_sm::Machine sm_{};
-    StreamId stream_id_{};
     uint64_t rng_{1};
 
     // Timer deadlines in the caller's ns timebase; *_active_ gates them.

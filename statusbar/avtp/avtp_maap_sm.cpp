@@ -72,8 +72,8 @@ void probe_tick(Context& ctx, TimePoint time)
     // B.3.4.2 probeTimer!: send another probe, decrement count
     ctx.callbacks.start_probe_timer(ctx, time);
     ctx.callbacks.send_probe(ctx, time);
-    // dec_maap_probe_count (B.3.6.3)
-    // The component checks ctx.maap_probe_count == 0 after this and fires ProbeCount
+    // dec_maap_probe_count (B.3.6.3): the handler raises ProbeCount in the same
+    // tick when this leaves the count at zero.
     if (ctx.maap_probe_count > 0) {
         --ctx.maap_probe_count;
     }

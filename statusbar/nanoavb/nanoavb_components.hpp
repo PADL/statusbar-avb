@@ -204,10 +204,11 @@ class MaapNetHandler : public net::Pollable
         : handler_{handler}
     {
         (void)context_.open(interface_name, ETHERTYPE_AVTP, &MAAP_MULTICAST_MAC);
-        // All MAAP PDUs go to the MAAP multicast group; route the handler's frames
-        // out through this socket.
-        handler_.set_send(
-            [this](std::span<uint8_t const> bytes) -> bool { return context_.send(&MAAP_MULTICAST_MAC, bytes).has_value(); });
+        // The handler names each PDU's destination: the MAAP group for a PROBE or
+        // an ANNOUNCE, the prober for a DEFEND (IEEE 1722-2025 B.2.1).
+        handler_.set_send([this](ieee::Eui48 const& dest, std::span<uint8_t const> bytes) -> bool {
+            return context_.send(&dest, bytes).has_value();
+        });
     }
 
     /// Check if the handler is valid (socket opened successfully)

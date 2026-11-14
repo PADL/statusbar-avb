@@ -69,16 +69,9 @@ class MaapAddressAcquirer
         }
         on_addresses_ready_ = std::move(on_addresses_ready);
 
-        // One allocation covering all talker streams; the PDUs carry the
-        // first stream's id, and the seed spreads our initial random pick
-        // per station.
-        statusbar::tsn::StreamId maap_sid{};
-        if (!indices_.empty()) {
-            if (auto const* s = components.acmp_talker.get_stream(indices_.front()); s != nullptr) {
-                (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &maap_sid);
-            }
-        }
-        handler_ = std::make_unique<avtp::MaapHandler>(our_mac, maap_sid, our_mac.to_uint64());
+        // One allocation covering all talker streams; the seed spreads our
+        // initial random pick per station.
+        handler_ = std::make_unique<avtp::MaapHandler>(our_mac, our_mac.to_uint64());
 
         // Gate stream TX until the block is defended. ADP/gPTP/SRP/ACMP are
         // unaffected — they keep running in the reactor; only the talker waits.

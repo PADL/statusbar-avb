@@ -15,11 +15,13 @@
 #include <span>
 #include <vector>
 
+using statusbar::avtp::maap_block_address;
 using statusbar::avtp::MAAP_DYNAMIC_POOL_END;
 using statusbar::avtp::MAAP_DYNAMIC_POOL_START;
 using statusbar::avtp::MaapDu;
 using statusbar::avtp::MaapHandler;
 using statusbar::ieee::Eui48;
+using statusbar::ieee::protocols::MAAP_MULTICAST_MAC;
 using statusbar::tsn::StreamId;
 
 namespace {
@@ -31,6 +33,7 @@ struct Rig
 {
     MaapHandler handler;
     std::vector<MaapDu> sent;
+    std::vector<Eui48> sent_to;  ///< the destination of each entry of `sent`
     std::optional<Eui48> acquired_start;
     uint16_t acquired_count{0};
     std::optional<Eui48> lost_start;
@@ -38,12 +41,13 @@ struct Rig
     int lost_calls{0};
 
     explicit Rig(Eui48 mac, uint64_t seed = 1)
-        : handler{mac, StreamId{}, seed}
+        : handler{mac, seed}
     {
-        handler.set_send([this](std::span<uint8_t const> bytes) {
+        handler.set_send([this](Eui48 const& dest, std::span<uint8_t const> bytes) {
             MaapDu du{};
             if (statusbar::protocol::load(bytes, &du) != 0) {
                 sent.push_back(du);
+                sent_to.push_back(dest);
             }
             return true;
         });
@@ -64,6 +68,15 @@ struct Rig
         for (int k = 1; k <= 12 && !handler.is_acquired(); ++k) {
             handler.tick(static_cast<int64_t>(k + 1) * SEC);
         }
+    }
+
+    /// Tick exactly at the next armed deadline; the time ticked at.
+    auto tick_at_deadline() -> int64_t
+    {
+        auto const deadline = handler.next_deadline_ns();
+        EXPECT_TRUE(deadline.has_value());
+        handler.tick(deadline.value_or(0));
+        return deadline.value_or(0);
     }
 };
 
@@ -325,6 +338,92 @@ TEST(maap_handler, ignores_our_own_echoed_frame)
     rig.handler.receive(me, frame, 2 * SEC);
 
     EXPECT_EQ(rig.handler.address(), addr);  // unchanged
+}
+
+// B.2.1: a PROBE and an ANNOUNCE go to the MAAP multicast address; B.2.4: the
+// stream_id is not used in MAAP and is zero in every PDU sent.
+TEST(maap_handler, probes_and_announces_go_to_the_group_with_a_zero_stream_id)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_TRUE(rig.sent.size() >= size_t{5});  // four PROBEs and the ANNOUNCE
+    for (size_t i = 0; i < rig.sent.size(); ++i) {
+        EXPECT_TRUE(rig.sent[i].is_probe() || rig.sent[i].is_announce());
+        EXPECT_EQ(rig.sent_to[i], MAAP_MULTICAST_MAC);
+        EXPECT_EQ(rig.sent[i].stream_id(), StreamId{});
+    }
+}
+
+// B.2.1: the DEFEND goes to the source MAC of the PROBE it answers. B.2.5/B.2.6:
+// its requested fields echo the PROBE's. B.2.7/B.2.8: its conflict fields name
+// the first of our addresses the PROBE covers and how many of ours it covers.
+TEST(maap_handler, defend_goes_to_the_prober_echoing_its_range_and_naming_the_overlap)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(4, SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    Eui48 const ours = rig.handler.address();  // [ours, ours+4)
+    Eui48 const prober{0x00, 0, 0, 0, 0, 0x09};
+
+    // A PROBE for [ours+2, ours+7): it covers our last two addresses.
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_PROBE, maap_block_address(ours, 2), 5);
+    rig.handler.receive(prober, frame, 100 * SEC);
+
+    MaapDu const& defend = rig.sent.back();
+    EXPECT_TRUE(defend.is_defend());
+    EXPECT_EQ(rig.sent_to.back(), prober);
+    EXPECT_EQ(defend.stream_id(), StreamId{});
+    EXPECT_EQ(defend.requested_start_address, maap_block_address(ours, 2));
+    EXPECT_EQ(defend.requested_count.get(), static_cast<uint16_t>(5));
+    EXPECT_EQ(defend.conflict_start_address, maap_block_address(ours, 2));
+    EXPECT_EQ(defend.conflict_count.get(), static_cast<uint16_t>(2));
+}
+
+// The PROBE that covers our whole range from its own start is told about all of
+// ours, from our first address.
+TEST(maap_handler, defend_names_our_whole_range_when_the_probe_contains_it)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(3, SEC);
+    rig.run_until_acquired();
+    Eui48 const ours = rig.handler.address();  // [ours, ours+3)
+
+    // A PROBE for [ours, ours+8) from a higher MAC.
+    auto frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_PROBE, ours, 8);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x09}, frame, 100 * SEC);
+
+    MaapDu const& defend = rig.sent.back();
+    EXPECT_TRUE(defend.is_defend());
+    EXPECT_EQ(defend.requested_start_address, ours);
+    EXPECT_EQ(defend.requested_count.get(), static_cast<uint16_t>(8));
+    EXPECT_EQ(defend.conflict_start_address, ours);
+    EXPECT_EQ(defend.conflict_count.get(), static_cast<uint16_t>(3));
+}
+
+// B.3.6.3: dec_maap_probe_count raises probeCount! the moment the count reaches
+// zero, and Table B.7 answers it with sAnnounce. With MAAP_PROBE_RETRANSMITS
+// retransmissions the ANNOUNCE follows the last PROBE in the same tick, not one
+// probe interval later.
+TEST(maap_handler, announce_follows_the_last_probe_in_the_same_tick)
+{
+    Rig rig{Eui48{0x02, 0, 0, 0, 0, 0x01}};
+    rig.handler.acquire(1, SEC);
+    EXPECT_EQ(rig.sent.size(), size_t{1});  // the first PROBE, on acquire
+    for (uint32_t k = 1; k < statusbar::avtp::MAAP_PROBE_RETRANSMITS; ++k) {
+        rig.tick_at_deadline();
+        EXPECT_EQ(rig.sent.size(), size_t{1} + k);  // one more PROBE, nothing else
+        EXPECT_TRUE(rig.sent.back().is_probe());
+        EXPECT_FALSE(rig.handler.is_acquired());
+    }
+    rig.tick_at_deadline();                                                           // the last PROBE
+    EXPECT_EQ(rig.sent.size(), size_t{2} + statusbar::avtp::MAAP_PROBE_RETRANSMITS);  // ... and the ANNOUNCE with it
+    EXPECT_TRUE(rig.sent[rig.sent.size() - 2].is_probe());
+    EXPECT_TRUE(rig.sent.back().is_announce());
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.acquired_calls, 1);
 }
 
 namespace {
