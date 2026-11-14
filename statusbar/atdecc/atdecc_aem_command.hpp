@@ -311,11 +311,11 @@ constexpr uint8_t COMPLETED = 3;  ///< settled
 {
     return static_cast<uint8_t>(((pbsta & 0x07U) << 5U) | (acmpsta & 0x1FU));
 }
-[[nodiscard]] constexpr auto probing_status_of(uint8_t const packed) noexcept -> uint8_t
+[[nodiscard]] constexpr auto probing_status_for(uint8_t const packed) noexcept -> uint8_t
 {
     return static_cast<uint8_t>(packed >> 5U);
 }
-[[nodiscard]] constexpr auto acmp_status_of(uint8_t const packed) noexcept -> uint8_t
+[[nodiscard]] constexpr auto acmp_status_for(uint8_t const packed) noexcept -> uint8_t
 {
     return static_cast<uint8_t>(packed & 0x1FU);
 }
@@ -411,8 +411,8 @@ struct AemStreamInfoMilanExtension
     /// Bytes 53-55: Reserved
     std::array<octet_t, 3> reserved{};
 
-    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return probing_status_of(pbsta_acmpsta.get()); }
-    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return acmp_status_of(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return probing_status_for(pbsta_acmpsta.get()); }
+    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return acmp_status_for(pbsta_acmpsta.get()); }
     /// pbsta per Table 5.5; acmpsta an ACMP status (defined only while
     /// probing actively, else 0).
     constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
