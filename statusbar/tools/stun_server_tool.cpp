@@ -20,7 +20,9 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <optional>
 #include <print>
+#include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -64,57 +66,89 @@ void print_usage(char const* prog, statusbar::args::ArgumentSpecs const& specs)
     statusbar::config::default_print_usage(prog, specs, "STUN rendezvous server. --port and --key are required.");
 }
 
-}  // namespace
-
-auto main(int argc, char** argv) -> int
+// Parses the command line into cli. Returns the exit code when the run ends here (a
+// built-in command handled, an argument error, the key missing); nullopt to go on.
+auto parse_arguments(int argc, char** argv, Config& cli) -> std::optional<int>
 {
-    Config cli;
     auto specs = build_arg_specs(cli);
-    auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage, "stun_server_tool");
+    auto cli_result = statusbar::config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-stun-server-tool");
     if (!cli_result) {
         return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
     }
-
     if (cli.key_hex.empty()) {
         std::println(stderr, "error: --key is required");
         return 1;
     }
-    statusbar::crypto::Aes128SivKey key{};
-    if (!statusbar::net::parse_hex_into(cli.key_hex, std::span<uint8_t>{key.data})) {
-        std::println(stderr, "error: --key must be {} hex characters", key.data.size() * 2);
-        return 1;
-    }
+    return std::nullopt;
+}
 
-    stun::ServerConfig server_cfg{
+auto parse_key(std::string const& hex, statusbar::crypto::Aes128SivKey& key) -> bool
+{
+    if (!statusbar::net::parse_hex_into(hex, std::span<uint8_t>{key.data})) {
+        std::println(stderr, "error: --key must be {} hex characters", key.data.size() * 2);
+        return false;
+    }
+    return true;
+}
+
+auto make_server_config(Config const& cli, statusbar::crypto::Aes128SivKey const& key) -> stun::ServerConfig
+{
+    return stun::ServerConfig{
         .bind_port = cli.port,
         .shared_key = key,
         .refresh_interval_ms = static_cast<uint32_t>(cli.refresh_interval_ms),
         .session_expiry_ms = static_cast<uint32_t>(cli.session_expiry_ms),
         .verbose = cli.verbose,
     };
+}
 
-    std::error_code ec{};
-    auto server = stun::StunServer<>::create(server_cfg, ec);
-    if (!server) {
-        std::println(stderr, "error: failed to start server: {}", ec.message());
-        return 1;
-    }
-
-    std::println(stderr, "STUN rendezvous server listening on port {}", server->port());
+void announce(stun::StunServer<> const& server, stun::ServerConfig const& server_cfg)
+{
+    std::println(stderr, "STUN rendezvous server listening on port {}", server.port());
     // One-line downgrade canary: a "sw" where "hw" is expected means the
     // platform is hiding CPU crypto features from this process.
     std::println(stderr, "Crypto backends: {}", statusbar::crypto::crypto_backend_summary());
     std::println(
         stderr, "Refresh interval: {}ms, session expiry: {}ms", server_cfg.refresh_interval_ms, server_cfg.session_expiry_ms);
     std::println(stderr, "Press Ctrl+C to stop");
+}
 
+// Runs the server's pollables on the reactor until the stop signal.
+auto serve(stun::StunServer<>& server) -> int
+{
     auto& stop = statusbar::itc::install_stop_signal();
     statusbar::net::MessageReactor reactor{stop, statusbar::net::monotonic_ns, 100};
-    for (auto& p : server->take_pollables()) {
+    for (auto& p : server.take_pollables()) {
         reactor.add(std::move(p));
     }
     reactor.run();
-
     std::println(stderr, "\nShutting down...");
     return 0;
+}
+
+auto run_server(stun::ServerConfig const& server_cfg) -> int
+{
+    std::error_code ec{};
+    auto server = stun::StunServer<>::create(server_cfg, ec);
+    if (!server) {
+        std::println(stderr, "error: failed to start server: {}", ec.message());
+        return 1;
+    }
+    announce(*server, server_cfg);
+    return serve(*server);
+}
+
+}  // namespace
+
+auto main(int argc, char** argv) -> int
+{
+    Config cli;
+    if (auto const done = parse_arguments(argc, argv, cli)) {
+        return *done;
+    }
+    statusbar::crypto::Aes128SivKey key{};
+    if (!parse_key(cli.key_hex, key)) {
+        return 1;
+    }
+    return run_server(make_server_config(cli, key));
 }
