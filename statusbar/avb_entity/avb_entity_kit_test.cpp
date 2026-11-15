@@ -1093,7 +1093,8 @@ TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_clas
     EXPECT_FALSE(milan.talker_specs().empty());
     for (auto const& spec : milan.talker_specs()) {
         auto const info = milan->make_talker_srp_info(spec);
-        EXPECT_EQ(info.max_frame_size, milan_srp_max_frame_size(spec.format));
+        bool const am824 = spec.format.kind == StreamKind::am824;  // not a Milan format: its spare sample stays
+        EXPECT_EQ(info.max_frame_size, am824 ? srp_max_frame_size(spec.format) : milan_srp_max_frame_size(spec.format));
         EXPECT_EQ(info.max_interval_frames, 1U);
     }
     for (auto const& spec : classic.talker_specs()) {
@@ -5034,8 +5035,7 @@ TEST(avb_entity_kit_kind, an_audio_stream_switches_between_aaf_and_am824)
     EXPECT_EQ(out->am824->sequence_num, uint8_t{41});
     EXPECT_EQ(out->am824->running_dbc, uint32_t{600});
     EXPECT_EQ(
-        m.kit.talker_tspec(m.kit.talker_specs().front()).max_frame_size,
-        milan_srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
+        m.kit.talker_tspec(m.kit.talker_specs().front()).max_frame_size, srp_max_frame_size(decode_stream_format(AM824_8CH_48K)));
 
     EXPECT_EQ(set(DESCRIPTOR_STREAM_INPUT, AM824_8CH_48K), atdecc::AEM_STATUS_SUCCESS);
     auto const* in = m.kit.listener()->slot_for(0);

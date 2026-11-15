@@ -588,16 +588,17 @@ class AvbEntityKit
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
 
     /// The MSRP TSpec advertised for talker stream @p spec, one frame per class A interval: Milan v1.3
-    /// Table 4.4's frame and drift byte for a @p milan entity, else srp_max_frame_size. The shaper's too.
+    /// Table 4.4's frame and drift byte for a @p milan entity, else srp_max_frame_size. AM824 is no Milan
+    /// format and may carry a sample over nominal: srp_max_frame_size either way. The shaper's too.
     [[nodiscard]] static auto talker_tspec(StreamSpec const& spec, bool const milan) noexcept -> TSpec
     {
-        if (!milan) {
+        if (!milan || spec.format.kind == StreamKind::am824) {
             return TSpec{.max_frame_size = srp_max_frame_size(spec.format), .max_interval_frames = 1};
         }
         return TSpec{
             .max_frame_size = milan_srp_max_frame_size(spec.format),
             .max_interval_frames = 1,
-            .clock_drift_bytes = spec.format.kind != StreamKind::am824 ? MILAN_TSPEC_SPARE_BYTES : uint16_t{0}};
+            .clock_drift_bytes = MILAN_TSPEC_SPARE_BYTES};
     }
     /// talker_tspec under this entity's profile (milan_profile()).
     [[nodiscard]] auto talker_tspec(StreamSpec const& spec) const noexcept -> TSpec { return talker_tspec(spec, milan_profile()); }
