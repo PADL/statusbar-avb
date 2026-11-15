@@ -311,14 +311,15 @@ trip over is switched in one place. Interoperable Milan behaviour (MRP
 timers, TSpec, the AVTP `tu` bit, the MSRP Domain, ADP valid_time) is
 unconditional and does not consult it.
 
-Being Milan is a property of the device model, so the default comes from the
-model: the blob's symbol table may carry one of two well-known symbols on the
-ENTITY descriptor (aemxml's entity `milan` attribute,
-`ENTITY_PROFILE_*_SYMBOL` in `python/aemxml/flatten.py`). The symbol table is
-blob metadata the kit reads internally and is never served to a controller
-(READ_DESCRIPTOR serves the TOC's descriptor bytes only), so the AVDECC
-information model is unchanged. A model that says nothing is Milan; the kit
-config's `milan` setting overrides the model.
+An entity built with the kit is Milan when its configuration says so
+(`entity.milan`, `AvbEntityAudioIOConfig::milan`), which also gives the AEM
+profile its default (ENTITY_CONSTRUCTION_KIT.md, "Profiles"). An entity built
+on the host alone reads the model: the blob's symbol table may carry one of
+two well-known symbols on the ENTITY descriptor (aemxml's entity `milan`
+attribute, `ENTITY_PROFILE_*_SYMBOL` in `python/aemxml/flatten.py`), and a
+model that says nothing is Milan. The symbol table is blob metadata never
+served to a controller (READ_DESCRIPTOR serves the TOC's descriptor bytes
+only), so the AVDECC information model is unchanged.
 
 Keyed off `EntityProfile::milan`:
 
