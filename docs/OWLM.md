@@ -339,3 +339,8 @@ directly, no `pip install` needed.
   realtime-timer code path (gPTP slave or ptp4l with
   `--wan_timer.period_ns > 0`); polling fallback prints a warning and
   skips the CSV.
+- `--wan_timer.lock_memory=false` keeps the realtime timer's thread from
+  calling `mlockall` when it starts (the default locks the whole
+  process). With `--time-source=ptp4l` the PTP setup owns memory
+  locking: it locks once, or not at all under `--ptp.no-mlock`, and the
+  timer then never locks behind that flag.

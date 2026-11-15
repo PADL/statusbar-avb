@@ -76,4 +76,34 @@ TEST(session_helpers, presentation_time_accepts_realistic)
     EXPECT_TRUE(udptun::presentation_time_plausible(rx, rx));
 }
 
+TEST(session_helpers, the_wan_timer_locks_memory_on_its_own_setting_with_a_gptp_source)
+{
+    // No ptp4l setup locks the process for a gPTP-slave session: the
+    // timer's wan_timer.lock_memory is the only say.
+    udptun::TimeSourceConfig ts{};
+    ts.kind = udptun::TimeSourceKind::GptpSlave;
+    EXPECT_TRUE(udptun::wan_timer_locks_memory(ts, true));
+    EXPECT_FALSE(udptun::wan_timer_locks_memory(ts, false));
+    ts.kind = udptun::TimeSourceKind::Realtime;
+    EXPECT_TRUE(udptun::wan_timer_locks_memory(ts, true));
+}
+
+TEST(session_helpers, ptp_no_mlock_keeps_the_wan_timer_from_locking_memory)
+{
+#if defined(__linux__)
+    // The ptp4l setup locks the process once, or not at all with
+    // ptp.no-mlock; the timer must not lock behind that flag.
+    udptun::TimeSourceConfig ts{};
+    ts.kind = udptun::TimeSourceKind::Ptp4l;
+    ts.ptp4l.lock_memory = true;
+    EXPECT_TRUE(udptun::wan_timer_locks_memory(ts, true));
+    EXPECT_FALSE(udptun::wan_timer_locks_memory(ts, false));
+    ts.ptp4l.lock_memory = false;
+    EXPECT_FALSE(udptun::wan_timer_locks_memory(ts, true));
+    EXPECT_FALSE(udptun::wan_timer_locks_memory(ts, false));
+#else
+    SKIP("the ptp4l time source is Linux-only");
+#endif
+}
+
 TEST_MAIN(statusbar_udptun, udptun_session_helpers_test)

@@ -24,6 +24,7 @@
 #include "statusbar/itc/itc_telemetry_counter.hpp"
 #include "statusbar/net/net.hpp"
 #include "statusbar/ptpclient/ptpclient_tai_translator.hpp"
+#include "statusbar/realtime/realtime.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/catch_or_status.hpp"
@@ -46,7 +47,6 @@
 
 #if defined(__linux__)
 #    include "statusbar/gptp/gptp_slave_session.hpp"
-#    include "statusbar/realtime/realtime.hpp"
 #    include "statusbar/udptun/udptun_gptp_clock_source.hpp"
 #endif
 
@@ -973,6 +973,9 @@ class Session
         TimerConfig tcfg = cfg_.wan_timer;
         tcfg.name = "udptun_rt";
         tcfg.period_ns = cfg_.wan_timer.period_ns;
+        // The ptp4l source's ptp.no-mlock reaches the timer too: it must not
+        // lock the process's memory that the setup was told to leave alone.
+        tcfg.lock_memory = wan_timer_locks_memory(cfg_.time_source, cfg_.wan_timer.lock_memory);
 
         // Optional tripwire monitor — owned here, lives until this
         // method returns. Callback captures by pointer (nullptr when

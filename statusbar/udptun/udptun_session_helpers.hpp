@@ -14,6 +14,7 @@
 
 #include "statusbar/net/net.hpp"
 #include "statusbar/sg14/inplace_vector.h"
+#include "statusbar/udptun/udptun_time_source.hpp"
 
 #include <poll.h>
 
@@ -98,6 +99,25 @@ using SessionPollFds = sg14::inplace_vector<pollfd, 2>;
     constexpr int64_t floor_ns = 100'000'000;  // 100 ms
     int64_t const doubled = (observed_max_rtt_ns > 0) ? 2 * observed_max_rtt_ns : 0;
     return (doubled > floor_ns) ? doubled : floor_ns;
+}
+
+/// Whether the WAN timer's thread locks the process's memory when it
+/// starts (realtime::TimerConfig::lock_memory). @p wan_timer_lock_memory
+/// is the timer's own setting (wan_timer.lock_memory). With the ptp4l time
+/// source, memory locking is the PTP setup's: it locks the whole process
+/// once unless told not to (ptp.no-mlock), and a timer that locked again
+/// behind that flag would undo it, so the flag rules there. The other
+/// sources have no such step and the timer's own setting stands.
+[[nodiscard]] inline auto wan_timer_locks_memory(TimeSourceConfig const& time_source, bool const wan_timer_lock_memory) noexcept
+    -> bool
+{
+#if defined(__linux__)
+    if (time_source.kind == TimeSourceKind::Ptp4l) {
+        return wan_timer_lock_memory && time_source.ptp4l.lock_memory;
+    }
+#endif
+    (void)time_source;
+    return wan_timer_lock_memory;
 }
 
 }  // namespace statusbar::udptun
