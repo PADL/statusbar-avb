@@ -93,6 +93,10 @@ fixes with the test that pins each: **[`docs/RELEASE_2_7_0.md`](docs/RELEASE_2_7
 What 2.8.0 changed, the Milan device (GET_MILAN_INFO, the profile from the
 model, the Link Up Domain return) and core's netlink, netdev and RX flow
 steering: **[`docs/RELEASE_2_8_0.md`](docs/RELEASE_2_8_0.md)**.
+What 2.9.0 changed, MAAP as IEEE 1722-2025 Annex B has it (unicast DEFEND,
+Release! on stop, PortOperational! on Link Up), timers that need not lock
+the whole process, a mapped file with page-range locking and a BW64 reader:
+**[`docs/RELEASE_2_9_0.md`](docs/RELEASE_2_9_0.md)**.
 
 - **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
   AM824 + AAF + CRF; the `statusbar-avb-entity` service),
