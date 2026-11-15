@@ -2399,6 +2399,24 @@ TEST(nanoavb_entity_notify_cor1, lock_expiry_notifies_unlock)
     EXPECT_EQ(payload.locked_entity_id, Eui64{});
 }
 
+TEST(nanoavb_entity_notify_cor1, deregister_notifies_remaining_controllers)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
+    EXPECT_EQ(sends.size(), size_t{2});  // B's own response + A's notification
+}
+
 TEST(nanoavb_entity_notify_cor1, an_unlock_or_release_that_changes_nothing_notifies_nobody)
 {
     SetAcceptingHandler app;
