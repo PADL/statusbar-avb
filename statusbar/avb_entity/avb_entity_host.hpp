@@ -124,12 +124,14 @@ class AvbEntityHost
     /// descriptor_for_symbol() / get_descriptor(). The host neither owns nor
     /// copies the handler: it must outlive the host (declare it before the host).
     /// @param handler  the entity's descriptor/command handler.
+    /// @param profile  the entity profile, when the owner knows it; else the model's.
     AvbEntityHost(
         nanoavb::AemEntityHandler& handler,
         nanoavb::AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<nanoavb::EntityProfile> profile = std::nullopt);
 
     AvbEntityHost(AvbEntityHost const&) = delete;
     auto operator=(AvbEntityHost const&) -> AvbEntityHost& = delete;

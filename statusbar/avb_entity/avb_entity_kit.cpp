@@ -133,7 +133,12 @@ AvbEntityKit::AvbEntityKit(
     , sample_rate_{sample_rate}
     , initial_rate_{sample_rate}
     , storage_handler_{handler}
-    , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
+    , host_{handler,
+            default_adp_advertiser_config(),
+            talker_specs_.size(),
+            4,
+            listener_specs_.size(),
+            nanoavb::EntityProfile{.milan = config.milan}}
     , unit_zero_{load_descriptor<atdecc::aem::DescriptorAudioUnit>(host_, atdecc::aem::DESCRIPTOR_AUDIO_UNIT, 0)}
     , unit_zero_shares_domain_{shares_clock_domain(host_, unit_zero_)}
     , gate_{config.gate_talker_on_listener, host_.components()}

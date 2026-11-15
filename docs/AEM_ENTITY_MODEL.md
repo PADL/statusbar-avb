@@ -141,8 +141,9 @@ The symbol table is metadata for the kit, never served to a controller
 (`symbol` in the JSON/XML models), the ENTITY descriptor may carry one
 well-known symbol, `entity_profile:milan` or `entity_profile:classic`,
 compiled from the model's entity `milan` attribute: the entity's ATDECC
-profile (`nanoavb::EntityProfile`, `nanoavb_entity_profile.hpp`). Without
-it the kit runs Milan; the kit config's `milan` overrides it.
+profile (`nanoavb::EntityProfile`, `nanoavb_entity_profile.hpp`) for an
+entity built on the host alone, which runs Milan without it. The kit reads
+its configuration's `milan` (`entity.milan`) instead.
 
 ### How the two interact
 
