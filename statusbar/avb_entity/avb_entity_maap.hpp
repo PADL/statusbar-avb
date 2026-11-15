@@ -130,6 +130,30 @@ class MaapAddressAcquirer
         return net_ != nullptr ? net_->next_deadline_ns() : std::nullopt;
     }
 
+    /// What a defended block means for the streams: stream @p indices[pos]
+    /// takes address @p block_start + pos in ACMP's picture of it (what a
+    /// CONNECT_TX_RESPONSE and GET_STREAM_INFO carry) and in the frames. The
+    /// stream's id and VLAN stay as they are: the VLAN is the Domain's,
+    /// configured or adopted from the bridge, and a block acquired on every
+    /// Link Up must not move the stream back to the default. Reactor thread.
+    static void publish_block(
+        nanoavb::NanoAvbComponents& components,
+        TalkerStreams& talker,
+        std::span<uint16_t const> const indices,
+        ieee::Eui48 const& block_start)
+    {
+        for (size_t pos = 0; pos < indices.size(); ++pos) {
+            uint16_t const idx = indices[pos];
+            ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
+            if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
+                (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest, s->stream_vlan_id);
+            }
+            if (auto* slot = talker.slot_for(idx); slot != nullptr) {
+                slot->dest_mac = dest;
+            }
+        }
+    }
+
   private:
     [[nodiscard]] static auto to_ns(sm::TimePoint const tp) noexcept -> int64_t
     {
@@ -183,7 +207,7 @@ class MaapAddressAcquirer
                 // Reactor thread, once the block is defended. Publish each
                 // per-stream dest MAC, then release the gate so the media
                 // thread's acquire-load sees the new MACs before transmitting.
-                publish_addresses(components, talker, block_start);
+                publish_block(components, talker, indices_, block_start);
                 ready_.store(true, std::memory_order_release);
                 log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
                 if (on_addresses_ready_) {
@@ -198,20 +222,6 @@ class MaapAddressAcquirer
             ready_.store(false, std::memory_order_release);
             log_->warning("maap: no longer defending {:012x}; stream TX gated", start.to_uint64());
         });
-    }
-
-    void publish_addresses(nanoavb::NanoAvbComponents& components, TalkerStreams& talker, ieee::Eui48 const& block_start)
-    {
-        for (size_t pos = 0; pos < indices_.size(); ++pos) {
-            uint16_t const idx = indices_[pos];
-            ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
-            if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
-                (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest);
-            }
-            if (auto* slot = talker.slot_for(idx); slot != nullptr) {
-                slot->dest_mac = dest;
-            }
-        }
     }
 
     /// The port on the reactor, which owns it; null when nothing is set up.

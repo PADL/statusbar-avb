@@ -341,6 +341,43 @@ TEST(avb_entity_kit_maap, a_maap_kit_is_stopped_started_and_bounced_without_a_po
     }
 }
 
+TEST(avb_entity_kit_maap, an_adopted_vlan_survives_the_acquisition_of_a_block)
+{
+    // The block is acquired on every Link Up (B.3.5.9); publishing it writes
+    // each stream's dest MAC into ACMP's picture of the stream, and that
+    // picture also carries the VLAN. The VLAN is the Domain's - here the one
+    // adopted from the bridge - and must come through the publication as it
+    // was, or every Link Up would move the Talker Advertise, the
+    // CONNECT_TX_RESPONSE and GET_STREAM_INFO back to the default VLAN while
+    // the frames stayed on the adopted one.
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));  // the talker slots exist from here
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    expect_kit_on_vlan(kit, 5, 5);
+
+    std::vector<uint16_t> indices;
+    for (auto const& spec : kit.talker_specs()) {
+        indices.push_back(spec.index);
+    }
+    Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, block);
+
+    for (size_t pos = 0; pos < indices.size(); ++pos) {
+        auto const* stream = kit->host().components().acmp_talker.get_stream(indices[pos]);
+        EXPECT_TRUE(stream != nullptr);
+        if (stream != nullptr) {
+            EXPECT_EQ(stream->stream_vlan_id, 5U);
+            EXPECT_TRUE(stream->stream_dest_mac == avtp::maap_block_address(block, static_cast<uint16_t>(pos)));
+        }
+        auto const* slot = kit->talker().slot_for(indices[pos]);
+        EXPECT_TRUE(slot != nullptr && slot->dest_mac == avtp::maap_block_address(block, static_cast<uint16_t>(pos)));
+    }
+    expect_kit_on_vlan(kit, 5, 5);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
 {
     // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every
