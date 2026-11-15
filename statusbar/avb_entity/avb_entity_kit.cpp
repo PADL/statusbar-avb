@@ -459,6 +459,7 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
     // three again.
     close_streams();
     maap_.stop(now);
+    link_up_ = false;  // the next start()'s Link Up is a first one again
     return host_.stop_control_plane(now);
 }
 

@@ -378,6 +378,45 @@ TEST(avb_entity_kit_maap, an_adopted_vlan_survives_the_acquisition_of_a_block)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
+TEST(avb_entity_kit_maap, a_link_up_while_the_link_is_up_is_a_repeat_and_a_restart_starts_afresh)
+{
+    // The runner raises the start-up Link Up itself and then installs a link
+    // monitor that reports the first state it sees, so a kit sees two Link
+    // Ups within milliseconds. The second must not reach MAAP, or it restarts
+    // the probe sequence the first began (B.3.5.9 PortOperational! from
+    // PROBE: five PROBEs for four). What on_link_up() tells the two apart by
+    // is the link-up state, which a Link Down ends, and which stop() ends so
+    // that the Link Up after a restart begins the acquisition again.
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_FALSE(kit->link_up());
+
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_FALSE(kit->link_up());
+    auto const down = std::string{kit->host().state_string()};
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(kit->link_up());
+    auto const after_first = std::string{kit->host().state_string()};
+    EXPECT_NE(after_first, down);                                                        // the supervisor left Down on the first
+    kit->on_link_up(TimePoint{std::chrono::seconds{2} + std::chrono::milliseconds{3}});  // the monitor's first report
+    EXPECT_TRUE(kit->link_up());
+    EXPECT_EQ(std::string{kit->host().state_string()}, after_first);  // and the repeat changed nothing
+
+    kit->on_link_down(TimePoint{std::chrono::seconds{3}});
+    EXPECT_FALSE(kit->link_up());
+    kit->on_link_up(TimePoint{std::chrono::seconds{4}});  // a genuine bounce
+    EXPECT_TRUE(kit->link_up());
+
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+    EXPECT_FALSE(kit->link_up());  // the next start's Link Up is a first one
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{6}}));
+    EXPECT_FALSE(kit->link_up());
+    kit->on_link_up(TimePoint{std::chrono::seconds{7}});
+    EXPECT_TRUE(kit->link_up());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{8}}));
+}
+
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
 {
     // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every

@@ -106,13 +106,30 @@ class AvbEntityKit
     // --- Event handlers (drive the shared SM stack) ---------------------------
     /// The link is up: the control plane's Link Up, and MAAP's
     /// PortOperational! (IEEE 1722-2025 B.3.5.9) — the first begins acquiring
-    /// the stream addresses, a later one re-probes the range held.
+    /// the stream addresses, a later one re-probes the range held. A Link Up
+    /// while the link is already up is a repeat, not a bounce (a runner that
+    /// drives the start-up Link Up itself and then installs a link monitor
+    /// reporting the first state it sees raises two within milliseconds):
+    /// the supervisor's table has no row for it, and MAAP is not told, or the
+    /// second one would restart the probe sequence the first began (five
+    /// PROBEs for four). A Link Down, or stop(), ends the link-up state, so a
+    /// genuine bounce and the Link Up after a restart both go through.
     void on_link_up(TimePoint time)
     {
         host_.on_link_up(time);
-        maap_.port_operational(time);
+        if (!link_up_) {
+            maap_.port_operational(time);
+        }
+        link_up_ = true;
     }
-    void on_link_down(TimePoint time) { host_.on_link_down(time); }
+    void on_link_down(TimePoint time)
+    {
+        link_up_ = false;
+        host_.on_link_down(time);
+    }
+    /// Whether the kit has seen a Link Up since start(), stop() or the last
+    /// Link Down: the state on_link_up() tells a repeat from a bounce by.
+    [[nodiscard]] auto link_up() const noexcept -> bool { return link_up_; }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
@@ -284,6 +301,7 @@ class AvbEntityKit
     /// MAAP dynamic-address acquisition (active only in "maap"
     /// stream_address_mode; ready() defaults true for static MACs).
     MaapAddressAcquirer maap_{};
+    bool link_up_{false};
 
     /// CRF-input media-clock recovery: fed by the CRF stream input's
     /// timestamps on the RX/reactor thread; consulted by media_rate() on the
