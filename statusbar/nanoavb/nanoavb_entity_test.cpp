@@ -2194,13 +2194,13 @@ TEST(nanoavb_entity_notify_cor1, acquire_notifies_registered_and_acquirer)
         EXPECT_EQ(payload.owner_entity_id, kControllerA);
     }
 
-    // B's own DEREGISTER is not fanned out, to the acquirer either: a controller
-    // reads an unsolicited DEREGISTER as its own deregistration (Milan v1.3 Table 5.22).
+    // The acquirer's implicit registration is for what others do: B's own
+    // DEREGISTER is notified to A (7.5.2 lists it) and not back to B.
     sends.clear();
     inject_command(
         handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, std::array<uint8_t, 0>{});
     EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
 }
 
@@ -2278,11 +2278,30 @@ TEST(nanoavb_entity_notify_cor1, an_unlock_or_release_that_changes_nothing_notif
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacB), 1);
 }
 
-TEST(nanoavb_entity_notify_cor1, deregister_is_not_fanned_out)
+TEST(nanoavb_entity_notify_cor1, deregister_notifies_remaining_controllers)
 {
     SetAcceptingHandler app;
     AemCommandHandler handler{app};
     handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
+    EXPECT_EQ(sends.size(), size_t{2});  // B's own response + A's notification
+}
+
+TEST(nanoavb_entity_notify_cor1, a_milan_entity_does_not_fan_out_deregister)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    handler.set_profile(AemCommandHandler::Profile::milan13);
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
     register_controller(handler, kEntity, kControllerA, kMacA);
