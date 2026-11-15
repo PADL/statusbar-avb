@@ -322,8 +322,9 @@ void acmp_connect(nanoavb::NanoAvbComponents& comps, uint16_t talker_unique)
 // stops when the declaration goes (Milan v1.3 Section 4.2.7.2.2).
 TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 {
-    auto blob = load_file(entity_tone_bin_path());
-    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    auto config = make_config_with_blob(load_file(entity_tone_bin_path()));
+    config.milan = true;  // a Milan device (entity.milan)
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;

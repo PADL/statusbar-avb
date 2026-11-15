@@ -9,6 +9,7 @@
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <charconv>
@@ -235,6 +236,7 @@ struct AvbEntityAudioIOConfig
     /// three fields below, the others NOT_IMPLEMENTED; and an empty
     /// atdecc_profile means "milan13". Off, the entity is a plain 1722.1
     /// entity and lets every MVU command pass unanswered (5.4.4.1, Note).
+    /// Either way it is the entity profile (nanoavb::EntityProfile) the kit's handlers read.
     bool milan{false};
     /// GET_MILAN_INFO features_flags, Table 5.17 (REDUNDANCY 1,
     /// TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, MVU_BINDING 4,
@@ -354,10 +356,19 @@ struct AvbEntityAudioIOConfig
     /// into the right SR class / credit-based shaper. Default 3 = SR Class A.
     uint8_t stream_pcp{3};
 
-    /// Presentation-time offset (ns) added to gPTP time for transmitted AVTP
-    /// timestamps; must exceed talker + network transit. Default 2 ms (Milan v1.2
-    /// Section 5.3.7.6); a controller may change it per output.
-    uint64_t presentation_offset_ns{2'000'000};
+    /// Presentation-time offset in nanoseconds added to the gPTP time to form the
+    /// AVTP timestamp of transmitted stream packets (how far in the future the
+    /// listener should present the samples). Must exceed the worst-case talker +
+    /// network transit time or the listener flags LATE_TIMESTAMP, and it is all
+    /// the room a late media-timer wake has: a wake later than this puts frames
+    /// on the wire past their presentation time, and a listener that takes its
+    /// media clock from the stream may stop to lock again. 0 (the default)
+    /// takes the profile's: 2 ms under the Milan profile (Milan v1.3 5.3.7.6,
+    /// "By default, the PAAD-AE shall use a 2ms Presentation time offset"),
+    /// 1 ms otherwise. Any other value is used as given under either profile;
+    /// see effective_presentation_offset_ns(). (The deterministic GPS-rate
+    /// media clock owns this lead; see ptpclient::MediaClockGenerator.)
+    uint64_t presentation_offset_ns{0};
 
     /// Number of stream packets emitted per stream per media-timer wake. Default 1
     /// = strict SR Class A (one 12-sample/125 us packet per 125 us wake, evenly
@@ -496,6 +507,30 @@ struct AvbEntityAudioIOConfig
         priorities.push_back(value);
     }
     return priorities;
+}
+
+/// The presentation offset of a talker that is given none, by profile: Milan
+/// v1.3 5.3.7.6 has 2 ms as the default of a PAAD; an entity held to 1722.1
+/// alone keeps 1 ms.
+inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
+inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
+
+/// Whether @p config holds the entity to Milan v1.3: said outright by
+/// atdecc_profile ("milan13"), or, when that is empty, by the model being a
+/// Milan one.
+[[nodiscard]] inline auto is_milan_profile(AvbEntityAudioIOConfig const& config) noexcept -> bool
+{
+    return config.atdecc_profile.empty() ? config.milan : config.atdecc_profile == "milan13";
+}
+
+/// The presentation offset the entity's talkers use: what the configuration
+/// gives, or the profile's default when it gives none (0).
+[[nodiscard]] inline auto effective_presentation_offset_ns(AvbEntityAudioIOConfig const& config) noexcept -> uint64_t
+{
+    if (config.presentation_offset_ns != 0) {
+        return config.presentation_offset_ns;
+    }
+    return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
 }
 
 }  // namespace statusbar::avb_entity

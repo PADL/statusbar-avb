@@ -425,13 +425,15 @@ struct NanoAvbComponents
     /// backed by an .aem blob — instead of a parsed EntityModel. The handler MUST
     /// outlive this object. The entity descriptor (entity_id + capabilities for ADP +
     /// ACMP) is resolved from the handler at construction; the legacy `entity_model`
-    /// member stays empty/unused on this path.
+    /// member stays empty/unused on this path. @p configured is the entity profile when the owner
+    /// knows it (the kit's entity.milan); without one the model's ENTITY symbol decides.
     NanoAvbComponents(
         AemEntityHandler& handler,
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<EntityProfile> profile = std::nullopt);
 
     NanoAvbComponents(NanoAvbComponents const&) = delete;
     auto operator=(NanoAvbComponents const&) -> NanoAvbComponents& = delete;
@@ -448,7 +450,8 @@ struct NanoAvbComponents
         AdpAdvertiserConfig adp_config,
         size_t talker_max_streams,
         size_t talker_max_listeners,
-        size_t listener_max_streams);
+        size_t listener_max_streams,
+        std::optional<EntityProfile> configured);
 
   public:
     // Declaration order matters: `entity_model` must precede the handlers that

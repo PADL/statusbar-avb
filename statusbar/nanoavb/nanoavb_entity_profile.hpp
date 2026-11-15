@@ -3,8 +3,8 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-/// The entity's ATDECC profile, read by every module that switches Milan-only behaviour: the
-/// model's ENTITY symbol says which, else Milan. See docs/NANOAVB_ARCHITECTURE.md.
+/// The entity's ATDECC profile, read by every module that switches Milan-only behaviour: the kit's
+/// entity.milan, else the model's ENTITY symbol, else Milan. See docs/NANOAVB_ARCHITECTURE.md.
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 
