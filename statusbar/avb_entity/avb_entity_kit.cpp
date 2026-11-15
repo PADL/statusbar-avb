@@ -1867,24 +1867,16 @@ auto AvbEntityKit::start_control(net::MessageReactor& reactor, TimePoint const n
     // that follows a start declares it.
     (void)host_.components().msrp_handler.return_to_configured_domain(now);
     wire_stream_callbacks();
-    declare_vid_and_domain(now);
+    // The VID in force, registered on every start: stop() withdraws it with
+    // the rest, but the Domain adopted from the wire outlives a stop, and
+    // MVRP must say what the MSRP Domain declares.
+    (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
     // A restarted kit whose control plane stayed Ready gets no advertise hook
     // again (stop() withdrew everything): advertise now.
     if (host_.is_ready()) {
         advertise_talker_streams(now);
     }
     return start_declarations(reactor, now);
-}
-
-void AvbEntityKit::declare_vid_and_domain(TimePoint const now)
-{
-    // The Class A VID in force (configured or adopted), registered on every start: stop() withdraws it.
-    (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
-    // After a stop, declaring the Domain resumes the run: a link already up
-    // reports no link up and a Ready control plane runs no advertise hook.
-    if (host_.components().msrp_handler.withdrawn()) {
-        (void)host_.components().msrp_handler.declare_domain(now);
-    }
 }
 
 void AvbEntityKit::prepare_control_plane()
