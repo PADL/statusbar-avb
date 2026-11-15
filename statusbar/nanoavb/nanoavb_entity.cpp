@@ -4236,12 +4236,9 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         return;  // sent after the command's response
     }
 
-    // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
-    // and every registered controller "without sending the unsolicited
-    // response back to the ATDECC Controller which executed the command",
-    // under either profile (Milan v1.3 5.4.5.3 asks the same). Each
-    // registration has its own sequence id, incremented whether or not the
-    // send succeeds (Milan v1.2 Section 5.4.5.1).
+    // IEEE 1722.1-2021 7.5.2: to the acquired and every registered controller but the one that executed
+    // the command, under either profile (Milan v1.3 5.4.5.3). Each registration's sequence id advances
+    // whether or not the send succeeds (Milan v1.2 Section 5.4.5.1).
     for (auto& reg : unsolicited_registrations_) {
         if (reg.controller_entity_id == requester_) {
             continue;
