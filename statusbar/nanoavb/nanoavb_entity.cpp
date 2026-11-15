@@ -476,10 +476,15 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
         case AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION:
             return handle_register_unsolicited(header);
 
-        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION:
-            // Not fanned out: a controller treats an unsolicited DEREGISTER as its own
-            // deregistration (Milan v1.2 Table 5.22 sends one only to a controller the entity drops).
-            return handle_deregister_unsolicited(header);
+        case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION: {
+            // Classic: the remaining controllers learn that this one left (7.5.2 lists it). Milan:
+            // none, as a controller reads an unsolicited DEREGISTER as its own (Milan v1.2 Table 5.22).
+            auto const r = handle_deregister_unsolicited(header);
+            if (profile_ == Profile::classic) {
+                notify_on_success(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, r, out_buffer);
+            }
+            return r;
+        }
 
         default:
             return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
@@ -2948,12 +2953,9 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         return;  // sent after the command's response
     }
 
-    // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
-    // and every registered controller "without sending the unsolicited
-    // response back to the ATDECC Controller which executed the command",
-    // under either profile (Milan v1.3 5.4.5.3 asks the same). Each
-    // registration has its own sequence id, incremented whether or not the
-    // send succeeds (Milan v1.2 Section 5.4.5.1).
+    // IEEE 1722.1-2021 7.5.2: to the acquired and every registered controller but the one that executed
+    // the command, under either profile (Milan v1.3 5.4.5.3). Each registration's sequence id advances
+    // whether or not the send succeeds (Milan v1.2 Section 5.4.5.1).
     for (auto& reg : unsolicited_registrations_) {
         if (reg.controller_entity_id == requester_) {
             continue;
