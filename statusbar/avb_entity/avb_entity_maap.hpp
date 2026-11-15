@@ -141,6 +141,26 @@ class MaapAddressAcquirer
     /// share a MAC). Reactor thread, after setup().
     [[nodiscard]] auto fell_back_to_static() const noexcept -> bool { return fell_back_to_static_; }
 
+    /// Publish the block from @p block_start to the streams at @p indices (block offset = position):
+    /// each one's ACMP destination address, on the VLAN it already has, and its TX slot's.
+    static void publish_addresses(
+        nanoavb::NanoAvbComponents& components,
+        TalkerStreams& talker,
+        std::span<uint16_t const> const indices,
+        ieee::Eui48 const& block_start)
+    {
+        for (size_t pos = 0; pos < indices.size(); ++pos) {
+            uint16_t const idx = indices[pos];
+            ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
+            if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
+                (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest, s->stream_vlan_id);
+            }
+            if (auto* slot = talker.slot_for(idx); slot != nullptr) {
+                slot->dest_mac = dest;
+            }
+        }
+    }
+
   private:
     [[nodiscard]] static auto to_ns(sm::TimePoint const tp) noexcept -> int64_t
     {
@@ -195,7 +215,7 @@ class MaapAddressAcquirer
                 // Reactor thread, once the block is defended. Publish each
                 // per-stream dest MAC, then release the gate so the media
                 // thread's acquire-load sees the new MACs before transmitting.
-                publish_addresses(components, talker, block_start);
+                publish_addresses(components, talker, indices_, block_start);
                 ready_.store(true, std::memory_order_release);
                 log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
                 if (on_addresses_ready_) {
@@ -219,20 +239,6 @@ class MaapAddressAcquirer
                 on_addresses_lost_(sm::TimePoint{std::chrono::nanoseconds{now_ns}});  // the reactor's clock, as on_acquired
             }
         });
-    }
-
-    void publish_addresses(nanoavb::NanoAvbComponents& components, TalkerStreams& talker, ieee::Eui48 const& block_start)
-    {
-        for (size_t pos = 0; pos < indices_.size(); ++pos) {
-            uint16_t const idx = indices_[pos];
-            ieee::Eui48 const dest = avtp::maap_block_address(block_start, static_cast<uint16_t>(pos));
-            if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
-                (void)components.acmp_talker.configure_stream(idx, s->stream_id, dest);
-            }
-            if (auto* slot = talker.slot_for(idx); slot != nullptr) {
-                slot->dest_mac = dest;
-            }
-        }
     }
 
     /// The port on the reactor, which owns it; null when nothing is set up.
