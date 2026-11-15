@@ -900,6 +900,27 @@ TEST(avb_entity_kit_maap, a_maap_kit_is_stopped_started_and_bounced_without_a_po
     }
 }
 
+TEST(avb_entity_kit_maap, an_adopted_vid_survives_a_maap_acquire)
+{
+    // A defended block publishes each stream's address. The stream keeps the
+    // VLAN of the Domain it follows (Milan v1.3 4.2.7.2.1), or ACMP and the
+    // Talker Advertise go back to VLAN 2 while the frames stay on VLAN 5.
+    KitUnderTest kit{make_config(7, "milan13")};
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    std::vector<uint16_t> indices;
+    for (auto const& spec : kit.talker_specs()) {
+        indices.push_back(spec.index);
+    }
+    Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x40, 0x00};
+    MaapAddressAcquirer::publish_addresses(kit->host().components(), kit->talker(), indices, block);
+    for (size_t pos = 0; pos < indices.size(); ++pos) {
+        auto const* stream = kit->host().components().acmp_talker.get_stream(indices[pos]);
+        EXPECT_TRUE(stream != nullptr && stream->stream_vlan_id == 5U);
+        EXPECT_TRUE(stream != nullptr && stream->stream_dest_mac == avtp::maap_block_address(block, static_cast<uint16_t>(pos)));
+    }
+    expect_kit_on_vlan(kit, 5, 5);
+}
+
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
 {
     // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every
