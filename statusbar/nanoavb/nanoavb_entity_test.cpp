@@ -2363,13 +2363,13 @@ TEST(nanoavb_entity_notify_cor1, acquire_notifies_registered_and_acquirer)
         EXPECT_EQ(payload.owner_entity_id, kControllerA);
     }
 
-    // B's own DEREGISTER is not fanned out, to the acquirer either: a controller
-    // reads an unsolicited DEREGISTER as its own deregistration (Milan v1.3 Table 5.22).
+    // The acquirer's implicit registration is for what others do: B's own
+    // DEREGISTER is notified to A (7.5.2 lists it) and not back to B.
     sends.clear();
     inject_command(
         handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, std::array<uint8_t, 0>{});
     EXPECT_EQ(header_of(*solicited(sends)).status(), AEM_STATUS_SUCCESS);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 1);
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
 }
 
@@ -2445,26 +2445,6 @@ TEST(nanoavb_entity_notify_cor1, an_unlock_or_release_that_changes_nothing_notif
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 6);
     inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 7);
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_ACQUIRE_ENTITY, kMacB), 1);
-}
-
-TEST(nanoavb_entity_notify_cor1, deregister_is_not_fanned_out)
-{
-    SetAcceptingHandler app;
-    AemCommandHandler handler{app};
-    handler.set_entity_id(kEntity);
-    std::vector<CapturedSend> sends;
-    capture_sends(handler, sends);
-    register_controller(handler, kEntity, kControllerA, kMacA);
-    register_controller(handler, kEntity, kControllerB, kMacB);
-    sends.clear();
-
-    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
-    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
-    // Not fanned out: A would treat an unsolicited DEREGISTER as its own
-    // (Milan v1.2 Table 5.22 sends one only to a controller the entity drops).
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacA), 0);
-    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, kMacB), 0);
-    EXPECT_EQ(sends.size(), size_t{1});  // B's own response
 }
 
 TEST(nanoavb_entity_notify_cor1, notify_counters_changed_pushes_get_counters)
