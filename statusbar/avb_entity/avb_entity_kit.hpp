@@ -104,7 +104,14 @@ class AvbEntityKit
     [[nodiscard]] auto stop(TimePoint now = sm::Clock::now()) -> Status;
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    void on_link_up(TimePoint time) { host_.on_link_up(time); }
+    /// The link is up: the control plane's Link Up, and MAAP's
+    /// PortOperational! (IEEE 1722-2025 B.3.5.9) — the first begins acquiring
+    /// the stream addresses, a later one re-probes the range held.
+    void on_link_up(TimePoint time)
+    {
+        host_.on_link_up(time);
+        maap_.port_operational(time);
+    }
     void on_link_down(TimePoint time) { host_.on_link_down(time); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
@@ -237,7 +244,7 @@ class AvbEntityKit
     /// Stream @p index's identity (ACMP), VLAN and priority (the domain in force) into @p info.
     void fill_talker_srp_identity(uint16_t index, nanoavb::TalkerStreamSrpInfo& info) const;
     void advertise_talker_streams(TimePoint time);
-    [[nodiscard]] auto acquire_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
+    [[nodiscard]] auto setup_maap_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
     /// The stream kind of talker stream @p index ("other" when not in the table).
     [[nodiscard]] auto talker_kind_of(uint16_t index) const noexcept -> StreamKind;
 

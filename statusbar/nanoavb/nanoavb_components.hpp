@@ -188,31 +188,47 @@ class MsrpNetHandler : public net::Pollable
 /// Opens an AVTP-ethertype socket joined to the MAAP multicast group, wires the
 /// MaapHandler's send callback to that socket, delivers received MAAP frames to
 /// it, and drives its probe/announce timers on tick(). This is the reactor
-/// slot-in for MAAP — construct one with a MaapHandler owned by the entity and
-/// add it to the reactor (opt-in; nothing adds it by default).
+/// slot-in for MAAP — construct one around the entity's MaapHandler and add it
+/// to the reactor (opt-in; nothing adds it by default).
 ///
-/// The MaapHandler must outlive this object: this handler wires the MaapHandler's
-/// send callback to capture `this`, and references the MaapHandler for receive/tick.
+/// It owns the MaapHandler: the send callback captures `this`, receive and tick
+/// drive it, and the reactor owns this port, so the two live and die together
+/// and the entity keeps no pointer into either past retire(). retire() is the
+/// entity's stop: Table B.7 Release! on the handler, after which the port is
+/// finished() and the reactor drops it on its next pass; a frame or a tick that
+/// still reaches a retired port goes nowhere.
 ///
 /// Threading: on_ready/tick run on the reactor poll thread. Must not block/throw.
 class MaapNetHandler : public net::Pollable
 {
   public:
     /// @param interface_name The network interface name
-    /// @param handler Reference to the MAAP protocol handler (must outlive this)
-    MaapNetHandler(std::string_view interface_name, avtp::MaapHandler& handler)
-        : handler_{handler}
+    /// @param handler The MAAP protocol handler, owned from here on
+    MaapNetHandler(std::string_view interface_name, std::unique_ptr<avtp::MaapHandler> handler)
+        : handler_{std::move(handler)}
     {
         (void)context_.open(interface_name, ETHERTYPE_AVTP, &MAAP_MULTICAST_MAC);
         // The handler names each PDU's destination: the MAAP group for a PROBE or
         // an ANNOUNCE, the prober for a DEFEND (IEEE 1722-2025 B.2.1).
-        handler_.set_send([this](ieee::Eui48 const& dest, std::span<uint8_t const> bytes) -> bool {
+        handler_->set_send([this](ieee::Eui48 const& dest, std::span<uint8_t const> bytes) -> bool {
             return context_.send(&dest, bytes).has_value();
         });
     }
 
     /// Check if the handler is valid (socket opened successfully)
     [[nodiscard]] auto valid() const noexcept -> bool { return context_.valid(); }
+
+    /// The protocol handler this port hosts.
+    [[nodiscard]] auto handler() noexcept -> avtp::MaapHandler& { return *handler_; }
+    [[nodiscard]] auto handler() const noexcept -> avtp::MaapHandler const& { return *handler_; }
+
+    /// The entity is done with MAAP: Release! the range (B.3.5.2) at @p now_ns
+    /// and finish, so the reactor drops this port. Nothing goes out after this.
+    void retire(int64_t const now_ns) noexcept
+    {
+        handler_->release(now_ns);
+        retired_ = true;
+    }
 
     // -- Pollable interface --
 
@@ -227,22 +243,33 @@ class MaapNetHandler : public net::Pollable
             if (!result || *result <= 0) {
                 break;
             }
-            handler_.receive(src_mac, {payload_buf_.data(), static_cast<size_t>(*result)}, now_ns);
+            if (!retired_) {
+                handler_->receive(src_mac, {payload_buf_.data(), static_cast<size_t>(*result)}, now_ns);
+            }
         }
     }
 
-    void tick(int64_t now_ns) override { handler_.tick(now_ns); }
+    void tick(int64_t now_ns) override
+    {
+        if (!retired_) {
+            handler_->tick(now_ns);
+        }
+    }
 
     /// The MaapHandler's next deadline: what the loop driving the reactor
     /// bounds its poll timeout by, so the tick that sends a PDU is not up to
-    /// a whole poll period late.
-    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t> { return handler_.next_deadline_ns(); }
+    /// a whole poll period late. Nothing once retired.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>
+    {
+        return retired_ ? std::nullopt : handler_->next_deadline_ns();
+    }
 
-    [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
+    [[nodiscard]] auto finished() const noexcept -> bool override { return retired_; }
 
   private:
     net::RawnetContext context_{};
-    avtp::MaapHandler& handler_;  // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    std::unique_ptr<avtp::MaapHandler> handler_;
+    bool retired_{false};
     std::array<uint8_t, 2048> payload_buf_{};
 };
 

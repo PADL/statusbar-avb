@@ -109,17 +109,40 @@ auto MaapHandler::make_defend() const noexcept -> MaapDu
     return du;
 }
 
-void MaapHandler::acquire(uint16_t count, int64_t now_ns)
+void MaapHandler::prime()
 {
     // The very first handle_event runs the Start->Initial UCT, whose init() action
     // resets requested_count. Prime that transition with a benign event (Release is
     // a no-op in Initial) BEFORE setting the count, so our count survives into
     // begin_acquire's generate_address.
     if (sm_.current_state() == maap_sm::Def::State::Start) {
-        sm_.handle_event(ctx_, maap_sm::Def::Event::Release, from_ns(now_ns));
+        sm_.handle_event(ctx_, maap_sm::Def::Event::Release, from_ns(0));
     }
+}
+
+void MaapHandler::prepare(uint16_t count)
+{
+    prime();
     ctx_.requested_count = count;  // pick_address bounds its offset by this
+}
+
+void MaapHandler::acquire(uint16_t count, int64_t now_ns)
+{
+    prepare(count);
     dispatch(maap_sm::Def::Event::Begin, now_ns);
+}
+
+void MaapHandler::port_operational(int64_t now_ns)
+{
+    prime();
+    if (!is_probing_or_defending() && ctx_.requested_count == 0) {
+        return;  // nothing asked for yet: nothing to begin
+    }
+    // Table B.7 note a: the restart from PROBE or DEFEND is handed the range we
+    // hold, so generate_address keeps it; from INITIAL it draws afresh.
+    reprobe_held_range_ = is_probing_or_defending();
+    dispatch(maap_sm::Def::Event::PortOperational, now_ns);
+    reprobe_held_range_ = false;
 }
 
 void MaapHandler::release(int64_t now_ns)
@@ -266,16 +289,19 @@ auto MaapHandler::next_random() noexcept -> uint64_t
 
 void MaapHandler::pick_address() noexcept
 {
+    if (reprobe_held_range_) {
+        return;  // the range supplied with PortOperational! (Table B.7 note a)
+    }
     // B.3.6.1: pick a random start so [start, start+count) fits in the dynamic pool.
-    uint64_t const pool_start = MAAP_DYNAMIC_POOL_START.to_uint64();
-    uint64_t const pool_end = MAAP_DYNAMIC_POOL_END.to_uint64();
-    uint64_t const pool_span = (pool_end - pool_start) + 1U;
-
     uint16_t const want = ctx_.requested_count == 0 ? 1U : ctx_.requested_count;
-    uint64_t const max_offset = want <= pool_span ? pool_span - want : 0U;
+    ctx_.requested_start.from_uint64(MAAP_DYNAMIC_POOL_START.to_uint64() + random_pool_offset(want));
+}
 
-    uint64_t const offset = max_offset == 0 ? 0U : next_random() % (max_offset + 1U);
-    ctx_.requested_start.from_uint64(pool_start + offset);
+auto MaapHandler::random_pool_offset(uint16_t const want) noexcept -> uint64_t
+{
+    uint64_t const pool_span = (MAAP_DYNAMIC_POOL_END.to_uint64() - MAAP_DYNAMIC_POOL_START.to_uint64()) + 1U;
+    uint64_t const max_offset = want <= pool_span ? pool_span - want : 0U;
+    return max_offset == 0 ? 0U : next_random() % (max_offset + 1U);
 }
 
 auto MaapHandler::probe_interval_ns() noexcept -> int64_t

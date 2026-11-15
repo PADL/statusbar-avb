@@ -62,11 +62,12 @@ struct Rig
         });
     }
 
-    /// Tick repeatedly (advancing well past each timer) until acquired or a cap.
-    void run_until_acquired()
+    /// Tick repeatedly (advancing well past each timer) until acquired or a cap,
+    /// the ticks a second apart from @p from_ns on.
+    void run_until_acquired(int64_t const from_ns = SEC)
     {
         for (int k = 1; k <= 12 && !handler.is_acquired(); ++k) {
-            handler.tick(static_cast<int64_t>(k + 1) * SEC);
+            handler.tick(from_ns + static_cast<int64_t>(k) * SEC);
         }
     }
 
@@ -539,6 +540,137 @@ TEST(maap_handler, block_address_helper_offsets_within_block)
     EXPECT_EQ(
         statusbar::avtp::maap_block_address(Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0xff}, 1),
         (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x13, 0x00}));
+}
+
+//
+// B.3.5.9 PortOperational!
+//
+
+TEST(maap_handler, port_operational_begins_acquiring_a_prepared_range)
+{
+    using S = statusbar::avtp::maap_sm::Def::State;
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x91}};
+    rig.handler.prepare(2);
+    EXPECT_EQ(rig.handler.state(), S::Initial);
+    EXPECT_TRUE(rig.sent.empty());  // nothing on the wire before the port is operational
+
+    rig.handler.port_operational(SEC);
+    EXPECT_EQ(rig.handler.state(), S::Probe);
+    EXPECT_EQ(rig.sent.size(), size_t{1});
+    EXPECT_TRUE(rig.sent.back().is_probe());
+    EXPECT_EQ(rig.sent_to.back(), MAAP_MULTICAST_MAC);
+    EXPECT_EQ(rig.handler.count(), 2U);
+    EXPECT_TRUE(in_dynamic_pool(rig.handler.address(), 2));
+
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.acquired_calls, 1);
+}
+
+TEST(maap_handler, port_operational_with_nothing_to_acquire_does_nothing)
+{
+    using S = statusbar::avtp::maap_sm::Def::State;
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x92}};
+    rig.handler.port_operational(SEC);
+    EXPECT_EQ(rig.handler.state(), S::Initial);
+    EXPECT_TRUE(rig.sent.empty());
+    EXPECT_FALSE(rig.handler.next_deadline_ns().has_value());
+}
+
+TEST(maap_handler, port_operational_while_defending_reprobes_the_held_range)
+{
+    using S = statusbar::avtp::maap_sm::Def::State;
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x93}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    Eui48 const held = rig.handler.address();
+    size_t const sent_before = rig.sent.size();
+
+    // The link bounces: Table B.7 DEFEND + PortOperational! -> INITIAL/Restart!,
+    // the range we hold supplied back (note a), so the first PROBE is for it.
+    rig.handler.port_operational(100 * SEC);
+    EXPECT_EQ(rig.handler.state(), S::Probe);
+    EXPECT_EQ(rig.handler.address(), held);
+    EXPECT_EQ(rig.lost_calls, 1);  // not usable while it is re-probed
+    EXPECT_TRUE(rig.lost_start.has_value() && *rig.lost_start == held);
+    EXPECT_EQ(rig.sent.size(), sent_before + 1);
+    EXPECT_TRUE(rig.sent.back().is_probe());
+    EXPECT_EQ(rig.sent.back().requested_start_address, held);
+    EXPECT_EQ(rig.sent_to.back(), MAAP_MULTICAST_MAC);
+
+    // Nobody took it while the link was down: defended again, the same range.
+    rig.run_until_acquired(100 * SEC);
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.handler.address(), held);
+    EXPECT_EQ(rig.acquired_calls, 2);
+}
+
+TEST(maap_handler, a_range_taken_while_the_link_was_down_is_found_out_by_the_reprobe)
+{
+    using S = statusbar::avtp::maap_sm::Def::State;
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x94}};
+    rig.handler.acquire(2, SEC);
+    rig.run_until_acquired();
+    Eui48 const held = rig.handler.address();
+
+    rig.handler.port_operational(100 * SEC);
+    // Another station now announces our old range: Table B.7 rAnnounce in
+    // PROBE restarts us on a fresh draw.
+    auto const frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_ANNOUNCE, held, 2);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x01}, frame, 101 * SEC);
+    EXPECT_EQ(rig.handler.state(), S::Probe);
+    EXPECT_NE(rig.handler.address(), held);
+    EXPECT_TRUE(in_dynamic_pool(rig.handler.address(), 2));
+
+    rig.run_until_acquired(101 * SEC);
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_NE(rig.handler.address(), held);
+}
+
+TEST(maap_handler, port_operational_while_probing_restarts_the_probe_sequence_on_the_held_range)
+{
+    // A fresh acquisition's wire cost: its PROBEs and the ANNOUNCE.
+    Rig fresh{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x95}};
+    fresh.handler.acquire(2, SEC);
+    fresh.run_until_acquired();
+    size_t const pdus_per_acquisition = fresh.sent.size();
+
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x96}};
+    rig.handler.acquire(2, SEC);
+    Eui48 const held = rig.handler.address();
+    (void)rig.tick_at_deadline();  // one PROBE into the sequence
+    size_t const sent_before = rig.sent.size();
+
+    // Table B.7 PROBE + PortOperational!: the sequence starts over on the
+    // range we were probing — as many PDUs again as a fresh acquisition.
+    rig.handler.port_operational(50 * SEC);
+    EXPECT_EQ(rig.handler.address(), held);
+    EXPECT_EQ(rig.lost_calls, 0);  // it was never defended
+    rig.run_until_acquired(50 * SEC);
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.handler.address(), held);
+    EXPECT_EQ(rig.sent.size() - sent_before, pdus_per_acquisition);
+}
+
+TEST(maap_handler, released_then_port_operational_acquires_afresh)
+{
+    using S = statusbar::avtp::maap_sm::Def::State;
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x97}};
+    rig.handler.acquire(1, SEC);
+    rig.run_until_acquired();
+    rig.handler.release(50 * SEC);
+    EXPECT_EQ(rig.handler.state(), S::Initial);
+    size_t const sent_before = rig.sent.size();
+
+    // Table B.7 INITIAL + PortOperational!: acquisition begins, for the count
+    // last asked for, on a new draw.
+    rig.handler.port_operational(60 * SEC);
+    EXPECT_EQ(rig.handler.state(), S::Probe);
+    EXPECT_EQ(rig.handler.count(), 1U);
+    EXPECT_EQ(rig.sent.size(), sent_before + 1);
+    EXPECT_TRUE(rig.sent.back().is_probe());
+    EXPECT_TRUE(in_dynamic_pool(rig.handler.address(), 1));
 }
 
 //

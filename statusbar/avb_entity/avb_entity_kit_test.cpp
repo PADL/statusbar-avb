@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
@@ -318,6 +319,39 @@ TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
         EXPECT_EQ(info.vlan_id, 7U);
         EXPECT_EQ(info.priority, 3U);
     }
+}
+
+TEST(avb_entity_kit_maap, a_maap_kit_is_stopped_started_and_bounced_without_a_port_left_behind)
+{
+    // The interface does not exist, so the MAAP socket never opens and the
+    // kit keeps its static addresses — the fallback. The stop/start and Link
+    // Up bookkeeping around the acquirer must hold all the same: no deadline
+    // from a port that is not there, TX never gated, nothing dangling across
+    // a restart (Table B.7 Release! on stop, PortOperational! on Link Up).
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    for (int round = 0; round < 2; ++round) {
+        auto const base = std::chrono::seconds{1 + (round * 10)};
+        EXPECT_TRUE(kit.start(TimePoint{base}));
+        kit->on_link_up(TimePoint{base + std::chrono::seconds{1}});
+        EXPECT_EQ(kit->poll_timeout_ms(100, 0), 100);                // no MAAP deadline bounds the loop
+        kit->on_link_up(TimePoint{base + std::chrono::seconds{2}});  // a bounce
+        EXPECT_TRUE(kit.stop(TimePoint{base + std::chrono::seconds{3}}));
+    }
+}
+
+TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
+{
+    // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every
+    // boot, and two stations booted at one instant draw different ones.
+    Eui48 const mac_a{0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
+    Eui48 const mac_b{0x00, 0x11, 0x22, 0x33, 0x44, 0x56};
+    EXPECT_NE(maap_seed(mac_a, 1'700'000'000'000'000'000LL), maap_seed(mac_a, 1'700'000'001'000'000'000LL));
+    EXPECT_NE(maap_seed(mac_a, 1'700'000'000'000'000'000LL), maap_seed(mac_b, 1'700'000'000'000'000'000LL));
+    EXPECT_EQ(maap_seed(mac_a, 0), mac_a.to_uint64());
+    // Never 0, which the handler would read as "the MAC alone".
+    EXPECT_EQ(maap_seed(Eui48{}, 0), 1U);
 }
 
 TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_classic_kit_its_headroom)

@@ -289,7 +289,7 @@ void AvbEntityKit::wire_stream_callbacks()
         });
 }
 
-auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
+auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
 {
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices{};
     for (auto const& spec : talker_specs_) {
@@ -297,7 +297,7 @@ auto AvbEntityKit::acquire_maap_addresses(net::MessageReactor& reactor, TimePoin
     }
     // On (re)defend: re-declare the MSRP Talker Advertise so listeners
     // reserve against the MAAP address, once the SR-class domain is up.
-    return maap_.acquire(
+    return maap_.setup(
         reactor,
         config_.interface_name,
         stream_base_mac_for(config_.interface_name, config_.entity_id),
@@ -355,11 +355,12 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
             stream_port_.serialized() ? logging::lit(", TX and RX serialised") : logging::lit(""));
     }
 
-    // In "maap" mode, claim the talker stream destination addresses via MAAP and
-    // overwrite the static defaults BEFORE the data plane reads them below.
+    // In "maap" mode, set up the claim of the talker stream destination
+    // addresses via MAAP: the Link Up begins it (B.3.5.9), and the acquired
+    // addresses then overwrite the static defaults the data plane reads below.
     // Non-fatal inside: on socket failure the entity keeps the static MACs.
     if (config_.stream_address_mode == "maap") {
-        if (auto status = acquire_maap_addresses(reactor, now); !status) {
+        if (auto status = setup_maap_addresses(reactor, now); !status) {
             return status;
         }
     }
@@ -453,8 +454,11 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
         return failure(std::make_error_code(std::errc::not_connected));
     }
     // The data plane first, once the tool has stopped the timers that drive
-    // it, then the control plane. start() builds both again.
+    // it, then the MAAP range (Table B.7 Release!: no longer defended, its
+    // port off the reactor), then the control plane. start() builds all
+    // three again.
     close_streams();
+    maap_.stop(now);
     return host_.stop_control_plane(now);
 }
 

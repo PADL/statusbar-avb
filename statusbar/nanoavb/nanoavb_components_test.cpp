@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: MIT
 //
 // GptpAnnounceHandler: the grandmaster in force, as the Announces name it and
-// as their silence takes it away.
+// as their silence takes it away. MaapNetHandler: the reactor port that owns
+// the MAAP handler, and how it retires.
 
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 
+#include "statusbar/avtp/avtp_maap_handler.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -99,6 +102,32 @@ TEST(gptp_announce_handler, silence_for_the_receipt_timeout_loses_the_grandmaste
     EXPECT_EQ(seen.changes.size(), size_t{2});
     // logMessageInterval -3: 125 ms Announces, held for 375 ms.
     EXPECT_EQ(handler.announce_receipt_timeout_ns(), (3 * ONE_SECOND_NS) / 8);
+}
+
+TEST(maap_net_handler, retire_releases_the_range_and_finishes_the_port)
+{
+    using S = avtp::maap_sm::Def::State;
+    // On no interface: the socket never opens, the handler it owns works all
+    // the same, and nothing leaves the test.
+    auto handler = std::make_unique<avtp::MaapHandler>(ieee::Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, 7);
+    MaapNetHandler port{"no-such-interface-0", std::move(handler)};
+    EXPECT_FALSE(port.valid());
+    EXPECT_FALSE(port.finished());
+
+    port.handler().acquire(2, ONE_SECOND_NS);
+    EXPECT_EQ(port.handler().state(), S::Probe);
+    EXPECT_TRUE(port.next_deadline_ns().has_value());
+
+    // The entity stops: Table B.7 Release!, and the reactor is to drop the port.
+    port.retire(2 * ONE_SECOND_NS);
+    EXPECT_TRUE(port.finished());
+    EXPECT_EQ(port.handler().state(), S::Initial);
+    EXPECT_FALSE(port.next_deadline_ns().has_value());
+
+    // A tick that still reaches the retired port drives nothing.
+    port.tick(100 * ONE_SECOND_NS);
+    EXPECT_EQ(port.handler().state(), S::Initial);
+    EXPECT_FALSE(port.next_deadline_ns().has_value());
 }
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_components_test)

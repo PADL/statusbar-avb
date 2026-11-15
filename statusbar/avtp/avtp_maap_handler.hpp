@@ -12,7 +12,10 @@
 /// timers, and the three PDU sends), and exposes a small entity-facing API:
 ///
 ///   - acquire(count): begin claiming `count` contiguous multicast addresses
-///     from the IEEE 1722 dynamic pool (91:E0:F0:00:00:00 .. :00:FD:FF);
+///     from the IEEE 1722 dynamic pool (91:E0:F0:00:00:00 .. :00:FD:FF), or
+///     prepare(count) and let the first port_operational() begin it;
+///   - port_operational(): B.3.5.9 Link Up — begin acquiring, or re-probe the
+///     range held;
 ///   - on_acquired / on_lost callbacks: learn when the range becomes defended
 ///     (usable as a stream destination) or is lost to a conflict;
 ///   - receive(): feed a received MAAP frame (drives conflict handling);
@@ -89,6 +92,20 @@ class MaapHandler
     /// Picks a random start, sends the first PROBE, and starts the probe timer.
     void acquire(uint16_t count, int64_t now_ns);
 
+    /// Name the size of the range to acquire and wait: the first
+    /// port_operational() begins acquiring it (Table B.7, PortOperational! in
+    /// INITIAL), the way acquire() would begin it now.
+    void prepare(uint16_t count);
+
+    /// B.3.5.9 PortOperational!: the port can transmit and receive AVTPDUs
+    /// (again). Idle with a range prepared, this begins acquiring it. Probing or
+    /// defending, it restarts the probe sequence on the range held — that range
+    /// supplied back to the restart (Table B.7 note a) — so a range nobody took
+    /// while the link was down is defended again and one that was taken is
+    /// found out. A defended range is reported lost as its re-probe starts and
+    /// acquired again when it completes. With nothing to acquire: nothing.
+    void port_operational(int64_t now_ns);
+
     /// Release the current allocation and return to idle (stops defending/announcing).
     void release(int64_t now_ns);
 
@@ -145,8 +162,14 @@ class MaapHandler
     /// Dispatch an SM event, firing on_acquired/on_lost on a Defend boundary.
     void dispatch(maap_sm::Def::Event ev, int64_t now_ns);
 
+    /// Run the Start->Initial UCT, once, before the requested count is set.
+    void prime();
+
     [[nodiscard]] auto next_random() noexcept -> uint64_t;
     void pick_address() noexcept;  // generate_address callback body
+    /// A uniform draw of the start offset into the dynamic pool for a range of
+    /// @p want addresses, so the whole range fits.
+    [[nodiscard]] auto random_pool_offset(uint16_t want) noexcept -> uint64_t;
     [[nodiscard]] auto probe_interval_ns() noexcept -> int64_t;
     [[nodiscard]] auto announce_interval_ns() noexcept -> int64_t;
     /// A deadline strictly inside (BASE, BASE + VARIATION), with
@@ -178,6 +201,9 @@ class MaapHandler
     maap_sm::Context ctx_{};
     maap_sm::Machine sm_{};
     uint64_t rng_{1};
+    /// Set while a PortOperational! restart runs: generate_address keeps the
+    /// range held instead of drawing a new one (Table B.7 note a).
+    bool reprobe_held_range_{false};
 
     // Timer deadlines in the caller's ns timebase; *_active_ gates them.
     int64_t probe_deadline_ns_{0};
