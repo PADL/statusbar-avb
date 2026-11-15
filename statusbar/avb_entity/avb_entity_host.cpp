@@ -161,6 +161,8 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
     components_.msrp_handler.withdraw_all(now);
     components_.mvrp_handler.withdraw_all(now);
     (void)components_.adp_advertiser.shutdown(now);  // Milan v1.2 Section 5.6.3.5.8
+    // Down, whatever the link: the owner's Link Up after the next start runs start_protocols again.
+    supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, now);
 }
 
 void AvbEntityHost::release_net_handlers()

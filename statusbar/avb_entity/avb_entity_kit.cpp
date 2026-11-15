@@ -2120,11 +2120,6 @@ void AvbEntityKit::restore_control_state(TimePoint const now)
     // the rest, but the Domain adopted from the wire outlives a stop, and
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
-    // A restarted kit whose control plane stayed Ready gets no advertise hook
-    // again (stop() withdrew everything): advertise now.
-    if (host_.is_ready()) {
-        advertise_talker_streams(now);
-    }
     return start_declarations(reactor, now);
 }
 

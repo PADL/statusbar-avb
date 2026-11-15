@@ -485,8 +485,8 @@ class AvbEntityHost
     /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
     [[nodiscard]] auto grandmaster_capable() const -> bool;
 
-    /// stop_control_plane's first half: the MSRP reservations and the MVRP
-    /// VID withdrawn with their Leaves sent at once, then ENTITY_DEPARTING.
+    /// stop_control_plane's first half: the MSRP reservations and the MVRP VID withdrawn with their
+    /// Leaves sent at once, ENTITY_DEPARTING, then the supervisor back to Down.
     void withdraw_from_the_network(TimePoint now);
     /// Its second: the SRP senders dropped, the net handlers released, the
     /// mirror detached from them.
