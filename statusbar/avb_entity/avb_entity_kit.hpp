@@ -1165,8 +1165,6 @@ class AvbEntityKit
     auto read_port() -> bool;
     /// Loggers, the local ATDECC socket and the saved settings, before the control plane starts.
     void prepare_control_plane();
-    /// start(): register the configured VID; after a stop(), declare the MSRP Domain, which resumes MSRP.
-    void declare_vid_and_domain(TimePoint now);
     /// config_.default_mcr_priorities onto the MVU handler's clock domains (Milan v1.3 Section 7.6.1.1).
     void apply_default_mcr_priorities();
     /// MAAP's addresses in "maap" mode (none offered until defended) and the declarations' timer.
