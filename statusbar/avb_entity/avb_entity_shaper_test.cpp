@@ -282,6 +282,19 @@ TEST(shaper_talker_latency, an_unknown_link_speed_or_mtu_counts_as_1000_mbit_s_a
         uint32_t{((9042 + 211) * 80) + 500});
 }
 
+// AM824 is not a Milan format (Milan v1.3 Table 4.4 lists AAF and CRF) and an AM824 talker may send
+// a sample over nominal, so its TSpec keeps srp_max_frame_size's spare sample under either profile:
+// 32-byte header + (6+1) samples x 8 ch x 4 B = 256 at 48 kHz.
+TEST(shaper_cbs, an_am824_tspec_keeps_its_spare_sample_under_milan)
+{
+    StreamSpec spec{};
+    spec.format = decode_stream_format(0x00A0020840000800ULL);  // AM824 48k 8ch
+    auto const milan = AvbEntityKit::talker_tspec(spec, true);
+    EXPECT_EQ(milan.max_frame_size, uint16_t{256});
+    EXPECT_EQ(milan.clock_drift_bytes, uint16_t{0});
+    EXPECT_TRUE(milan == AvbEntityKit::talker_tspec(spec, false));
+}
+
 TEST(shaper_cbs, frame_sizes_and_bandwidth)
 {
     // The TSpecs the kit advertises (milan_srp_max_frame_size, Milan v1.3 Table 4.4):
