@@ -208,6 +208,7 @@ struct AvbEntityAudioIOConfig
     /// three fields below, the others NOT_IMPLEMENTED; and an empty
     /// atdecc_profile means "milan13". Off, the entity is a plain 1722.1
     /// entity and lets every MVU command pass unanswered (5.4.4.1, Note).
+    /// Either way it is the entity profile (nanoavb::EntityProfile) the kit's handlers read.
     bool milan{false};
     /// GET_MILAN_INFO features_flags, Table 5.17 (REDUNDANCY 1,
     /// TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, MVU_BINDING 4,
