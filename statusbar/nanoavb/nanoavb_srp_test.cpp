@@ -624,6 +624,41 @@ TEST(nanoavb_srp_msrp, a_milan_handler_adopts_the_class_a_domain_registered_from
     EXPECT_FALSE(adopted.has_value());
 }
 
+TEST(nanoavb_srp_msrp, a_domain_with_a_reserved_vid_or_an_impossible_priority_is_not_adopted)
+{
+    // IEEE 802.1Q-2022 Table 9-2: VID 0 means priority-tagged, no VLAN; 4095
+    // is reserved. A priority is three bits. A bridge declaring any of them
+    // offers nothing a stream could move to, so the Domain in force stays.
+    for (auto const bad : {
+             DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 0},
+             DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 4095},
+             DomainInfo{.sr_class_id = 6, .sr_class_priority = 8, .sr_class_vid = 5},
+         }) {
+        DomainWire wire;
+        wire.device.set_adopt_domain(true);
+        std::optional<DomainInfo> adopted{};
+        wire.device.set_on_domain_adopted([&](DomainInfo const& d, TimePoint) { adopted = d; });
+        wire.bridge.set_domain(bad);
+        (void)wire.bridge.declare_domain(wire.now);
+        (void)wire.device.declare_domain(wire.now);
+        wire.run(6);
+        EXPECT_FALSE(adopted.has_value());
+        EXPECT_EQ(wire.device.domain().sr_class_priority, 3);
+        EXPECT_EQ(wire.device.domain().sr_class_vid, 2);
+    }
+
+    // The edges of what is allowed are adopted as before.
+    DomainWire wire;
+    wire.device.set_adopt_domain(true);
+    std::optional<DomainInfo> adopted{};
+    wire.device.set_on_domain_adopted([&](DomainInfo const& d, TimePoint) { adopted = d; });
+    wire.bridge.set_domain(DomainInfo{.sr_class_id = 6, .sr_class_priority = 7, .sr_class_vid = 4094});
+    (void)wire.bridge.declare_domain(wire.now);
+    (void)wire.device.declare_domain(wire.now);
+    wire.run(6);
+    EXPECT_TRUE(adopted.has_value() && adopted->sr_class_priority == 7 && adopted->sr_class_vid == 4094);
+}
+
 TEST(nanoavb_srp_msrp, installing_the_sender_alone_keeps_the_hooks_installed_before_it)
 {
     // The entity installs its hooks once, at construction; the network path

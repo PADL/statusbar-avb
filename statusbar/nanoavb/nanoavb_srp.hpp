@@ -767,14 +767,26 @@ class MsrpHandler
     /// Advertise appears, Ready -> AskingFailed when it goes away — and
     /// surface the change through on_listener_state_change, told the time
     /// of the receive_packet()/tick() this fires from (last_event_time_).
+    /// Whether a Domain from the wire names something a stream could move to.
+    /// IEEE 802.1Q-2022 Table 9-2 reserves VID 0 (priority-tagged, no VLAN)
+    /// and VID 4095, and a priority is three bits (Table 9-3 names 0 to 7):
+    /// a Domain carrying either is a peer's mistake, not a VLAN to join.
+    [[nodiscard]] static constexpr auto adoptable(statusbar::srp::msrp::DomainFirstValue const& fv) noexcept -> bool
+    {
+        uint16_t const vid = fv.sr_class_vid.get();
+        return vid >= 1 && vid <= 4094 && fv.sr_class_priority.get() <= 7;
+    }
+
     /// A Domain registered from the wire. Under adoption, a Class A Domain
     /// whose priority or VLAN differs from ours becomes ours (see
-    /// set_adopt_domain); anything else is noted and left alone.
+    /// set_adopt_domain); anything else - another class, the same values, a
+    /// VID or priority outside what 802.1Q allows - is noted and left alone,
+    /// the Domain in force kept.
     void on_remote_domain(statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation const op)
     {
         bool const class_a = fv.sr_class_id.get() == statusbar::srp::msrp::SR_CLASS_A;
         bool const same = fv.sr_class_priority.get() == domain_.sr_class_priority && fv.sr_class_vid.get() == domain_.sr_class_vid;
-        if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !class_a || same) {
+        if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !class_a || same || !adoptable(fv)) {
             return;
         }
         take_domain(
