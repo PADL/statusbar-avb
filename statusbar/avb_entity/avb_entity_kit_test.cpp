@@ -1791,9 +1791,11 @@ TEST(avb_entity_kit_milan_talker, stop_withdraws_and_a_restart_declares_again)
     EXPECT_TRUE(m.kit.admitted_talker_streams().empty());
     EXPECT_FALSE(m.advertising(0));
 
-    // Restarted while the control plane stayed Ready: the probe of a moment
-    // ago is still within its 15 s window, so the stream declares again.
+    // Restarted on the same Domain: the owner's Link Up begins the run again (MSRP no longer
+    // withdrawn, so attached listeners follow their talkers), and the probe of a moment ago
+    // is still within its 15 s window, so the stream declares again.
     EXPECT_TRUE(m.start_ready());
+    EXPECT_FALSE(m.kit.host().components().msrp_handler.withdrawn());
     EXPECT_TRUE(m.advertising(0));
     EXPECT_TRUE(m.kit.admitted_talker_streams().empty());  // no Listener seen since
     auto const& probe = m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
