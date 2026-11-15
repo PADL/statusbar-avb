@@ -303,6 +303,7 @@ same under both.
 |---|---|---|
 | ACQUIRE_ENTITY | granted for the ENTITY descriptor (7.4.1) | NOT_SUPPORTED, never granted (5.4.2.1) |
 | A SET to the value already in force | applied and notified: 7.5.2 notifies every SET answered SUCCESS | answered SUCCESS, not applied, not notified (5.4.5.3) |
+| A controller's DEREGISTER_UNSOLICITED_NOTIFICATION | the remaining registered controllers are notified (7.5.2 lists the command) | nobody is told: each copy would carry the recipient's own controller_entity_id (5.4.5.1) and read as its own deregistration; Table 5.20 sends one only to the controller removed |
 | Changes by non-ATDECC means while locked (front panel, `set_local_identify`) | allowed | refused ENTITY_LOCKED (5.3.4.1, 5.4.2.17) |
 | MSRP Registrar receiving Lv in IN | starts the leavetimer (802.1Q Table 10-4) | goes straight to MT (4.2.7.2.2) |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |

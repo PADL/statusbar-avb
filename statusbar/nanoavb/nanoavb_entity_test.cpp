@@ -1458,7 +1458,88 @@ void register_controller(AemCommandHandler& handler, Eui64 const& entity_id, Eui
     (void)handler.process_packet(src_mac, packet, entity_id);
 }
 
+/// Build + inject a DEREGISTER_UNSOLICITED_NOTIFICATION from (controller_id, src_mac).
+void deregister_controller(AemCommandHandler& handler, Eui64 const& entity_id, Eui64 const& controller_id, Eui48 const& src_mac)
+{
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, AemDu::AEM_DATA_LENGTH);
+    cmd.target_entity_id = entity_id;
+    cmd.controller_entity_id = controller_id;
+    std::array<uint8_t, AemDu::LENGTH> packet{};
+    span_copy(make_span(packet), make_const_span(cmd));
+    (void)handler.process_packet(src_mac, packet, entity_id);
+}
+
+/// The AemDu header at the front of a captured send.
+[[nodiscard]] auto captured_header(CapturedSend const& s) -> AemDu
+{
+    AemDu hdr{};
+    span_copy(make_span(hdr), std::span<uint8_t const>(s.bytes).first(AemDu::LENGTH));
+    return hdr;
+}
+
 }  // namespace
+
+TEST(nanoavb_entity_unsolicited_notify, a_deregistration_is_told_to_the_others_under_classic_and_to_nobody_under_milan)
+{
+    // 1722.1-2021 7.5.2 lists DEREGISTER_UNSOLICITED_NOTIFICATION, so a classic
+    // entity tells the remaining controllers. A Milan entity must not: v1.3
+    // 5.4.5.1 has every copy carry the recipient's own controller_entity_id,
+    // so B would receive a successful DEREGISTER addressed to B and take it
+    // for its own deregistration (la_avdecc drops its subscription on it),
+    // while the entity still holds B's registration. Table 5.20 sends a
+    // deregistration only to the controller removed.
+    Eui64 const entity_id{0xAA, 0, 0, 0, 0, 0, 0, 0x05};
+    Eui48 const mac_a{0x02, 0, 0, 0, 0, 0x0A};
+    Eui48 const mac_b{0x02, 0, 0, 0, 0, 0x0B};
+    Eui64 const ctrl_a{0xC0, 0, 0, 0, 0, 0, 0, 0x0A};
+    Eui64 const ctrl_b{0xC0, 0, 0, 0, 0, 0, 0, 0x0B};
+
+    for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
+        auto model = create_test_model();
+        AemCommandHandler handler{model};
+        handler.set_entity_id(entity_id);
+        handler.set_profile(profile);
+        std::vector<CapturedSend> sends;
+        handler.set_callbacks(AemCommandHandlerCallbacks{.send_response = [&](Eui48 const& dest, std::span<uint8_t const> resp) {
+            sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+            return true;
+        }});
+        register_controller(handler, entity_id, ctrl_a, mac_a);
+        register_controller(handler, entity_id, ctrl_b, mac_b);
+        EXPECT_EQ(handler.unsolicited_registration_count(), size_t{2});
+        sends.clear();
+
+        deregister_controller(handler, entity_id, ctrl_a, mac_a);
+        EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+
+        // A's own response, addressed to A, under both profiles.
+        size_t to_a = 0;
+        size_t unsolicited_to_b = 0;
+        for (auto const& s : sends) {
+            auto const hdr = captured_header(s);
+            EXPECT_EQ(hdr.command_code(), AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION);
+            EXPECT_EQ(hdr.status(), AEM_STATUS_SUCCESS);
+            if (s.dest == mac_a && !hdr.is_unsolicited()) {
+                EXPECT_EQ(hdr.controller_entity_id, ctrl_a);
+                ++to_a;
+            }
+            if (s.dest == mac_b && hdr.is_unsolicited()) {
+                // The copy that reads to B as B's own deregistration.
+                EXPECT_EQ(hdr.controller_entity_id, ctrl_b);
+                ++unsolicited_to_b;
+            }
+        }
+        EXPECT_EQ(to_a, size_t{1});
+        if (profile == AemCommandHandler::Profile::classic) {
+            EXPECT_EQ(unsolicited_to_b, size_t{1});
+            EXPECT_EQ(sends.size(), size_t{2});
+        } else {
+            EXPECT_EQ(unsolicited_to_b, size_t{0});
+            EXPECT_EQ(sends.size(), size_t{1});
+        }
+    }
+}
 
 TEST(nanoavb_entity_unsolicited_notify, fan_out_to_all_registered_controllers)
 {

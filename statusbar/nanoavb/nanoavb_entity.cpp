@@ -282,10 +282,17 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
             return handle_register_unsolicited(header);
 
         case AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION: {
-            // Listed by 7.5.2 as notification-generating: the remaining
-            // registered controllers learn that this one left.
+            // IEEE 1722.1-2021 7.5.2 lists the command, so under classic the
+            // remaining registered controllers learn that this one left. Not
+            // under Milan: v1.3 5.4.5.1 addresses every copy with the
+            // recipient's own controller_entity_id, so a copy of A's
+            // deregistration reaches B as a successful DEREGISTER of B's own
+            // and B drops its subscription while the entity still holds it;
+            // Table 5.20 sends a deregistration only to the controller removed.
             auto const r = handle_deregister_unsolicited(header);
-            notify_on_success(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, r, out_buffer);
+            if (profile_ != Profile::milan13) {
+                notify_on_success(AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, r, out_buffer);
+            }
             return r;
         }
 
