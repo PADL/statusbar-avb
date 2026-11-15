@@ -552,9 +552,16 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<EntityProfile> const profile)
     : NanoAvbComponents{
-          handler, resolve_entity_descriptor(handler), adp_config, talker_max_streams, talker_max_listeners, listener_max_streams}
+          handler,
+          resolve_entity_descriptor(handler),
+          adp_config,
+          talker_max_streams,
+          talker_max_listeners,
+          listener_max_streams,
+          profile}
 {}
 
 NanoAvbComponents::NanoAvbComponents(
@@ -563,9 +570,10 @@ NanoAvbComponents::NanoAvbComponents(
     AdpAdvertiserConfig const adp_config,
     size_t const talker_max_streams,
     size_t const talker_max_listeners,
-    size_t const listener_max_streams)
+    size_t const listener_max_streams,
+    std::optional<EntityProfile> const configured)
     : entity_model{}  // empty: descriptors are served by the handler, not this member
-    , profile{entity_profile_from_model(handler.descriptor_storage())}
+    , profile{configured.value_or(entity_profile_from_model(handler.descriptor_storage()))}
     , aem_handler{handler}
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
