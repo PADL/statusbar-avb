@@ -761,12 +761,6 @@ class MsrpHandler
         }
     }
 
-    /// The remote talker's registration for @p sid changed (Advertise or
-    /// Failed registered, or the talker left): re-derive the declaration of
-    /// an attached listener stream — AskingFailed -> Ready when the
-    /// Advertise appears, Ready -> AskingFailed when it goes away — and
-    /// surface the change through on_listener_state_change, told the time
-    /// of the receive_packet()/tick() this fires from (last_event_time_).
     /// Whether a Domain from the wire names something a stream could move to.
     /// IEEE 802.1Q-2022 Table 9-2 reserves VID 0 (priority-tagged, no VLAN)
     /// and VID 4095, and a priority is three bits (Table 9-3 names 0 to 7):
