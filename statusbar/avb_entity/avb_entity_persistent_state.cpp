@@ -4,11 +4,10 @@
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
 
 #include "statusbar/atdecc/atdecc_utf8.hpp"
+#include "statusbar/buffer/file_write.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/net/net_socket.hpp"
 #include "statusbar/toml/toml.hpp"
-
-#include <fcntl.h>
-#include <unistd.h>
 
 #include <array>
 #include <cerrno>
@@ -18,6 +17,7 @@
 #include <format>
 #include <limits>
 #include <optional>
+#include <system_error>
 #include <utility>
 
 #include <sys/stat.h>
@@ -215,21 +215,6 @@ using toml::Table;
 {
     auto const parent = std::filesystem::path{path}.parent_path();
     return parent.empty() ? std::string{"."} : parent.string();
-}
-
-[[nodiscard]] auto write_all(int const fd, std::string_view text) -> bool
-{
-    while (!text.empty()) {
-        auto const n = ::write(fd, text.data(), text.size());
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return false;
-        }
-        text.remove_prefix(static_cast<size_t>(n));
-    }
-    return true;
 }
 
 //
@@ -553,48 +538,6 @@ struct DescriptorKey
 // Saving and loading
 //
 
-/// Create @p tmp for writing, making @p path's directory when it is not there yet
-/// (first start); -1 with errno set on failure.
-[[nodiscard]] auto open_for_write(std::string const& tmp, std::string const& path) -> int
-{
-    int const fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-    if (fd >= 0 || errno != ENOENT) {
-        return fd;
-    }
-    if (::mkdir(parent_of(path).c_str(), 0755) != 0 && errno != EEXIST) {
-        return -1;
-    }
-    return ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
-}
-
-/// Write @p text to @p fd, fsync and close it; on failure @p tmp is removed.
-[[nodiscard]] auto write_and_close(int const fd, std::string const& tmp, std::string_view const text) -> Status
-{
-    bool const written = write_all(fd, text) && ::fsync(fd) == 0;
-    auto const write_error = net::errno_code();
-    bool const closed = ::close(fd) == 0;
-    if (!written || !closed) {
-        (void)::unlink(tmp.c_str());
-        return failure(written ? net::errno_code() : write_error);
-    }
-    return success();
-}
-
-/// Rename @p tmp over @p path, then sync the directory so the rename survives a power cut.
-[[nodiscard]] auto replace_with(std::string const& tmp, std::string const& path) -> Status
-{
-    if (::rename(tmp.c_str(), path.c_str()) != 0) {
-        auto const error = net::errno_code();
-        (void)::unlink(tmp.c_str());
-        return failure(error);
-    }
-    if (int const dir = ::open(parent_of(path).c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC); dir >= 0) {
-        (void)::fsync(dir);
-        (void)::close(dir);
-    }
-    return success();
-}
-
 /// The bindings of the old listener bindings file at @p path, once, into @p loaded
 auto import_legacy_bindings(std::string const& path, LoadedPersistentState& loaded) -> void
 {
@@ -696,15 +639,14 @@ auto parse_persistent_state(std::string_view const text) -> StatusValue<Persiste
 
 auto save_persistent_state(std::string const& path, std::string_view const text) -> Status
 {
-    std::string const tmp = path + ".tmp";
-    int const fd = open_for_write(tmp, path);
-    if (fd < 0) {
-        return failure(net::errno_code());
-    }
-    if (auto const written = write_and_close(fd, tmp, text); !written) {
+    auto const written = write_file_durably(path, make_const_span(text));
+    if (written || written.error() != std::errc::no_such_file_or_directory) {
         return written;
     }
-    return replace_with(tmp, path);
+    if (::mkdir(parent_of(path).c_str(), 0755) != 0 && errno != EEXIST) {
+        return failure(net::errno_code());  // the state directory is made on the first start
+    }
+    return write_file_durably(path, make_const_span(text));
 }
 
 auto load_persistent_state(std::string const& path, uint64_t const model_id, std::string const& legacy_bindings_path)
