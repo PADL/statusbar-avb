@@ -141,8 +141,8 @@ struct PersistentState
 /// range) and not_supported for another version.
 [[nodiscard]] auto parse_persistent_state(std::string_view text) -> StatusValue<PersistentState>;
 
-/// Write @p text (serialize_persistent_state's) to @p path atomically: a temporary file beside it,
-/// fsync, rename over it, then fsync the directory. A missing directory (one level) is created.
+/// Write @p text (serialize_persistent_state's) to @p path through write_file_durably(): whole or
+/// not at all, and durable once this returns. A missing directory (one level) is created.
 [[nodiscard]] auto save_persistent_state(std::string const& path, std::string_view text) -> Status;
 
 /// What load_persistent_state found.

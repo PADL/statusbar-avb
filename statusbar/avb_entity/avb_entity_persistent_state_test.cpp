@@ -11,8 +11,10 @@
 
 #include <unistd.h>
 
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <sstream>
 #include <string>
 
@@ -173,14 +175,13 @@ TEST(avb_persistent_state, atomic_write)
     EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     EXPECT_TRUE(read_text(path) == serialize_persistent_state(state));
 
-    // A stale temporary file (a write cut short) is replaced, and the new
-    // state replaces the old whole
-    write_text(path + ".tmp", "torn");
+    // The new state replaces the old whole, and the directory holds the file alone
     state.names.clear();
     state.system_unique_id = 7;
     EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     EXPECT_TRUE(read_text(path) == serialize_persistent_state(state));
-    EXPECT_FALSE(std::filesystem::exists(path + ".tmp"));
+    auto const entries = std::distance(std::filesystem::directory_iterator{dir / "state"}, std::filesystem::directory_iterator{});
+    EXPECT_EQ(entries, std::ptrdiff_t{1});
     auto const loaded = load_persistent_state(path, MODEL, {});
     EXPECT_TRUE(loaded.outcome == PersistentStateOutcome::loaded);
     EXPECT_TRUE(loaded.state == state);
