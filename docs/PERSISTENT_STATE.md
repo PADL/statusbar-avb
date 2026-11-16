@@ -99,9 +99,9 @@ discarded (Milan v1.2 Section 5.5.1.4: the state belongs to the model).
 
 ## Writing
 
-The file is written whole and atomically (a temporary file in the same
-directory, fsync, rename), from the reactor thread only, never the media
-thread.
+The file is written whole and atomically by core's `write_file_durably()`
+(a synced temporary file in the same directory renamed over it, the directory
+synced), from the reactor thread only, never the media thread.
 
 ## See also
 
