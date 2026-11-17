@@ -222,6 +222,15 @@ struct AvbEntityAudioIOConfig
     /// probing); on failure the entity falls back to the static MACs with a warning.
     std::string stream_address_mode{"static"};
 
+    /// Under "maap": where the block defended is saved, and read back at the
+    /// next start to be probed first, so a restart keeps its destination
+    /// addresses under the same StreamIDs - a bridge still holding the old
+    /// registration refuses a new address for them (802.1Q-2018 35.2.2.8,
+    /// Talker Failed code 16) until it lapses, tens of seconds. A range taken
+    /// by somebody else while the entity was down is found out by the probe
+    /// and a fresh one drawn. Empty (the default): every start draws afresh.
+    std::string stream_maap_range_file{};
+
     /// VLAN ID for AVB streams (default: SR Class A VLAN 2)
     uint16_t vlan_id{2};
 

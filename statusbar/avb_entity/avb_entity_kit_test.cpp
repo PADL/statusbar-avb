@@ -473,6 +473,39 @@ TEST(avb_entity_kit_maap, without_a_maap_socket_adp_starts_at_link_up_as_before)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
 }
 
+TEST(avb_entity_kit_maap, the_range_file_holds_one_line_and_reads_back_what_was_written)
+{
+    SavedMaapRange const range{.start = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34}, .count = 3};
+    EXPECT_EQ(encode_maap_range(range), std::string{"91e0f0001234 3\n"});
+    EXPECT_TRUE(decode_maap_range("91e0f0001234 3\n") == std::optional{range});
+    EXPECT_TRUE(decode_maap_range("91e0f0001234 3") == std::optional{range});  // the newline is a courtesy
+    EXPECT_FALSE(decode_maap_range("").has_value());
+    EXPECT_FALSE(decode_maap_range("91e0f0001234").has_value());      // no count
+    EXPECT_FALSE(decode_maap_range("91e0f0001234 0\n").has_value());  // a count of 0
+    EXPECT_FALSE(decode_maap_range("91e0f0001234 x\n").has_value());
+    EXPECT_FALSE(decode_maap_range("91e0f000123g 3\n").has_value());  // not hex
+    EXPECT_FALSE(decode_maap_range("001122334455 3\n").has_value());  // outside the dynamic pool
+    EXPECT_FALSE(decode_maap_range("91e0f000fdff 2\n").has_value());  // runs off the pool's end
+    EXPECT_TRUE(decode_maap_range("91e0f000fdff 1\n").has_value());
+
+    auto const dir = std::filesystem::temp_directory_path() / "statusbar-maap-range-test";
+    std::filesystem::create_directories(dir);
+    auto const path = (dir / "range").string();
+    std::filesystem::remove(path);
+    EXPECT_FALSE(load_maap_range(path).has_value());  // no file: a fresh draw
+    EXPECT_TRUE(save_maap_range(path, range).has_value());
+    EXPECT_TRUE(load_maap_range(path) == std::optional{range});
+    SavedMaapRange const moved{.start = Eui48{0x91, 0xE0, 0xF0, 0x00, 0xAB, 0xCD}, .count = 2};
+    EXPECT_TRUE(save_maap_range(path, moved).has_value());  // replaced, not appended
+    EXPECT_TRUE(load_maap_range(path) == std::optional{moved});
+    {
+        std::ofstream damaged{path, std::ios::trunc};
+        damaged << "not a range\n";
+    }
+    EXPECT_FALSE(load_maap_range(path).has_value());
+    std::filesystem::remove_all(dir);
+}
+
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
 {
     // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every

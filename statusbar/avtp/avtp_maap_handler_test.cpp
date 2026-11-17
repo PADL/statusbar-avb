@@ -567,6 +567,69 @@ TEST(maap_handler, port_operational_begins_acquiring_a_prepared_range)
     EXPECT_EQ(rig.acquired_calls, 1);
 }
 
+// A range saved from an earlier life is probed first and, with nobody
+// objecting, defended again: the streams keep their destination addresses.
+TEST(maap_handler, a_supplied_start_is_probed_first_and_kept_when_nobody_objects)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x93}};
+    Eui48 const saved{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    rig.handler.prepare(2, saved);
+    rig.handler.port_operational(SEC);
+    EXPECT_EQ(rig.sent.size(), size_t{1});
+    EXPECT_TRUE(rig.sent.back().is_probe());
+    EXPECT_EQ(rig.handler.address(), saved);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_EQ(rig.acquired_start.value_or(Eui48{}), saved);
+}
+
+TEST(maap_handler, a_supplied_start_somebody_else_defends_gives_way_to_a_fresh_draw)
+{
+    // Our MAC is high so we lose the tie-break against a low sender.
+    Rig rig{Eui48{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF}};
+    Eui48 const saved{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    rig.handler.prepare(2, saved);
+    rig.handler.port_operational(SEC);
+    EXPECT_EQ(rig.handler.address(), saved);
+
+    auto const frame = make_frame(statusbar::avtp::MAAP_MESSAGE_TYPE_DEFEND, saved, 2);
+    rig.handler.receive(Eui48{0x00, 0, 0, 0, 0, 0x01}, frame, 2 * SEC);
+    EXPECT_EQ(rig.handler.state(), statusbar::avtp::maap_sm::Def::State::Probe);
+    EXPECT_NE(rig.handler.address(), saved);  // drawn afresh, once: the saved start is spent
+    EXPECT_TRUE(in_dynamic_pool(rig.handler.address(), 2));
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    EXPECT_NE(rig.acquired_start.value_or(saved), saved);
+}
+
+TEST(maap_handler, a_supplied_start_the_range_does_not_fit_the_pool_from_is_ignored)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x94}};
+    Eui48 const last{0x91, 0xE0, 0xF0, 0x00, 0xFD, 0xFF};  // the pool's last address: no room for two
+    EXPECT_TRUE(MaapHandler::range_fits_pool(last, 1));
+    EXPECT_FALSE(MaapHandler::range_fits_pool(last, 2));
+    EXPECT_FALSE(MaapHandler::range_fits_pool(Eui48{0x91, 0xE0, 0xEF, 0xFF, 0xFF, 0xFF}, 1));
+    rig.handler.prepare(2, last);
+    rig.handler.port_operational(SEC);
+    EXPECT_NE(rig.handler.address(), last);
+    EXPECT_TRUE(in_dynamic_pool(rig.handler.address(), 2));
+}
+
+TEST(maap_handler, a_link_up_reprobe_keeps_the_supplied_range_it_defends)
+{
+    Rig rig{Eui48{0x00, 0x11, 0x22, 0x33, 0x44, 0x95}};
+    Eui48 const saved{0x91, 0xE0, 0xF0, 0x00, 0x56, 0x78};
+    rig.handler.prepare(3, saved);
+    rig.handler.port_operational(SEC);
+    rig.run_until_acquired();
+    EXPECT_TRUE(rig.handler.is_acquired());
+    rig.handler.port_operational(20 * SEC);  // a Link Up: the range held is re-probed (Table B.7 note a)
+    EXPECT_EQ(rig.handler.address(), saved);
+    rig.run_until_acquired(20 * SEC);
+    EXPECT_EQ(rig.acquired_start.value_or(Eui48{}), saved);
+    EXPECT_EQ(rig.acquired_calls, 2);
+}
+
 TEST(maap_handler, port_operational_with_nothing_to_acquire_does_nothing)
 {
     using S = statusbar::avtp::maap_sm::Def::State;

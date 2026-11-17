@@ -120,9 +120,16 @@ void MaapHandler::prime()
     }
 }
 
+void MaapHandler::prepare(uint16_t count, Eui48 const& start)
+{
+    prepare(count);
+    supplied_start_ = start;
+}
+
 void MaapHandler::prepare(uint16_t count)
 {
     prime();
+    supplied_start_.reset();
     ctx_.requested_count = count;  // pick_address bounds its offset by this
 }
 
@@ -292,9 +299,26 @@ void MaapHandler::pick_address() noexcept
     if (reprobe_held_range_) {
         return;  // the range supplied with PortOperational! (Table B.7 note a)
     }
-    // B.3.6.1: pick a random start so [start, start+count) fits in the dynamic pool.
     uint16_t const want = ctx_.requested_count == 0 ? 1U : ctx_.requested_count;
+    // The start a caller supplied is tried first, and only on this draw: the
+    // draw after a conflict is a fresh one, as it is for any range.
+    if (supplied_start_.has_value()) {
+        Eui48 const start = *supplied_start_;
+        supplied_start_.reset();
+        if (range_fits_pool(start, want)) {
+            ctx_.requested_start = start;
+            return;
+        }
+    }
+    // B.3.6.1: pick a random start so [start, start+count) fits in the dynamic pool.
     ctx_.requested_start.from_uint64(MAAP_DYNAMIC_POOL_START.to_uint64() + random_pool_offset(want));
+}
+
+auto MaapHandler::range_fits_pool(Eui48 const& start, uint16_t const count) noexcept -> bool
+{
+    uint64_t const first = start.to_uint64();
+    uint64_t const want = count == 0 ? 1U : count;
+    return first >= MAAP_DYNAMIC_POOL_START.to_uint64() && first + want - 1U <= MAAP_DYNAMIC_POOL_END.to_uint64();
 }
 
 auto MaapHandler::random_pool_offset(uint16_t const want) noexcept -> uint64_t

@@ -160,6 +160,12 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "the 1722 dynamic pool via MAAP at startup). Default static.",
         entity.stream_address_mode,
         [&entity](auto v) { entity.stream_address_mode = std::string{v}; });
+    specs.add<std::string>(
+        "stream.maap_range_file",
+        "Under stream.address_mode=maap: a file the defended MAAP block is saved to and probed first from at the next "
+        "start, so a restart keeps its stream destination addresses. Default empty: every start draws afresh.",
+        entity.stream_maap_range_file,
+        [&entity](auto v) { entity.stream_maap_range_file = std::string{v}; });
     specs.add<bool>(
         "srp.redeclare_registered_listeners",
         "Sticky-Listener MSRP workaround: re-declare REGISTERED Listener attributes every periodic/LeaveAll pass. "

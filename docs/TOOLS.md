@@ -73,7 +73,11 @@ answers GET_MILAN_INFO and takes `milan13` as its default profile; see
 `--srp.*` workarounds and `--stream.address_mode=static|maap` (under `maap`
 the first ENTITY_AVAILABLE after a Link Up waits until the MAAP block is
 defended, so a listener that discovers the entity is never told
-TALKER_DEST_MAC_FAIL for an address still being probed).
+TALKER_DEST_MAC_FAIL for an address still being probed; with
+`--stream.maap_range_file=<path>` the block defended is saved there and
+probed first at the next start, so a restart keeps its destination
+addresses and a bridge still holding the StreamIDs does not refuse the
+new Talker Advertise for tens of seconds).
 
 ## ATDECC — control & inspection
 

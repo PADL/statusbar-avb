@@ -19,10 +19,19 @@
 /// block is defended. A socket failure falls back to the configured static
 /// MACs (gate released, nothing on the reactor) so a MAAP-less network
 /// still streams.
+///
+/// With a range file named, the block defended is saved there (durably, a
+/// temporary renamed over it) each time it is acquired, and the next
+/// setup() hands the saved start back to the handler to probe first, so a
+/// restart keeps its destination addresses unless somebody took them while
+/// it was down. Without one, every start draws afresh.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avtp/avtp_maap_handler.hpp"
+#include "statusbar/buffer/file_descriptor.hpp"
+#include "statusbar/buffer/file_write.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -32,16 +41,110 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cstdint>
+#include <format>
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
 namespace statusbar::avb_entity {
+
+/// A defended MAAP range as the range file holds it.
+struct SavedMaapRange
+{
+    ieee::Eui48 start{};
+    uint16_t count{0};
+
+    [[nodiscard]] auto operator==(SavedMaapRange const&) const noexcept -> bool = default;
+};
+
+/// The range file's one line: the start as twelve hex digits, a space, the
+/// count in decimal, a newline. "91e0f0001234 3\n".
+[[nodiscard]] auto encode_maap_range(SavedMaapRange const& range) -> std::string;
+
+/// The range a range file's text holds, or nullopt for text that is not one
+/// (empty, damaged, a count of 0, a range outside the dynamic pool).
+[[nodiscard]] auto decode_maap_range(std::string_view text) noexcept -> std::optional<SavedMaapRange>;
+
+/// Write @p range to @p path durably (write_file_durably: a temporary beside
+/// it, synced and renamed over it). Errors: the write's.
+[[nodiscard]] auto save_maap_range(std::string_view path, SavedMaapRange const& range) -> Status;
+
+/// The range saved at @p path, or nullopt when there is no file, it cannot be
+/// read, or it does not hold one: a missing or damaged file is a fresh draw,
+/// not a failure.
+[[nodiscard]] auto load_maap_range(std::string_view path) -> std::optional<SavedMaapRange>;
+
+inline auto encode_maap_range(SavedMaapRange const& range) -> std::string
+{
+    return std::format("{:012x} {}\n", range.start.to_uint64(), range.count);
+}
+
+namespace detail {
+
+/// The twelve hex digits at the front of a range line, as a number.
+[[nodiscard]] inline auto maap_range_start_of(std::string_view const text) noexcept -> std::optional<uint64_t>
+{
+    constexpr size_t HEX_DIGITS = 12;
+    if (text.size() < HEX_DIGITS + 2 || text[HEX_DIGITS] != ' ') {
+        return std::nullopt;
+    }
+    uint64_t start = 0;
+    auto const hex = std::from_chars(text.data(), text.data() + HEX_DIGITS, start, 16);
+    return hex.ec == std::errc{} && hex.ptr == text.data() + HEX_DIGITS ? std::optional{start} : std::nullopt;
+}
+
+/// The count after the space, 1 to 65535.
+[[nodiscard]] inline auto maap_range_count_of(std::string_view const rest) noexcept -> std::optional<uint16_t>
+{
+    uint32_t count = 0;
+    auto const dec = std::from_chars(rest.data(), rest.data() + rest.size(), count, 10);
+    if (dec.ec != std::errc{} || dec.ptr == rest.data() || count == 0 || count > UINT16_MAX) {
+        return std::nullopt;
+    }
+    return static_cast<uint16_t>(count);
+}
+
+}  // namespace detail
+
+inline auto decode_maap_range(std::string_view const text) noexcept -> std::optional<SavedMaapRange>
+{
+    auto const start = detail::maap_range_start_of(text);
+    auto const count = start ? detail::maap_range_count_of(text.substr(13)) : std::nullopt;
+    if (!start || !count) {
+        return std::nullopt;
+    }
+    SavedMaapRange range{.count = *count};
+    range.start.from_uint64(*start);
+    return avtp::MaapHandler::range_fits_pool(range.start, range.count) ? std::optional{range} : std::nullopt;
+}
+
+inline auto save_maap_range(std::string_view const path, SavedMaapRange const& range) -> Status
+{
+    std::string const text = encode_maap_range(range);
+    return write_file_durably(path, make_const_span(text));
+}
+
+inline auto load_maap_range(std::string_view const path) -> std::optional<SavedMaapRange>
+{
+    FileDescriptor const fd{::open(std::string{path}.c_str(), O_RDONLY | O_CLOEXEC)};
+    std::array<char, 64> text{};  // the one line is 20 octets; anything near the buffer's size is not ours
+    ssize_t const got = fd.valid() ? ::read(fd.get(), text.data(), text.size()) : -1;
+    if (got <= 0 || static_cast<size_t>(got) >= text.size()) {
+        return std::nullopt;
+    }
+    return decode_maap_range(std::string_view{text.data(), static_cast<size_t>(got)});
+}
 
 /// B.3.6.1: the address draw is seeded from the least-significant octets of
 /// the sum of the station's MAC address and its local real-time clock, so a
@@ -69,7 +172,9 @@ class MaapAddressAcquirer
     /// reserve against the MAAP address, told the reactor time it fires at.
     /// Call once from start() in "maap" address mode; in static mode simply
     /// never call it (ready() defaults true). A set-up still standing from
-    /// an earlier call is retired first, at @p now.
+    /// an earlier call is retired first, at @p now. @p range_file, when not
+    /// empty, is where the block defended is saved and read back from: the
+    /// saved start is probed first (MaapHandler::prepare(count, start)).
     [[nodiscard]] auto setup(
         net::MessageReactor& reactor,
         std::string_view const interface_name,
@@ -79,13 +184,15 @@ class MaapAddressAcquirer
         std::span<uint16_t const> const stream_indices,
         logging::Logger const log,
         ReadyFn on_addresses_ready,
-        sm::TimePoint const now = sm::Clock::now()) -> Status
+        sm::TimePoint const now = sm::Clock::now(),
+        std::string_view const range_file = {}) -> Status
     {
         begin_setup(log, stream_indices, std::move(on_addresses_ready), now);
+        range_file_ = std::string{range_file};
         // One allocation covering all talker streams; the seed spreads our
         // initial draw per station and per boot.
         auto handler = std::make_unique<avtp::MaapHandler>(our_mac, maap_seed(our_mac, realtime_now_ns()));
-        handler->prepare(static_cast<uint16_t>(indices_.size()));
+        prepare_range(*handler);
         wire_handler(*handler, components, talker);
         return install(reactor, interface_name, std::move(handler));
     }
@@ -203,13 +310,14 @@ class MaapAddressAcquirer
     void wire_handler(avtp::MaapHandler& handler, nanoavb::NanoAvbComponents& components, TalkerStreams& talker)
     {
         handler.set_on_acquired(
-            [this, &components, &talker](ieee::Eui48 const& block_start, uint16_t /*count*/, int64_t const now_ns) {
+            [this, &components, &talker](ieee::Eui48 const& block_start, uint16_t const count, int64_t const now_ns) {
                 // Reactor thread, once the block is defended. Publish each
                 // per-stream dest MAC, then release the gate so the media
                 // thread's acquire-load sees the new MACs before transmitting.
                 publish_block(components, talker, indices_, block_start);
                 ready_.store(true, std::memory_order_release);
                 log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
+                remember(block_start, count);
                 if (on_addresses_ready_) {
                     // The MAAP handler's timeline is the reactor's (net::monotonic_ns,
                     // std::chrono::steady_clock): the same clock as sm::Clock.
@@ -224,6 +332,34 @@ class MaapAddressAcquirer
         });
     }
 
+    /// Name the block's size to @p handler, and the start to try first where
+    /// the range file holds one: the range of an earlier life, probed first so
+    /// the streams keep their destination addresses unless somebody took them.
+    void prepare_range(avtp::MaapHandler& handler)
+    {
+        auto const count = static_cast<uint16_t>(indices_.size());
+        auto const saved = range_file_.empty() ? std::nullopt : load_maap_range(range_file_);
+        if (!saved) {
+            handler.prepare(count);
+            return;
+        }
+        handler.prepare(count, saved->start);
+        log_->status("maap: probing the saved range {:012x} first", saved->start.to_uint64());
+    }
+
+    /// The block defended into the range file, for the next start to probe
+    /// first. A write that fails is logged and that is all: the block is
+    /// defended either way, and the next start draws afresh.
+    void remember(ieee::Eui48 const& block_start, uint16_t const count)
+    {
+        if (range_file_.empty()) {
+            return;
+        }
+        if (auto const saved = save_maap_range(range_file_, SavedMaapRange{.start = block_start, .count = count}); !saved) {
+            log_->warning("maap: the range file was not written: {}", logging::embed<40>(saved.error().message()));
+        }
+    }
+
     /// The port on the reactor, which owns it; null when nothing is set up.
     /// Valid until stop() retires it: the reactor drops only finished ports.
     nanoavb::MaapNetHandler* net_{nullptr};
@@ -231,6 +367,7 @@ class MaapAddressAcquirer
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     ReadyFn on_addresses_ready_{};
     std::optional<logging::Logger> log_{};  ///< set by setup (Logger is not default-constructible)
+    std::string range_file_{};              ///< empty: nothing saved, every start draws afresh
 };
 
 }  // namespace statusbar::avb_entity

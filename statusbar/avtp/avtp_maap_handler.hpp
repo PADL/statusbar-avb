@@ -97,6 +97,17 @@ class MaapHandler
     /// INITIAL), the way acquire() would begin it now.
     void prepare(uint16_t count);
 
+    /// prepare(count), with the start to try first: the range this station
+    /// defended in an earlier life, saved and handed back. B.3.6.1 leaves the
+    /// draw to the station, and a station that draws afresh on every start
+    /// moves its streams to new destination addresses under the same
+    /// StreamIDs - which a bridge still holding the old registration refuses
+    /// (802.1Q-2018 35.2.2.8, Talker Failed code 16) until it lapses. The
+    /// saved range is probed first, once: a conflict during that probe, or a
+    /// defence lost later, draws afresh as always. A start the range would
+    /// not fit in the pool from is ignored, and the draw is fresh.
+    void prepare(uint16_t count, Eui48 const& start);
+
     /// B.3.5.9 PortOperational!: the port can transmit and receive AVTPDUs
     /// (again). Idle with a range prepared, this begins acquiring it. Probing or
     /// defending, it restarts the probe sequence on the range held — that range
@@ -142,6 +153,9 @@ class MaapHandler
 
     /// The raw SM state (for diagnostics/tests).
     [[nodiscard]] auto state() const noexcept -> maap_sm::Def::State { return sm_.current_state(); }
+
+    /// Whether [start, start + count) lies within the dynamic pool.
+    [[nodiscard]] static auto range_fits_pool(Eui48 const& start, uint16_t count) noexcept -> bool;
 
   private:
     void wire_callbacks();
@@ -204,6 +218,8 @@ class MaapHandler
     /// Set while a PortOperational! restart runs: generate_address keeps the
     /// range held instead of drawing a new one (Table B.7 note a).
     bool reprobe_held_range_{false};
+    /// The start prepare() was handed, for the next draw and that one only.
+    std::optional<Eui48> supplied_start_{};
 
     // Timer deadlines in the caller's ns timebase; *_active_ gates them.
     int64_t probe_deadline_ns_{0};

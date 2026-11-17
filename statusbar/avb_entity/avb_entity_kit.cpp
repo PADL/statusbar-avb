@@ -312,7 +312,8 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
                 advertise_talker_streams(time);
             }
         },
-        now);
+        now,
+        config_.stream_maap_range_file);
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
