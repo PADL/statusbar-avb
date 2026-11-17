@@ -295,8 +295,9 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
     for (auto const& spec : talker_specs_) {
         (void)indices.try_push_back(spec.index);
     }
-    // On (re)defend: re-declare the MSRP Talker Advertise so listeners
-    // reserve against the MAAP address, once the SR-class domain is up.
+    // On (re)defend: release the ADP start the Link Up held back, and
+    // re-declare the MSRP Talker Advertise so listeners reserve against the
+    // MAAP address, once the SR-class domain is up.
     return maap_.setup(
         reactor,
         config_.interface_name,
@@ -306,6 +307,7 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
         indices,
         host_.ctl_log(),
         [this](TimePoint const time) {
+            host_.release_adp(time);
             if (host_.is_ready()) {
                 advertise_talker_streams(time);
             }

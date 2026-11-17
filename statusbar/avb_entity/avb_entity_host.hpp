@@ -153,6 +153,24 @@ class AvbEntityHost
     void on_gptp_announce(TimePoint time, bool has_grandmaster);
     void on_timeout(TimePoint time);
 
+    /// Whether the Link Up starts everything but ADP and leaves ADP owed to
+    /// release_adp(). A kit acquiring its talker addresses through MAAP sets
+    /// it while the block is being probed: an ENTITY_AVAILABLE sent before
+    /// the block is defended has a Milan listener probe at once, be told
+    /// TALKER_DEST_MAC_FAIL (IEEE 1722.1-2021 Table 8-3) and sit out its
+    /// retry timer, seconds a held ENTITY_AVAILABLE costs nobody. A Link Down
+    /// cancels what is owed; the next Link Up asks again. Off by default:
+    /// static addresses, or a MAAP set-up that fell back to them, hold
+    /// nothing.
+    void hold_adp(bool const on) noexcept { adp_held_ = on; }
+
+    /// The talker addresses are defended: start ADP if a Link Up left it
+    /// owed. Nothing otherwise, so it is safe on every re-defend.
+    void release_adp(TimePoint time);
+
+    /// Whether a Link Up has left ADP owed to release_adp().
+    [[nodiscard]] auto adp_owed() const noexcept -> bool { return adp_owed_; }
+
     // --- State queries ---------------------------------------------------------
     [[nodiscard]] auto is_ready() const noexcept -> bool;
     [[nodiscard]] auto state_string() const -> std::string_view;
@@ -389,6 +407,11 @@ class AvbEntityHost
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
     bool running_{false};
+    bool adp_held_{false};  ///< see hold_adp()
+    bool adp_owed_{false};  ///< a Link Up under the hold has not started ADP yet
+
+    /// Start the ADP advertiser, the failure logged.
+    void start_adp(TimePoint time);
 };
 
 }  // namespace statusbar::avb_entity

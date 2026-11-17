@@ -384,7 +384,24 @@ void AvbEntityHost::on_link_up(TimePoint const time)
 void AvbEntityHost::on_link_down(TimePoint const time)
 {
     supervisor_ctx_.link_up = false;
+    adp_owed_ = false;  // the next Link Up asks again
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, time);
+}
+
+void AvbEntityHost::release_adp(TimePoint const time)
+{
+    if (!adp_owed_) {
+        return;
+    }
+    adp_owed_ = false;
+    start_adp(time);
+}
+
+void AvbEntityHost::start_adp(TimePoint const time)
+{
+    if (auto const result = components_.adp_advertiser.start(time); !result) {
+        ctl_log().error("ADP start failed: errno {}", result.error().value());
+    }
 }
 
 void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandmaster)
@@ -458,9 +475,10 @@ void AvbEntityHost::wire_supervisor_callbacks()
         // port". An adoption follows from what the wire then says.
         (void)components_.msrp_handler.return_to_configured_domain(time);
         (void)components_.msrp_handler.declare_domain(time);
-        auto result = components_.adp_advertiser.start(time);
-        if (!result) {
-            ctl_log().error("ADP start failed: errno {}", result.error().value());
+        if (adp_held_) {
+            adp_owed_ = true;  // release_adp() starts it once the talker addresses are defended
+        } else {
+            start_adp(time);
         }
     };
 

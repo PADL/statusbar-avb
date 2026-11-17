@@ -417,6 +417,62 @@ TEST(avb_entity_kit_maap, a_link_up_while_the_link_is_up_is_a_repeat_and_a_resta
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{8}}));
 }
 
+TEST(avb_entity_kit_maap, the_first_entity_available_waits_for_the_talker_addresses)
+{
+    // A Milan listener that hears ENTITY_AVAILABLE while the block is still
+    // being probed probes at once, is told TALKER_DEST_MAC_FAIL and sits out
+    // TMR_RETRY. Under the hold the host's Link Up starts everything but ADP
+    // and owes it; the acquirer's ready callback releases it. A Link Down
+    // cancels the debt and the next Link Up incurs it again. Driven at the
+    // host, since the fixture's MAAP socket never opens (see below).
+    using nanoavb::AdpAdvertiserState;
+    KitUnderTest kit{make_config(2, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto& host = kit->host();
+    auto& adp = host.components().adp_advertiser;
+    host.hold_adp(true);
+    host.on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(adp.state() == AdpAdvertiserState::Stopped);  // held
+    EXPECT_TRUE(host.adp_owed());
+    host.release_adp(TimePoint{std::chrono::seconds{3}});  // the block is defended
+    EXPECT_TRUE(adp.state() == AdpAdvertiserState::Advertising);
+    EXPECT_FALSE(host.adp_owed());
+    host.release_adp(TimePoint{std::chrono::seconds{3}});  // a re-defend owes nothing
+    EXPECT_TRUE(adp.state() == AdpAdvertiserState::Advertising);
+
+    host.on_link_down(TimePoint{std::chrono::seconds{4}});
+    EXPECT_FALSE(host.adp_owed());
+    EXPECT_TRUE(adp.state() != AdpAdvertiserState::Advertising);
+    host.on_link_up(TimePoint{std::chrono::seconds{5}});
+    EXPECT_TRUE(host.adp_owed());  // the bounce asks again
+    host.on_link_down(TimePoint{std::chrono::seconds{6}});
+    EXPECT_FALSE(host.adp_owed());  // and a Link Down before the defend cancels it
+    host.release_adp(TimePoint{std::chrono::seconds{7}});
+    EXPECT_TRUE(adp.state() != AdpAdvertiserState::Advertising);
+
+    host.hold_adp(false);
+    host.on_link_up(TimePoint{std::chrono::seconds{8}});
+    EXPECT_TRUE(adp.state() == AdpAdvertiserState::Advertising);  // no hold: at once, as a static kit
+    EXPECT_FALSE(host.adp_owed());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{9}}));
+}
+
+TEST(avb_entity_kit_maap, without_a_maap_socket_adp_starts_at_link_up_as_before)
+{
+    // The fixture's interface does not exist, so the acquirer falls back to
+    // the static addresses and is ready from the start: the kit's Link Up
+    // holds nothing and ADP starts at once, as it does in static mode.
+    using nanoavb::AdpAdvertiserState;
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    EXPECT_TRUE(kit->host().components().adp_advertiser.state() == AdpAdvertiserState::Advertising);
+    EXPECT_FALSE(kit->host().adp_owed());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
+}
+
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)
 {
     // IEEE 1722-2025 B.3.6.1: a station draws a different sequence after every

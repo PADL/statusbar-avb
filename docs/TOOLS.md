@@ -70,7 +70,10 @@ answers GET_MILAN_INFO and takes `milan13` as its default profile; see
 (+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.
 `avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous),
 `--tx_pcap.path`, `--gate.talker_on_listener`, `--media.*`, `--tone.*`,
-`--srp.*` workarounds and `--stream.address_mode=static|maap`.
+`--srp.*` workarounds and `--stream.address_mode=static|maap` (under `maap`
+the first ENTITY_AVAILABLE after a Link Up waits until the MAAP block is
+defended, so a listener that discovers the entity is never told
+TALKER_DEST_MAC_FAIL for an address still being probed).
 
 ## ATDECC — control & inspection
 

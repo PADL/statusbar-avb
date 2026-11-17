@@ -116,11 +116,19 @@ class AvbEntityKit
     /// genuine bounce and the Link Up after a restart both go through.
     void on_link_up(TimePoint time)
     {
-        host_.on_link_up(time);
+        // MAAP first, the host after: the host's Link Up starts ADP unless
+        // the kit holds it, and it is held while the block is being probed
+        // (a first acquisition, or a bounce re-probing the range held). The
+        // first ENTITY_AVAILABLE then goes out once the addresses are
+        // defended, from the acquirer's ready callback, so no listener probes
+        // a talker whose destination address is not yet its own. A repeat
+        // (the link already up) reaches neither MAAP nor the hold.
         if (!link_up_) {
             maap_.port_operational(time);
         }
         link_up_ = true;
+        host_.hold_adp(!maap_.ready());
+        host_.on_link_up(time);
     }
     void on_link_down(TimePoint time)
     {
