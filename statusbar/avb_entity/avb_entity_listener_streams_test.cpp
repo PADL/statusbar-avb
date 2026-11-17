@@ -199,6 +199,47 @@ TEST(listener_connection, the_drain_matches_frames_by_the_published_connection)
     EXPECT_FALSE(ls.frame_is_for_listener(0, frame));
 }
 
+// The RX thread matches a frame to its slot by testing each slot in hand, not
+// by looking the slot up again by its index inside the walk: with several
+// inputs the second lookup made every frame cost a walk per slot, and a
+// frame for no slot - our own transmit, another stream on the segment - paid
+// for all of it. Same frames, same slots: the frame for the last of three
+// inputs reaches that input alone, a stranger's frame reaches none, and a
+// frame too short to carry a stream id is refused on this path too.
+TEST(listener_connection, a_frame_is_matched_against_the_slot_in_hand)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    for (uint16_t index = 0; index < 3; ++index) {
+        EXPECT_TRUE(ls.open_stream(make_aaf_spec(index)).has_value());
+    }
+    constexpr ieee::Eui64 STREAM_3{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x03};
+    ls.on_listener_connected(2, STREAM_3, GROUP, sm::TimePoint{});
+
+    auto const seen = [&](uint16_t const index) {
+        auto const* slot = ls.slot_for(index);
+        return slot == nullptr ? uint64_t{0} : slot->rx_packets.load() + slot->rx_bad.load();
+    };
+
+    std::array<uint8_t, 24> frame{};
+    frame[0] = avtp::AvtpSubtype::aaf;
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_3));
+    ls.on_stream_rx_frame(frame, 0);
+    EXPECT_EQ(seen(2), uint64_t{1});
+    EXPECT_EQ(seen(0), uint64_t{0});
+    EXPECT_EQ(seen(1), uint64_t{0});
+
+    auto stranger = frame;
+    span_copy(std::span<uint8_t>{stranger}.subspan(4, 8), make_const_span(STREAM_1));
+    ls.on_stream_rx_frame(stranger, 0);
+    ls.on_stream_rx_frame(std::span<uint8_t const>{frame}.first(11), 0);  // the id cut short
+    EXPECT_EQ(seen(2), uint64_t{1});
+    EXPECT_EQ(seen(0) + seen(1), uint64_t{0});
+    EXPECT_TRUE(ls.frame_is_for_listener(2, frame));
+    EXPECT_FALSE(ls.frame_is_for_listener(2, std::span<uint8_t const>{frame}.first(11)));
+}
+
 TEST(listener_connection, a_connect_for_an_index_without_a_slot_declares_nothing)
 {
     auto donor = make_donor();

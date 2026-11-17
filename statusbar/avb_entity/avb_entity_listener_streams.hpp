@@ -280,8 +280,8 @@ struct ListenerStreams
     /// Declare @p stream_id when @p held is not on it yet, else ask after the
     /// standing declaration: true when the reservation is Ready.
     auto attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
-    /// Whether @p frame (an AVTPDU of 12 octets or more) carries the stream
-    /// @p slot has published as its connection. RX thread.
+    /// Whether @p frame (an AVTPDU) carries the stream @p slot has published
+    /// as its connection; false for a frame too short to carry one. RX thread.
     [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
 

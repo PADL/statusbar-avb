@@ -365,8 +365,12 @@ auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> Lis
     if (subtype_kind == StreamKind::other) {
         return nullptr;
     }
+    // The slot in hand is tested as it is: looking it up again by its index
+    // would walk the slots a second time for each one, and a frame for no
+    // slot - our own transmit, another stream on the segment - pays the whole
+    // walk on every frame.
     for (auto& s : slots_) {
-        if (s.spec.format.kind == subtype_kind && frame_is_for_listener(s.spec.index, frame)) {
+        if (s.spec.format.kind == subtype_kind && slot_receives(s, frame)) {
             return &s;
         }
     }
@@ -520,17 +524,19 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
 {
-    // AVTP stream_id is 8 bytes at offset 4 (subtype@0, sv/ver/flags@1, seq@2,
-    // ...). The frame arrives here as the AVTPDU: the L2 header and any VLAN tag are gone.
-    if (frame.size() < 12) {
-        return false;
-    }
     auto const* slot = slot_for(stream_index);
     return slot != nullptr && slot_receives(*slot, frame);
 }
 
 auto ListenerStreams::slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool
 {
+    // AVTP stream_id is 8 bytes at offset 4 (subtype@0, sv/ver/flags@1, seq@2,
+    // ...). The frame arrives here as the AVTPDU: the L2 header and any VLAN
+    // tag are gone. Checked here, on the one path every caller takes, so a
+    // frame too short to read is refused whichever way it came.
+    if (frame.size() < 4 + ieee::Eui64::LENGTH) {
+        return false;
+    }
     // The connection as the reactor published it (on_listener_connected), not
     // the ACMP listener's record, which that thread writes with no hand-off.
     uint64_t const connected = slot.rx_stream_id.load();
