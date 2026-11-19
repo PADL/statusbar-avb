@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <thread>
@@ -152,6 +153,14 @@ class PtpTimer : public PtpTimerBase
     PtpTimer(PtpTimer&&) = delete;
     auto operator=(PtpTimer&&) -> PtpTimer& = delete;
 
+    /// Prefault `bytes` of the timer thread's stack before its loop, so the
+    /// first deep calls in it fault on nothing (realtime::prefault_stack()).
+    /// 0, the default, prefaults nothing. Set it before start().
+    auto set_stack_prefault(size_t const bytes) noexcept -> void { stack_prefault_bytes_ = bytes; }
+
+    /// Stack bytes prefaulted before the loop; 0 for none.
+    [[nodiscard]] auto stack_prefault_bytes() const noexcept -> size_t { return stack_prefault_bytes_; }
+
     /// Start the timer
     /// @return Success or error if timer is already running
     [[nodiscard]] auto start() -> Status
@@ -243,8 +252,12 @@ class PtpTimer : public PtpTimerBase
         run_guarded("PTP timer thread", [this]() { timer_loop_impl(); });
     }
 
-    void timer_loop_impl()
+    /// Make the timer thread ready for its loop: stack prefault, CPU
+    /// affinity, SCHED_FIFO priority. The last two log their failure and
+    /// the loop runs anyway.
+    void prepare_timer_thread()
     {
+        realtime::prefault_stack(stack_prefault_bytes_);
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
@@ -256,6 +269,11 @@ class PtpTimer : public PtpTimerBase
         if (enable_realtime_) {
             (void)realtime::set_realtime_priority_logged(49, "PTP timer");
         }
+    }
+
+    void timer_loop_impl()
+    {
+        prepare_timer_thread();
 
         // Do NOT block waiting for sync at startup. Enter the loop immediately;
         // while the bridge is unhealthy (no sync yet, or sync lost mid-run) we
@@ -319,6 +337,7 @@ class PtpTimer : public PtpTimerBase
     int64_t compensation_ns_;
     bool enable_realtime_;
     int cpu_affinity_;
+    size_t stack_prefault_bytes_{0};      ///< prefaulted before the loop; 0 = none
     [[maybe_unused]] int64_t threshold_;  ///< retained for API stability; ftrace tripwire that used it was removed
 
     Callback callback_;

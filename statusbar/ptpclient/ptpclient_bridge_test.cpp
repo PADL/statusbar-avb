@@ -17,6 +17,8 @@
 #include <system_error>
 #include <thread>
 
+#include <sys/resource.h>
+
 using namespace statusbar::ptpclient;
 
 //
@@ -623,6 +625,83 @@ TEST(ptp_timer, each_wake_carries_the_raw_instant_its_ptp_time_was_made_from)
     EXPECT_TRUE(raw_skew_ns.load() >= 0);
     EXPECT_TRUE(raw_skew_ns.load() < 50'000'000);
     EXPECT_TRUE(std::abs(ptp_skew_ns.load()) < 1'000'000);
+    bridge.stop_sampling();
+}
+
+namespace {
+
+/// Use 64 KiB of stack, one write per page.
+[[gnu::noinline]] auto use_stack() noexcept -> unsigned char
+{
+    constexpr size_t bytes = size_t{64} * 1024;
+    unsigned char volatile buf[bytes];
+    for (size_t i = 0; i < bytes; i += 4096) {
+        buf[i] = static_cast<unsigned char>(i);
+    }
+    asm volatile("" : : "r"(&buf[0]) : "memory");
+    return buf[0];
+}
+
+#if defined(__linux__)
+/// Minor faults this thread has taken so far.
+auto minor_faults() -> long
+{
+    rusage usage{};
+    (void)getrusage(RUSAGE_THREAD, &usage);
+    return usage.ru_minflt;
+}
+#endif
+
+}  // namespace
+
+TEST(ptp_timer, a_stack_prefault_leaves_the_timer_thread_nothing_to_fault_on)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    EXPECT_TRUE(bridge.is_healthy());
+
+    // The first wake uses 64 KiB of stack and counts the minor faults that
+    // took: none, once the thread prefaulted 128 KiB before its loop.
+    (void)use_stack();  // its code is resident before anything is counted
+    std::atomic<long> faults{-1};
+    std::atomic<int> wakes{0};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (!info || wakes.fetch_add(1) != 0) {
+                return;
+            }
+#if defined(__linux__)
+            (void)minor_faults();  // and so is getrusage's
+            long const before = minor_faults();
+            (void)use_stack();
+            faults.store(minor_faults() - before);
+#else
+            (void)use_stack();
+            faults.store(0);
+#endif
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{0});
+    timer.set_stack_prefault(size_t{128} * 1024);
+    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{128} * 1024);
+    EXPECT_TRUE(timer.start().has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    timer.stop();
+
+    EXPECT_TRUE(wakes.load() > 0);
+    EXPECT_EQ(faults.load(), 0);
     bridge.stop_sampling();
 }
 
