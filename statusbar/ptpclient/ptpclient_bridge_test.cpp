@@ -20,6 +20,10 @@
 #include <system_error>
 #include <thread>
 
+#if defined(__linux__)
+#    include <sys/resource.h>
+#endif
+
 using namespace statusbar::ptpclient;
 
 //
@@ -560,6 +564,66 @@ TEST(ptp_timer_stats, headroom_duration_and_thread_name)
 
     bridge.stop_sampling();
 }
+
+#if defined(__linux__)
+
+namespace {
+
+/// Use @p bytes of stack below this call, writing each page.
+[[gnu::noinline]] void use_stack(size_t const bytes)
+{
+    std::array<char volatile, 4096> chunk{};
+    if (bytes > chunk.size()) {
+        use_stack(bytes - chunk.size());
+    }
+    asm volatile("" : : "r"(&chunk[0]) : "memory");
+}
+
+/// The calling thread's minor page faults so far (getrusage(RUSAGE_THREAD)).
+auto thread_minor_faults() -> long
+{
+    struct rusage usage{};
+    (void)::getrusage(RUSAGE_THREAD, &usage);
+    return usage.ru_minflt;
+}
+
+}  // namespace
+
+TEST(ptp_timer_stats, a_prefaulted_timer_stack_takes_no_fault_on_its_first_wake)
+{
+    PtpTimeBridge bridge;
+    MockPtpReader mock;
+    BridgeSamplingParams params;
+    params.sample_hz = 100;
+    params.min_samples_for_healthy = 8;
+    auto guard = bridge.start_sampling(mock.get_reader(), params);
+    EXPECT_TRUE(guard.has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    std::atomic<long> faults{-1};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (info && faults.load() < 0) {
+                long const before = thread_minor_faults();
+                use_stack(size_t{64} * 1024);
+                faults.store(thread_minor_faults() - before);
+            }
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    timer.set_stack_prefault(size_t{128} * 1024);
+    EXPECT_TRUE(timer.start().has_value());
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    timer.stop();
+
+    EXPECT_EQ(faults.load(), 0L);
+    bridge.stop_sampling();
+}
+
+#endif  // __linux__
 
 //
 // Tests: PtpTimeBridge - get_mapping() consistency

@@ -232,6 +232,11 @@ class PtpTimer : public PtpTimerBase
         name.copy(thread_name_.data(), thread_name_.size() - 1);
     }
 
+    /// Touch @p bytes of the timer thread's stack when it starts, before its first wake
+    /// (realtime::prefault_stack; default 0, none). Applies from the next start(); call it
+    /// while the timer is stopped.
+    void set_stack_prefault(size_t const bytes) noexcept { stack_prefault_bytes_ = bytes; }
+
   private:
     /// The schedule after a wake at @p actual_wake_ptp: the next period, or,
     /// when that is already behind the wake, the first period boundary still
@@ -272,9 +277,13 @@ class PtpTimer : public PtpTimerBase
         run_guarded("PTP timer thread", [this]() { timer_loop_impl(); });
     }
 
-    void timer_loop_impl()
+    /// The timer thread's setup, before its loop: name, stack prefault, CPU and priority.
+    void prepare_timer_thread()
     {
         realtime::set_current_thread_name(thread_name_.data());
+        if (stack_prefault_bytes_ > 0) {
+            realtime::prefault_stack(stack_prefault_bytes_);
+        }
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
@@ -286,6 +295,11 @@ class PtpTimer : public PtpTimerBase
         if (enable_realtime_) {
             (void)realtime::set_realtime_priority_logged(49, "PTP timer");
         }
+    }
+
+    void timer_loop_impl()
+    {
+        prepare_timer_thread();
 
         // Do NOT block waiting for sync at startup. Enter the loop immediately;
         // while the bridge is unhealthy (no sync yet, or sync lost mid-run) we
@@ -360,6 +374,7 @@ class PtpTimer : public PtpTimerBase
     std::thread timer_thread_;
     static constexpr int64_t NO_HEADROOM = INT64_MIN;  ///< the wake did not sleep
     std::array<char, 16> thread_name_{'m', 'e', 'd', 'i', 'a'};
+    size_t stack_prefault_bytes_{0};
     stats::AtomicWakeStats stats_;
     stats::AtomicTimeStats headroom_;
 };
