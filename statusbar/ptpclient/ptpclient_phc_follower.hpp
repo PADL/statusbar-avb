@@ -21,12 +21,12 @@ namespace statusbar::ptpclient {
 
 /// What the followed PHC is steered onto: `target_ns` at PHC0's `anchor_ns`, advancing at 1 + rate_offset_ppb * 1e-9
 /// followed ns per PHC0 ns. Following PHC0 itself, offset by a constant, is offset_from_phc0(). A line whose rate is
-/// not finite, or past the servo's clamp, is refused by PhcFollower::sample().
+/// not finite, or at or past the servo's clamp, is refused by PhcFollower::sample().
 struct PhcLine
 {
     int64_t anchor_ns{0};         ///< PHC0 time of the anchor, ns
     int64_t target_ns{0};         ///< the followed PHC's time there, ns
-    double rate_offset_ppb{0.0};  ///< the line's rate against PHC0, ppb; finite and within the servo's clamp
+    double rate_offset_ppb{0.0};  ///< the line's rate against PHC0, ppb; finite, its magnitude below the servo's clamp
 
     /// The line at PHC0 time `phc0_ns`, the rate term rounded to the nearest ns.
     [[nodiscard]] auto at(int64_t const phc0_ns) const noexcept -> int64_t
@@ -82,7 +82,7 @@ struct PhcFollowerParams
 enum class PhcFollowerStage : uint8_t
 {
     none,       ///< nothing failed
-    line,       ///< the line's rate is not finite, or past the servo's clamp (invalid_argument)
+    line,       ///< the line's rate is not finite, or at or past the servo's clamp (invalid_argument)
     measure,    ///< the pair could not be read
     frequency,  ///< the frequency was refused: nothing applied, the follower as before the sample
     step,       ///< the frequency was applied, the step refused: the first time the servo starts over (the step owed
