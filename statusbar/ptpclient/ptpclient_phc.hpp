@@ -109,14 +109,25 @@ class PhcDevice
     bool extended_{false};  ///< PTP_SYS_OFFSET_EXTENDED with clockid works here
 };
 
+/// How PhcCrossTimestamp opens its two devices.
+enum class PhcCrossAccess : uint8_t
+{
+    read_only,      ///< both read-only
+    phcd_writable,  ///< PHC_d O_RDWR, so phcd() can be adjusted (a follower steering it); PHC0 read-only
+};
+
 /// PHC0 (the engine's) and PHC_d (another NIC's) read at one instant: three reads,
 /// PHC0 / PHC_d / PHC0, each the narrowest of `samples` (phc2sys's sysoff_measure, RAW-based).
 class PhcCrossTimestamp
 {
   public:
-    /// Open both devices read-only; they may be the same device.
-    [[nodiscard]] static auto open(std::string_view phc0_path, std::string_view phcd_path, PhcDeviceConfig config = {})
-        -> StatusValue<PhcCrossTimestamp>;
+    /// Open both devices, read-only unless `access` says otherwise (config.writable is ignored); they may be the
+    /// same device.
+    [[nodiscard]] static auto open(
+        std::string_view phc0_path,
+        std::string_view phcd_path,
+        PhcDeviceConfig config = {},
+        PhcCrossAccess access = PhcCrossAccess::read_only) -> StatusValue<PhcCrossTimestamp>;
 
     /// One pair; fails with a read's errno or invalid_argument for a disordered bracket.
     [[nodiscard]] auto measure() const noexcept -> StatusValue<PhcCrossSample>;

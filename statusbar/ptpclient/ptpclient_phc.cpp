@@ -60,20 +60,31 @@ PhcDevice::PhcDevice(FileDescriptor fd, std::string path, PhcDeviceConfig const 
     , config_{config}
 {}
 
+namespace {
+
+/// `config` opening O_RDWR when `writable`, else read-only.
+[[nodiscard]] auto with_writable(PhcDeviceConfig config, bool const writable) noexcept -> PhcDeviceConfig
+{
+    config.writable = writable;
+    return config;
+}
+
+}  // namespace
+
 PhcCrossTimestamp::PhcCrossTimestamp(PhcDevice phc0, PhcDevice phcd) noexcept
     : phc0_{std::move(phc0)}
     , phcd_{std::move(phcd)}
 {}
 
-auto PhcCrossTimestamp::open(std::string_view const phc0_path, std::string_view const phcd_path, PhcDeviceConfig config)
+auto PhcCrossTimestamp::open(
+    std::string_view const phc0_path, std::string_view const phcd_path, PhcDeviceConfig const config, PhcCrossAccess const access)
     -> StatusValue<PhcCrossTimestamp>
 {
-    config.writable = false;  // read only
-    auto phc0 = PhcDevice::open(phc0_path, config);
+    auto phc0 = PhcDevice::open(phc0_path, with_writable(config, false));  // PHC0 read only
     if (!phc0) {
         return forward_failure(phc0);
     }
-    auto phcd = PhcDevice::open(phcd_path, config);
+    auto phcd = PhcDevice::open(phcd_path, with_writable(config, access == PhcCrossAccess::phcd_writable));
     if (!phcd) {
         return forward_failure(phcd);
     }
