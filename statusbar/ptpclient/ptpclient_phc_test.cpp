@@ -78,6 +78,28 @@ TEST(ptpclient_phc, open_refuses_bad_configuration)
     EXPECT_FALSE(PhcDevice::open("/nonexistent/ptp").has_value());
 }
 
+TEST(ptpclient_phc, a_writable_phcd_can_be_adjusted)
+{
+    EXPECT_FALSE(PhcCrossTimestamp::open("/nonexistent/ptp", "/nonexistent/ptp", {}, PhcCrossAccess::phcd_writable).has_value());
+    // Needs /dev/ptpN read and write access (root); STATUSBAR_PHCD chooses the device.
+    char const* const envd = std::getenv("STATUSBAR_PHCD");
+    std::string const phcd = envd != nullptr ? envd : "/dev/ptp0";
+    auto pair = PhcCrossTimestamp::open(phcd, phcd, {}, PhcCrossAccess::phcd_writable);
+    if (!pair) {
+        SKIP("cannot open the device writable (no PHC, or not root)");
+    }
+    auto const frequency = pair->phcd().frequency_ppb();
+    EXPECT_TRUE(frequency.has_value());
+    if (frequency) {
+        EXPECT_TRUE(pair->phcd().set_frequency_ppb(*frequency).has_value());  // its own frequency: nothing moves
+    }
+    auto read_only = PhcCrossTimestamp::open(phcd, phcd);
+    EXPECT_TRUE(read_only.has_value());
+    if (frequency && read_only) {
+        EXPECT_FALSE(read_only->phcd().set_frequency_ppb(*frequency).has_value());  // the default stays read-only
+    }
+}
+
 TEST(ptpclient_phc, real_phcs_cross_timestamp_within_their_brackets)
 {
     // Needs read access to /dev/ptpN (root); STATUSBAR_PHC0 / STATUSBAR_PHCD choose the devices.
