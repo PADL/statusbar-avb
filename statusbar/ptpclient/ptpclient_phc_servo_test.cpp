@@ -124,9 +124,11 @@ TEST(PhcServo, the_servo_steps_only_before_its_first_lock)
     auto servo = make_servo();
     Bench bench{.natural_ppb = -10'000.0};
     bench.target_offset_ns -= 1'000'000;  // the PHC is 1 ms ahead
+    EXPECT_FALSE(servo.estimated());
     for (int i = 0; i < 160; ++i) {
         (void)bench.step(servo);
     }
+    EXPECT_TRUE(servo.estimated());
     EXPECT_EQ(bench.steps, 1);
     EXPECT_TRUE(servo.state() == PhcServoState::locked);
     EXPECT_TRUE(std::abs(bench.error_ns()) < 100);
@@ -140,8 +142,9 @@ TEST(PhcServo, the_servo_steps_only_before_its_first_lock)
     EXPECT_EQ(bench.steps, 1);
     EXPECT_TRUE(servo.state() == PhcServoState::unlocked);
 
-    // After reset() the servo may step again.
+    // After reset() the servo estimates again, and may step again.
     servo.reset();
+    EXPECT_FALSE(servo.estimated());
     bench.target_offset_ns += 1'000'000;
     for (int i = 0; i < 160; ++i) {
         (void)bench.step(servo);
@@ -170,8 +173,9 @@ TEST(PhcServo, a_frozen_servo_holds_its_frequency)
     }
     EXPECT_TRUE(servo.frequency_ppb() == held);
 
-    // Thawed, it slews back without a step: it has locked before.
+    // Thawed, it estimates its rate again and slews back without a step: it has locked before.
     servo.thaw();
+    EXPECT_FALSE(servo.estimated());
     for (int i = 0; i < 320; ++i) {
         (void)bench.step(servo);
     }

@@ -70,6 +70,9 @@ class PhcServo
     [[nodiscard]] auto state() const noexcept -> PhcServoState;
     /// The frequency offset last output, in ppb, feed-forward included.
     [[nodiscard]] auto frequency_ppb() const noexcept -> double { return frequency_ppb_; }
+    /// Whether its rate estimate is done since its creation, its last reset() or thaw(): from then on it regulates,
+    /// and the one step it may make (before its first lock) has been decided.
+    [[nodiscard]] auto estimated() const noexcept -> bool { return count_ >= 2; }
     /// The proportional gain in ppb per ns of error.
     [[nodiscard]] auto kp() const noexcept -> double { return kp_; }
     /// The integral gain in ppb per ns of error per sample.
