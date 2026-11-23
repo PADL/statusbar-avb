@@ -48,7 +48,6 @@ statusbar_add_module(
   nanoavb_aem_symbols_test.cpp
   nanoavb_aem_entity_model_test.cpp
   nanoavb_base_test.cpp
-  nanoavb_components_test.cpp
   nanoavb_entity_model_test.cpp
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp
@@ -56,7 +55,9 @@ statusbar_add_module(
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_controller_test.cpp
-  nanoavb_integration_test.cpp)
+  nanoavb_integration_test.cpp
+  FUNCTIONAL_TESTS
+  nanoavb_components_functional_test.cpp)
 
 add_executable(nanoavb_example nanoavb_example.cpp)
 target_link_libraries(nanoavb_example PRIVATE statusbar)

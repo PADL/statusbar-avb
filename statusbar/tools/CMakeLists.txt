@@ -205,7 +205,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
                    $<TARGET_FILE:owlm_tool>)
   set_tests_properties(
     owlm_loopback_smoke PROPERTIES SKIP_RETURN_CODE 77 LABELS
-                                   "smoke;needs-network")
+                                   "smoke;needs-network;functional")
 endif()
 
 # --- real-time AVTP latency tester (Linux: PACKET_MMAP) ---
