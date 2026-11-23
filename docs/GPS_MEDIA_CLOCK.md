@@ -324,7 +324,16 @@ accumulator: presentation time advances by exactly one `nominal_period_ns * r`
 sample period; the wake time only paces the integer sample count (nominal ±1,
 GPS-rate), never the timestamp. `r = switch/GPS` comes from the ratio Kalman,
 sampled in-entity from `CLOCK_REALTIME`(GPS) vs gPTP (`AvbEntityAudioIO::
-update_gps_ratio`). The presentation offset is 1 ms.
+update_gps_ratio`). The presentation offset is `presentation_offset_ns`: 1 ms by
+default, 2 ms under the Milan profile (Milan v1.3 5.3.7.6), or what the
+configuration gives. It is also all the room a late media-timer wake has. A
+wake later than the offset puts frames on the wire past their presentation
+time, and the generator then makes up the lag one sample a packet, so they
+stay late for several times the length of the stall; a listener that takes
+its media clock from the stream may stop its own talker to lock again
+(measured against an AVB interface clocked from our stream: no effect from
+stalls shorter than the offset, a pause of 5 ms to over a second from longer
+ones).
 
 Why it mattered — diagnosed on a Pi → the audio interface → Pi loopback. The the audio interface recovers its
 entire media clock from `avtp_timestamp` (its CIP SYT is a constant placeholder),

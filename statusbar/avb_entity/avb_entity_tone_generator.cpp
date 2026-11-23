@@ -305,7 +305,7 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor, TimePoint const
     // contexts add zero extra offset. Assigned before kit_.start() opens the
     // TX slots (the kit's talker holds a reference to it).
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
-        .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = config_.presentation_offset_ns}};
+        .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = effective_presentation_offset_ns(config_)}};
 
     if (auto status = kit_.start(reactor, now); !status) {
         return status;

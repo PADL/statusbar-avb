@@ -326,6 +326,25 @@ TEST(avb_entity_kit_profile, the_loop_does_not_sleep_past_an_mrp_timer)
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 200'000'000), 0);
 }
 
+TEST(avb_entity_kit_profile, a_talker_given_no_presentation_offset_takes_its_profiles)
+{
+    // Milan v1.3 5.3.7.6: "By default, the PAAD-AE shall use a 2ms Presentation
+    // time offset for all its Stream Outputs." An entity held to 1722.1 alone
+    // keeps 1 ms. A value the configuration gives is used under either profile.
+    auto milan = make_config(2, "milan13");
+    auto classic = make_config(2, "classic");
+    auto milan_model = make_config(2, "", true);
+    EXPECT_EQ(milan.presentation_offset_ns, 0U);
+    EXPECT_EQ(effective_presentation_offset_ns(milan), 2'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(classic), 1'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(milan_model), 2'000'000U);
+
+    milan.presentation_offset_ns = 1'000'000;
+    classic.presentation_offset_ns = 3'000'000;
+    EXPECT_EQ(effective_presentation_offset_ns(milan), 1'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(classic), 3'000'000U);
+}
+
 TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)
 {
     // Nothing said: a plain 1722.1 model answers to 1722.1 and has no Milan info.

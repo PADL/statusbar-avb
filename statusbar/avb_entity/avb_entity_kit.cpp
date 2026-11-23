@@ -53,7 +53,7 @@ AvbEntityKit::AvbEntityKit(
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(
             config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns, audio_sink);
-        listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
+        listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
     }
 
     // ATDECC descriptor wire version. Default "2016": emit descriptors at their
@@ -282,7 +282,11 @@ void AvbEntityKit::wire_stream_callbacks()
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 return fill_talker_stream_info(
-                    host_, descriptor_index, config_.presentation_offset_ns, talker_->stream_stopped(descriptor_index), out);
+                    host_,
+                    descriptor_index,
+                    effective_presentation_offset_ns(config_),
+                    talker_->stream_stopped(descriptor_index),
+                    out);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 return fill_listener_stream_info(host_, descriptor_index, out);
@@ -501,7 +505,7 @@ auto AvbEntityKit::milan_profile() const noexcept -> bool
 {
     // The configuration decides; left empty, the model does: a Milan model
     // answers to Milan v1.3, any other to IEEE 1722.1-2021 as written.
-    return config_.atdecc_profile.empty() ? config_.milan : config_.atdecc_profile == "milan13";
+    return is_milan_profile(config_);
 }
 
 void AvbEntityKit::install_milan_info()

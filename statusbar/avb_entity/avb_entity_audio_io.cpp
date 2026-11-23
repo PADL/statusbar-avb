@@ -227,7 +227,7 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor, TimePoint const now) 
     // timestamp we pass them is already the final presentation time. Assigned
     // before kit_.start() opens the TX slots (the kit's talker references it).
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
-        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = config_.presentation_offset_ns}};
+        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = effective_presentation_offset_ns(config_)}};
     rate_tracker_.configure(ptpclient::KalmanRatioTracker::Config{.meas_noise_ns = 1000.0, .jerk_psd = 1e-3});
 
     // Control plane + the whole stream data plane (TX/RX slots, sockets, MAAP,

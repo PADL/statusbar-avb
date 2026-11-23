@@ -200,7 +200,8 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         [&entity](auto v) { entity.crf_talker_dest_mac = v; });
     specs.add<uint64_t>(
         "presentation_offset_ns",
-        "AVTP presentation-time offset added to gPTP time to form the stream timestamp (ns)",
+        "AVTP presentation-time offset added to gPTP time to form the stream timestamp (ns). 0 = the profile's default: "
+        "2000000 under the Milan profile, 1000000 otherwise",
         entity.presentation_offset_ns,
         [&entity](auto v) { entity.presentation_offset_ns = v; });
     specs.add<uint64_t>(
