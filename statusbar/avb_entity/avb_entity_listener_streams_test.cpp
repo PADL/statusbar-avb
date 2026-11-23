@@ -16,6 +16,8 @@
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
+#include "statusbar/avtp/avtp_am824_stream_output.hpp"
+#include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/avtp/avtp_stream_common.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
@@ -38,6 +40,7 @@ namespace {
 
 constexpr uint64_t AAF_96K_INT32_8CH = 0x020702200200C000ULL;
 constexpr uint64_t CRF_MILAN_48K = 0x041060010000BB80ULL;
+constexpr uint64_t AM824_48K_8CH = 0x00A0020840000800ULL;
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -448,6 +451,120 @@ TEST(listener_consume, a_timed_consumer_is_kept_pending_and_through_a_close_like
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
     EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume_timed));
     EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume));
+}
+
+// An AM824 frame through the listener, as a talker builds it: the path
+// receive_am824_frame takes (header, declared audio, the decoder, both
+// consumers, the slot's counters).
+TEST(listener_consume, an_am824_frame_reaches_both_consumers_with_its_presentation_time)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 48'000, donor->components(), gptp, nullptr};
+    StreamSpec spec{};
+    spec.index = 0;
+    spec.format_word = AM824_48K_8CH;
+    spec.format = decode_stream_format(AM824_48K_8CH);
+    EXPECT_TRUE(ls.open_stream(spec).has_value());
+    EXPECT_TRUE(ls.slot_for(0)->am824.has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+
+    // Six data blocks of eight channels, the first on a SYT boundary, so
+    // the packet carries a timestamp: 2 ms after the time it is received at.
+    constexpr avtp::Nanoseconds NOW{1'795'000'000'000'000'000};
+    constexpr avtp::Nanoseconds AHEAD{2'000'000};
+    avtp::Am824StreamOutputContext talker{tsn::StreamId{}, avtp::Am824SampleRate::rate_48_khz, 8, 0};
+    avtp::Am824Pdu pdu{};
+    pdu.init(tsn::StreamId{}, 8, avtp::Am824SampleRate::rate_48_khz);
+    std::array<uint8_t, avtp::Am824Pdu::HEADER_LENGTH + (6 * 8 * 4)> frame{};
+    auto const payload = std::span<uint8_t>{frame}.subspan(avtp::Am824Pdu::HEADER_LENGTH);
+    EXPECT_EQ(avtp::am824_serialize_mbla(talker, pdu, payload, 6, NOW + AHEAD, [](uint8_t, std::span<float>) {}), payload.size());
+    EXPECT_TRUE(pdu.tv());
+    span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+
+    int timed_calls = 0;
+    int unsigned_calls = 0;
+    avtp::Nanoseconds timed_pts{};
+    uint64_t unsigned_pts = 0;
+    ls.set_consume_timed(0, [&](uint8_t, std::span<float const> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
+        ++timed_calls;
+        timed_pts = pts;
+        EXPECT_EQ(s.size(), 6U);
+        EXPECT_TRUE(period == avtp::Nanoseconds{20833});
+    });
+    ls.set_consume(0, [&](uint8_t, std::span<float const>, uint64_t pts, uint64_t) {
+        ++unsigned_calls;
+        unsigned_pts = pts;
+    });
+
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(ls.slot_for(0)->rx_samples.load(), uint64_t{6});
+    EXPECT_EQ(ls.slot_for(0)->rx_bad.load(), uint64_t{0});
+    EXPECT_EQ(timed_calls, 8);  // once a channel
+    EXPECT_EQ(unsigned_calls, 8);
+    EXPECT_TRUE(timed_pts == NOW + AHEAD);
+    EXPECT_EQ(unsigned_pts, static_cast<uint64_t>((NOW + AHEAD).count()));
+
+    // A frame cut short of its header is not a packet, and one for this
+    // stream whose header is not a valid AM824 header is counted as bad.
+    ls.on_stream_rx_frame(std::span<uint8_t const>{frame}.first(12), NOW);
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{1});
+    frame[1] &= 0x7F;  // the stream id is no longer marked valid
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(ls.slot_for(0)->rx_bad.load(), uint64_t{1});
+    EXPECT_EQ(timed_calls, 8);
+}
+
+// A CRF frame through the listener: each timestamp of the packet reaches
+// the consumer with the time the frame was received at.
+TEST(listener_crf, a_crf_frame_hands_each_timestamp_to_the_consumer_with_its_receive_time)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 48'000, donor->components(), gptp, nullptr};
+    StreamSpec spec{};
+    spec.index = 1;
+    spec.format_word = CRF_MILAN_48K;
+    spec.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(spec).has_value());
+    ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+
+    // Milan's CRF: one timestamp a packet, every 96 samples at 48 kHz.
+    constexpr avtp::Nanoseconds NOW{1'795'000'000'000'000'000};
+    constexpr avtp::Nanoseconds FIRST{NOW.count() + 2'000'000};
+    avtp::CrfStreamOutputContext talker{tsn::StreamId{}, avtp::CrfType::audio_sample, 48000, avtp::CrfPull::multiply_1_0, 96, 1};
+    avtp::CrfPdu pdu{};
+    pdu.init_audio_sample(tsn::StreamId{}, 48000, avtp::CrfPull::multiply_1_0, 96, 1);
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    auto const data = std::span<uint8_t>{frame}.subspan(avtp::CrfPdu::HEADER_LENGTH);
+    EXPECT_EQ(talker.build_packet(pdu, data, FIRST), data.size());
+    span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_2));
+
+    int calls = 0;
+    uint64_t told_ts = 0;
+    int64_t told_rx = 0;
+    ls.set_crf(1, [&](uint64_t ts, uint16_t index, int64_t rx) {
+        ++calls;
+        told_ts = ts;
+        told_rx = rx;
+        EXPECT_EQ(index, uint16_t{0});
+    });
+
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(told_ts, static_cast<uint64_t>(FIRST.count()));
+    EXPECT_EQ(told_rx, NOW.count());
+    EXPECT_EQ(ls.slot_for(1)->rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(ls.slot_for(1)->rx_samples.load(), uint64_t{1});
+
+    // A frame for another stream is not this slot's.
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(calls, 1);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

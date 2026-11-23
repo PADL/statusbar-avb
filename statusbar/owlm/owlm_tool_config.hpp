@@ -23,6 +23,7 @@
 #    include "statusbar/udptun/udptun_session.hpp"
 #    include "statusbar/udptun/udptun_time_source.hpp"
 
+#    include <algorithm>
 #    include <cstdint>
 #    include <ctime>
 #    include <string>
@@ -123,6 +124,9 @@ struct Config
     /// microseconds, when the wire timeline is made from it. 0 reports the
     /// bound without enforcing one.
     int64_t max_utc_error_us{0};
+    /// How fast the system clock's worst-case error grows while its time
+    /// daemon has no server, in parts per billion.
+    uint64_t utc_holdover_drift_ppb{::statusbar::realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
     /// Per-packet CSV output path. Empty = disabled (no file opened,
     /// the RX hot path does only a null-pointer check per packet). When
     /// non-empty, Session opens the file in its constructor and runs a
@@ -315,7 +319,9 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
         "measure and send on, in microseconds. When synchronization is interrupted the link keeps "
         "its rate and offset and its error grows; measurement runs on until the error passes this "
         "limit and resumes when synchronization returns. The report shows the current figure. "
-        "Negative takes any bounded link. Not used by --time-source=realtime.",
+        "Negative takes any bounded link. 0 is met by no link: nothing is measured or sent. How fast "
+        "the error grows without synchronization is --ptp.holdover_drift_ppb. Not used by "
+        "--time-source=realtime.",
         c.max_clock_error_us,
         [&](auto v) { c.max_clock_error_us = v; });
     s.add<int64_t>(
@@ -323,9 +329,17 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
         "Largest worst-case error of the system clock to measure and send on, in microseconds, "
         "when the wire timeline is made from it (--wire-clock=gps-tai or --time-source=realtime). "
         "The figure is the operating system's own (what chrony or ntpd last told it), coasted at "
-        "15 ppm between updates. 0 (default) shows it in the report without enforcing a limit.",
+        "--utc-holdover-drift-ppb between updates. 0 (default) shows it in the report without "
+        "enforcing a limit; on this option alone 0 does not mean a limit of zero.",
         c.max_utc_error_us,
         [&](auto v) { c.max_utc_error_us = v; });
+    s.add<uint64_t>(
+        "utc-holdover-drift-ppb",
+        "How fast the system clock's worst-case error grows between updates by its time daemon and "
+        "while the daemon has no server, in parts per billion (default 15000, the tolerance NTP "
+        "assumes of any clock).",
+        c.utc_holdover_drift_ppb,
+        [&](auto v) { c.utc_holdover_drift_ppb = v; });
     ::statusbar::ptpclient::add_ptp_arg_specs(s, c.ptp4l);
     s.add_flag(
         "gptp-verbose",
@@ -454,6 +468,9 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.identity.gptp_session_config.servo_kp = cli.servo_kp;
     cfg.identity.gptp_session_config.servo_ki = cli.servo_ki;
     cfg.identity.gptp_session_config.bridge = true;  // the wire timeline is read through it
+    // One figure for the master link, whichever source it is: the gPTP
+    // slave's bridge takes the PHC bridge's (--ptp.holdover_drift_ppb).
+    cfg.identity.gptp_session_config.holdover_drift_ppb = cli.ptp4l.sampling.holdover_drift_ppb;
     cfg.identity.gptp_session_config.verbose = cli.gptp_verbose;
     // owlm consumes master-time only via the bridge; nothing else on
     // the system needs the PHC disciplined, so keep PHC raw and let
@@ -486,6 +503,7 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.tai_minus_utc_ns = cli.tai_minus_utc_ns;
     cfg.max_clock_error_ns = cli.max_clock_error_us < 0 ? -1 : cli.max_clock_error_us * 1'000;
     cfg.max_utc_error_ns = cli.max_utc_error_us > 0 ? cli.max_utc_error_us * 1'000 : 0;
+    cfg.utc_holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(cli.utc_holdover_drift_ppb, UINT32_MAX));
     cfg.bridge_stable_samples = cli.bridge_stable_samples;
     cfg.bridge_stable_rate_ppm = cli.bridge_stable_rate_ppm;
     cfg.bridge_stable_offset_ns = cli.bridge_stable_offset_ns;

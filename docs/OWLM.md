@@ -97,11 +97,11 @@ displayed RTT is unaffected by the choice of WCL.
 Pass `--worst-case-latency-ms=0` to recover the original "PT ==
 acquisition wall" semantic (lateness ≡ real one-way transit).
 
-## Running without gPTP (`--no-gptp`)
+## Running without gPTP (`--time-source=realtime`)
 
 When there's no gPTP grand master on the segment (e.g. the RPi is
 plugged straight into a consumer router, or you just want a quick RTT
-sanity check), pass `--no-gptp`. Behaviour:
+sanity check), pass `--time-source=realtime`. Behaviour:
 
 - the gPTP slave session is skipped entirely (no PHC, no raw sockets,
   no `CAP_NET_RAW`);
@@ -190,18 +190,23 @@ networks.
 | `--peer-port PORT`         | `9991`           | Destination UDP port                                       |
 | `--local-port PORT`        | `9991`           | Local UDP bind port                                        |
 | `--tx-interval-us US`      | `100000` (10 Hz) | µs between transmits; `0` disables sending (RX-only)       |
-| `--report-interval US`     | `1000000` (1 s)  | Live summary cadence                                       |
+| `--report-interval-ms MS`  | `1000` (1 s)     | Live summary cadence                                       |
 | `--id-mid HEX`             | `0xFFFE`         | EUI-64 mid bytes (legacy single-stream; ignored if redundant) |
 | `--no-redundant`           | off              | Disable the default dual-stream redundancy                 |
 | `--temporal-shift-ms MS`   | `10`             | Delay between primary and its redundant copy               |
-| `--no-gptp`                | off              | Skip gPTP; stamp packets with `CLOCK_REALTIME` (no GM needed) |
+| `--worst-case-latency-ms MS` | `60`           | Offset between acquisition time and the presentation time stamped on the wire |
+| `--time-source {gptp-slave,ptp4l,realtime}` | `gptp-slave` | Where wire time comes from: the built-in gPTP slave on `--gptp-interface`, a PHC that ptp4l keeps in sync (`--ptp.*` options), or `CLOCK_REALTIME` with no grandmaster |
+| `--wire-clock {master,gps-tai}` | `master`    | Timeline of the on-wire timestamps: the time source's own, or absolute TAI made from the system clock (needed between sites whose grandmasters are not on TAI) |
+| `--tai-minus-utc-ns NS`    | `37000000000`    | TAI − UTC, applied with `--wire-clock=gps-tai`             |
 | `--payload-bytes N`        | `0`              | Pad bytes after the 32-byte header                         |
 | `--mcast-ttl N`            | `1`              | `IP_MULTICAST_TTL` for multicast peers                     |
 | `--dscp N`                 | `46` (EF)        | DSCP value (0–63); pass `-1` to disable. Wi-Fi maps EF→AC_VO |
 | `--ipv6`                   | off              | Bind IPv6 in RX-only mode (TX mode infers from `--peer`)   |
 | `--max-sources N`          | `32`             | Cap on tracked sources                                     |
-| `--max-clock-error-us US`  | `100`            | Largest worst-case error of the master clock link to measure on; negative takes any bounded link. See Accuracy |
-| `--max-utc-error-us US`    | `0` (report only)| Largest worst-case error of the system clock to measure on, when the wire timeline is made from it |
+| `--max-clock-error-us US`  | `100`            | Largest worst-case error of the master clock link to measure on; negative takes any bounded link, `0` is met by no link. See Accuracy |
+| `--max-utc-error-us US`    | `0` (report only)| Largest worst-case error of the system clock to measure on, when the wire timeline is made from it. Here `0` means no limit is enforced |
+| `--utc-holdover-drift-ppb N` | `15000`        | How fast the system clock's worst-case error grows from its time daemon's last update |
+| `--ptp.holdover_drift_ppb N` | `15000`        | How fast the master link's worst-case error grows without synchronization, for either time source |
 | `--hist-low-ns NS`         | `0`              | Histogram lower bound                                      |
 | `--hist-high-ns NS`        | `300000000`      | Histogram upper bound (300 ms)                             |
 | `--hist-bucket-ns NS`      | `500000`         | Histogram bucket width (500 µs → 600 bins)                 |
@@ -234,14 +239,24 @@ measurement stops there and resumes when synchronization returns. A new
 grandmaster is a new timeline: the link is unbounded until it has been
 fitted again.
 
-Two limits of that figure, one per time source. With `--time-source=ptp4l`
-the link is the PHC as ptp4l disciplines it: the bound says how well the PHC
-is read, not whether ptp4l still follows its grandmaster, so a ptp4l that
-has lost its master is not seen here. With the built-in gPTP slave the
-packet stamps use the bridge's offset alone, which is exact at each Sync and
-then moves at the local crystal's rate offset until the next one; the bound
-printed is for the rate-corrected conversion and does not include that
-movement, which matters only once Syncs are missing.
+What the figure covers depends on the time source. With
+`--time-source=ptp4l` the link is the PHC as ptp4l disciplines it: the bound
+says how well the PHC is read, not whether ptp4l still follows its
+grandmaster, so a ptp4l that has lost its master is not seen here. A PHC
+slewed more than 200 ppm against the local crystal has no bound at all until
+the slew is back inside that range. With the built-in gPTP slave the packet
+stamps use the bridge's offset alone, which is exact at each Sync and then
+moves at the local crystal's rate offset until the next one. The bound
+printed is that line's own: a few microseconds while Syncs arrive, growing
+at the holdover figure plus the whole rate offset once they stop. A crystal
+40 ppm off leaves a 100 µs limit about two seconds after the last Sync. A
+new grandmaster has no bound until a rate has been fitted to its own Syncs,
+which takes a second of them.
+
+How fast either link's error grows without synchronization is
+`--ptp.holdover_drift_ppb` (default 15 ppm, the tolerance NTP assumes of any
+clock); a machine whose oscillator is known to be steadier can be told so
+and coasts for longer.
 
 When the wire timeline is made from the system clock (`--wire-clock=gps-tai`
 or `--time-source=realtime`), a figure compared across two sites also
@@ -266,6 +281,16 @@ spent there, `timeline_changes` the grandmaster changes and time steps seen.
 `NOT USABLE` is appended while nothing is being measured or sent. The bounds
 are worst cases, rounded up: a one-way figure between two sites is good to
 the sum of both sites' bounds, and usually far better.
+
+With `--wire-clock=gps-tai` the mapping from the master timeline to TAI is
+learned from pairs of the two clocks, four a second. It is learned only while
+the link is inside its limit, and it starts over when the link moves to a new
+timeline. The filter widens itself when it finds its samples persistently
+outside its gate (a seed taken from a bad reading, a slew of the system
+clock it had not allowed for); the clock line then also shows
+`tai filter self-corrections N`. One or two at the start of a run are
+harmless. A count that keeps climbing means the system clock or the link is
+moving in steps.
 
 Hardware timestamping on the UDP NIC is *not* used — its PHC drifts
 independently of the gPTP NIC's PHC, and bridging across two PHCs

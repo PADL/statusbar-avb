@@ -21,6 +21,7 @@
 
 #    include <poll.h>
 
+#    include <algorithm>
 #    include <array>
 #    include <chrono>
 #    include <csignal>
@@ -64,6 +65,7 @@ struct Config
     double servo_ki{-1.0};
     double servo_kp{-1.0};
     bool no_bridge{false};
+    uint64_t holdover_drift_ppb{statusbar::realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
     // Derived (resolved after parsing)
     Profile profile{Profile::Standard};
@@ -97,6 +99,13 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
         "Do not keep the gPTP <-> CLOCK_MONOTONIC_RAW bridge. With it (the default) the per-sync line "
         "and the exit summary include the bridge's offset and rate.",
         [&](auto v) { config.no_bridge = v; });
+
+    specs.add<uint64_t>(
+        "holdover-drift-ppb",
+        "How fast the bridge's worst-case error grows while no Sync arrives, in parts per billion: the "
+        "oscillator and temperature figure of this machine (default 15000)",
+        config.holdover_drift_ppb,
+        [&](auto v) { config.holdover_drift_ppb = v; });
 
     specs.add_flag("verbose", "Print every sync update", [&](auto v) { config.verbose = v; });
 
@@ -151,6 +160,7 @@ int main(int argc, char** argv)
     sc.servo_kp = cli.servo_kp;
     sc.servo_ki = cli.servo_ki;
     sc.bridge = !cli.no_bridge;
+    sc.holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(cli.holdover_drift_ppb, UINT32_MAX));
     sc.verbose = cli.verbose;
 
     SlaveSession session{sc};

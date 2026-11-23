@@ -521,6 +521,10 @@ struct SessionConfig
     /// on it, only a figure compared across sites does.
     int64_t max_utc_error_ns{0};
 
+    /// How fast the system clock's worst-case error grows from the last
+    /// update by its time daemon, in parts per billion.
+    uint32_t utc_holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+
     // Payload size past the codec header.
     uint32_t payload_bytes{0};
 
@@ -1473,11 +1477,15 @@ class Session
     /// How well the master link is known now. It is refreshed at each
     /// synchronization and coasts in between and through a loss, so this
     /// never says "unsynchronized": it says how large the error may be.
+    /// It is the quality of the line the wire clock stamps with: for the
+    /// gPTP slave that is the bridge's offset-only line (see
+    /// make_gptp_slave_translator), which drifts at the whole rate offset
+    /// once Syncs stop.
     [[nodiscard]] auto link_quality() const noexcept -> realtime::ClockQuality
     {
 #if defined(__linux__)
         if (gptp_session_.has_value()) {
-            return gptp_session_->bridge().quality();
+            return gptp_session_->bridge().offset_quality();
         }
         if (ptp4l_ctx_.has_value()) {
             return ptp4l_ctx_->bridge->quality();
@@ -1495,8 +1503,27 @@ class Session
         sample_utc(now_mraw);
         bool const usable =
             clock_gate_.judge(link_quality(), utc_tracker_.quality(), realtime::MonotonicRawClock::from_ns(now_mraw));
+        follow_link_timeline(now_mraw);
         publish_clock_report(now_mraw);
         return usable;
+    }
+
+    /// Keep the GPS-TAI mapping to the master link it was learned from. A
+    /// link on a new timeline (a new grandmaster, a step) has a new offset
+    /// from the system clock: what the filter learned is dropped. A link
+    /// that is usable and has no mapping yet gets its first sample here,
+    /// before anything is stamped through it. No-op unless wire_clock_gps_tai.
+    void follow_link_timeline(int64_t const now_mraw) noexcept
+    {
+        if (!cfg_.wire_clock_gps_tai) {
+            return;
+        }
+        if (clock_gate_.link_timeline_changed()) {
+            tai_translator_.reset();
+        }
+        if (clock_gate_.link_usable() && !tai_translator_.has_sample()) {
+            take_tai_sample(now_mraw);
+        }
     }
 
     /// The system clock's own report of its error, read once a second when
@@ -1516,7 +1543,9 @@ class Session
             return;
         }
         next_clock_report_mraw_ = now_mraw + loss_snapshot_interval_ns_;
-        clock_report_.publish(clock_gate_.report());
+        ClockReport report = clock_gate_.report();
+        report.tai_self_corrections = tai_translator_.self_corrections();
+        clock_report_.publish(report);
     }
 
     /// SPSC consumer. Reads the active time source's "now" once
@@ -1556,7 +1585,8 @@ class Session
     /// polling loop) so the translator stays single-threaded. The
     /// master read goes through master_clock_ (mraw→master mapping; no
     /// PHC syscall in ptp4l mode), the same timeline the RX path and
-    /// the RT scheduler use. No-op unless wire_clock_gps_tai.
+    /// the RT scheduler use. No-op unless wire_clock_gps_tai, and while the
+    /// master link is outside its limit.
     /// The packet thread's periodic bookkeeping: the TAI sampler and the live
     /// report's loss snapshot.
     void periodic_samples(int64_t now_mraw) noexcept
@@ -1586,9 +1616,19 @@ class Session
 
     void tai_sample_tick(int64_t now_mraw) noexcept
     {
-        if (!cfg_.wire_clock_gps_tai || now_mraw < next_tai_sample_mraw_) {
+        // A master link outside its limit is not learned from: its time
+        // may be anything, and the filter would carry that into the
+        // mapping long after the link came back.
+        if (!cfg_.wire_clock_gps_tai || now_mraw < next_tai_sample_mraw_ || !clock_gate_.link_usable()) {
             return;
         }
+        take_tai_sample(now_mraw);
+    }
+
+    /// One paired reading of the master timeline and the system clock into
+    /// the GPS-TAI translator, on the loop thread.
+    void take_tai_sample(int64_t const now_mraw) noexcept
+    {
         next_tai_sample_mraw_ = now_mraw + tai_sample_interval_ns_;
         int64_t const rt1 = realtime_ns();
         int64_t const master = master_clock_.wire_ns(monotonic_raw_ns());
@@ -1688,7 +1728,8 @@ class Session
     /// The session's clocks against its limits. Packet thread only; the
     /// reporter reads what it publishes in clock_report_.
     ClockGate clock_gate_{};
-    realtime::UtcClockQualityTracker utc_tracker_{};
+    realtime::UtcClockQualityTracker utc_tracker_{
+        realtime::UtcClockQualityTracker::Config{.drift_bound_ppb = cfg_.utc_holdover_drift_ppb}};
     int64_t next_utc_sample_mraw_{0};
     static constexpr int64_t utc_sample_interval_ns_ = 1'000'000'000;  // the system updates its figure once a second
     statusbar::itc::AtomicTripleBuffer<ClockReport> clock_report_{};

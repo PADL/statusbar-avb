@@ -446,15 +446,34 @@ auto AvbEntityAudioIO::read_system_clock() -> SystemClockReading
 {
     auto const raw = realtime::read_monotonic_raw();
     auto const utc = realtime::read_utc();
+    auto const clock = clock_through_link(raw, utc);
+    auto const tai = tai_limit_.judge(clock, raw);
+    publish_system_clock(tai);
+    return {
+        .utc_ns = static_cast<uint64_t>(realtime::UtcClock::to_ns(utc)),
+        .verdict = {.follow = follow_verdict(clock, raw), .tai_usable = tai.usable}};
+}
+
+auto AvbEntityAudioIO::clock_through_link(
+    realtime::MonotonicRawClock::time_point const raw, realtime::UtcClock::time_point const utc) -> realtime::ClockQuality
+{
     if (raw >= next_utc_report_) {
         utc_tracker_.observe(raw, utc, realtime::read_system_clock_error());
         next_utc_report_ = raw + UTC_REPORT_INTERVAL;
     }
-    auto const tai = tai_limit_.judge(utc_tracker_.quality(), raw);
-    publish_system_clock(tai);
-    return {
-        .utc_ns = static_cast<uint64_t>(realtime::UtcClock::to_ns(utc)),
-        .verdict = {.follow = utc_follow_limit_.judge(utc_tracker_.quality(), raw), .tai_usable = tai.usable}};
+    // A pair is one reading of each clock and a TAI timestamp is made from
+    // both: the error of the two together. An unbounded link leaves no bound.
+    return utc_tracker_.quality().widened_by(link_.accuracy(raw));
+}
+
+auto AvbEntityAudioIO::follow_verdict(realtime::ClockQuality const& clock, realtime::MonotonicRawClock::time_point const raw)
+    -> realtime::AccuracyVerdict
+{
+    auto verdict = utc_follow_limit_.judge(clock, raw);
+    // What the filters learned is the offset between the two clocks: a new
+    // timeline of either one makes it void.
+    verdict.timeline_changed = link_.take_timeline_change() || verdict.timeline_changed;
+    return verdict;
 }
 
 void AvbEntityAudioIO::publish_system_clock(realtime::AccuracyVerdict const& tai)
@@ -474,7 +493,7 @@ void AvbEntityAudioIO::log_tai_verdict(realtime::AccuracyVerdict const& tai)
     tai_vouched_ = tai.usable;
     // RT media thread: deferred-formatting logger. -1 ns is an unbounded error.
     kit_.host().media_log().status(
-        "tunnel-clock: TAI timestamps {}  system clock error={} ns  limit={} ns  excursions={}",
+        "tunnel-clock: TAI timestamps {}  clock error={} ns  limit={} ns  excursions={}",
         logging::static_str(tai.usable ? "vouched for (tu=0)" : "NOT vouched for (tu=1)"),
         tai.accuracy == realtime::UNBOUNDED_ACCURACY ? int64_t{-1} : tai.accuracy.count(),
         config_.udptun_max_tai_error_ns,
@@ -497,12 +516,14 @@ void AvbEntityAudioIO::log_media_clock(ptpclient::RatioEstimate const& est, uint
     // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
     // RT media thread: deferred-formatting logger — never std::print here.
     kit_.host().media_log().status(
-        "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb  utc_error={} ns",
+        "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb  utc_error={} ns  "
+        "self_corrections={}",
         est.r,
         est.ppm(),
         static_cast<int64_t>(est.filtered_offset_ns),
         est.freq_uncertainty_ppb,
-        udptun_->telemetry().utc_accuracy_ns().load());
+        udptun_->telemetry().utc_accuracy_ns().load(),
+        rate_tracker_.self_corrections());
     rate_tracker_.mark_logged(gptp_now_ns);
 }
 

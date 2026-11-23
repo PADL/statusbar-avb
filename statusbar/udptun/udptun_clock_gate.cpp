@@ -81,6 +81,9 @@ void print_clock_report(std::ostream& out, ClockReport const& report)
     if (report.tracks_utc) {
         print_utc(out, report);
     }
+    if (report.tai_self_corrections > 0) {
+        std::format_to(Out{out}, "  tai filter self-corrections {}", report.tai_self_corrections);
+    }
     std::format_to(Out{out}, "{}\n", report.usable ? "" : "  NOT USABLE: nothing measured or sent");
 }
 

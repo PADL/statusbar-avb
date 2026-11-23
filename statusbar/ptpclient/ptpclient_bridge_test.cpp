@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/ptpclient/ptpclient_bridge_test_support.hpp"
 #include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/status.hpp"
@@ -15,128 +16,18 @@
 #include <expected>
 #include <system_error>
 
-#include <sys/resource.h>
-
 using namespace statusbar::ptpclient;
 
 //
 // How these tests tell the time
 //
 // The bridge is told every reading (begin_told_sampling / observe): the
-// times are made up, no thread runs and nothing waits. The few tests of the
-// sampler thread's own start and stop give it a reader that reads no clock,
-// and assert nothing that depends on how long anything takes.
+// times are made up, no thread runs and nothing waits. The sampler thread's
+// own start and stop, the sleep on the real clocks and the PtpTimer thread
+// are tried in ptpclient_bridge_functional_test.cpp.
 //
 
-namespace {
-
-using statusbar::realtime::GptpClock0;
-using statusbar::realtime::MonotonicClock;
-using statusbar::realtime::MonotonicRawClock;
-using statusbar::realtime::Nanoseconds;
-using namespace std::chrono_literals;
-
-/// A made-up nanosecond count as an instant on each clock the bridge names.
-constexpr auto ptp(int64_t const ns) -> GptpClock0::time_point
-{
-    return GptpClock0::from_ns(ns);
-}
-constexpr auto raw(int64_t const ns) -> MonotonicRawClock::time_point
-{
-    return MonotonicRawClock::from_ns(ns);
-}
-constexpr auto mono(int64_t const ns) -> MonotonicClock::time_point
-{
-    return MonotonicClock::from_ns(ns);
-}
-/// How far apart two instants of one clock are, either way round.
-constexpr auto abs_ns(Nanoseconds const d) -> int64_t
-{
-    return d.count() < 0 ? -d.count() : d.count();
-}
-
-/// A made-up PHC, a fixed distance ahead of RAW and running `ppm` fast of
-/// it, read every 2 ms, beside a made-up CLOCK_MONOTONIC running `mono_ppm`
-/// fast of RAW. Each reading takes `bracket_ns` and catches the PHC at the
-/// middle of it.
-struct ToldPhc
-{
-    static constexpr int64_t SAMPLE_INTERVAL_NS = 2'000'000;
-    static constexpr int64_t PHC_AHEAD_OF_RAW_NS = 1'000'000'000'000;
-
-    int64_t raw_ns{50'000'000'000};                        ///< RAW at the start of the next reading
-    int64_t phc_ns{50'000'000'000 + PHC_AHEAD_OF_RAW_NS};  ///< the PHC at that instant
-    int64_t mono_ns{57'000'000'000};                       ///< CLOCK_MONOTONIC at that instant
-    int64_t ppm{0};
-    int64_t mono_ppm{0};
-    int64_t bracket_ns{400};
-    bool fails{false};
-
-    /// The next reading, its PHC value @p phc_error_ns off the truth.
-    auto next(int64_t phc_error_ns = 0) -> PtpTimeBridge::Reading
-    {
-        int64_t const before = raw_ns;
-        int64_t const after = before + bracket_ns;
-        int64_t const phc_mid = phc_ns + (bracket_ns / 2) + phc_error_ns;
-        int64_t const mono_read = mono_ns + bracket_ns + 100;
-        raw_ns += SAMPLE_INTERVAL_NS;
-        phc_ns += SAMPLE_INTERVAL_NS + ((SAMPLE_INTERVAL_NS * ppm) / 1'000'000);
-        mono_ns += SAMPLE_INTERVAL_NS + ((SAMPLE_INTERVAL_NS * mono_ppm) / 1'000'000);
-        return {
-            .raw_before_phc = before,
-            .phc = fails ? statusbar::StatusValue<int64_t>{statusbar::failure(make_error_code(PtpError::clock_gettime_failed))}
-                         : statusbar::StatusValue<int64_t>{phc_mid},
-            .raw_after_phc = after,
-            .mono = mono_read,
-            .raw_after_mono = after + 200};
-    }
-
-    /// The RAW midpoint of the reading taken last: where its sample sits.
-    [[nodiscard]] auto last_sample_raw_ns() const -> int64_t { return raw_ns - SAMPLE_INTERVAL_NS + (bracket_ns / 2); }
-};
-
-/// A small window so a test can fill it several times over: fitted from
-/// 8 samples on, 32 at most.
-auto told_params() -> BridgeSamplingParams
-{
-    BridgeSamplingParams params;
-    params.window_size = 32;
-    params.min_samples_for_healthy = 8;
-    return params;
-}
-
-auto feed(PtpTimeBridge& bridge, PtpTimeBridge::SamplerState& state, ToldPhc& phc, int readings) -> void
-{
-    for (int i = 0; i < readings; ++i) {
-        (void)bridge.observe(state, phc.next());
-    }
-}
-
-/// For the three tests that let real code wait on the real clocks: tell the
-/// bridge a history that agrees with those clocks as they stand at this
-/// call, 64 readings ending now. The mapping is then fixed, so what such a
-/// test asserts is exact or one-sided, and never how long the wait took.
-auto tell_history_ending_now(PtpTimeBridge& bridge, PtpTimeBridge::SamplerState& state) -> ToldPhc
-{
-    constexpr int READINGS = 64;
-    int64_t const raw_now = statusbar::realtime::read_monotonic_raw_ns();
-    int64_t const mono_now = statusbar::realtime::read_monotonic_ns();
-    ToldPhc phc;
-    phc.raw_ns = raw_now - (READINGS * ToldPhc::SAMPLE_INTERVAL_NS);
-    phc.phc_ns = phc.raw_ns + ToldPhc::PHC_AHEAD_OF_RAW_NS;
-    phc.mono_ns = phc.raw_ns + (mono_now - raw_now);
-    feed(bridge, state, phc, READINGS);
-    return phc;
-}
-
-/// A PHC reader for the sampler thread's start and stop tests: it counts,
-/// and reads no clock.
-auto counting_reader() -> PtpTimeBridge::PtpTimeReader
-{
-    return [count = int64_t{0}]() mutable -> statusbar::StatusValue<int64_t> { return statusbar::success(++count); };
-}
-
-}  // namespace
+using namespace statusbar::ptpclient::test_support;
 
 //
 // Tests: PtpTimeBridge - Construction and initial state
@@ -161,64 +52,6 @@ TEST(ptp_bridge_construct, initial_mapping_has_default_values)
     EXPECT_EQ(mapping.epoch, 0U);
     EXPECT_FALSE(mapping.healthy);
     EXPECT_EQ(mapping.sample_count, 0);
-}
-
-//
-// Tests: PtpTimeBridge - start_sampling with PtpTimeReader
-//
-
-TEST(ptp_bridge_sampling, start_with_reader_succeeds)
-{
-    PtpTimeBridge bridge;
-    auto result = bridge.start_sampling(counting_reader());
-
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(bridge.is_running());
-
-    // Stop via guard destruction
-    result->stop();
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, guard_stops_on_destruction)
-{
-    PtpTimeBridge bridge;
-
-    {
-        auto result = bridge.start_sampling(counting_reader());
-        EXPECT_TRUE(result.has_value());
-        EXPECT_TRUE(bridge.is_running());
-    }  // Guard goes out of scope
-
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, stop_sampling_is_idempotent)
-{
-    PtpTimeBridge bridge;
-    auto result = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(result.has_value());
-
-    bridge.stop_sampling();
-    EXPECT_FALSE(bridge.is_running());
-
-    // Second stop should be safe
-    bridge.stop_sampling();
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, cannot_start_twice)
-{
-    PtpTimeBridge bridge;
-
-    auto result1 = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(result1.has_value());
-
-    // Second start should fail
-    auto result2 = bridge.start_sampling(counting_reader());
-    EXPECT_FALSE(result2.has_value());
-
-    bridge.stop_sampling();
 }
 
 //
@@ -483,6 +316,52 @@ TEST(ptp_bridge_quality, a_step_of_the_phc_is_a_new_epoch)
     EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
 }
 
+TEST(ptp_bridge_quality, a_phc_slewed_past_the_rate_window_is_not_vouched_for)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    // A servo slewing the PHC 300 ppm against RAW, past the 200 ppm the
+    // published rate is held within.
+    EXPECT_TRUE(params.max_rate_ppm < 300.0);
+    ToldPhc phc{.ppm = 300};
+    feed(bridge, state, phc, 64);
+
+    // The readings lie on a clean line, so the fit is healthy and a timer
+    // on the bridge keeps running. The line that is published is not that
+    // line: it is held at the edge of the window and runs away from the
+    // PHC at 100 ppm, microseconds across the window. No bound is claimed.
+    EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) >= 2'000);
+
+    // The servo settles inside the window: bounded again, on the same epoch.
+    uint64_t const epoch = bridge.epoch();
+    phc.ppm = 150;
+    feed(bridge, state, phc, 96);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch);
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
+}
+
+TEST(ptp_bridge_quality, the_bound_is_measured_against_the_line_the_conversions_use)
+{
+    // What quality() claims must cover what a conversion really does: at
+    // every sample of the window the published line is within the bound.
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc{.ppm = 97};
+    constexpr int64_t SCATTER_NS[4] = {700, -700, -700, 700};
+    for (int i = 0; i < 64; ++i) {
+        int64_t const truth = phc.phc_ns + (phc.bracket_ns / 2);
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+        if (i >= 32) {
+            int64_t const converted = bridge.from_raw_ns(phc.last_sample_raw_ns());
+            EXPECT_TRUE(std::abs(converted - truth) <= bridge.quality().bound_at_sync.count());
+        }
+    }
+}
+
 TEST(ptp_bridge_quality, a_rate_seen_moving_raises_the_drift_bound)
 {
     PtpTimeBridge bridge;
@@ -503,53 +382,6 @@ TEST(ptp_bridge_quality, a_rate_seen_moving_raises_the_drift_bound)
     // Steady again for a few windows, the configured figure stands.
     feed(bridge, state, phc, 160);
     EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000 + 500});
-}
-
-//
-// Tests: SamplingGuard - RAII behavior
-//
-
-TEST(ptp_bridge_guard, guard_active_when_valid)
-{
-    PtpTimeBridge bridge;
-    auto result = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(result->active());
-
-    result->stop();
-    EXPECT_FALSE(result->active());
-}
-
-TEST(ptp_bridge_guard, guard_release_transfers_ownership)
-{
-    PtpTimeBridge bridge;
-    auto result = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(result.has_value());
-
-    // Release ownership
-    auto* released = result->release();
-    EXPECT_EQ(released, &bridge);
-    EXPECT_FALSE(result->active());
-
-    // Bridge should still be running
-    EXPECT_TRUE(bridge.is_running());
-
-    // Manual cleanup
-    bridge.stop_sampling();
-}
-
-TEST(ptp_bridge_guard, guard_move_transfers_ownership)
-{
-    PtpTimeBridge bridge;
-    auto result = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(result.has_value());
-
-    SamplingGuard guard2 = std::move(*result);
-    EXPECT_TRUE(guard2.active());
-    EXPECT_FALSE(result->active());
-
-    guard2.stop();
-    EXPECT_FALSE(bridge.is_running());
 }
 
 //
@@ -712,62 +544,6 @@ TEST(ptp_bridge_sleep, the_slew_term_of_the_early_wake_is_not_counted_as_headroo
     EXPECT_TRUE(abs_ns(bridge.spin_headroom(*plan, mono_wake, raw_at_wake + 20us) - 30us) <= 100);
 }
 
-TEST(ptp_bridge_sleep, a_wake_that_never_slept_tells_no_headroom)
-{
-    PtpTimeBridge bridge;
-    auto state = bridge.begin_told_sampling(told_params());
-    ToldPhc const phc = tell_history_ending_now(bridge, state);
-
-    // A deadline already behind: nothing to sleep for, and the spin ends at once.
-    constexpr Nanoseconds untouched{-1};
-    Nanoseconds headroom = untouched;
-    auto const result = bridge.sleep_until_ptp(ptp(phc.phc_ns - 1'000'000LL), nullptr, &headroom);
-
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(headroom == untouched);
-}
-
-// The one test of the sleep itself on the real clocks. It says nothing of
-// how long the sleep took, only what no amount of load can change: it does
-// not end before its deadline, and the wake it tells is one instant on both
-// clocks.
-TEST(ptp_bridge_sleep, a_real_sleep_never_ends_before_its_deadline)
-{
-    PtpTimeBridge bridge;
-    auto state = bridge.begin_told_sampling(told_params());
-    ToldPhc const phc = tell_history_ending_now(bridge, state);
-
-    int64_t const deadline_ptp = phc.phc_ns + 2'000'000LL;
-    auto const result = bridge.sleep_until_ptp(ptp(deadline_ptp));
-
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(result->ptp >= ptp(deadline_ptp));
-    EXPECT_TRUE(result->raw >= raw(bridge.to_raw_ns(deadline_ptp)));
-    EXPECT_TRUE(ptp(bridge.from_raw_ns(MonotonicRawClock::to_ns(result->raw))) == result->ptp);
-    EXPECT_TRUE(statusbar::realtime::read_monotonic_raw() >= result->raw);
-}
-
-//
-// Tests: PtpTimeBridge - get_mapping() consistency
-//
-
-TEST(ptp_bridge_mapping, get_mapping_returns_consistent_snapshot)
-{
-    PtpTimeBridge bridge;
-
-    auto guard = bridge.start_sampling(counting_reader());
-    EXPECT_TRUE(guard.has_value());
-
-    // Get multiple mappings and verify they're consistent
-    auto m1 = bridge.get_mapping();
-    auto m2 = bridge.get_mapping();
-
-    // Epoch should be the same (or m2 >= m1)
-    EXPECT_TRUE(m2.epoch >= m1.epoch);
-
-    bridge.stop_sampling();
-}
-
 //
 // Main test runner
 //
@@ -812,130 +588,6 @@ TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
     EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(phc.phc_ns)) - phc.phc_ns) <= 2);
     EXPECT_TRUE(abs_ns(bridge.from_monotonic(bridge.to_monotonic(ptp(phc.phc_ns))) - ptp(phc.phc_ns)) <= 2);
     EXPECT_TRUE(bridge.to_monotonic(ptp(phc.phc_ns)) == bridge.raw_line().to_monotonic(raw(bridge.to_raw_ns(phc.phc_ns))));
-}
-
-//
-// Tests: PtpTimer - each wake tells its RAW instant
-//
-
-// The PtpTimer tests run its real thread, since a thread waking and a stack
-// being prefaulted are what they test. They block until the first wake has
-// been told, however long the host takes to get there, and assert nothing
-// about when that was.
-TEST(ptp_timer, each_wake_carries_the_raw_instant_its_ptp_time_was_made_from)
-{
-    PtpTimeBridge bridge;
-    auto state = bridge.begin_told_sampling(told_params());
-    (void)tell_history_ending_now(bridge, state);
-    EXPECT_TRUE(bridge.is_healthy());
-
-    // The callback is told the wake on both clocks; it compares the RAW one
-    // with the clock as it stands on entry and with the PTP one through the
-    // bridge, and reads nothing else.
-    std::atomic<int64_t> raw_skew_ns{INT64_MIN};
-    std::atomic<int64_t> ptp_skew_ns{INT64_MAX};
-    std::atomic<int64_t> error_skew_ns{INT64_MAX};
-    std::atomic<int> wakes{0};
-    std::atomic<bool> told{false};
-    auto timer = make_ptp_timer(
-        bridge,
-        1'000'000,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
-            if (!info || wakes.fetch_add(1) != 0) {
-                return;
-            }
-            int64_t const raw_ns = statusbar::realtime::MonotonicRawClock::to_ns(info->actual_raw);
-            raw_skew_ns.store(statusbar::realtime::read_monotonic_raw_ns() - raw_ns);
-            ptp_skew_ns.store(bridge.from_raw_ns(raw_ns) - info->actual_time_ns());
-            error_skew_ns.store(((info->actual_time - info->scheduled_time) - info->error).count());
-            told.store(true);
-            told.notify_all();
-        },
-        0,
-        /*enable_realtime=*/false,
-        /*cpu_affinity=*/-1);
-    EXPECT_TRUE(timer.start().has_value());
-    told.wait(false);
-    timer.stop();
-
-    // The RAW instant is one the clock had reached, and the PTP time is that
-    // instant through the bridge's mapping, to the nanosecond.
-    EXPECT_TRUE(raw_skew_ns.load() >= 0);
-    EXPECT_EQ(ptp_skew_ns.load(), int64_t{0});
-    EXPECT_EQ(error_skew_ns.load(), int64_t{0});
-    bridge.stop_sampling();
-}
-
-namespace {
-
-/// Use 64 KiB of stack, one write per page.
-[[gnu::noinline]] auto use_stack() noexcept -> unsigned char
-{
-    constexpr size_t bytes = size_t{64} * 1024;
-    unsigned char volatile buf[bytes];
-    for (size_t i = 0; i < bytes; i += 4096) {
-        buf[i] = static_cast<unsigned char>(i);
-    }
-    asm volatile("" : : "r"(&buf[0]) : "memory");
-    return buf[0];
-}
-
-#if defined(__linux__)
-/// Minor faults this thread has taken so far.
-auto minor_faults() -> long
-{
-    rusage usage{};
-    (void)getrusage(RUSAGE_THREAD, &usage);
-    return usage.ru_minflt;
-}
-#endif
-
-}  // namespace
-
-TEST(ptp_timer, a_stack_prefault_leaves_the_timer_thread_nothing_to_fault_on)
-{
-    PtpTimeBridge bridge;
-    auto state = bridge.begin_told_sampling(told_params());
-    (void)tell_history_ending_now(bridge, state);
-    EXPECT_TRUE(bridge.is_healthy());
-
-    // The first wake uses 64 KiB of stack and counts the minor faults that
-    // took: none, once the thread prefaulted 128 KiB before its loop.
-    (void)use_stack();  // its code is resident before anything is counted
-    std::atomic<long> faults{-1};
-    std::atomic<int> wakes{0};
-    std::atomic<bool> told{false};
-    auto timer = make_ptp_timer(
-        bridge,
-        1'000'000,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
-            if (!info || wakes.fetch_add(1) != 0) {
-                return;
-            }
-#if defined(__linux__)
-            (void)minor_faults();  // and so is getrusage's
-            long const before = minor_faults();
-            (void)use_stack();
-            faults.store(minor_faults() - before);
-#else
-            (void)use_stack();
-            faults.store(0);
-#endif
-            told.store(true);
-            told.notify_all();
-        },
-        0,
-        /*enable_realtime=*/false,
-        /*cpu_affinity=*/-1);
-    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{0});
-    timer.set_stack_prefault(size_t{128} * 1024);
-    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{128} * 1024);
-    EXPECT_TRUE(timer.start().has_value());
-    told.wait(false);
-    timer.stop();
-
-    EXPECT_EQ(faults.load(), 0);
-    bridge.stop_sampling();
 }
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_bridge_test)

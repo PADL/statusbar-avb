@@ -337,6 +337,16 @@ template <typename Entity>
     }
 }
 
+/// Tell @p entity how well the media timer's clock link is known, when it
+/// asks to be told (on_link_quality). One seqlock read; media thread.
+template <typename Entity>
+auto tell_link_quality(Entity& entity, ptpclient::PtpTimeBridge const& bridge) -> void
+{
+    if constexpr (requires { entity.on_link_quality(bridge.quality()); }) {
+        entity.on_link_quality(bridge.quality());
+    }
+}
+
 template <typename Entity>
 auto run_entity_main_loop(
     net::MessageReactor& reactor,
@@ -385,6 +395,7 @@ auto run_entity_main_loop(
             }
             auto const now = TimePoint{wake_info->actual_time.time_since_epoch()};
             auto const cb_t0 = std::chrono::steady_clock::now();
+            tell_link_quality(entity, *ctx.bridge);
             entity.process_audio(now, wake_info->actual_raw);
             note_wake(cb_t0, *wake_info);
         },

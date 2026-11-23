@@ -14,6 +14,7 @@
 #include <chrono>
 #include <cstdint>
 
+using statusbar::avb_entity::LinkWatch;
 using statusbar::avb_entity::MediaClockRateTracker;
 namespace ptpclient = statusbar::ptpclient;
 
@@ -198,5 +199,69 @@ TEST(media_rate, a_step_of_the_system_clock_restarts_the_filters_and_keeps_the_r
 }
 
 // Test runner
+
+//
+// LinkWatch: the media timer's clock link as the entity is told it
+//
+
+namespace {
+
+using statusbar::realtime::ClockQuality;
+using statusbar::realtime::MonotonicRawClock;
+using statusbar::realtime::Nanoseconds;
+
+/// A link last fitted at RAW @p synced_s seconds, good to 800 ns then and
+/// drifting no faster than 15.5 ppm.
+constexpr auto link_of(uint64_t epoch, int64_t synced_s) -> ClockQuality
+{
+    return {
+        .synced_at = MonotonicRawClock::from_ns(synced_s * 1'000'000'000),
+        .bound_at_sync = Nanoseconds{800},
+        .epoch = epoch,
+        .drift_bound_ppb = 15'500,
+        .time_source = statusbar::realtime::TimeSource::ptp};
+}
+
+}  // namespace
+
+TEST(media_rate_link, an_entity_told_of_no_link_accounts_for_none)
+{
+    LinkWatch link;
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(5'000'000'000)).count(), int64_t{0});
+    EXPECT_FALSE(link.take_timeline_change());
+}
+
+TEST(media_rate_link, the_error_of_the_link_grows_from_its_last_fit)
+{
+    LinkWatch link;
+    link.tell(link_of(3, 10));
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(10'000'000'000)).count(), int64_t{800});
+    // Two seconds without a fit: 31 us more.
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)).count(), int64_t{800 + 31'000});
+    // The first link told is not a change of timeline, whatever its epoch.
+    EXPECT_FALSE(link.take_timeline_change());
+
+    // A link that claims no bound leaves none: added to anything it is unbounded.
+    link.tell(ClockQuality{.epoch = 3});
+    EXPECT_TRUE(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)) == statusbar::realtime::UNBOUNDED_ACCURACY);
+    auto const utc = link_of(0, 10).widened_by(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)));
+    EXPECT_FALSE(utc.is_bounded());
+}
+
+TEST(media_rate_link, a_new_timeline_of_the_link_is_told_once)
+{
+    LinkWatch link;
+    link.tell(link_of(3, 10));
+    link.tell(link_of(3, 11));
+    EXPECT_FALSE(link.take_timeline_change());
+
+    // The PHC was stepped: epoch 4, nothing known of it, then fitted again.
+    // Told every wake and asked a few times a second, the change is not lost.
+    link.tell(ClockQuality{.epoch = 4});
+    link.tell(link_of(4, 12));
+    link.tell(link_of(4, 13));
+    EXPECT_TRUE(link.take_timeline_change());
+    EXPECT_FALSE(link.take_timeline_change());
+}
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_media_rate_test)

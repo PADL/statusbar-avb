@@ -32,7 +32,7 @@ binds the lambdas.
 statusbar/gptp/
 ├── gptp_clock_ops_linux.hpp         factory declaration (#if __linux__)
 ├── gptp_clock_ops_linux.cpp         factory implementation (#if __linux__)
-└── examples/gptp_slave_linux.cpp    working slave daemon example
+└── gptp_slave_linux_tool.cpp        the slave daemon (statusbar-gptp-slave)
 ```
 
 ## The five GptpClockOps lambdas

@@ -256,6 +256,33 @@ TEST(avtp_nanoseconds, the_mixed_am824_decoder_hands_each_callback_signed_times)
     EXPECT_TRUE(got_pts == now + OFFSET);
 }
 
+TEST(avtp_nanoseconds, the_mixed_am824_serializer_takes_the_signed_time_too)
+{
+    // One audio channel and one MIDI channel, built once on each form of
+    // the time: the same header and the same quadlets.
+    Nanoseconds const now{(9 * WRAP) - 1'000'000};
+    constexpr std::array<Am824ChannelType, 2> TYPES{Am824ChannelType::mbla, Am824ChannelType::midi};
+    auto const no_midi = [](uint8_t, uint8_t, uint8_t*) -> uint8_t { return 0; };
+    auto const no_smpte = [](uint8_t, uint8_t, std::array<uint8_t, 3>&) -> uint8_t { return 0; };
+
+    Am824StreamOutputContext talker_s{tsn::StreamId{}, Am824SampleRate::rate_48_khz, 2, static_cast<uint64_t>(OFFSET.count())};
+    Am824StreamOutputContext talker_u{tsn::StreamId{}, Am824SampleRate::rate_48_khz, 2, static_cast<uint64_t>(OFFSET.count())};
+    Am824Pdu pdu_s{};
+    Am824Pdu pdu_u{};
+    std::array<uint8_t, 6 * 2 * 4> payload_s{};
+    std::array<uint8_t, 6 * 2 * 4> payload_u{};
+    EXPECT_EQ(
+        am824_serialize_mixed(talker_s, pdu_s, std::span{payload_s}, 6, now, TYPES, silence, no_midi, no_smpte), payload_s.size());
+    EXPECT_EQ(
+        am824_serialize_mixed(
+            talker_u, pdu_u, std::span{payload_u}, 6, static_cast<uint64_t>(now.count()), TYPES, silence, no_midi, no_smpte),
+        payload_u.size());
+    EXPECT_TRUE(payload_s == payload_u);
+    EXPECT_TRUE(pdu_s.tv());
+    EXPECT_EQ(pdu_s.avtp_timestamp(), pdu_u.avtp_timestamp());
+    EXPECT_EQ(pdu_s.avtp_timestamp(), field_of((now + OFFSET).count()));
+}
+
 TEST(avtp_nanoseconds, an_aaf_v1_packet_built_and_read_on_the_signed_time_keeps_its_presentation_time)
 {
     Nanoseconds const now{TAI_SCALE};

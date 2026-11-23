@@ -191,6 +191,13 @@ class AvbEntityAudioIO
     /// grace clock), so the tick reads no clock: the media timer tells both.
     auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
+    /// The quality of the media timer's clock link (the PHC bridge the
+    /// timer waits on), told by the runner before each process_audio. The
+    /// gPTP time process_audio is told comes through that link, so its
+    /// error counts toward every limit on a time made from it. An entity
+    /// never told of a link accounts for none. Media thread.
+    void on_link_quality(realtime::ClockQuality const& link) noexcept { link_.tell(link); }
+
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
     /// stream on the wire this tick: true if gating is disabled, or ALL of this
     /// stream's own preconditions hold -- an ACMP connection exists AND the stream
@@ -207,6 +214,12 @@ class AvbEntityAudioIO
     /// Register a per-stream RX consumer (decoded floats + PTS, kit phase 2).
     /// Menu/selection: an index the model never declares stays inert.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn) { kit_.listener()->set_consume(stream_index, std::move(fn)); }
+    /// set_consume() for a consumer that takes its times as avtp::Nanoseconds;
+    /// kept beside a set_consume() consumer for the same stream.
+    void set_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn)
+    {
+        kit_.listener()->set_consume_timed(stream_index, std::move(fn));
+    }
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
 
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return kit_.host().components(); }
@@ -269,8 +282,19 @@ class AvbEntityAudioIO
     /// Read the system clock and judge it against the entity's two limits
     /// (config_.max_utc_error_ns, config_.udptun_max_tai_error_ns). The
     /// operating system's report of its error is read once a second (it
-    /// changes no faster); between reports the bound coasts. Media thread.
+    /// changes no faster); between reports the bound coasts. What is judged
+    /// is the system clock's error with the media timer link's added
+    /// (on_link_quality), since each pair and each TAI timestamp is made
+    /// from both. Media thread.
     [[nodiscard]] auto read_system_clock() -> SystemClockReading;
+    /// The system clock's quality at @p raw, its report refreshed when one
+    /// is due, widened by the media timer link's error.
+    [[nodiscard]] auto clock_through_link(realtime::MonotonicRawClock::time_point raw, realtime::UtcClock::time_point utc)
+        -> realtime::ClockQuality;
+    /// The verdict for following the clock's rate. A change of either
+    /// clock's timeline restarts the filters.
+    [[nodiscard]] auto follow_verdict(realtime::ClockQuality const& clock, realtime::MonotonicRawClock::time_point raw)
+        -> realtime::AccuracyVerdict;
     void publish_system_clock(realtime::AccuracyVerdict const& tai);
     /// One log line each time the verdict on the tunnel's TAI changes, and
     /// one for the first verdict.
@@ -323,6 +347,8 @@ class AvbEntityAudioIO
         realtime::UtcClockQualityTracker::Config{.drift_bound_ppb = config_.utc_holdover_drift_ppb}};
     realtime::AccuracyLimit utc_follow_limit_{accuracy_limit_of(config_.max_utc_error_ns)};
     realtime::AccuracyLimit tai_limit_{accuracy_limit_of(config_.udptun_max_tai_error_ns)};
+    /// The media timer's clock link as last told (on_link_quality).
+    LinkWatch link_{};
     realtime::MonotonicRawClock::time_point next_utc_report_{};
     bool tai_verdict_logged_{false};
     bool tai_vouched_{false};

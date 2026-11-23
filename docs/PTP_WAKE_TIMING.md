@@ -3,7 +3,7 @@
 
 # PTP Wake Timing Guide
 
-This document covers the `ptpclient_wake_example` tool and performance tuning recommendations for achieving sub-microsecond precision wake timing using PTP hardware clocks on Linux.
+This document covers the `statusbar-ptpclient-wake` tool (built from `ptpclient_wake_example.cpp`) and performance tuning recommendations for achieving sub-microsecond precision wake timing using PTP hardware clocks on Linux.
 
 ## Overview
 
@@ -16,7 +16,7 @@ The PTP Wake Example demonstrates precision wake timing by:
 ## Command Line Usage
 
 ```bash
-Usage: ptpclient_wake_example [options]
+Usage: statusbar-ptpclient-wake [options]
 
 Options:
   --ptp.driver=CHOICE   PTP driver (linuxptp or system)
@@ -29,6 +29,13 @@ Options:
   --ptp.no-rt           Disable realtime priority
   --ptp.no-mlock        Disable memory locking
   --ptp.quiet           Suppress verbose output
+  --ptp.threshold=INTEGER
+                        PTP sync threshold in ns (default: 50000)
+  --ptp.spin_ns=INTEGER Busy-spin window before each wake in ns (default: 50000,
+                        0 = no busy-wait)
+  --ptp.holdover_drift_ppb=INTEGER
+                        How fast the worst-case error of the PHC link grows while
+                        the PHC cannot be read, in parts per billion (default: 15000)
   --help                Show help message
   --config-load=FILE    Load configuration from TOML file
   --config-save=FILE    Save current configuration to TOML file
@@ -38,20 +45,20 @@ Options:
 
 ```bash
 # Basic usage with defaults (1ms period, no compensation, with RT priority)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0
 
 # 1ms period with -3µs compensation to account for wake overhead
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
     --ptp.period=1000000 --ptp.compensation=-3000
 
 # Without realtime priority (for testing without CAP_SYS_NICE)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.period=1000000 --ptp.compensation=-3000 --ptp.no-rt
+sudo statusbar-ptpclient-wake --ptp.period=1000000 --ptp.compensation=-3000 --ptp.no-rt
 
 # 500µs period (2kHz wake rate)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.period=500000 --ptp.compensation=-3000
+sudo statusbar-ptpclient-wake --ptp.period=500000 --ptp.compensation=-3000
 
 # Using a TOML configuration file
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --config-load=ptp_config.toml
+sudo statusbar-ptpclient-wake --config-load=ptp_config.toml
 ```
 
 ### Configuration File Example
@@ -116,7 +123,7 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 1. Run first without compensation to measure average error:
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=0
    ```
 
@@ -124,7 +131,7 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 3. Apply compensation to subtract this offset:
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=-3000
    ```
 
@@ -153,7 +160,7 @@ Dedicate a CPU core exclusively to the wake timing process by preventing the sch
 
 3. Run the program on the isolated core (use `--ptp.cpu=3` for affinity, taskset optional):
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=-2900 --ptp.cpu=3
    ```
 
@@ -203,7 +210,7 @@ for irq in /proc/irq/*/smp_affinity; do
 done
 
 # Run on isolated core with RT priority and compensation
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
     --ptp.period=1000000 --ptp.compensation=-2900 --ptp.cpu=3
 ```
 
@@ -276,7 +283,7 @@ sudo phc2sys -s CLOCK_REALTIME -c /dev/ptp0 -O 0
 
 Run with `sudo` or grant `CAP_SYS_NICE`:
 ```bash
-sudo setcap cap_sys_nice+ep ./ptpclient_wake_example
+sudo setcap cap_sys_nice+ep $(command -v statusbar-ptpclient-wake)
 ```
 
 Or use `--ptp.no-rt` to run without realtime priority.
@@ -285,7 +292,7 @@ Or use `--ptp.no-rt` to run without realtime priority.
 
 Run with `sudo` or grant `CAP_IPC_LOCK`:
 ```bash
-sudo setcap cap_ipc_lock+ep ./ptpclient_wake_example
+sudo setcap cap_ipc_lock+ep $(command -v statusbar-ptpclient-wake)
 ```
 
 Memory locking is strongly recommended to prevent page fault latency spikes.
@@ -329,6 +336,18 @@ the window less the headroom. A window that the headroom never comes near the
 bottom of can be made smaller, which spins less; a headroom that goes negative
 means late wakes, and the window wants to be larger. A wake that did not sleep
 reports nothing. `spin_headroom()` is the same figure told its clock readings.
+
+`PtpTimer` passes the figure on with every wake, as
+`TimerWakeInfo::spin_headroom` (empty for a wake that did not sleep), and
+`statusbar-ptpclient-wake` prints its statistics when it stops:
+
+```
+Spin headroom of the 50000 ns window: avg 44512 ns  min 20804 ns  max 49120 ns  over 600000 sleeps
+```
+
+The smallest figure is the one to read: here the kernel never woke the thread
+more than 29 us late, so a 30 us window (`--ptp.spin_ns=30000`) would still
+have been enough.
 
 The startup lines above print one `CLOCK_MONOTONIC_RAW` reading and the
 PTP-minus-RAW difference for orientation; the mapping the timer runs on is

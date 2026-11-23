@@ -164,7 +164,15 @@ sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 `--phase-jump-threshold=<ns>`, `--servo-kp`/`--servo-ki`, `--software`,
 `--no-bridge` (the gPTP time bridge is kept against CLOCK_MONOTONIC_RAW, the
 application's one timing reference, and its offset and rate are printed; this
-turns it off).
+turns it off), `--holdover-drift-ppb=<n>` (how fast the bridge's worst-case
+error grows while no Sync arrives, default 15000).
+
+`ptpclient-wake` takes the `--ptp.*` options every PTP-timed tool takes, among
+them `--ptp.spin_ns` (the busy-spin window before each wake) and
+`--ptp.holdover_drift_ppb` (how fast the PHC link's worst-case error grows
+while the PHC cannot be read). When it stops it prints the wake-error
+statistics and how much of the spin window was left at each wake; see
+[PTP_WAKE_TIMING.md](PTP_WAKE_TIMING.md).
 
 ## SRP / MSRP
 

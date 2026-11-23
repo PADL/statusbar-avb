@@ -4,13 +4,14 @@
 //
 // PTP Wake Example - Demonstrates precision wake timing using PTP clock
 //
-// Usage: ptpclient_wake_example --ptp.driver=<name> --ptp.device=<path> --ptp.period=<ns> [options]
+// Usage: statusbar-ptpclient-wake --ptp.driver=<name> --ptp.device=<path> --ptp.period=<ns> [options]
 //
 // Requires CAP_SYS_NICE capability or root for realtime thread priority.
 
 #include "statusbar/config/config.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/stats/stats_atomic_time_stats.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -78,12 +79,20 @@ auto setup_failed(std::error_code const& error) -> int
     return EXIT_FAILURE;
 }
 
-/// The example's wake: a line every 10000 wakes with the wake error.
+/// What was left of the spin window at each wake that slept (written by the
+/// timer thread, read for the report).
+statusbar::stats::AtomicTimeStats spin_headroom_stats{};
+
+/// The example's wake: the spin headroom into its statistics, and a line
+/// every 10000 wakes with the wake error.
 void on_wake(statusbar::StatusValue<statusbar::ptpclient::TimerWakeInfo> const& wake_info)
 {
     if (!wake_info) {
         std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
         return;
+    }
+    if (wake_info->spin_headroom) {
+        spin_headroom_stats.update(wake_info->spin_headroom->count());
     }
     if (wake_info->wake_count % 10000 == 0) {
         std::print(
@@ -102,20 +111,47 @@ void print_report(StatsT const& stats, int64_t const compensation_ns)
     std::print("{}", report);
 }
 
-/// Clean shutdown, then the timer's statistics.
-template <typename TimerT>
-void stop_and_report(TimerT& timer, statusbar::ptpclient::PtpAppContext& ctx)
+/// How much of the spin window (--ptp.spin_ns) was left when the kernel
+/// woke the thread, over every wake that slept. The window less the
+/// smallest figure is the latest the kernel woke it; a smallest figure at
+/// or below zero means a sleep overran the window and that wake was late.
+void print_spin_headroom(int64_t const window_ns)
 {
-    std::print("\n\nShutting down...\n");
-    timer.stop();
+    auto const headroom = spin_headroom_stats.snapshot();
+    if (headroom.count == 0) {
+        std::print("Spin headroom: no wake slept (window {} ns)\n", window_ns);
+        return;
+    }
+    std::print(
+        "Spin headroom of the {} ns window: avg {:.0f} ns  min {} ns  max {} ns  over {} sleeps\n",
+        window_ns,
+        headroom.average_ns(),
+        headroom.min_ns,
+        headroom.max_ns,
+        headroom.count);
+}
+
+/// Stop the bridge's sampling.
+void stop_sampling(statusbar::ptpclient::PtpAppContext& ctx)
+{
     std::print("\n\nguard stopping...\n");
     ctx.guard.stop();
     std::print("\n\nguard stopped...\n\n");
+}
+
+/// Clean shutdown, then the timer's statistics.
+template <typename TimerT>
+void stop_and_report(TimerT& timer, statusbar::ptpclient::PtpAppContext& ctx, int64_t const spin_window_ns)
+{
+    std::print("\n\nShutting down...\n");
+    timer.stop();
+    stop_sampling(ctx);
     print_report(timer.stats(), ctx.compensation_ns);
+    print_spin_headroom(spin_window_ns);
 }
 
 /// Run the timer on the PHC until a shutdown signal.
-auto run_wake_loop(statusbar::ptpclient::PtpAppContext& ctx) -> int
+auto run_wake_loop(statusbar::ptpclient::PtpAppContext& ctx, int64_t const spin_window_ns) -> int
 {
     std::print("\nStarting wake loop (Ctrl-C to stop)...\n\n");
     auto timer = statusbar::ptpclient::make_ptp_timer(
@@ -127,7 +163,7 @@ auto run_wake_loop(statusbar::ptpclient::PtpAppContext& ctx) -> int
     while (!statusbar::realtime::is_shutdown_requested()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    stop_and_report(timer, ctx);
+    stop_and_report(timer, ctx, spin_window_ns);
     return EXIT_SUCCESS;
 }
 
@@ -146,7 +182,7 @@ auto run(Config const& config) -> int
     statusbar::realtime::setup_shutdown_signal_handlers();
     auto ctx = statusbar::ptpclient::setup_ptp_app(config.ptp_app, [] { return statusbar::realtime::is_shutdown_requested(); });
     if (ctx) {
-        return run_wake_loop(*ctx);
+        return run_wake_loop(*ctx, config.ptp_app.sampling.wake_refine_spin_ns);
     }
     return setup_failed(ctx.error());
 }

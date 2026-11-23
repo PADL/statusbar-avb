@@ -52,6 +52,11 @@ struct ClockReport
     int64_t utc_accuracy_ns{UNBOUNDED};
     int64_t utc_limit_ns{0};  ///< 0: reported, not enforced
     uint64_t utc_excursions{0};
+    /// Times the GPS-TAI filter found its samples persistently outside its
+    /// gate and widened itself to follow them: the system clock or the
+    /// link moved in a way the filter had not allowed for. The session
+    /// fills it in; 0 when the wire timeline is not GPS-TAI.
+    uint64_t tai_self_corrections{0};
     bool has_link{false};
     bool tracks_utc{false};
     bool usable{false};
@@ -111,6 +116,11 @@ class ClockGate
 
     /// The master link moved to a different timeline at the last verdict.
     [[nodiscard]] auto link_timeline_changed() const noexcept -> bool { return link_verdict_.timeline_changed; }
+
+    /// The master link alone was inside its limit at the last verdict (true
+    /// when there is no link to judge): whether its time is fit to learn
+    /// from, whatever the system clock is doing.
+    [[nodiscard]] auto link_usable() const noexcept -> bool { return link_verdict_.usable; }
 
     [[nodiscard]] auto report() const noexcept -> ClockReport
     {

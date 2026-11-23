@@ -28,14 +28,23 @@
 ///     the tunnel's talker puts on the wire as the tu bit.
 /// A step of the system clock is a different timeline; the filters start over
 /// on it and r again holds until they have an estimate.
+///
+/// The other clock of each pair is the media timer's: gPTP as the timer's
+/// clock link (the PHC bridge) maps it. LinkWatch holds what the entity is
+/// told of that link. Its worst-case error is added to the system clock's
+/// before either limit is applied, since a TAI timestamp is made from both,
+/// and a change of its timeline restarts the filters as a step of the system
+/// clock does.
 
 #include "statusbar/ptpclient/ptpclient_freq_ratio.hpp"      // KalmanRatioTracker, RatioEstimate
 #include "statusbar/ptpclient/ptpclient_tai_translator.hpp"  // GpsTaiTranslator
 #include "statusbar/realtime/realtime_accuracy_limit.hpp"    // AccuracyVerdict
+#include "statusbar/realtime/realtime_clock.hpp"             // ClockQuality
 
 #include <algorithm>
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -48,6 +57,36 @@ struct SystemClockVerdict
 
     /// Against the tighter limit for vouching for a TAI timestamp made from it.
     bool tai_usable{false};
+};
+
+/// The media timer's clock link as the entity was last told it. Told the
+/// quality, told the time, single-threaded (the media thread).
+class LinkWatch
+{
+  public:
+    /// The link's quality now, from whoever owns the link.
+    void tell(realtime::ClockQuality const& link) noexcept
+    {
+        changed_ = changed_ || (told_ && link.epoch != quality_.epoch);
+        quality_ = link;
+        told_ = true;
+    }
+
+    /// The link's worst-case error at @p now. Zero until a link has been
+    /// told: an entity that is told of none has none to account for.
+    [[nodiscard]] auto accuracy(realtime::MonotonicRawClock::time_point const now) const noexcept -> realtime::Nanoseconds
+    {
+        return told_ ? quality_.uncertainty(now) : realtime::Nanoseconds::zero();
+    }
+
+    /// Whether the link moved to another timeline since this was last
+    /// asked. True once for each run of changes.
+    [[nodiscard]] auto take_timeline_change() noexcept -> bool { return std::exchange(changed_, false); }
+
+  private:
+    realtime::ClockQuality quality_{};
+    bool told_{false};
+    bool changed_{false};
 };
 
 class MediaClockRateTracker
@@ -144,6 +183,15 @@ class MediaClockRateTracker
         }
         last_sample_ns_ = gptp_now_ns;
         return est;
+    }
+
+    /// Times either filter (the ratio's, the TAI mapping's) found its samples
+    /// persistently outside its gate and widened itself to follow them,
+    /// since the filters were last started. Not zero means one of the two
+    /// clocks moved in a way the filters had not allowed for.
+    [[nodiscard]] auto self_corrections() const noexcept -> std::uint64_t
+    {
+        return ratio_.self_corrections() + tai_.self_corrections();
     }
 
     /// Telemetry rate-limit (5 s) for the [media-clock] r/offset-slope line.

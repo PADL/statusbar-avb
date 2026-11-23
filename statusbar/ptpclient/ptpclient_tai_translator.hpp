@@ -156,6 +156,12 @@ class GpsTaiTranslator
     /// Filter diagnostics (ratio, uncertainty, drift) for reporting.
     [[nodiscard]] RatioEstimate estimate() const { return kalman_.estimate(); }
 
+    /// Times the filter found its samples persistently outside its gate and
+    /// widened itself to follow them (KalmanRatioTracker::self_corrections).
+    /// Not zero means one of the two clocks moved in a way the filter had
+    /// not allowed for. Counted since construction or the last reset().
+    [[nodiscard]] std::uint64_t self_corrections() const noexcept { return kalman_.self_corrections(); }
+
     void reset()
     {
         kalman_.reset();

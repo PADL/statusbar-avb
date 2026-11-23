@@ -145,12 +145,30 @@ follows it. Do not cache the delta and walk away.
      chronyd has lost its server passes the limit after a minute or so at
      15 ppm.
 
+   Each limit can be set negative, which takes any bounded clock. Zero is a
+   limit no clock meets: `media.max_utc_error_us=0` never follows the system
+   clock, and `udptun.max_tai_error_us=0` sets `tu` on every packet.
+
+   The error held against both limits is the system clock's with the media
+   timer link's added. The gPTP time of each pair comes through that link (the
+   PHC bridge, PHC against `CLOCK_MONOTONIC_RAW`), and a TAI timestamp is made
+   from both clocks. The link's share is a few microseconds while the PHC is
+   being read and grows at `ptp.holdover_drift_ppb` when it is not; a link
+   that claims no bound (before its first healthy fit, after a step of the
+   PHC, or with the PHC slewed past the bridge's rate window) leaves none, so
+   `r` holds and `tu` is set until it is fitted again.
+
    A step of the system clock restarts the filters and keeps `r` until they
-   have a new estimate. The receiver counts packets that arrive with `tu` set
+   have a new estimate, and so does a new timeline of the link (the PHC was
+   stepped). The receiver counts packets that arrive with `tu` set
    and plays them as any other. The entity's state line shows the figures:
    `tunnel-clock[utc_error_ns=… excursions=… tu_tx=… tu_rx=…]`. The media log
    has one `tunnel-clock:` line for the first verdict and one for each change,
-   and the periodic `media-clock` line ends with the current `utc_error`.
+   and the periodic `media-clock` line ends with the current `utc_error` and
+   `self_corrections`, the times either filter found its samples persistently
+   outside its gate and widened itself to follow them. A count that climbs
+   means one of the two clocks keeps moving in a way the filters do not
+   allow for.
 5. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
    path via chronyd doesn't need NIC HW timestamps.
 

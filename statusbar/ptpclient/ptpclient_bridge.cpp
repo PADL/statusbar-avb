@@ -49,9 +49,8 @@ auto PtpTimeBridgeBase::regression_buffer_publish(double const rate, int64_t con
 
 auto PtpTimeBridgeBase::regression_buffer_consume() const noexcept -> RateOffset
 {
-    // Non-consuming multi-reader load: safe to call from any thread (the RT timer,
-    // the ClockAdapter, or a status/telemetry caller), unlike the previous SPSC
-    // triple-buffer whose consume() was single-consumer-only.
+    // A seqlock load: nothing is consumed, and any thread may read (the RT
+    // timer, the ClockAdapter, a status or telemetry caller).
     return regression_buffer_.load();
 }
 
@@ -304,8 +303,9 @@ auto PtpTimeBridge::finalize_wake(realtime::MonotonicRawClock::time_point const 
 
 void PtpTimeBridge::reset_epoch() noexcept
 {
-    // Health first: quality() reads the epoch before the health, so the
-    // bound of the old timeline is gone before the new epoch can be seen.
+    // Health first, so the bound of the old timeline is withdrawn before
+    // the new epoch can be seen. quality() also checks the epoch each fit
+    // was published with, which holds whatever the order.
     set_healthy(false);
     set_ever_healthy(false);
     increment_epoch();
@@ -344,7 +344,7 @@ void PtpTimeBridge::sampler_loop_impl()
     // the media timer no longer hard-exits on a transient unhealthy bridge.)
     // The primary PHC<->RAW window (authoritative) and, over the same span,
     // the tracker that keeps raw_line_ (RAW<->MONOTONIC, for the sleeps).
-    SamplerState state{raw_line_, static_cast<size_t>(params_.window_size)};
+    SamplerState state = new_sampler_state();
     auto const period = std::chrono::nanoseconds(1'000'000'000LL / std::max(1, params_.sample_hz));
     auto next = std::chrono::steady_clock::now();
 
@@ -360,7 +360,14 @@ auto PtpTimeBridge::begin_told_sampling(BridgeSamplingParams const& params) -> S
     params_ = params;
     set_reset_requested(false);
     set_running(true);
-    return SamplerState{raw_line_, static_cast<size_t>(params_.window_size)};
+    return new_sampler_state();
+}
+
+auto PtpTimeBridge::new_sampler_state() -> SamplerState
+{
+    SamplerState state{raw_line_, static_cast<size_t>(params_.window_size)};
+    state.epoch = load_epoch();
+    return state;
 }
 
 auto PtpTimeBridge::get_mapping() const noexcept -> TimeMapping
@@ -379,30 +386,25 @@ auto PtpTimeBridge::get_mapping() const noexcept -> TimeMapping
 
 auto PtpTimeBridge::telemetry() const noexcept -> BridgeTelemetry
 {
-    // IMPORTANT: do NOT call get_mapping() here. get_mapping() consumes the
-    // regression_buffer_ triple buffer, which is strictly SPSC — its only
-    // legitimate consumer is the RT timer thread. telemetry() is called from a
-    // different thread (e.g. the tool's main loop, once per second); a second
-    // consumer races the timer's consume side and can hand the timer a torn
-    // (rate, offset) pair, producing a far-future sleep deadline that wedges the
-    // media timer (healthy bridge, zero wakes). telemetry() needs none of the
-    // regression buffer's contents — read the standalone atomics directly.
+    // telemetry() needs none of the regression line: it reads the standalone
+    // atomics. (It once had to keep off get_mapping(), when the line went
+    // through a single-consumer buffer that only the timer thread could
+    // read. The line is a seqlocked value now and any thread may read it.)
     auto const b = bracket_stats_.snapshot();
-    BridgeTelemetry t;
-    t.healthy = is_healthy_atomic();
-    t.epoch = load_epoch();
-    t.sample_count = load_sample_count();
-    t.rms_residual_ns = load_rms_residual_ns();
-    t.worst_bracket_ns = load_worst_bracket_ns();
-    t.bracket_min_ns = b.has_samples() ? b.min_ns : 0;
-    t.bracket_max_ns = b.has_samples() ? b.max_ns : 0;
-    t.bracket_mean_ns = static_cast<int64_t>(b.average_ns());
-    t.bracket_count = static_cast<uint64_t>(b.count);
-    t.reject_count = reject_count_.load(std::memory_order_relaxed);
-    t.step_count = step_count_.load(std::memory_order_relaxed);
-    t.last_step_residual_ns = last_step_residual_ns_.load(std::memory_order_relaxed);
-    t.regression_overruns = regression_buffer_overruns();
-    return t;
+    return {
+        .healthy = is_healthy_atomic(),
+        .epoch = load_epoch(),
+        .sample_count = load_sample_count(),
+        .rms_residual_ns = load_rms_residual_ns(),
+        .worst_bracket_ns = load_worst_bracket_ns(),
+        .bracket_min_ns = b.has_samples() ? b.min_ns : 0,
+        .bracket_max_ns = b.has_samples() ? b.max_ns : 0,
+        .bracket_mean_ns = static_cast<int64_t>(b.average_ns()),
+        .bracket_count = static_cast<uint64_t>(b.count),
+        .reject_count = reject_count_.load(std::memory_order_relaxed),
+        .step_count = step_count_.load(std::memory_order_relaxed),
+        .last_step_residual_ns = last_step_residual_ns_.load(std::memory_order_relaxed),
+        .regression_overruns = regression_buffer_overruns()};
 }
 
 auto PtpTimeBridge::sleep_until_ptp(
@@ -557,6 +559,9 @@ auto PtpTimeBridge::observe(SamplerState& state, Reading const& reading) -> bool
         state.phc_window.clear();
         state.raw_tracker.clear();
         state.worst_bracket = 0;
+        // The request is taken before the epoch is read: a reset that
+        // comes after this read asks again, and the window is cleared again.
+        state.epoch = load_epoch();
         rate_checkpoint_ = {};
     }
     // The RAW<->MONOTONIC line does not depend on the PHC read: the tracker
@@ -571,14 +576,14 @@ auto PtpTimeBridge::observe(SamplerState& state, Reading const& reading) -> bool
         return false;
     }
     if (accept_phc_sample(state.phc_window, reading, state.worst_bracket) && state.phc_window.size() >= min_samples_for_fit()) {
-        update_mapping(state.phc_window, state.worst_bracket);
+        update_mapping(state);
     }
     return true;
 }
 
-void PtpTimeBridge::update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket)
+void PtpTimeBridge::update_mapping(SamplerState const& state)
 {
-    auto const fit = fit_time_mapping(phc_window, params_.max_rate_ppm);
+    auto const fit = fit_time_mapping(state.phc_window, params_.max_rate_ppm);
     if (!fit.valid) {
         return;
     }
@@ -591,16 +596,16 @@ void PtpTimeBridge::update_mapping(TimingSampleWindow const& phc_window, int64_t
         // re-established on a cleared window.
         reset_epoch();
         store_rms_residual_ns(static_cast<int64_t>(fit.rms_residual));
-        store_worst_bracket_ns(worst_bracket);
+        store_worst_bracket_ns(state.worst_bracket);
         // Telemetry: this is the failure mode that hard-stalls the media timer.
         step_count_.fetch_add(1, std::memory_order_relaxed);
         last_step_residual_ns_.store(static_cast<int64_t>(fit.max_residual), std::memory_order_relaxed);
         return;
     }
-    publish_fit(fit, phc_window, worst_bracket);
+    publish_fit(fit, state);
 }
 
-void PtpTimeBridge::publish_fit(LinearFitResult const& fit, TimingSampleWindow const& phc_window, int64_t const worst_bracket)
+void PtpTimeBridge::publish_fit(LinearFitResult const& fit, SamplerState const& state)
 {
     // Publish the primary (rate, offset_ns) pair atomically. The regression
     // line `gptp = rate * raw + offset_ns` must be observed as a consistent
@@ -611,10 +616,10 @@ void PtpTimeBridge::publish_fit(LinearFitResult const& fit, TimingSampleWindow c
     regression_buffer_publish(fit.slope, fit.intercept_ns);
     // The quality goes out before the health: quality() claims a bound
     // only once the bridge has been healthy, and by then this one is in.
-    publish_fit_quality(fit, phc_window);
+    publish_fit_quality(fit, state);
     store_rms_residual_ns(static_cast<int64_t>(fit.rms_residual));
-    store_worst_bracket_ns(worst_bracket);
-    store_sample_count(static_cast<int>(phc_window.size()));
+    store_worst_bracket_ns(state.worst_bracket);
+    store_sample_count(static_cast<int>(state.phc_window.size()));
 
     // Health is driven by the PRIMARY (PHC <-> RAW) fit residual. RAW is immune
     // to phc2sys slewing, so this fit's slope is always ~the crystal offset and
@@ -627,21 +632,23 @@ void PtpTimeBridge::publish_fit(LinearFitResult const& fit, TimingSampleWindow c
     }
 }
 
-void PtpTimeBridge::publish_fit_quality(LinearFitResult const& fit, TimingSampleWindow const& phc_window)
+void PtpTimeBridge::publish_fit_quality(LinearFitResult const& fit, SamplerState const& state)
 {
-    // A sample is known to half its read bracket, and the line to the
-    // furthest it lies from any sample: together, the worst case over what
-    // the line was fitted to. Rounded up, on this thread, so that a
-    // reader's arithmetic stays integer.
+    // A sample is known to half its read bracket, and the published line
+    // to the furthest it lies from any sample, measured the way a reader
+    // converts: together, the worst case over what the line was fitted to.
+    // A line held at the edge of the rate window is not the samples' line
+    // and no bound is claimed for it.
+    TimingSampleWindow const& phc_window = state.phc_window;
     int64_t widest_bracket = 0;
     for (size_t i = 0; i < phc_window.size(); ++i) {
         widest_bracket = std::max(widest_bracket, phc_window[i].bracket_ns);
     }
-    auto const worst_residual = static_cast<int64_t>(std::ceil(fit.max_residual));
+    realtime::Nanoseconds const bound{fit.published_miss_ns + ((widest_bracket + 1) / 2)};
     fit_quality_.store(
         {.synced_at = realtime::MonotonicRawClock::from_ns(phc_window[phc_window.size() - 1].monotonic_ns),
-         .bound_at_sync = realtime::Nanoseconds{worst_residual + ((widest_bracket + 1) / 2)},
-         .epoch = 0,  // quality() fills in the live epoch
+         .bound_at_sync = fit.clamped ? realtime::UNBOUNDED_ACCURACY : bound,
+         .epoch = state.epoch,
          .drift_bound_ppb = std::max(params_.holdover_drift_ppb, rate_movement_ppb(fit.slope)) + PUBLISHED_RATE_ROUNDING_PPB,
          .time_source = realtime::TimeSource::ptp});
 }

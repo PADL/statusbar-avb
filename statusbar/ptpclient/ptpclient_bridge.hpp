@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: MIT
 
 /// PTP Time Bridge module
-/// Provides PtpTimeBridge class for mapping between PTP and monotonic clocks
-/// Uses background sampling thread with linear regression for accurate time conversion
+/// Provides PtpTimeBridge class for mapping between the PTP hardware clock and
+/// CLOCK_MONOTONIC_RAW, the timing reference. A background sampling thread
+/// fits the PHC against RAW by linear regression, and keeps the
+/// RAW<->CLOCK_MONOTONIC line the sleeps go through beside it.
 
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
@@ -86,11 +88,9 @@ class PtpTimeBridgeBase
         int64_t offset_ns;
     };
 
-    /// Diagnostic: publishes that overwrote a still-unconsumed prior
-    /// publish in the regression buffer. Non-zero is normal because
-    /// the sampler thread publishes at ~500 Hz while the RT-timer
-    /// consumer reads at ~8 kHz — the consumer just sees the latest
-    /// value, and "missed" prior samples are counted here.
+    /// Diagnostic kept from when the line was published through a
+    /// single-consumer buffer, which counted publishes that overwrote an
+    /// unread one. A seqlock has no such thing: this is always 0.
     [[nodiscard]] auto regression_buffer_overruns() const noexcept -> uint64_t;
 
   protected:
@@ -104,16 +104,12 @@ class PtpTimeBridgeBase
     auto exchange_reset_requested(bool value) noexcept -> bool;
     auto set_reset_requested(bool value) noexcept -> void;
 
-    /// Wait-free publish of the (rate, offset_ns) pair through the
-    /// regression_buffer_ triple buffer. Single writer (the sampler
-    /// thread); single consumer (the RT thread or main thread during
-    /// setup/shutdown).
+    /// Publish the (rate, offset_ns) pair as one value, through the
+    /// regression_buffer_ seqlock. Single writer: the sampler thread.
     auto regression_buffer_publish(double rate, int64_t offset_ns) noexcept -> void;
 
-    /// Wait-free consume of the latest (rate, offset_ns). SPSC: only
-    /// one consumer thread at a time may call this — the consumer
-    /// position transfers between main (setup/shutdown) and the
-    /// wan_timer / RT thread (steady-state operation).
+    /// The latest (rate, offset_ns) pair, read whole. Any thread, any
+    /// number of readers; nothing is consumed.
     [[nodiscard]] auto regression_buffer_consume() const noexcept -> RateOffset;
 
     // Epoch
@@ -145,11 +141,8 @@ class PtpTimeBridgeBase
     std::atomic<bool> running_;
     std::atomic<bool> reset_requested_;
 
-    // Triple-buffered regression line. Single writer (update_mapping
-    // in the sampler thread); single consumer (the RT timer thread,
-    // plus the main thread during setup before the RT thread starts
-    // and during shutdown after it exits). Initialized with
-    // {rate=1.0, offset_ns=0} via the initial-value constructor so
+    // The regression line `ptp = rate * raw + offset_ns`, raw being
+    // CLOCK_MONOTONIC_RAW. Initialized with {rate=1.0, offset_ns=0} so
     // the first load() before any regression fit returns sensible defaults.
     // Single writer (the sampler thread) via store(); many readers via load() --
     // now_ns()/get_mapping()/to_raw_ns()/from_raw_ns() are public const and may be called from
@@ -304,6 +297,10 @@ class PtpTimeBridge : public PtpTimeBridgeBase
         TimingSampleWindow phc_window;
         realtime::MonotonicRawTracker raw_tracker;
         int64_t worst_bracket{0};
+        /// The epoch the window's samples belong to: the bridge's when the
+        /// window was started or last cleared. A fit is published as a fit
+        /// of this epoch.
+        uint64_t epoch{0};
     };
 
     /// Set the bridge up to be told its readings instead of taking them on
@@ -338,19 +335,24 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// is the PTP daemon's business and is not in this figure.
     ///
     /// The bound at each fit is the furthest any sample of the window lies
-    /// from the line plus half the longest read bracket. When the PHC
-    /// cannot be read the line stands and the uncertainty grows from the
-    /// last fit. No bound is claimed before the first healthy fit, nor
-    /// after a step until the fit is healthy again: a step is a new epoch.
+    /// from the line as published (the line the conversions use) plus half
+    /// the longest read bracket. When the PHC cannot be read the line
+    /// stands and the uncertainty grows from the last fit. No bound is
+    /// claimed before the first healthy fit, nor after a step until the fit
+    /// is healthy again (a step is a new epoch), nor while the fitted rate
+    /// is outside max_rate_ppm: the published line is then held at the
+    /// edge of that window and runs away from the PHC.
     [[nodiscard]] auto quality() const noexcept -> realtime::ClockQuality
     {
-        // The epoch is read first: reset_epoch() withdraws the bound before
-        // it changes the epoch, so a new epoch is never told an old bound.
+        // Each fit is published with the epoch its samples belong to, and a
+        // bound is claimed only for a fit of the epoch read here: whatever
+        // order a reset and a reader come in, an epoch is never told the
+        // bound of another.
         uint64_t const timeline = load_epoch();
-        bool const established = was_ever_healthy();
         realtime::ClockQuality quality = fit_quality_.load();
+        bool const vouched = was_ever_healthy() && quality.epoch == timeline;
         quality.epoch = timeline;
-        quality.bound_at_sync = established ? quality.bound_at_sync : realtime::UNBOUNDED_ACCURACY;
+        quality.bound_at_sync = vouched ? quality.bound_at_sync : realtime::UNBOUNDED_ACCURACY;
         return quality;
     }
 
@@ -512,19 +514,22 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Samples the primary window needs before its fit is published.
     [[nodiscard]] auto min_samples_for_fit() const noexcept -> size_t;
 
+    /// An empty sampler state of the bridge's present epoch.
+    [[nodiscard]] auto new_sampler_state() -> SamplerState;
+
     void sampler_loop();       ///< Thread entry: exception barrier around sampler_loop_impl()
     void sampler_loop_impl();  ///< Actual sampler work loop
 
-    /// Refit and publish the primary PHC<->RAW mapping from the window.
-    void update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket);
+    /// Refit and publish the primary PHC<->RAW mapping from the sampler's window.
+    void update_mapping(SamplerState const& state);
 
     /// Publish a fit: the line, how well it is known, its telemetry and
     /// the health it implies.
-    void publish_fit(LinearFitResult const& fit, TimingSampleWindow const& phc_window, int64_t worst_bracket);
+    void publish_fit(LinearFitResult const& fit, SamplerState const& state);
 
     /// Publish how well the line of @p fit is known, as of the newest
-    /// sample of @p phc_window.
-    void publish_fit_quality(LinearFitResult const& fit, TimingSampleWindow const& phc_window);
+    /// sample of the sampler's window and for the epoch that window is of.
+    void publish_fit_quality(LinearFitResult const& fit, SamplerState const& state);
 
     /// How far the fitted rate has been seen to move, in parts per billion:
     /// against the rate one full window of fits ago, and over the window
@@ -557,7 +562,8 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     realtime::MonotonicRawLine raw_line_;
 
     // Quality of the primary line: written by the sampler thread at each
-    // fit, read by quality() together with the epoch and health atomics.
+    // fit with the epoch the fit is of, read by quality() beside the live
+    // epoch and the health flag.
     statusbar::itc::SeqlockValue<realtime::ClockQuality> fit_quality_{realtime::ClockQuality{}};
     RateCheckpoint rate_checkpoint_{};
 

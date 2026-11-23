@@ -240,11 +240,21 @@ TEST(gptp_time_bridge_quality, a_master_step_is_a_new_timeline)
     // The epoch changed, and one anchor of the new timeline proves nothing yet.
     EXPECT_EQ(bridge.quality().epoch, uint64_t{1});
     EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.offset_quality().epoch, uint64_t{1});
+    EXPECT_FALSE(bridge.offset_quality().is_bounded());
 
-    // The next Sync of the new timeline agrees with the line: bounded again.
+    // Nor does the next one: the rate the line holds was fitted to the old
+    // timeline. A bound waits for a rate fitted to this one, a second of
+    // Syncs from the step.
+    for (int i = 0; i < 7; ++i) {
+        master += SYNC_INTERVAL_NS;
+        anchor(bridge, app_at(master, app_ppm), master + step_ns);
+        EXPECT_FALSE(bridge.quality().is_bounded());
+    }
     master += SYNC_INTERVAL_NS;
     anchor(bridge, app_at(master, app_ppm), master + step_ns);
     EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_TRUE(bridge.offset_quality().is_bounded());
     EXPECT_EQ(bridge.quality().epoch, uint64_t{1});
     EXPECT_TRUE(bridge.quality().bound_at_sync <= Nanoseconds{50});
 }
@@ -262,12 +272,90 @@ TEST(gptp_time_bridge_quality, the_owner_can_declare_a_new_timeline)
     EXPECT_TRUE(bridge.quality().time_source == realtime::TimeSource::gnss);
     EXPECT_EQ(bridge.rate_offset_ppt(), rate_before);
 
+    // Two Syncs of the new grandmaster are not enough: the rate held is
+    // the old grandmaster's.
     for (int i = 0; i < 2; ++i) {
+        master += SYNC_INTERVAL_NS;
+        anchor(bridge, app_at(master, 30.0), master);
+    }
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    // A second of them is: the rate has been fitted again.
+    for (int i = 0; i < 7; ++i) {
         master += SYNC_INTERVAL_NS;
         anchor(bridge, app_at(master, 30.0), master);
     }
     EXPECT_TRUE(bridge.quality().is_bounded());
     EXPECT_TRUE(bridge.quality().time_source == realtime::TimeSource::gnss);
+}
+
+TEST(gptp_time_bridge_quality, a_new_grandmaster_at_another_rate_is_not_vouched_for_with_the_old_rate)
+{
+    GptpTimeBridge bridge{};
+    // Twenty seconds behind a grandmaster the app clock runs 30 ppm fast of.
+    int64_t master = run_syncs(bridge, 20 * 8, 30.0, [](int) { return int64_t{0}; });
+    int64_t app = app_at(master, 30.0);
+    bridge.restart_timeline();
+
+    // The new one runs 50 ppm the other way. Its Syncs stop after half a
+    // second: no rate was fitted to it, so nothing is claimed about it.
+    for (int i = 0; i < 4; ++i) {
+        master += SYNC_INTERVAL_NS;
+        app += SYNC_INTERVAL_NS - (SYNC_INTERVAL_NS * 50 / 1'000'000);
+        anchor(bridge, app, master);
+    }
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_FALSE(bridge.offset_quality().is_bounded());
+}
+
+//
+// The offset-only line: to_gptp() and from_gptp()
+//
+
+TEST(gptp_time_bridge_quality, the_offset_only_line_is_known_to_the_rate_offset_over_a_sync_interval)
+{
+    GptpTimeBridge bridge{};
+    constexpr double app_ppm = 30.0;
+    (void)run_syncs(bridge, 20 * 8, app_ppm, [](int) { return int64_t{0}; });
+
+    auto const rated = bridge.quality();
+    auto const offset_only = bridge.offset_quality();
+    EXPECT_TRUE(offset_only.is_bounded());
+    EXPECT_TRUE(offset_only.synced_at == rated.synced_at);
+    EXPECT_EQ(offset_only.epoch, rated.epoch);
+    // The rated line lands on each anchor. The offset alone is 30 ppm of a
+    // Sync interval out by the time the next anchor comes: 3.75 us.
+    EXPECT_TRUE(rated.bound_at_sync <= Nanoseconds{50});
+    EXPECT_TRUE(offset_only.bound_at_sync >= Nanoseconds{3'700});
+    EXPECT_TRUE(offset_only.bound_at_sync <= Nanoseconds{3'800});
+    // And it drifts at the whole rate offset on top of the holdover figure.
+    EXPECT_TRUE(offset_only.drift_bound_ppb >= realtime::DEFAULT_HOLDOVER_DRIFT_PPB + uint32_t{29'900});
+    EXPECT_TRUE(offset_only.drift_bound_ppb <= realtime::DEFAULT_HOLDOVER_DRIFT_PPB + uint32_t{30'100});
+}
+
+TEST(gptp_time_bridge_quality, when_syncs_stop_the_offset_only_bound_covers_what_that_line_really_does)
+{
+    GptpTimeBridge bridge{};
+    constexpr double app_ppm = 40.0;
+    int64_t const last_master = run_syncs(bridge, 20 * 8, app_ppm, [](int) { return int64_t{0}; });
+    auto const rated = bridge.quality();
+    auto const offset_only = bridge.offset_quality();
+
+    // Five seconds without a Sync. The crystal holds its 40 ppm, so the
+    // rated line is still right, and the offset alone is 200 us out.
+    int64_t const master_later = last_master + 5'000'000'000;
+    int64_t const app_later = app_at(master_later, app_ppm);
+    auto const raw_later = MonotonicRawClock::from_ns(app_later);
+    int64_t const offset_error = abs_ns(to_gptp_ns(bridge, app_later) - master_later);
+    EXPECT_TRUE(offset_error >= 199'000 && offset_error <= 201'000);
+
+    // The rated line's bound says 75 us and would pass a 100 us limit. It
+    // is not that line's error a user of to_gptp() has.
+    EXPECT_TRUE(rated.within(std::chrono::microseconds{100}, raw_later));
+    // The offset-only bound covers the real error, and fails that limit.
+    EXPECT_TRUE(offset_only.uncertainty(raw_later).count() >= offset_error);
+    EXPECT_FALSE(offset_only.within(std::chrono::microseconds{100}, raw_later));
+    // While Syncs arrived it was well inside it.
+    EXPECT_TRUE(offset_only.within(std::chrono::microseconds{100}, offset_only.synced_at + std::chrono::milliseconds{125}));
 }
 
 TEST_MAIN(statusbar_gptp, gptp_time_bridge_test)

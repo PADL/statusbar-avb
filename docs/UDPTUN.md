@@ -220,8 +220,10 @@ the slot indexed by their PT regardless of arrival order.
   `monotonic_raw` is offset-translated through the gPTP grandmaster's
   clock domain (offset only, no rate extrapolation — see header
   comment for the rationale). Both endpoints stamp packets in the
-  same TAI-based domain, so one-way latency is meaningful.
-- Without gPTP (`--no-gptp` deployments), `realtime_ns()` is read
+  same TAI-based domain, so one-way latency is meaningful. The session
+  judges that same line: the bridge's `offset_quality()`, whose bound
+  grows at the whole rate offset once Syncs stop.
+- Without gPTP (the realtime time source), `realtime_ns()` is read
   directly. Both endpoints rely on NTP for rough alignment — fine for
   ms-level RTT, acceptable for one-way LAN measurement.
 
@@ -233,8 +235,9 @@ how large the worst-case error is and compares that with its configuration
 
 | `SessionConfig` field | Default | Clock judged |
 |---|---|---|
-| `max_clock_error_ns` | 100 000 (100 µs) | the master link: the gPTP slave's bridge or the ptp4l PHC bridge. Negative takes any bounded link |
-| `max_utc_error_ns` | 0 (reported, not enforced) | the system clock, when the wire timeline is made from it (`wire_clock_gps_tai`, or the realtime time source) |
+| `max_clock_error_ns` | 100 000 (100 µs) | the master link: the gPTP slave's bridge or the ptp4l PHC bridge. Negative takes any bounded link; 0 is met by no link |
+| `max_utc_error_ns` | 0 (reported, not enforced) | the system clock, when the wire timeline is made from it (`wire_clock_gps_tai`, or the realtime time source). On this field alone 0 is not a limit of zero |
+| `utc_holdover_drift_ppb` | 15 000 | how fast the system clock's error grows from its time daemon's last update |
 
 Inside its limits the session measures and transmits; outside them it does
 neither, exactly as it used to while unsynchronized. The difference is when
@@ -243,6 +246,15 @@ its error grows slowly, so the session runs on for seconds and stops only
 when the error passes the limit. `Session::clock_report()` returns the
 current bounds and the record of excursions, and `print_clock_report()`
 writes them as the report's last line.
+
+The GPS-TAI mapping (`wire_clock_gps_tai`) is learned from the master link, so
+it follows the link's verdict. While the link is outside its limit no sample
+is fed to the filter. When the link moves to another timeline (a new
+grandmaster, a step) what the filter learned is dropped, and the first sample
+of the new timeline is taken before anything is stamped through the mapping.
+`ClockReport::tai_self_corrections` counts the times the filter found its
+samples persistently outside its gate and widened itself to follow them; the
+report line shows the count once it is not zero.
 
 For RTT measurement against a reflector, the sender's wire_ns appears
 on both ends of the interval (it stamps tx, then receives its own echo

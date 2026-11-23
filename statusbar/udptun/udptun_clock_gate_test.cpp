@@ -130,6 +130,26 @@ TEST(udptun_clock_gate, the_system_clock_is_enforced_only_when_a_limit_is_config
     EXPECT_TRUE(enforcing.judge(link_synced_at(1s), utc_rated(1500us, 1s), raw(1s)));
 }
 
+TEST(udptun_clock_gate, the_link_is_fit_to_learn_from_whatever_the_system_clock_does)
+{
+    // What is learned from the master link (the GPS-TAI mapping) depends on
+    // the link alone being inside its limit.
+    ClockGate gate{ClockGate::Config{.max_utc_error_ns = 5'000'000, .has_link = true, .tracks_utc = true}};
+    EXPECT_FALSE(gate.link_usable());
+    EXPECT_FALSE(gate.judge(link_synced_at(0s), utc_rated(8ms, 0s), raw(0s)));
+    EXPECT_TRUE(gate.link_usable());
+    // Coasted past the limit, it is not; back in sync, it is again.
+    (void)gate.judge(link_synced_at(0s), utc_rated(8ms, 0s), raw(10s));
+    EXPECT_FALSE(gate.link_usable());
+    (void)gate.judge(link_synced_at(11s), utc_rated(8ms, 0s), raw(11s));
+    EXPECT_TRUE(gate.link_usable());
+
+    // Without a link there is nothing that could be unfit.
+    ClockGate linkless{ClockGate::Config{.has_link = false, .tracks_utc = true}};
+    (void)linkless.judge(ClockQuality{}, ClockQuality{}, raw(1s));
+    EXPECT_TRUE(linkless.link_usable());
+}
+
 TEST(udptun_clock_gate, a_negative_link_limit_takes_any_bounded_link)
 {
     ClockGate gate{ClockGate::Config{.max_link_error_ns = -1, .has_link = true}};
@@ -152,6 +172,16 @@ TEST(udptun_clock_gate, the_report_line_names_each_clock_and_rounds_a_bound_up)
     EXPECT_TRUE(stopped.find("link +/-302.0 us") != std::string::npos);
     EXPECT_TRUE(stopped.find("excursions=1") != std::string::npos);
     EXPECT_TRUE(stopped.ends_with("NOT USABLE: nothing measured or sent\n"));
+}
+
+TEST(udptun_clock_gate, the_report_line_says_when_the_tai_filter_had_to_correct_itself)
+{
+    ClockGate gate{ClockGate::Config{.has_link = true, .tracks_utc = true}};
+    (void)gate.judge(link_synced_at(0s), utc_rated(1500us, 0s), raw(0s));
+    auto report = gate.report();
+    EXPECT_TRUE(line_of(report).find("self-corrections") == std::string::npos);
+    report.tai_self_corrections = 2;
+    EXPECT_TRUE(line_of(report).find("tai filter self-corrections 2") != std::string::npos);
 }
 
 TEST(udptun_clock_gate, a_session_that_judges_no_clock_prints_no_line)

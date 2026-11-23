@@ -16,8 +16,10 @@
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <format>
 #include <functional>
 #include <iterator>
@@ -312,15 +314,9 @@ struct GptpContext
 /// @return Populated PtpAppConfig with values from config or defaults
 [[nodiscard]] auto load_ptp_app_config(config::Config const& toml_config) -> PtpAppConfig;
 
-/// Build argument specifications for PTP CLI options with lambda binding
-/// The Config type must have PtpAppConfig fields (driver_name, device_path, period_ns, etc.)
-/// or be a class that inherits from / embeds PtpAppConfig.
-/// @tparam Config Configuration struct with PTP fields
-/// @param specs The ArgumentSpecs collection to add PTP options to
-/// @param config Reference to configuration struct whose fields are bound to the options
-/// @return Reference to specs for chaining
+/// The PTP options that name the clock: --ptp.driver, --ptp.device.
 template <typename Config>
-auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::ArgumentSpecs&
+auto add_ptp_device_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
 {
 #if defined(__linux__)
     specs.add_choice("ptp.driver", "PTP driver", {"linuxptp", "ntpshm", "system"}, "linuxptp", [&](std::string_view v) -> void {
@@ -335,6 +331,12 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
         config.device_path = std::string{v};
     });
 #endif
+}
+
+/// The PTP options of the timer thread: its period and how it is scheduled.
+template <typename Config>
+auto add_ptp_timer_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
+{
     specs.add<int64_t>("ptp.period", "Wake period in nanoseconds", 1'000'000, [&](int64_t v) -> void { config.period_ns = v; });
     specs.add<int64_t>("ptp.compensation", "Compensation offset in ns (negative = wake earlier)", 0, [&](int64_t v) -> void {
         config.compensation_ns = v;
@@ -344,6 +346,12 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
     specs.add_flag("ptp.no-rt", "Disable realtime priority", [&](bool v) -> void { config.enable_realtime = !v; });
     specs.add_flag("ptp.no-mlock", "Disable memory locking", [&](bool v) -> void { config.lock_memory = !v; });
     specs.add_flag("ptp.quiet", "Suppress verbose output", [&](bool v) -> void { config.verbose = !v; });
+}
+
+/// The PTP options of the bridge between the PHC and CLOCK_MONOTONIC_RAW.
+template <typename Config>
+auto add_ptp_bridge_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
+{
     specs.add<int64_t>("ptp.threshold", "PTP sync threshold ns", 50'000, [&](int64_t v) -> void { config.threshold = v; });
     // Busy-spin window before each wake. The timer clock_nanosleep()s to ~this far
     // before the deadline then busy-polls the rest for sub-us precision. Spinning
@@ -355,15 +363,33 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
         "Busy-spin refinement window before each wake in ns (0 = no busy-wait)",
         config.sampling.wake_refine_spin_ns,
         [&](int64_t v) -> void { config.sampling.wake_refine_spin_ns = v; });
+    specs.add<uint64_t>(
+        "ptp.holdover_drift_ppb",
+        "How fast the worst-case error of the PHC link grows while the PHC cannot be read, in parts per "
+        "billion: the oscillator and temperature figure of this machine (default 15000)",
+        static_cast<uint64_t>(config.sampling.holdover_drift_ppb),
+        [&](uint64_t v) -> void { config.sampling.holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(v, UINT32_MAX)); });
+}
+
+/// Build argument specifications for PTP CLI options with lambda binding
+/// The Config type must have PtpAppConfig fields (driver_name, device_path, period_ns, etc.)
+/// or be a class that inherits from / embeds PtpAppConfig.
+/// @tparam Config Configuration struct with PTP fields
+/// @param specs The ArgumentSpecs collection to add PTP options to
+/// @param config Reference to configuration struct whose fields are bound to the options
+/// @return Reference to specs for chaining
+template <typename Config>
+auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::ArgumentSpecs&
+{
+    add_ptp_device_arg_specs(specs, config);
+    add_ptp_timer_arg_specs(specs, config);
+    add_ptp_bridge_arg_specs(specs, config);
     return specs;
 }
 
-/// Print standard PTP CLI options help text
-/// @tparam OutputIt Output iterator type
-/// @param out Output iterator to write help text to
-/// @return Updated output iterator
+/// The help lines of --ptp.driver and --ptp.device, under the section's title.
 template <typename OutputIt>
-auto format_ptp_options_help_to(OutputIt out) -> OutputIt
+auto format_ptp_device_help_to(OutputIt out) -> OutputIt
 {
     out = std::format_to(out, "PTP Options:\n");
 #if defined(__linux__)
@@ -373,13 +399,41 @@ auto format_ptp_options_help_to(OutputIt out) -> OutputIt
     out = std::format_to(out, "  --ptp.driver=NAME       PTP driver: system (default: system)\n");
     out = std::format_to(out, "  --ptp.device=PATH       Device name for display (default: system_clock)\n");
 #endif
+    return out;
+}
+
+/// The help lines of the timer thread's options.
+template <typename OutputIt>
+auto format_ptp_timer_help_to(OutputIt out) -> OutputIt
+{
     out = std::format_to(out, "  --ptp.period=NS         Wake period in nanoseconds (default: 1000000 = 1ms)\n");
     out = std::format_to(out, "  --ptp.compensation=NS   Compensation offset in ns (default: 0, negative = wake earlier)\n");
     out = std::format_to(out, "  --ptp.cpu=N             CPU core affinity (default: 3)\n");
     out = std::format_to(out, "  --ptp.no-rt             Disable realtime priority\n");
     out = std::format_to(out, "  --ptp.no-mlock          Disable memory locking\n");
-    out = std::format_to(out, "  --ptp.quiet             Suppress verbose output\n");
-    return out;
+    return std::format_to(out, "  --ptp.quiet             Suppress verbose output\n");
+}
+
+/// The help lines of the bridge's options.
+template <typename OutputIt>
+auto format_ptp_bridge_help_to(OutputIt out) -> OutputIt
+{
+    out = std::format_to(out, "  --ptp.threshold=NS      PTP sync threshold in ns (default: 50000)\n");
+    out = std::format_to(out, "  --ptp.spin_ns=NS        Busy-spin window before each wake in ns (0 = no busy-wait)\n");
+    return std::format_to(
+        out, "  --ptp.holdover_drift_ppb=N  Growth of the PHC link's worst-case error while unread, in ppb (default: 15000)\n");
+}
+
+/// Print standard PTP CLI options help text
+/// @tparam OutputIt Output iterator type
+/// @param out Output iterator to write help text to
+/// @return Updated output iterator
+template <typename OutputIt>
+auto format_ptp_options_help_to(OutputIt out) -> OutputIt
+{
+    out = format_ptp_device_help_to(out);
+    out = format_ptp_timer_help_to(out);
+    return format_ptp_bridge_help_to(out);
 }
 
 /// Print PTP configuration summary

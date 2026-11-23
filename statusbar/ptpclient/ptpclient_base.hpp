@@ -72,14 +72,16 @@ class PtpErrorCategory : public std::error_category
 }
 
 //
-// Time Mapping Types (for PTP <-> Monotonic conversion)
+// Time Mapping Types (for PTP <-> CLOCK_MONOTONIC_RAW conversion)
 //
 
-/// Time mapping state between PTP clock and local monotonic clock
-/// The mapping is: ptp_ns = rate * monotonic_ns + offset_ns
+/// Time mapping state between the PTP clock and CLOCK_MONOTONIC_RAW, the
+/// local timing reference. The mapping is: ptp_ns = rate * raw_ns + offset_ns.
+/// The names below that say "monotonic" (monotonic_ns, ptp_to_monotonic_precise)
+/// date from before the reference was RAW and mean the RAW clock.
 struct TimeMapping
 {
-    double rate = 1.0;             ///< PTP rate relative to monotonic (slope)
+    double rate = 1.0;             ///< PTP rate relative to CLOCK_MONOTONIC_RAW (slope)
     int64_t offset_ns = 0;         ///< Offset in nanoseconds (intercept) - int64_t for precision
     uint64_t epoch = 0;            ///< Incremented on discontinuities/resets
     bool healthy = false;          ///< True if mapping quality is acceptable
@@ -170,9 +172,18 @@ struct LinearFitResult
 {
     double slope = 1.0;        ///< Slope (rate)
     int64_t intercept_ns = 0;  ///< Intercept (offset) in nanoseconds - int64_t for precision
-    double rms_residual = 0;   ///< RMS of residuals
-    double max_residual = 0;   ///< Maximum absolute residual
+    double rms_residual = 0;   ///< RMS of residuals, against the best-fit line
+    double max_residual = 0;   ///< Maximum absolute residual, against the best-fit line
     bool valid = false;        ///< Whether fit was successful
+    /// The best-fit slope lay outside the allowed window and `slope` is the
+    /// window's edge: the published line is not the line of the samples,
+    /// and runs away from them at the difference.
+    bool clamped = false;
+    /// The furthest any sample lies from the PUBLISHED line, as the
+    /// conversions compute it (the slope rounded to a part per million,
+    /// the integer intercept), in whole nanoseconds. This, not
+    /// max_residual, is how far a conversion can be from what was read.
+    int64_t published_miss_ns = 0;
 };
 
 /// Fixed-point slope representation for high-precision conversions
@@ -211,6 +222,9 @@ struct FixedPointSlope
 // double. Only the intercept needs the absolute values back, and it is put
 // together in integers.
 //
+
+[[nodiscard]] inline auto monotonic_to_ptp_precise(int64_t monotonic_ns, FixedPointSlope slope, int64_t offset_ns) noexcept
+    -> int64_t;
 
 namespace detail {
 
@@ -305,6 +319,19 @@ template <typename Container>
     return {.rms = std::sqrt(rss / static_cast<double>(samples.size())), .max = max_abs};
 }
 
+/// The furthest any sample lies from the published line, converted the
+/// way every reader converts.
+template <typename Container>
+[[nodiscard]] auto published_miss_ns(Container const& samples, FixedPointSlope slope, int64_t intercept_ns) noexcept -> int64_t
+{
+    int64_t worst = 0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        int64_t const miss = monotonic_to_ptp_precise(samples[i].monotonic_ns, slope, intercept_ns) - samples[i].ptp_ns;
+        worst = std::max(worst, miss < 0 ? -miss : miss);
+    }
+    return worst;
+}
+
 /// The result for a window whose best-fit slope is @p slope_fit.
 template <typename Container>
 [[nodiscard]] auto fit_result(Container const& samples, FitCentre const& centre, double slope_fit, double max_rate_ppm) noexcept
@@ -320,14 +347,19 @@ template <typename Container>
     // Residuals are judged against the UNCLAMPED best-fit slope: a clean but
     // steep line (CLOCK_MONOTONIC slewed by phc2sys while the bridge tracks
     // it) is a good fit and must read as healthy, not be pinned to
-    // +/-max_rate_ppm and then measured against the wrong line.
+    // +/-max_rate_ppm and then measured against the wrong line. What the
+    // published line itself misses by is told beside them.
     FitResiduals const residuals = fit_residuals(samples, centre, slope_fit);
+    auto const published = FixedPointSlope::from_double(slope_pub);
+    int64_t const intercept_ns = fit_intercept(centre, published);
     return {
         .slope = slope_pub,
-        .intercept_ns = fit_intercept(centre, FixedPointSlope::from_double(slope_pub)),
+        .intercept_ns = intercept_ns,
         .rms_residual = residuals.rms,
         .max_residual = residuals.max,
-        .valid = true};
+        .valid = true,
+        .clamped = slope_pub != slope_fit,
+        .published_miss_ns = published_miss_ns(samples, published, intercept_ns)};
 }
 
 }  // namespace detail
@@ -390,6 +422,7 @@ template <typename Container>
 /// @param offset_ns Mapping offset in nanoseconds
 /// @return PTP time in nanoseconds
 [[nodiscard]] inline auto monotonic_to_ptp_precise(int64_t monotonic_ns, FixedPointSlope slope, int64_t offset_ns) noexcept
+    -> int64_t
 {
     // ptp = (slope_num/slope_denom) * mono + offset
     __int128 const mono128 = static_cast<__int128>(monotonic_ns);
