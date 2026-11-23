@@ -12,6 +12,7 @@
 // type parameter.
 //
 
+#include "statusbar/sm/sm.hpp"
 #include "statusbar/srp/srp_mrp_applicant_sm.hpp"
 #include "statusbar/srp/srp_mrp_registrar_sm.hpp"
 
@@ -64,6 +65,12 @@ struct AttributeRecord
     /// been encoded; nullopt the rest of the time.
     std::optional<FirstValue> pending_first_value{};
 
+    /// The earliest time pending_first_value may be declared, once the Lv of
+    /// the old value has gone out. Set by the participant for an attribute
+    /// whose new value must wait (an MSRP Talker Advertise: two LeaveAll
+    /// periods, IEEE 802.1Q 35.2.2.8); nullopt when there is no wait.
+    std::optional<sm::TimePoint> pending_not_before{};
+
     /// Set by the participant when the attribute has fully decayed
     /// (Applicant in Vo and Registrar in Mt) and can be removed from
     /// the database on the next reclaim sweep. See mrp.c:3220-3242
@@ -98,10 +105,12 @@ struct AttributeRecord
     }
 
     /// Convenience: has this attribute fully decayed? Nothing declared
-    /// (Applicant in Vo) and nothing registered.
+    /// (Applicant in Vo), nothing registered, and no new value waiting to be
+    /// declared.
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
-        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty();
+        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty() &&
+            !pending_first_value.has_value();
     }
 };
 

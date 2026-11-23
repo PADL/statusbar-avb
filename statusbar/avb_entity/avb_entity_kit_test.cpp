@@ -290,6 +290,24 @@ TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_clas
     }
 }
 
+TEST(avb_entity_kit_profile, a_milan_kit_runs_mrp_on_table_4_3_and_a_classic_kit_on_table_10_7)
+{
+    // Milan v1.3 Table 4.3: joinTime 200 ms, LeaveTime 5000 ms, a leavealltimer
+    // of 10 to 15 s, a 1000 ms periodictimer, on MSRP and MVRP alike. Any
+    // other profile keeps IEEE 802.1Q Table 10-7, whose LeaveTime is 1000 ms.
+    KitUnderTest milan{make_config(2, "milan13")};
+    KitUnderTest classic{make_config(2, "classic")};
+    EXPECT_TRUE(milan->host().components().msrp_handler.mrp_timers() == nanoavb::MILAN_MRP_TIMERS);
+    EXPECT_TRUE(milan->host().components().mvrp_handler.mrp_timers() == nanoavb::MILAN_MRP_TIMERS);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.join_time.count(), 200);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_time.count(), 5000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_all_time_min.count(), 10000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_all_time_max.count(), 15000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.periodic_time.count(), 1000);
+    EXPECT_TRUE(classic->host().components().msrp_handler.mrp_timers() == srp::mrp::TimerConfig{});
+    EXPECT_TRUE(classic->host().components().mvrp_handler.mrp_timers() == srp::mrp::TimerConfig{});
+}
+
 TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)
 {
     // Nothing said: a plain 1722.1 model answers to 1722.1 and has no Milan info.

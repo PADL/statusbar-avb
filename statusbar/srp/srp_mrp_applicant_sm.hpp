@@ -125,6 +125,24 @@ struct Def
         Count,
     };
 
+    /// IEEE 802.1Q Table 10-3: an Applicant asks for a transmit opportunity on
+    /// entry to VN, AN, AA, LA, VP, AP and LO, the states that have a message
+    /// to send. The quiet and the pure observer states (QA, QP, VO, AO, QO)
+    /// do not.
+    /// The states of an Applicant that declares nothing: VO, AO and QO. What
+    /// Table 10-3 lets them send on tx! is the optional [s], an In or Mt that
+    /// only helps pack a vector.
+    [[nodiscard]] static constexpr auto is_observer(State const s) noexcept -> bool
+    {
+        return s == State::Vo || s == State::Ao || s == State::Qo;
+    }
+
+    [[nodiscard]] static constexpr auto wants_transmit(State const s) noexcept -> bool
+    {
+        return s == State::Vn || s == State::An || s == State::Aa || s == State::La || s == State::Vp || s == State::Ap ||
+            s == State::Lo;
+    }
+
     /// Applicant events — IEEE 802.1Q-2014 Clause 10.7.5.
     enum class Event : uint8_t
     {

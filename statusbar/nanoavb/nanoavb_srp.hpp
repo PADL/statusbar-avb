@@ -138,6 +138,18 @@ struct MvrpCallbacks
 /// MvrpHandler - skeleton class for MVRP VLAN registration
 /// Uses statusbar::srp::mvrp structures
 /// Does NOT directly send/receive packets - uses callback interface
+/// Milan's MRP timers (Milan v1.3 4.2.7.1.1, Table 4.3): joinTime 200 ms,
+/// LeaveTime 5000 ms, a leavealltimer of 10 to 15 s and a 1000 ms
+/// periodictimer. The long LeaveTime goes with the Registrar's instant leave
+/// (4.2.7.2.2, set_instant_leave), which sees an explicit withdrawal at once.
+inline constexpr statusbar::srp::mrp::TimerConfig MILAN_MRP_TIMERS{
+    .join_time = std::chrono::milliseconds{200},
+    .leave_time = std::chrono::milliseconds{5000},
+    .leave_all_time_min = std::chrono::milliseconds{10000},
+    .leave_all_time_max = std::chrono::milliseconds{15000},
+    .periodic_time = std::chrono::milliseconds{1000},
+};
+
 class MvrpHandler
 {
   public:
@@ -182,6 +194,13 @@ class MvrpHandler
     /// For the owner of the network path, which comes and goes with the
     /// run, while the hooks are the entity's and are installed once.
     void set_send_packet(decltype(MvrpCallbacks::send_packet) send) { callbacks_.send_packet = std::move(send); }
+
+    /// The MRP timer durations of this port from here on (see
+    /// MsrpHandler::set_mrp_timers). An invalid @p timers is ignored.
+    void set_mrp_timers(statusbar::srp::mrp::TimerConfig const& timers) noexcept { (void)participant_.set_mrp_timers(timers); }
+
+    /// The MRP timer durations in force.
+    [[nodiscard]] auto mrp_timers() const noexcept -> statusbar::srp::mrp::TimerConfig const& { return participant_.mrp_timers(); }
 
     /// Forget the sender: nothing goes out until set_send_packet() or
     /// set_callbacks() installs another. For the owner of the network path
@@ -382,6 +401,14 @@ class MsrpHandler
     /// Milan v1.3 4.2.7.2.2 instant leave for every Registrar of this port
     /// (see MsrpParticipant::set_instant_leave).
     void set_instant_leave(bool const on) noexcept { participant_.set_instant_leave(on); }
+
+    /// The MRP timer durations of this port from here on: IEEE 802.1Q Table
+    /// 10-7's (statusbar::srp::mrp::TimerConfig{}) or a profile's, such as
+    /// MILAN_MRP_TIMERS. An invalid @p timers is ignored.
+    void set_mrp_timers(statusbar::srp::mrp::TimerConfig const& timers) noexcept { (void)participant_.set_mrp_timers(timers); }
+
+    /// The MRP timer durations in force.
+    [[nodiscard]] auto mrp_timers() const noexcept -> statusbar::srp::mrp::TimerConfig const& { return participant_.mrp_timers(); }
 
     /// Diagnostic breakdown of why the talker gate is open/closed for a stream
     /// (record present? operation? registrar In? Ready substate?), for logging

@@ -48,8 +48,10 @@
 #include "statusbar/tsn/tsn_error.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 
 namespace statusbar::srp::msrp {
@@ -190,11 +192,15 @@ struct MsrpConfig
     /// records.
     size_t max_interesting_stream_ids = 16;
 
+    /// The MRP timer durations of this port (IEEE 802.1Q Table 10-7 by
+    /// default; see also MsrpParticipant::set_mrp_timers).
+    mrp::TimerConfig timers{};
+
     /// Check invariants. Returns Success if the config is
     /// self-consistent, otherwise a tsn::TsnError.
     [[nodiscard]] auto validate() const noexcept -> Status
     {
-        if (max_interesting_stream_ids > max_talker_advertise) {
+        if (max_interesting_stream_ids > max_talker_advertise || !timers.valid()) {
             return failure(make_error_code(tsn::TsnError::invalid_configuration));
         }
         return success();
@@ -298,9 +304,12 @@ class MsrpParticipantT
     /// changed DataFrameParameters, TSpec or PriorityAndRank is a different
     /// attribute (IEEE 802.1Q-2022 Clause 10.7; a bridge refuses a changed
     /// FirstValue under a registered StreamID, Table 35-6 code 16): the old
-    /// value is left (Lv!) first and the new one declared New! once that Lv
-    /// has been encoded, so for one JoinTime find_talker_advertise() still
-    /// answers the old value and talker_change_pending() is true. A change
+    /// value is left (Lv!) first and the new one declared New! two LeaveAll
+    /// periods after that Lv has been encoded (35.2.2.8: "at least two
+    /// LeaveAllTime ... time periods between when the Talker removes the
+    /// existing Stream registration and declares the new"). Until then
+    /// find_talker_advertise() answers the old value, which is no longer
+    /// declared, and talker_change_pending() is true. A change
     /// to AccumulatedLatency alone stays in place when it is a decrease; an
     /// increase turns the Advertise into a Talker Failed with Failure Code 7
     /// (35.2.2.8.6: the reported latency is not to increase during the life
@@ -308,7 +317,8 @@ class MsrpParticipantT
     auto declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
 
     /// Whether a re-declared Talker Advertise for @p stream_id is still
-    /// waiting for the Lv of its previous value to go out.
+    /// waiting: for the Lv of its previous value to go out, then for the two
+    /// LeaveAll periods before its new value may be declared.
     [[nodiscard]] auto talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool;
 
     /// Declare a Talker Failed attribute (used when a previously
@@ -319,6 +329,20 @@ class MsrpParticipantT
     /// to MT instead of waiting out the leavetimer. Off by default (IEEE
     /// 802.1Q-2022 Table 10-4 as written).
     void set_instant_leave(bool const on) noexcept { instant_leave_ = on; }
+
+    /// Other MRP timer durations from here on (a profile's, such as Milan
+    /// v1.3 Table 4.3): each timer takes its new duration when it is next
+    /// armed. An invalid @p timers is refused.
+    auto set_mrp_timers(mrp::TimerConfig const& timers) noexcept -> Status
+    {
+        if (!port_.timers().set_config(timers)) {
+            return failure(make_error_code(tsn::TsnError::invalid_configuration));
+        }
+        return success();
+    }
+
+    /// The MRP timer durations in force.
+    [[nodiscard]] auto mrp_timers() const noexcept -> mrp::TimerConfig const& { return port_.timers().config(); }
 
     /// Withdraw any Talker attribute (Advertise or Failed) matching
     /// `stream_id`. Fires Applicant Lv! event which drives the state
@@ -630,7 +654,9 @@ class MsrpParticipantT
     template <class FirstValue>
     static void change_declared_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
     template <class Table>
-    [[nodiscard]] static auto complete_value_changes(Table& table, TimePoint now) -> bool;
+    [[nodiscard]] static auto complete_value_changes(Table& table, std::chrono::milliseconds hold, TimePoint now) -> bool;
+    template <class Record>
+    [[nodiscard]] static auto change_may_complete(Record& rec, std::chrono::milliseconds hold, TimePoint now) -> bool;
     void complete_pending_changes(TimePoint now);
 
     //
@@ -642,15 +668,63 @@ class MsrpParticipantT
     void rearm_leave_timer() noexcept;
     void on_leaveall_timer(TimePoint now);
     void on_periodic_timer(TimePoint now);
+    /// The timers that expired in one tick(), each given its turn.
+    void run_expired_timers(mrp::TimerScheduler::Expired const& expired, TimePoint now);
+    /// IEEE 802.1Q Table 10-3: an Applicant that still has a message to send
+    /// has asked for a transmit opportunity, so the jointimer runs again. It
+    /// is what puts the second New of a declaration, and the second Join
+    /// after a LeaveAll, one JoinTime after the first.
+    void request_transmit_if_owed(TimePoint now);
 
     //
-    // PDU decode
+    // PDU decode. Each step answers false for an invalid field, which ends
+    // the decoding of the PDU (Milan v1.3 4.2.7.1.2).
     //
-    void decode_attribute_list(
-        AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now);
+    /// One Message's header: its type, AttributeLength and where its
+    /// AttributeList begins and ends in the PDU.
+    struct RxMessage
+    {
+        AttributeType type{};
+        uint8_t attr_length{0};
+        size_t list_begin{0};
+        size_t list_end{0};
+    };
+    /// One vector's FirstValue and packed events, as spans of the PDU.
+    struct RxVector
+    {
+        std::span<uint8_t const> first_value{};
+        std::span<uint8_t const> events{};
+        std::span<uint8_t const> declarations{};
+    };
+    void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
+    [[nodiscard]] static auto parse_message_header(std::span<uint8_t const> pdu, size_t pos) -> std::optional<RxMessage>;
+    [[nodiscard]] auto decode_message(std::span<uint8_t const> pdu, size_t& pos, TimePoint now) -> bool;
+    [[nodiscard]] auto decode_attribute_list(RxMessage const& message, std::span<uint8_t const> payload, TimePoint now) -> bool;
+    [[nodiscard]] auto decode_vector_attribute(
+        RxMessage const& message, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool;
+    void receive_leaveall(AttributeType type, uint16_t num_values, TimePoint now);
+    [[nodiscard]] auto decode_vector_values(
+        RxMessage const& message, uint16_t num_values, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool;
+    [[nodiscard]] auto deliver_vector_values(RxMessage const& message, uint16_t num_values, RxVector const& vector, TimePoint now)
+        -> bool;
+    /// What follows the decoding of a PDU: the re-declaration a received
+    /// LeaveAll asks for, and a transmit opportunity.
+    void finish_receive(TimePoint now);
 
-    void decode_vector_attribute(
-        AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now);
+    /// @p fn on every record of one attribute type.
+    template <class Fn>
+    void for_each_record_of(AttributeType const type, Fn fn)
+    {
+        if (type == AttributeType::TalkerAdvertise) {
+            std::ranges::for_each(talker_adv_, fn);
+        } else if (type == AttributeType::TalkerFailed) {
+            std::ranges::for_each(talker_failed_, fn);
+        } else if (type == AttributeType::Listener) {
+            std::ranges::for_each(listeners_, fn);
+        } else if (type == AttributeType::Domain) {
+            std::ranges::for_each(domains_, fn);
+        }
+    }
 
     void handle_rx_event(
         AttributeType attr_type,
@@ -702,6 +776,13 @@ class MsrpParticipantT
         }
     }
 
+    /// What settle_peer_rx saw of a record before the machines ran.
+    struct PeerRxBefore
+    {
+        bool was_registered{false};  ///< the Registrar was In or Lv
+        bool value_changed{false};   ///< a peer's registered value differs from the one received
+    };
+
     /// The second half of handle_peer_attr_rx: the record takes the received
     /// value or counts the conflict, both state machines run, and observers
     /// are told what registered or left.
@@ -715,41 +796,81 @@ class MsrpParticipantT
         NotifyRegister notify_register,
         NotifyLeave notify_leave)
     {
-        bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-        // Adopt the received payload ONLY for a pure peer registration. If WE are
-        // locally declaring this key, a peer declaring the same one is a conflict
-        // (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
-        // own params, not the peer's.
-        if (rec.operation == Operation::Register) {
-            rec.first_value = fv;
-        } else if (!(rec.first_value == fv)) {
-            ++foreign_declaration_conflict_count_;
-        }
+        PeerRxBefore const before = adopt_peer_rx(rec, fv);
         mrp::dispatch_applicant(rec, applicant_event, now);
         if (registrar_event == registrar_sm::Def::Event::Count) {
             return;
         }
         drive_registrar(rec, registrar_event, now);
-        notify_peer_rx(rec, fv, was_registered, notify_register, notify_leave);
+        notify_peer_rx(rec, fv, before, notify_register, notify_leave);
     }
 
-    /// Observers hear what the wire said: the received value, which is the
-    /// record's own for a pure peer registration and the peer's conflicting
-    /// one otherwise (a Domain adopter needs the peer's); a Leave names the
-    /// value that was registered.
+    /// Adopt the received payload ONLY for a pure peer registration. If WE are
+    /// locally declaring this key, a peer declaring the same one is a conflict
+    /// (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
+    /// own params, not the peer's.
+    template <class Record, class FirstValue>
+    auto adopt_peer_rx(Record& rec, FirstValue const& fv) -> PeerRxBefore
+    {
+        bool const differs = !(rec.first_value == fv);
+        PeerRxBefore const before{
+            .was_registered = rec.registrar_is_registered(), .value_changed = rec.operation == Operation::Register && differs};
+        if (rec.operation == Operation::Register) {
+            rec.first_value = fv;
+        } else if (differs) {
+            ++foreign_declaration_conflict_count_;
+        }
+        return before;
+    }
+
+    /// Observers hear of a registration once: when the attribute becomes
+    /// registered, and again only when a registered peer value changes. A
+    /// repeated New, and the Join that follows a LeaveAll while the Registrar
+    /// is in LV, change nothing an application acts on (the AVnu end station
+    /// tests want each indication shown one time). They hear of a Leave once
+    /// too, when the registration ends: the leavetimer expiring (see
+    /// on_leave_timer) or, with instant leave, the Lv itself. A value this
+    /// port declares itself is reported whenever a registration event brings
+    /// a peer's differing one, which a Domain adopter needs. Observers are
+    /// given the received value; a Leave names the value that was registered.
     template <class Record, class FirstValue, class NotifyRegister, class NotifyLeave>
     static void notify_peer_rx(
         Record const& rec,
         FirstValue const& fv,
-        bool const was_registered,
+        PeerRxBefore const& before,
         NotifyRegister notify_register,
         NotifyLeave notify_leave)
     {
-        auto const n = rec.registrar_ctx.notify;
-        if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
+        bool const registered = rec.registrar_is_registered();
+        bool const conflict = rec.operation == Operation::Declare && rec.registrar_ctx.notify != registrar_sm::Notify::None &&
+            !(rec.first_value == fv);
+        if (registered && (!before.was_registered || before.value_changed || conflict)) {
             notify_register(fv);
-        } else if (n == registrar_sm::Notify::Leave && was_registered) {
+        } else if (!registered && before.was_registered) {
             notify_leave(rec.first_value);
+        }
+    }
+
+    /// IEEE 802.1Q 35.2.6: a registration event for a Talker attribute of one
+    /// type (Advertise or Failed) replaces a registration of the other type
+    /// under the same StreamID, as though that one had left with its
+    /// leavetimer expired at once. The application is not told of a Leave:
+    /// the stream is still declared, under its new type. @p stream_of reads
+    /// the StreamID of a record of @p other.
+    template <class Table, class StreamOf>
+    void supersede_talker_registration(
+        Table& other, tsn::StreamId const& stream_id, registrar_sm::Def::Event const event, StreamOf stream_of)
+    {
+        using E = registrar_sm::Def::Event;
+        if (event != E::RNew && event != E::RJoinIn && event != E::RJoinMt) {
+            return;
+        }
+        for (auto& rec : other) {
+            if (stream_of(rec) == stream_id && rec.registrar_is_registered()) {
+                rec.registrar_sm.reset();
+                rec.registrar_ctx.clear_outputs();
+                rec.leave_deadline.reset();
+            }
         }
     }
 

@@ -17,8 +17,8 @@
 // deadlines it learns from next_deadline(). Expired timers are
 // reported and then cleared; the caller decides whether to rearm.
 //
-// Timer durations follow OpenAvnu mrpd defaults (mrp.h:140-143), which
-// match IEEE 802.1Q-2014 Clause 10.7.4 within the permitted ranges.
+// Timer durations come from a TimerConfig: IEEE 802.1Q Table 10-7 by
+// default; a profile such as Milan sets its own.
 //
 
 #include "statusbar/sm/sm.hpp"
@@ -33,29 +33,64 @@ namespace statusbar::srp::mrp {
 using sm::Clock;
 using sm::TimePoint;
 
+/// MRP timer durations. The defaults are IEEE 802.1Q Table 10-7's, which are
+/// also what the AVnu end station tests name: JoinTime 200 ms, LeaveTime
+/// 1000 ms (the top of its 600 to 1000 ms), a leavealltimer drawn from
+/// LeaveAllTime to 1.5 times LeaveAllTime (10 to 15 s), and a 1 s
+/// periodictimer.
+struct TimerConfig
+{
+    /// JoinTime (10.7.4.1): the wait for a transmit opportunity.
+    std::chrono::milliseconds join_time{200};
+    /// LeaveTime (10.7.4.2): how long a Registrar stays in LV for a re-Join.
+    std::chrono::milliseconds leave_time{1000};
+    /// The leavealltimer (10.7.4.3) is drawn uniformly from
+    /// [leave_all_time_min, leave_all_time_max).
+    std::chrono::milliseconds leave_all_time_min{10000};
+    std::chrono::milliseconds leave_all_time_max{15000};
+    /// The periodictimer (10.7.4.4).
+    std::chrono::milliseconds periodic_time{1000};
+
+    /// Every duration positive and the leavealltimer's range not empty.
+    [[nodiscard]] constexpr auto valid() const noexcept -> bool
+    {
+        return join_time.count() > 0 && leave_time.count() > 0 && periodic_time.count() > 0 && leave_all_time_min.count() > 0 &&
+            leave_all_time_max > leave_all_time_min;
+    }
+
+    friend auto operator==(TimerConfig const&, TimerConfig const&) -> bool = default;
+};
+
 /// Per-port MRP timer scheduler. Not thread-safe; a participant is
 /// assumed to be driven from a single event loop thread.
 class TimerScheduler
 {
   public:
-    /// JoinTime — mrp.h:140. The spec allows up to 3 join fires in
-    /// 300 ms (10.7.4.1); mrp.c uses 100 ms to give 3 fires in 300 ms.
-    static constexpr auto JOIN_TIME = std::chrono::milliseconds(100);
-
-    /// LeaveTime — mrp.h:141, spec 10.7.4.3.
+    /// The default durations (TimerConfig{}), under their earlier names.
+    static constexpr auto JOIN_TIME = std::chrono::milliseconds(200);
     static constexpr auto LEAVE_TIME = std::chrono::milliseconds(1000);
-
-    /// LeaveAllTime (nominal) — mrp.h:142, spec 10.7.4.2.
-    /// The actual interval is randomized in
-    /// [LEAVE_ALL_TIME_NOMINAL / 2, LEAVE_ALL_TIME_NOMINAL * 3 / 2).
+    /// LeaveAllTime: the leavealltimer runs from this to 1.5 times this.
     static constexpr auto LEAVE_ALL_TIME_NOMINAL = std::chrono::milliseconds(10000);
-
-    /// PeriodicTransmissionTime — mrp.h:143, spec 10.7.5.23.
     static constexpr auto PERIODIC_TIME = std::chrono::milliseconds(1000);
 
-    /// Construct. Pass a nonzero seed for deterministic tests; the
-    /// default 0 seeds from std::random_device.
-    explicit TimerScheduler(uint64_t seed = 0);
+    /// Construct with @p config's durations. Pass a nonzero seed for
+    /// deterministic tests; the default 0 seeds from std::random_device.
+    explicit TimerScheduler(uint64_t seed = 0, TimerConfig const& config = {});
+
+    /// The durations the timers are armed with.
+    [[nodiscard]] auto config() const noexcept -> TimerConfig const& { return config_; }
+
+    /// Other durations from here on: a timer already running keeps its
+    /// deadline and takes the new duration when it is next armed. An invalid
+    /// @p config is refused and changes nothing.
+    auto set_config(TimerConfig const& config) noexcept -> bool
+    {
+        if (!config.valid()) {
+            return false;
+        }
+        config_ = config;
+        return true;
+    }
 
     // --- Idempotent starts --------------------------------------------
     // If the timer is already running, these are a no-op (deadline is
@@ -114,10 +149,10 @@ class TimerScheduler
     [[nodiscard]] auto tick(TimePoint now) noexcept -> Expired;
 
   private:
-    /// Uniform random interval in [LEAVE_ALL_TIME_NOMINAL/2, 3*LEAVE_ALL_TIME_NOMINAL/2).
-    /// See mrp.c:412-428 for the reference formula.
+    /// Uniform random interval in [leave_all_time_min, leave_all_time_max).
     auto randomized_leaveall_duration() -> std::chrono::milliseconds;
 
+    TimerConfig config_{};
     std::optional<TimePoint> join_{};
     std::optional<TimePoint> leave_{};
     std::optional<TimePoint> leaveall_{};

@@ -580,11 +580,59 @@ TEST(mrp_timer_scheduler, tick_join_expires)
     TimerScheduler ts{1};
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_join(now);
-    auto e1 = ts.tick(now + std::chrono::milliseconds(50));
+    auto e1 = ts.tick(now + std::chrono::milliseconds(199));
     EXPECT_FALSE(e1.any());
-    auto e2 = ts.tick(now + std::chrono::milliseconds(100));
+    auto e2 = ts.tick(now + std::chrono::milliseconds(200));
     EXPECT_TRUE(e2.join);
     EXPECT_FALSE(ts.join_running());
+}
+
+// The defaults are IEEE 802.1Q Table 10-7's, which the AVnu end station
+// tests name too: JoinTime 200 ms, a leavealltimer of 10 to 15 s, a 1 s
+// periodictimer, and a LeaveTime inside 600 to 1000 ms.
+TEST(mrp_timer_scheduler, the_default_durations_are_the_standards)
+{
+    TimerConfig const config{};
+    EXPECT_TRUE(config.valid());
+    EXPECT_EQ(config.join_time.count(), 200);
+    EXPECT_EQ(config.leave_time.count(), 1000);
+    EXPECT_EQ(config.leave_all_time_min.count(), 10000);
+    EXPECT_EQ(config.leave_all_time_max.count(), 15000);
+    EXPECT_EQ(config.periodic_time.count(), 1000);
+}
+
+// Every leavealltimer is drawn from LeaveAllTime to 1.5 times LeaveAllTime.
+TEST(mrp_timer_scheduler, the_leavealltimer_runs_ten_to_fifteen_seconds)
+{
+    TimerScheduler ts{7};
+    auto now = TimePoint{} + std::chrono::seconds(1);
+    for (int i = 0; i < 200; ++i) {
+        ts.arm_leaveall(now);
+        auto const wait = ts.next_deadline() - now;
+        EXPECT_TRUE(wait >= std::chrono::milliseconds(10000) && wait < std::chrono::milliseconds(15000));
+        now += std::chrono::seconds(20);
+        (void)ts.tick(now);
+    }
+}
+
+// A profile's durations take effect as each timer is next armed, and an
+// invalid set is refused.
+TEST(mrp_timer_scheduler, a_configured_duration_is_used_when_the_timer_is_next_armed)
+{
+    TimerScheduler ts{1};
+    auto const now = TimePoint{} + std::chrono::seconds(1);
+    TimerConfig milan{};
+    milan.leave_time = std::chrono::milliseconds(5000);
+    EXPECT_TRUE(ts.set_config(milan));
+    ts.start_leave(now);
+    EXPECT_FALSE(ts.tick(now + std::chrono::milliseconds(4999)).leave);
+    EXPECT_TRUE(ts.tick(now + std::chrono::milliseconds(5000)).leave);
+
+    TimerConfig bad{};
+    bad.leave_all_time_max = bad.leave_all_time_min;
+    EXPECT_FALSE(bad.valid());
+    EXPECT_FALSE(ts.set_config(bad));
+    EXPECT_TRUE(ts.config() == milan);
 }
 
 TEST(mrp_timer_scheduler, tick_leave_expires)
@@ -611,7 +659,7 @@ TEST(mrp_timer_scheduler, next_deadline_picks_earliest)
     auto const now = TimePoint{} + std::chrono::seconds(1);
     ts.start_join(now);
     ts.start_periodic(now);
-    EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(100));
+    EXPECT_EQ(ts.next_deadline(), now + std::chrono::milliseconds(200));
 }
 
 TEST(mrp_timer_scheduler, multiple_timers_expire)

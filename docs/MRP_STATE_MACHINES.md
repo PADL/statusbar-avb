@@ -107,9 +107,9 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
 - One instance per port per protocol. Periodically flips to `Active`,
   at which point the next TX pass sends the PDU with the LeaveAll
   flag set, then flips back to `Passive`.
-- LeaveAll interval is randomized in `[0.5×LAT, 1.5×LAT)` per Clause
-  10.7.4.2, using a `TimerScheduler`-owned `std::mt19937_64` seeded
-  deterministically for tests.
+- The leavealltimer is drawn from LeaveAllTime to 1.5 times LeaveAllTime
+  (10 to 15 s, Clause 10.7.4.3), using a `TimerScheduler`-owned
+  `std::mt19937_64` seeded deterministically for tests.
 
 ### Periodic Transmission FSM — `mrp_periodic_sm.hpp`
 
@@ -125,12 +125,26 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
 `TimerScheduler` tracks four deadline-based timers as `std::optional<TimePoint>`
 fields:
 
-| Timer       | Duration                 | Clause       |
-|-------------|--------------------------|--------------|
-| JoinTimer   | 100 ms                   | 10.7.4.1     |
-| LeaveTimer  | 1000 ms                  | 10.7.4.3     |
-| LeaveAllTimer | randomized 5–15 s      | 10.7.4.2     |
-| PeriodicTimer | 1000 ms                | 10.7.5.23    |
+| Timer | IEEE 802.1Q Table 10-7 (the default) | Milan v1.3 Table 4.3 |
+|---|---|---|
+| JoinTimer | 200 ms | 200 ms |
+| LeaveTimer | 1000 ms | 5000 ms |
+| LeaveAllTimer | drawn from 10 to 15 s | drawn from 10 to 15 s |
+| PeriodicTimer | 1000 ms | 1000 ms |
+
+The durations are a `mrp::TimerConfig`. `MsrpConfig::timers` and
+`MvrpConfig::timers` give them at construction and `set_mrp_timers()` on
+either participant changes them, each timer taking its new duration when
+it is next armed. `nanoavb::MILAN_MRP_TIMERS` holds Milan's, and the
+entity kit applies them to both handlers under the Milan profile, with
+the Registrar's instant leave (Milan 4.2.7.2.2) that the 5 s LeaveTime
+goes with.
+
+The jointimer runs again after a pass while any Applicant this port
+declares still has a message to send (Table 10-3: VN, AN, AA, LA, VP, AP,
+LO). That is what puts the second New of a declaration, and the second
+Join after a LeaveAll, one JoinTime after the first, as the AVnu end
+station tests look for.
 
 ### Operations
 
@@ -244,7 +258,10 @@ Exposes:
   before it: IEEE 802.1Q 35.2.6 has the receiver treat it as the old
   registration leaving and the new one joining. A changed Talker
   Advertise or Domain value is a different attribute and leaves the old
-  value first.
+  value first. A Domain's new value follows its Leave at once; a Talker
+  Advertise's waits two LeaveAll periods (35.2.2.8: "at least two
+  LeaveAllTime ... time periods between when the Talker removes the
+  existing Stream registration and declares the new").
 - **Registered talkers**: `find_registered_talker_advertise(stream_id)`
   and `find_registered_talker_failed(stream_id)` answer only while a
   peer's declaration is registered (Registrar `In`, or `Lv` until its
@@ -254,6 +271,24 @@ Exposes:
   there (Milan v1.3 5.3.8.5 allows that, and IEEE 802.1Q 35.1.2.2 sets
   no order between the two declarations). The Listener is declared when
   the talker's attribute arrives and withdrawn when it has gone.
+- **Indications** — an observer hears of a registration once, when the
+  attribute becomes registered, and again only when a registered value
+  or a Listener's Declaration Type changes. A repeated New and the Join
+  that follows a LeaveAll are not reported again. It hears of a Leave
+  once, when the leavetimer expires or, with instant leave, on the Lv.
+  A Talker Advertise that arrives for a StreamID registered as Talker
+  Failed (or the other way round) replaces that registration with no
+  Leave reported (35.2.6).
+- **Malformed PDUs** — decoding stops at an invalid field: what came
+  before it has been processed, the rest of that AttributeList and every
+  later Message are discarded (Milan v1.3 4.2.7.1.2). An attribute type
+  MSRP does not define is passed over.
+- **One deliberate departure** — our own LeaveAll does not put our
+  Registrars in LV (Table 10-4, IN / txLA!). An AVB bridge seen in the
+  field re-declares its Listener only at its own LeaveAll, not in answer
+  to ours, so ageing on ours dropped a registration that was being
+  served. A received LeaveAll and a received Leave retire registrations;
+  a peer that falls silent is not aged out by our own LeaveAll.
   `set_listener_waits_for_talker(false)` declares Asking Failed in that
   case instead, which is the other choice both documents leave open.
 - **Talker transmit authorization** — `listener_permits_transmit(stream_id)`
@@ -283,9 +318,9 @@ Exposes:
 
 ### `MvrpParticipant` (Clause 11.2, `mvrp_participant.hpp`)
 
-Same shape as `MsrpParticipant` but with only a `VlanIdentifier`
-attribute type and a smaller `MvrpConfig` (two fields: `max_vlans`,
-`max_observers`). API surface:
+Built like `MsrpParticipant` but with only a `VlanIdentifier`
+attribute type and a smaller `MvrpConfig` (`max_vlans`,
+`max_observers` and the timers). API surface:
 
 - `declare_vlan(vid, now)` / `withdraw_vlan(vid, now)` — return
   `TsnError::InvalidVlanId` for out-of-range VIDs,
@@ -293,7 +328,7 @@ attribute type and a smaller `MvrpConfig` (two fields: `max_vlans`,
 - `has_vlan(vid)` / `is_vlan_registered(vid)`
 - Observer callbacks: `on_vlan_registered(vid, Operation)` /
   `on_vlan_leave(vid)`
-- Same `receive_pdu` / `set_send_pdu` / `tick` / `next_deadline` shape
+- The same `receive_pdu` / `set_send_pdu` / `tick` / `next_deadline` calls
 - Same zero-allocation steady state: attribute database, observer
   slots, and PDU build buffer are all reserved at construction.
 

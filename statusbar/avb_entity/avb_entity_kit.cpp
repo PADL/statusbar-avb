@@ -63,15 +63,17 @@ AvbEntityKit::AvbEntityKit(
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
     // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
-    // answers, and on the SRP side the Class A Domain adopted from the wire
-    // (4.2.7.2.1) and the instant leave (4.2.7.2.2). A Milan model also has
-    // GET_MILAN_INFO to answer, whichever profile it is held to.
+    // answers, and on the SRP side the MRP timers (Table 4.3), the Class A
+    // Domain adopted from the wire (4.2.7.2.1) and the instant leave
+    // (4.2.7.2.2). A Milan model also has GET_MILAN_INFO to answer, whichever
+    // profile it is held to.
     bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
     install_milan_info();
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
+    apply_mrp_timers(milan);
     host_.components().msrp_handler.set_on_domain_adopted(
         [this](DomainInfo const& domain, TimePoint const now) { follow_domain(domain, now); });
 
@@ -474,6 +476,13 @@ void AvbEntityKit::close_streams() noexcept
         listener_->close_rx();
     }
     stream_port_.close();
+}
+
+void AvbEntityKit::apply_mrp_timers(bool const milan)
+{
+    auto const timers = milan ? nanoavb::MILAN_MRP_TIMERS : srp::mrp::TimerConfig{};
+    host_.components().msrp_handler.set_mrp_timers(timers);
+    host_.components().mvrp_handler.set_mrp_timers(timers);
 }
 
 auto AvbEntityKit::milan_profile() const noexcept -> bool

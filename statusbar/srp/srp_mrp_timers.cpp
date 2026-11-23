@@ -5,17 +5,16 @@
 
 namespace statusbar::srp::mrp {
 
-TimerScheduler::TimerScheduler(uint64_t seed)
-    : rng_{seed != 0 ? seed : std::random_device{}()}
+TimerScheduler::TimerScheduler(uint64_t seed, TimerConfig const& config)
+    : config_{config.valid() ? config : TimerConfig{}}
+    , rng_{seed != 0 ? seed : std::random_device{}()}
 {}
 
 auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 {
-    // mrp.c:412-428 — uniform in [nominal/2, nominal*3/2).
-    constexpr auto half_nominal = LEAVE_ALL_TIME_NOMINAL.count() / 2;
-    constexpr auto full_nominal = LEAVE_ALL_TIME_NOMINAL.count();
-    std::uniform_int_distribution<int64_t> dist{0, full_nominal - 1};
-    return std::chrono::milliseconds(half_nominal + dist(rng_));
+    // IEEE 802.1Q 10.7.4.3: a random value from LeaveAllTime to 1.5 times it.
+    std::uniform_int_distribution<int64_t> dist{config_.leave_all_time_min.count(), config_.leave_all_time_max.count() - 1};
+    return std::chrono::milliseconds(dist(rng_));
 }
 
 //
@@ -25,13 +24,13 @@ auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 void TimerScheduler::start_join(TimePoint now) noexcept
 {
     if (!join_.has_value()) {
-        join_ = now + JOIN_TIME;
+        join_ = now + config_.join_time;
     }
 }
 
 void TimerScheduler::start_leave(TimePoint now) noexcept
 {
-    start_leave_at(now + LEAVE_TIME);
+    start_leave_at(now + config_.leave_time);
 }
 
 void TimerScheduler::start_leave_at(TimePoint deadline) noexcept
@@ -51,7 +50,7 @@ void TimerScheduler::start_leaveall(TimePoint now)
 void TimerScheduler::start_periodic(TimePoint now) noexcept
 {
     if (!periodic_.has_value()) {
-        periodic_ = now + PERIODIC_TIME;
+        periodic_ = now + config_.periodic_time;
     }
 }
 
@@ -61,12 +60,12 @@ void TimerScheduler::start_periodic(TimePoint now) noexcept
 
 void TimerScheduler::arm_join(TimePoint now) noexcept
 {
-    join_ = now + JOIN_TIME;
+    join_ = now + config_.join_time;
 }
 
 void TimerScheduler::arm_leave(TimePoint now) noexcept
 {
-    leave_ = now + LEAVE_TIME;
+    leave_ = now + config_.leave_time;
 }
 
 void TimerScheduler::arm_leaveall(TimePoint now)
@@ -76,7 +75,7 @@ void TimerScheduler::arm_leaveall(TimePoint now)
 
 void TimerScheduler::arm_periodic(TimePoint now) noexcept
 {
-    periodic_ = now + PERIODIC_TIME;
+    periodic_ = now + config_.periodic_time;
 }
 
 //

@@ -9,12 +9,15 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <array>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <optional>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -375,7 +378,7 @@ TEST(msrp_participant, declare_talker_emits_pdu_peer_notifies)
     auto const ta = make_talker_adv(0x0001);
     auto status = a.declare_talker_advertise(ta, clock.now);
     EXPECT_TRUE(bool(status));
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
     fab.deliver_a_to_b(b, t1);
@@ -410,7 +413,7 @@ TEST(msrp_participant, registered_peer_talker_is_not_readvertised)
         peer.set_send_pdu(peer_fab.make_a_sender());
         peer.start(clock.now);
         (void)peer.declare_talker_advertise(make_talker_adv(0xB001), clock.now);
-        auto const tp = clock.advance(std::chrono::milliseconds(150));
+        auto const tp = clock.advance(std::chrono::milliseconds(250));
         peer.tick(tp);
         for (auto const& pdu : peer_fab.a_to_b) {
             a.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now);
@@ -427,7 +430,7 @@ TEST(msrp_participant, registered_peer_talker_is_not_readvertised)
     // re-assertion (the 20s jump fires the LeaveAll, driving every applicant --
     // including the registered-peer observer -- to attempt a transmit).
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -458,7 +461,7 @@ TEST(msrp_participant, periodic_leaveall_is_transmitted)
     a.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
     EXPECT_TRUE(!fab.a_to_b.empty());
     bool saw_leaveall = false;
@@ -486,7 +489,7 @@ TEST(msrp_participant, leaveall_pdu_redeclares_listener_and_omits_recordless_tal
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
     (void)a.declare_listener(make_stream_id(0xB001), ListenerDeclaration::Ready, clock.now);
     fab.a_to_b.clear();
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
     bool found_la = false;
     for (auto const& pdu : fab.a_to_b) {
@@ -526,7 +529,7 @@ TEST(msrp_participant, received_leaveall_triggers_immediate_redeclare)
     a.start(clock.now);
     b.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     // Fire b's periodic LeaveAll and grab the PDU it emits.
     bfab.a_to_b.clear();
@@ -577,13 +580,13 @@ TEST(msrp_participant, registered_listener_redeclared_only_when_sticky_enabled)
 
         // a is the TALKER for 0xA001.
         (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
 
         // b is a downstream LISTENER for 0xA001; deliver its Listener-Ready to a so
         // a holds a REGISTERED (operation=Register) Listener record for its stream.
         (void)b.declare_listener(make_stream_id(0xA001), ListenerDeclaration::Ready, clock.now);
         bfab.a_to_b.clear();
-        b.tick(clock.advance(std::chrono::milliseconds(150)));
+        b.tick(clock.advance(std::chrono::milliseconds(250)));
         for (auto const& pdu : bfab.a_to_b) {
             a.receive_pdu(std::span<uint8_t const>(pdu.data(), pdu.size()), clock.now);
         }
@@ -591,7 +594,7 @@ TEST(msrp_participant, registered_listener_redeclared_only_when_sticky_enabled)
         // Run a periodic + LeaveAll pass on a and see whether a Listener attribute
         // (the only one a could emit -- a never DECLARED a listener) goes out.
         fab.a_to_b.clear();
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
         a.tick(clock.advance(std::chrono::seconds(20)));
         for (auto const& pdu : fab.a_to_b) {
             for (uint8_t const t : pdu_attribute_types(std::span<uint8_t const>(pdu.data(), pdu.size()))) {
@@ -623,7 +626,7 @@ TEST(msrp_participant, suppress_leaveall_never_originates_leaveall)
         a.start(clock.now);
         (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
         fab.a_to_b.clear();
-        a.tick(clock.advance(std::chrono::milliseconds(150)));
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
         a.tick(clock.advance(std::chrono::seconds(20)));  // fire the LeaveAll timer
         a.tick(clock.advance(std::chrono::seconds(1)));   // periodic re-assert
         bool saw_leaveall = false;
@@ -662,12 +665,12 @@ TEST(msrp_participant, withdraw_talker_notifies_peer_leave)
     obs.on_talker_leave = [&](tsn::StreamId const& id) { leave_id = id; };
     b.subscribe(obs);
     (void)a.declare_talker_advertise(make_talker_adv(0x0042), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     auto const stream_id = make_stream_id(0x0042);
     (void)a.withdraw_talker(stream_id, clock.now);
-    auto const t2 = clock.advance(std::chrono::milliseconds(150));
+    auto const t2 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t2);
     fab.deliver_a_to_b(b, t2);
     auto const t3 = clock.advance(std::chrono::milliseconds(1100));
@@ -699,19 +702,19 @@ TEST(msrp_participant, each_registrar_leaves_a_full_leave_time_after_its_own_lea
     obs.on_talker_leave = [&](tsn::StreamId const& id) { timer_left.push_back(id.get_unique_id()); };
     (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0x0002), clock.now);
-    auto const t0 = clock.advance(std::chrono::milliseconds(150));
+    auto const t0 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t0);
     fab.deliver_a_to_b(b, t0);
     EXPECT_EQ(b.talker_advertise_count(), 2U);
 
     (void)a.withdraw_talker(make_stream_id(0x0001), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);  // b's Registrar for 0x0001 enters Lv at t1
     EXPECT_TRUE(b.next_deadline() <= t1 + std::chrono::milliseconds(1000));
 
     (void)a.withdraw_talker(make_stream_id(0x0002), clock.advance(std::chrono::milliseconds(500)));
-    auto const t2 = clock.advance(std::chrono::milliseconds(150));
+    auto const t2 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t2);
     fab.deliver_a_to_b(b, t2);  // b's Registrar for 0x0002 enters Lv at t2 = t1 + 650 ms
     EXPECT_EQ(b.talker_advertise_count(), 2U);
@@ -749,7 +752,7 @@ TEST(msrp_participant, listener_declare_reaches_peer)
     a.subscribe(obs);
     auto const sid = make_stream_id(0x0099);
     (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     b.tick(t1);
     fab.deliver_b_to_a(a, t1);
     EXPECT_TRUE(listener_seen.has_value());
@@ -780,7 +783,7 @@ TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
     b.start(clock.now);
     auto const sid = make_stream_id(0x0099);
     (void)b.declare_listener(sid, ListenerDeclaration::Ready, clock.now);
-    auto t = clock.advance(std::chrono::milliseconds(150));
+    auto t = clock.advance(std::chrono::milliseconds(250));
     b.tick(t);
     fab.deliver_b_to_a(a, t);
     EXPECT_TRUE(a.listener_permits_transmit(sid));  // registered (Registrar In)
@@ -814,7 +817,7 @@ TEST(msrp_participant, interesting_stream_id_pruning)
     b.subscribe(obs);
     (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(0x0002), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_EQ(talker_advertise_count, 1);
@@ -873,7 +876,7 @@ TEST(msrp_participant, declare_domain_basic)
     dfv.sr_class_vid = default_sr_class_vid;
     EXPECT_TRUE(bool(a.declare_domain(dfv, clock.now)));
     EXPECT_EQ(a.domain_count(), 1u);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_TRUE(domain_seen.has_value());
@@ -1108,7 +1111,7 @@ TEST(msrp_participant, leaveall_emits_pdu)
     TestClock clock{};
     a.start(clock.now);
     (void)a.declare_talker_advertise(make_talker_adv(1), clock.now);
-    auto t1 = clock.advance(std::chrono::milliseconds(150));
+    auto t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.a_to_b.clear();
     auto t2 = clock.advance(std::chrono::seconds(20));
@@ -1134,7 +1137,7 @@ TEST(msrp_print, format_msrp_of_declare_talker_advertise_pdu)
     auto const ta = make_talker_adv(0x0001);
     auto status = a.declare_talker_advertise(ta, clock.now);
     EXPECT_TRUE(bool(status));
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -1161,7 +1164,7 @@ TEST(msrp_print, format_msrp_of_listener_and_domain_pdus)
     auto const domain_status = a.declare_domain(domain, clock.now);
     EXPECT_TRUE(bool(domain_status));
 
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
 
@@ -1425,9 +1428,9 @@ TEST(msrp_participant, declare_redeclare_same_stream_id_idempotent)
 
 // A re-declared Talker Advertise with a changed TSpec is a different attribute
 // (IEEE 802.1Q-2022 Clause 10.7): the value on the wire is left first, and the
-// new one is declared New only once that Lv has gone out. A bridge that saw a
-// changed FirstValue under a registered StreamID would otherwise fail the
-// reservation with Table 35-6 code 16.
+// new one is declared New two LeaveAll periods after that Lv has gone out
+// (35.2.2.8). A bridge that saw a changed FirstValue under a registered
+// StreamID would otherwise fail the reservation with Table 35-6 code 16.
 TEST(msrp_participant, a_changed_talker_advertise_leaves_the_old_value_before_declaring_the_new)
 {
     MsrpParticipant a{test_msrp_config(), 0xc001};
@@ -1457,16 +1460,36 @@ TEST(msrp_participant, a_changed_talker_advertise_leaves_the_old_value_before_de
     EXPECT_EQ(lv.front().event, AttributeEvent::Lv);
     EXPECT_EQ(lv.front().max_frame_size, 150U);
     fab.a_to_b.clear();
-    // Once the Lv has been encoded the new value is in force and owed a New.
+
+    // The stream stays withdrawn for two LeaveAll periods (2 x 15 s): it is
+    // not declared (after a LeaveAll of ours Table 10-3's LO sends one Mt for
+    // it, which declares nothing), and the record is kept for the value that
+    // waits.
+    for (int i = 0; i < 119; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_EQ(a.talker_advertise_count(), 1u);
+    for (auto const& pdu : fab.a_to_b) {
+        for (auto const& carried : talker_advertise_carried(pdu)) {
+            EXPECT_TRUE(carried.event == AttributeEvent::Mt || carried.event == AttributeEvent::In);
+        }
+    }
+    fab.a_to_b.clear();
+
+    // Then the new value is declared, as New.
+    for (int i = 0; i < 8; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
     EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
     EXPECT_EQ(a.find_talker_advertise(make_stream_id(1))->max_frame_size.get(), 300U);
-
-    a.transmit_pending(clock.now);
-    EXPECT_EQ(fab.a_to_b.size(), 1u);
-    auto const anew = talker_advertise_carried(fab.a_to_b.front());
-    EXPECT_EQ(anew.size(), 1u);
-    EXPECT_EQ(anew.front().event, AttributeEvent::New);
-    EXPECT_EQ(anew.front().max_frame_size, 300U);
+    std::vector<CarriedTalker> anew{};
+    for (auto const& pdu : fab.a_to_b) {
+        auto const carried = talker_advertise_carried(pdu);
+        anew.insert(anew.end(), carried.begin(), carried.end());
+    }
+    EXPECT_TRUE(!anew.empty() && anew.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!anew.empty() && anew.front().max_frame_size == 300U);
     EXPECT_EQ(a.talker_advertise_count(), 1u);
 }
 
@@ -1710,14 +1733,14 @@ TEST(msrp_participant, instant_leave_retires_a_withdrawn_registration_on_arrival
     b.subscribe(obs);
 
     (void)a.declare_talker_advertise(make_talker_adv(0x0001), clock.now);
-    auto const t0 = clock.advance(std::chrono::milliseconds(150));
+    auto const t0 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t0);
     fab.deliver_a_to_b(b, t0);
     EXPECT_EQ(b.talker_advertise_count(), 1U);
     EXPECT_TRUE(left.empty());
 
     (void)a.withdraw_talker(make_stream_id(0x0001), clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     // Told on arrival; the registration is gone without a leavetimer.
@@ -1778,10 +1801,11 @@ TEST(msrp_participant, an_accumulated_latency_decrease_stays_in_place)
     }
 }
 
-// A peer's LeaveAll arriving between the Lv and the New: the new value is
-// already the one in force, so the immediate re-declaration the LeaveAll
-// provokes carries it as New, and the old value never comes back.
-TEST(msrp_participant, a_leaveall_between_the_leave_and_the_new_redeclares_the_new_value)
+// A peer's LeaveAll arriving between the Lv and the New: the stream is
+// withdrawn, so the re-declaration the LeaveAll provokes declares neither its
+// old value nor its new one, and the two LeaveAll periods still run their
+// course.
+TEST(msrp_participant, a_leaveall_between_the_leave_and_the_new_declares_nothing_for_the_stream)
 {
     MsrpParticipant a{test_msrp_config(), 0xc004};
     Fabric fab{};
@@ -1811,18 +1835,18 @@ TEST(msrp_participant, a_leaveall_between_the_leave_and_the_new_redeclares_the_n
         0x00,
         0x00};
     a.receive_pdu(leaveall, clock.now);
+    for (int i = 0; i < 8; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
 
-    EXPECT_FALSE(fab.a_to_b.empty());
-    bool saw_new = false;
+    // Table 10-3's LO answers the LeaveAll with an Mt, which declares nothing.
     for (auto const& pdu : fab.a_to_b) {
         for (auto const& carried : talker_advertise_carried(pdu)) {
-            EXPECT_EQ(carried.max_frame_size, 300U);
-            EXPECT_TRUE(carried.event != AttributeEvent::Lv);
-            saw_new |= carried.event == AttributeEvent::New;
+            EXPECT_TRUE(carried.event == AttributeEvent::Mt || carried.event == AttributeEvent::In);
         }
     }
-    EXPECT_TRUE(saw_new);
-    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(1))->max_frame_size.get(), 150U);
 }
 
 // The first declaration of an attribute the port was not declaring is told
@@ -2019,10 +2043,10 @@ TEST(msrp_participant, a_withdrawn_declaration_is_reclaimed_once_its_leave_has_g
 }
 
 // find_registered_talker_advertise() answers only while the peer's declaration
-// is registered. The Leave is told twice: on the peer's Lv message, when the
-// registration still stands for a LeaveTime, and when that time has run out.
-// From then on the talker is not found registered, though the record itself
-// stands until the reclaim sweep and find_talker_advertise() still answers it.
+// is registered. The Leave is told once, when the LeaveTime after the peer's
+// Lv has run out. From then on the talker is not found registered, though the
+// record itself stands until the reclaim sweep and find_talker_advertise()
+// still answers it.
 TEST(msrp_participant, a_talker_that_has_left_is_no_longer_found_registered)
 {
     MsrpParticipant talker{test_msrp_config(), 0xd107};
@@ -2059,9 +2083,427 @@ TEST(msrp_participant, a_talker_that_has_left_is_no_longer_found_registered)
 
     EXPECT_TRUE(is_success(talker.withdraw_talker(sid, clock.now)));
     run(12);
-    EXPECT_TRUE(registered_at_leave == (std::vector<bool>{true, false}));
+    EXPECT_TRUE(registered_at_leave == std::vector<bool>{false});
     EXPECT_TRUE(known_at_last_leave);
     EXPECT_EQ(listener.find_registered_talker_advertise(sid), nullptr);
+}
+
+//
+// The AVnu end station tests of MSRP (802.1Qat End Station Implementation
+// Compliance Test Suite, groups e2 and e3), with the timers Milan v1.3 Table
+// 4.3 shares with IEEE 802.1Q Table 10-7. Each test below names the AVnu test
+// it follows and is told the time, 10 ms at a step.
+//
+
+namespace {
+
+/// What one participant sent, each PDU with the time it went out.
+struct TimedPdus
+{
+    struct Sent
+    {
+        TimePoint at{};
+        std::vector<uint8_t> pdu{};
+    };
+    std::vector<Sent> sent{};
+
+    [[nodiscard]] auto sender(TestClock const& clock) -> std::function<bool(std::span<uint8_t const>)>
+    {
+        return [this, &clock](std::span<uint8_t const> pdu) {
+            sent.push_back({.at = clock.now, .pdu = std::vector<uint8_t>(pdu.begin(), pdu.end())});
+            return true;
+        };
+    }
+};
+
+/// One value's event as a PDU carried it, with the PDU's time.
+struct TimedEvent
+{
+    TimePoint at{};
+    AttributeEvent event{};
+};
+
+/// The events sent for the value @p unique_id, read from each PDU by @p carried.
+template <class Carried>
+auto events_of(TimedPdus const& pdus, uint16_t const unique_id, Carried carried) -> std::vector<TimedEvent>
+{
+    std::vector<TimedEvent> out{};
+    for (auto const& sent : pdus.sent) {
+        for (auto const& value : carried(std::span<uint8_t const>(sent.pdu))) {
+            if (value.unique_id == unique_id) {
+                out.push_back({.at = sent.at, .event = value.event});
+            }
+        }
+    }
+    return out;
+}
+
+void run(MsrpParticipant& p, TestClock& clock, int const steps)
+{
+    for (int i = 0; i < steps; ++i) {
+        p.tick(clock.advance(std::chrono::milliseconds(10)));
+    }
+}
+
+/// AVnu 35.e2.1 to 35.e2.5, observable b: New in the first two messages, one
+/// JoinTime (200 ms) apart, then JoinMt no later than the next periodictimer.
+void expect_new_twice_then_joinmt(std::vector<TimedEvent> const& events)
+{
+    EXPECT_TRUE(events.size() >= 3);
+    if (events.size() < 3) {
+        return;
+    }
+    EXPECT_EQ(events[0].event, AttributeEvent::New);
+    EXPECT_EQ(events[1].event, AttributeEvent::New);
+    EXPECT_TRUE(events[1].at - events[0].at == std::chrono::milliseconds(200));
+    EXPECT_EQ(events[2].event, AttributeEvent::JoinMt);
+    EXPECT_TRUE(events[2].at - events[1].at <= std::chrono::milliseconds(1200));
+}
+
+}  // namespace
+
+// AVnu 35.e2.1 to 35.e2.5: registering a Talker Advertise, a Talker Failed and
+// a Listener of each Declaration Type sends New twice within the JoinTime and
+// JoinMt after that; deregistering sends Lv.
+TEST(msrp_end_station, e2_a_registration_is_new_twice_within_the_join_time_and_a_deregistration_is_lv)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe201};
+    TestClock clock{};
+    TimedPdus pdus{};
+    a.set_send_pdu(pdus.sender(clock));
+    a.start(clock.now);
+    TalkerFailedFirstValue failed{};
+    failed.advertise = make_talker_adv(2);
+    failed.set_failure_code(FailureCode::InsufficientBandwidth);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    EXPECT_TRUE(is_success(a.declare_talker_failed(failed, clock.now)));
+    EXPECT_TRUE(is_success(a.declare_listener(make_stream_id(3), ListenerDeclaration::Ready, clock.now)));
+    EXPECT_TRUE(is_success(a.declare_listener(make_stream_id(5), ListenerDeclaration::AskingFailed, clock.now)));
+    EXPECT_TRUE(is_success(a.declare_listener(make_stream_id(7), ListenerDeclaration::ReadyFailed, clock.now)));
+    run(a, clock, 300);
+
+    auto const listeners = [](std::span<uint8_t const> pdu) { return test_support::listener_carried(pdu); };
+    expect_new_twice_then_joinmt(events_of(pdus, 1, talker_advertise_carried));
+    expect_new_twice_then_joinmt(events_of(pdus, 2, talker_failed_carried));
+    expect_new_twice_then_joinmt(events_of(pdus, 3, listeners));
+    expect_new_twice_then_joinmt(events_of(pdus, 5, listeners));
+    expect_new_twice_then_joinmt(events_of(pdus, 7, listeners));
+
+    EXPECT_TRUE(is_success(a.withdraw_talker(make_stream_id(1), clock.now)));
+    EXPECT_TRUE(is_success(a.withdraw_talker(make_stream_id(2), clock.now)));
+    EXPECT_TRUE(is_success(a.withdraw_listener(make_stream_id(3), clock.now)));
+    run(a, clock, 100);
+    EXPECT_EQ(events_of(pdus, 1, talker_advertise_carried).back().event, AttributeEvent::Lv);
+    EXPECT_EQ(events_of(pdus, 2, talker_failed_carried).back().event, AttributeEvent::Lv);
+    EXPECT_EQ(events_of(pdus, 3, listeners).back().event, AttributeEvent::Lv);
+    // A registration that was not deregistered goes on as JoinMt.
+    EXPECT_EQ(events_of(pdus, 5, listeners).back().event, AttributeEvent::JoinMt);
+}
+
+// AVnu 35.e2.7, observable a: a LeaveAll every 10 to 15 s, each one
+// re-declaring the Domain in the same PDU.
+TEST(msrp_end_station, e2_7_a_leaveall_comes_every_ten_to_fifteen_seconds_with_the_domain)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe207};
+    TestClock clock{};
+    TimedPdus pdus{};
+    a.set_send_pdu(pdus.sender(clock));
+    a.start(clock.now);
+    auto const started = clock.now;
+    DomainFirstValue domain{};
+    domain.sr_class_id = 6;
+    EXPECT_TRUE(is_success(a.declare_domain(domain, clock.now)));
+    run(a, clock, 12000);  // two minutes
+
+    std::vector<TimePoint> leavealls{};
+    for (auto const& sent : pdus.sent) {
+        if (pdu_has_leaveall(sent.pdu)) {
+            leavealls.push_back(sent.at);
+            EXPECT_FALSE(domain_carried(sent.pdu).empty());
+        }
+    }
+    EXPECT_TRUE(leavealls.size() >= 7);
+    auto previous = started;
+    for (auto const at : leavealls) {
+        EXPECT_TRUE(at - previous >= std::chrono::seconds(10) && at - previous <= std::chrono::seconds(15));
+        previous = at;
+    }
+}
+
+// AVnu 35.e2.7, the rest of observable a: after a peer's LeaveAll the Domain
+// goes out twice within a JoinTime.
+TEST(msrp_end_station, e2_7_after_a_received_leaveall_the_domain_is_sent_twice_within_the_join_time)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe217};
+    MsrpParticipant peer{test_msrp_config(), 0xe218};
+    TestClock clock{};
+    TimedPdus a_pdus{};
+    TimedPdus peer_pdus{};
+    a.set_send_pdu(a_pdus.sender(clock));
+    peer.set_send_pdu(peer_pdus.sender(clock));
+    a.start(clock.now);
+    DomainFirstValue domain{};
+    domain.sr_class_id = 6;
+    EXPECT_TRUE(is_success(a.declare_domain(domain, clock.now)));
+    run(a, clock, 300);  // settled, and three seconds ahead of the peer's LeaveAll
+    peer.start(clock.now);
+    EXPECT_TRUE(is_success(peer.declare_domain(domain, clock.now)));
+
+    std::optional<TimePoint> peer_leaveall{};
+    size_t delivered = 0;
+    for (int i = 0; i < 1200 && !peer_leaveall.has_value(); ++i) {
+        auto const now = clock.advance(std::chrono::milliseconds(10));
+        peer.tick(now);
+        a.tick(now);
+        for (; delivered < peer_pdus.sent.size(); ++delivered) {
+            auto const& pdu = peer_pdus.sent[delivered].pdu;
+            a_pdus.sent.clear();
+            a.receive_pdu(std::span<uint8_t const>(pdu), now);
+            peer_leaveall = pdu_has_leaveall(pdu) ? std::optional<TimePoint>{now} : peer_leaveall;
+        }
+    }
+    EXPECT_TRUE(peer_leaveall.has_value());
+    run(a, clock, 50);
+    std::vector<TimePoint> domains{};
+    for (auto const& sent : a_pdus.sent) {
+        if (!domain_carried(sent.pdu).empty()) {
+            domains.push_back(sent.at);
+        }
+    }
+    EXPECT_EQ(domains.size(), 2u);
+    EXPECT_TRUE(domains.size() == 2 && domains[0] == *peer_leaveall);
+    EXPECT_TRUE(domains.size() == 2 && domains[1] - domains[0] <= std::chrono::milliseconds(200));
+}
+
+// AVnu 35.e3.1 and 35.e3.2: a Talker Advertise is indicated once, however many
+// LeaveAlls pass while its talker keeps declaring it, and its deregistration
+// is indicated once.
+TEST(msrp_end_station, e3_1_e3_2_a_talker_advertise_is_indicated_once_and_its_leave_once)
+{
+    MsrpParticipant listener{test_msrp_config(), 0xe301};
+    MsrpParticipant talker{test_msrp_config(), 0xe302};
+    Fabric fab{};
+    listener.set_send_pdu(fab.make_a_sender());
+    talker.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    listener.start(clock.now);
+    talker.start(clock.now);
+    int registered = 0;
+    int left = 0;
+    Observer obs{};
+    obs.on_talker_advertise = [&](TalkerAdvertiseFirstValue const&, Operation) { ++registered; };
+    obs.on_talker_leave = [&](tsn::StreamId const&) { ++left; };
+    listener.subscribe(obs);
+    auto const both = [&](int const steps) {
+        for (int i = 0; i < steps; ++i) {
+            auto const now = clock.advance(std::chrono::milliseconds(10));
+            listener.tick(now);
+            talker.tick(now);
+            fab.deliver_a_to_b(talker, now);
+            fab.deliver_b_to_a(listener, now);
+        }
+    };
+
+    EXPECT_TRUE(is_success(talker.declare_talker_advertise(make_talker_adv(0x0031), clock.now)));
+    both(4000);  // forty seconds: several LeaveAlls from each side
+    EXPECT_EQ(registered, 1);
+    EXPECT_EQ(left, 0);
+
+    EXPECT_TRUE(is_success(talker.withdraw_talker(make_stream_id(0x0031), clock.now)));
+    both(300);
+    EXPECT_EQ(registered, 1);
+    EXPECT_EQ(left, 1);
+}
+
+// AVnu 35.e3.3: a talker that switches a registered stream from Talker Failed
+// to Talker Advertise and back, with JoinMt and no Leave (IEEE 802.1Q 35.2.6),
+// is indicated under each type in turn and never as having left.
+TEST(msrp_end_station, e3_3_a_talker_switching_between_failed_and_advertise_is_never_indicated_as_left)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe303};
+    TestClock clock{};
+    a.start(clock.now);
+    std::vector<AttributeType> indicated{};
+    int left = 0;
+    Observer obs{};
+    obs.on_talker_advertise = [&](TalkerAdvertiseFirstValue const&, Operation) {
+        indicated.push_back(AttributeType::TalkerAdvertise);
+    };
+    obs.on_talker_failed = [&](TalkerFailedFirstValue const&, Operation) { indicated.push_back(AttributeType::TalkerFailed); };
+    obs.on_talker_leave = [&](tsn::StreamId const&) { ++left; };
+    a.subscribe(obs);
+    auto const sid = make_stream_id(0x0033);
+    std::array<uint8_t, 25> advertise{};
+    (void)store_unchecked(std::span<uint8_t>(advertise), make_talker_adv(0x0033));
+    TalkerFailedFirstValue failed_value{};
+    failed_value.advertise = make_talker_adv(0x0033);
+    failed_value.set_failure_code(FailureCode::InsufficientBandwidth);
+    std::array<uint8_t, 34> failed{};
+    (void)store_unchecked(std::span<uint8_t>(failed), failed_value);
+    // The test station declares one type for 20 s, a JoinMt a second.
+    auto const declare_for_20s = [&](AttributeType const type, uint8_t const length, std::span<uint8_t const> value) {
+        for (int second = 0; second < 20; ++second) {
+            auto const pdu = build_vector_pdu(type, length, value, {AttributeEvent::JoinMt});
+            a.receive_pdu(std::span<uint8_t const>(pdu), clock.now);
+            run(a, clock, 100);
+        }
+    };
+
+    declare_for_20s(AttributeType::TalkerFailed, 34, failed);
+    EXPECT_NE(a.find_registered_talker_failed(sid), nullptr);
+    declare_for_20s(AttributeType::TalkerAdvertise, 25, advertise);
+    EXPECT_NE(a.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_EQ(a.find_registered_talker_failed(sid), nullptr);
+    declare_for_20s(AttributeType::TalkerFailed, 34, failed);
+    EXPECT_NE(a.find_registered_talker_failed(sid), nullptr);
+    EXPECT_EQ(a.find_registered_talker_advertise(sid), nullptr);
+
+    std::vector<AttributeType> const expected{
+        AttributeType::TalkerFailed, AttributeType::TalkerAdvertise, AttributeType::TalkerFailed};
+    EXPECT_TRUE(indicated == expected);
+    EXPECT_EQ(left, 0);
+}
+
+// AVnu 35.e3.5: two Talker Advertises that share one vector are each indicated
+// once, and each deregistration once.
+TEST(msrp_end_station, e3_5_two_talkers_in_one_vector_are_each_indicated_once)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe305};
+    TestClock clock{};
+    a.start(clock.now);
+    std::vector<int> log{};  // +unique_id registered, -unique_id left
+    Observer obs{};
+    obs.on_talker_advertise = [&](TalkerAdvertiseFirstValue const& fv, Operation) { log.push_back(fv.stream_id.get_unique_id()); };
+    obs.on_talker_leave = [&](tsn::StreamId const& id) { log.push_back(-static_cast<int>(id.get_unique_id())); };
+    a.subscribe(obs);
+    std::array<uint8_t, 25> stream_a{};
+    (void)store_unchecked(std::span<uint8_t>(stream_a), make_talker_adv(0x0051));
+    auto stream_b_value = make_talker_adv(0x0052);
+    stream_b_value.destination_address = ieee::Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x35};
+    std::array<uint8_t, 25> stream_b{};
+    (void)store_unchecked(std::span<uint8_t>(stream_b), stream_b_value);
+    auto const receive = [&](std::span<uint8_t const> value, std::vector<AttributeEvent> const& events) {
+        auto const pdu = build_vector_pdu(AttributeType::TalkerAdvertise, 25, value, events);
+        a.receive_pdu(std::span<uint8_t const>(pdu), clock.now);
+        run(a, clock, 150);
+    };
+
+    receive(stream_a, {AttributeEvent::JoinMt});
+    receive(stream_a, {AttributeEvent::JoinMt, AttributeEvent::JoinMt});
+    receive(stream_a, {AttributeEvent::Lv, AttributeEvent::JoinMt});
+    receive(stream_b, {AttributeEvent::Lv});
+
+    std::vector<int> const expected{0x0051, 0x0052, -0x0051, -0x0052};
+    EXPECT_TRUE(log == expected);
+}
+
+// Milan v1.3 Table 4.3 and 4.2.7.2.2: Milan's LeaveTime is 5 s, which a
+// Registrar in LV waits out, and the instant leave that goes with it ends a
+// registration on the Lv itself.
+TEST(msrp_end_station, milan_the_leave_time_is_five_seconds_and_an_instant_leave_ends_it_at_once)
+{
+    mrp::TimerConfig milan{};
+    milan.leave_time = std::chrono::milliseconds(5000);
+    MsrpParticipant a{test_msrp_config(), 0xe401};
+    EXPECT_TRUE(is_success(a.set_mrp_timers(milan)));
+    EXPECT_TRUE(a.mrp_timers() == milan);
+    TestClock clock{};
+    a.start(clock.now);
+    int left = 0;
+    Observer obs{};
+    obs.on_talker_leave = [&](tsn::StreamId const&) { ++left; };
+    a.subscribe(obs);
+    std::array<uint8_t, 25> value{};
+    (void)store_unchecked(std::span<uint8_t>(value), make_talker_adv(0x0041));
+    auto const sid = make_stream_id(0x0041);
+    auto const join = build_vector_pdu(AttributeType::TalkerAdvertise, 25, value, {AttributeEvent::JoinMt});
+    auto const lv = build_vector_pdu(AttributeType::TalkerAdvertise, 25, value, {AttributeEvent::Lv});
+
+    // Table 10-4 as written: the Lv starts the leavetimer, 5 s under Milan.
+    a.receive_pdu(std::span<uint8_t const>(join), clock.now);
+    a.receive_pdu(std::span<uint8_t const>(lv), clock.now);
+    run(a, clock, 499);
+    EXPECT_NE(a.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_EQ(left, 0);
+    run(a, clock, 2);
+    EXPECT_EQ(a.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_EQ(left, 1);
+
+    // With the instant leave: gone on arrival, told once.
+    a.set_instant_leave(true);
+    a.receive_pdu(std::span<uint8_t const>(join), clock.now);
+    EXPECT_NE(a.find_registered_talker_advertise(sid), nullptr);
+    a.receive_pdu(std::span<uint8_t const>(lv), clock.now);
+    EXPECT_EQ(a.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_EQ(left, 2);
+
+    mrp::TimerConfig bad{};
+    bad.join_time = std::chrono::milliseconds(0);
+    EXPECT_TRUE(is_failure(a.set_mrp_timers(bad)));
+    EXPECT_TRUE(a.mrp_timers() == milan);
+}
+
+// Milan v1.3 4.2.7.1.2: what follows an invalid field is discarded, in the
+// same AttributeList and in every later Message of the MRPDU; what came
+// before it has been processed. Here three Messages: a good Talker Advertise,
+// a Listener vector whose NumberOfValues overruns its list, and another good
+// Talker Advertise.
+TEST(msrp_end_station, milan_what_follows_an_invalid_field_is_discarded_with_every_later_message)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe402};
+    TestClock clock{};
+    a.start(clock.now);
+    auto const message_of = [](std::vector<uint8_t> const& pdu) { return std::vector<uint8_t>(pdu.begin() + 1, pdu.end() - 2); };
+    std::array<uint8_t, 25> first{};
+    (void)store_unchecked(std::span<uint8_t>(first), make_talker_adv(0x0061));
+    std::array<uint8_t, 25> later{};
+    (void)store_unchecked(std::span<uint8_t>(later), make_talker_adv(0x0069));
+    std::array<uint8_t, 8> listener{};
+    (void)store_unchecked(std::span<uint8_t>(listener), ListenerFirstValue{.stream_id = make_stream_id(0x0065)});
+    auto good_first = message_of(build_vector_pdu(AttributeType::TalkerAdvertise, 25, first, {AttributeEvent::JoinMt}));
+    auto bad = message_of(build_vector_pdu(AttributeType::Listener, 8, listener, {AttributeEvent::JoinMt}, {2}));
+    auto good_later = message_of(build_vector_pdu(AttributeType::TalkerAdvertise, 25, later, {AttributeEvent::JoinMt}));
+    bad[5] = 200;  // NumberOfValues: 200 values cannot be in this list
+
+    std::vector<uint8_t> pdu{PROTOCOL_VERSION};
+    pdu.insert(pdu.end(), good_first.begin(), good_first.end());
+    pdu.insert(pdu.end(), bad.begin(), bad.end());
+    pdu.insert(pdu.end(), good_later.begin(), good_later.end());
+    pdu.insert(pdu.end(), {0x00, 0x00});
+    a.receive_pdu(std::span<uint8_t const>(pdu), clock.now);
+
+    EXPECT_NE(a.find_registered_talker_advertise(make_stream_id(0x0061)), nullptr);
+    EXPECT_EQ(a.find_listener(make_stream_id(0x0065)), nullptr);
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0069)), nullptr);
+    EXPECT_EQ(a.talker_advertise_count(), 1u);
+    EXPECT_EQ(a.listener_count(), 0u);
+}
+
+// The same within one vector: the values before an AttributeEvent outside the
+// six are processed, the ones after it are not.
+TEST(msrp_end_station, milan_the_values_after_an_invalid_event_are_discarded)
+{
+    MsrpParticipant a{test_msrp_config(), 0xe403};
+    TestClock clock{};
+    a.start(clock.now);
+    std::array<uint8_t, 25> value{};
+    (void)store_unchecked(std::span<uint8_t>(value), make_talker_adv(0x0071));
+    auto pdu = build_vector_pdu(
+        AttributeType::TalkerAdvertise,
+        25,
+        value,
+        {AttributeEvent::JoinMt, AttributeEvent::JoinMt, AttributeEvent::JoinMt, AttributeEvent::JoinMt, AttributeEvent::JoinMt});
+    // The second three-packed octet (after the 5 header octets, the vector
+    // header and the 25-octet FirstValue, then the first packed octet) holds
+    // the fourth and fifth events: 250 unpacks its first event as 6.
+    pdu[33] = 250;
+    a.receive_pdu(std::span<uint8_t const>(pdu), clock.now);
+
+    EXPECT_NE(a.find_registered_talker_advertise(make_stream_id(0x0071)), nullptr);
+    EXPECT_NE(a.find_registered_talker_advertise(make_stream_id(0x0073)), nullptr);
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0074)), nullptr);
+    EXPECT_EQ(a.find_talker_advertise(make_stream_id(0x0075)), nullptr);
+    EXPECT_EQ(a.talker_advertise_count(), 3u);
 }
 
 // Declaring the type that already stands changes nothing a peer has to act
@@ -2204,7 +2646,7 @@ TEST(msrp_participant, consecutive_listeners_coalesce_into_one_vector)
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0002), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0003), ListenerDeclaration::Ready, clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     EXPECT_TRUE(!fab.a_to_b.empty());
 
     std::vector<uint16_t> nvals{};
@@ -2234,7 +2676,7 @@ TEST(msrp_participant, coalesced_listeners_round_trip_to_peer)
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0002), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0003), ListenerDeclaration::Ready, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
 
@@ -2260,7 +2702,7 @@ TEST(msrp_participant, non_consecutive_listeners_stay_separate_vectors)
     a.start(clock.now);
     (void)a.declare_listener(make_stream_id(0x0001), ListenerDeclaration::Ready, clock.now);
     (void)a.declare_listener(make_stream_id(0x0005), ListenerDeclaration::Ready, clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     std::vector<uint16_t> nvals{};
     for (auto const& pdu : fab.a_to_b) {
@@ -2298,7 +2740,7 @@ TEST(msrp_participant, domain_class_b_then_a_coalesce_and_round_trip)
     dom_a.sr_class_vid = default_sr_class_vid;
     (void)a.declare_domain(dom_b, clock.now);  // declared B first so container order chains B -> A
     (void)a.declare_domain(dom_a, clock.now);
-    auto const t1 = clock.advance(std::chrono::milliseconds(150));
+    auto const t1 = clock.advance(std::chrono::milliseconds(250));
     a.tick(t1);
 
     std::vector<uint16_t> nvals{};
@@ -2428,13 +2870,13 @@ TEST(msrp_participant, peer_declaration_does_not_overwrite_our_talker)
     auto ta_ours = make_talker_adv(0x0001);
     ta_ours.destination_address = our_mac;
     EXPECT_TRUE(bool(a.declare_talker_advertise(ta_ours, clock.now)));
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
 
     // B declares the SAME stream S with a DIFFERENT dest MAC; A receives it.
     auto ta_foreign = make_talker_adv(0x0001);
     ta_foreign.destination_address = foreign_mac;
     EXPECT_TRUE(bool(b.declare_talker_advertise(ta_foreign, clock.now)));
-    b.tick(clock.advance(std::chrono::milliseconds(150)));
+    b.tick(clock.advance(std::chrono::milliseconds(250)));
     fab.deliver_b_to_a(a, clock.now);
 
     // A must NOT have adopted B's foreign dest MAC into our own declaration -- our
@@ -2464,7 +2906,7 @@ TEST(msrp_participant, transmit_pending_sends_a_withdrawal_without_waiting_for_t
     b.subscribe(obs);
 
     (void)a.declare_talker_advertise(make_talker_adv(0x0042), clock.now);
-    a.tick(clock.advance(std::chrono::milliseconds(150)));
+    a.tick(clock.advance(std::chrono::milliseconds(250)));
     fab.deliver_a_to_b(b, clock.now);
     EXPECT_NE(b.find_talker_advertise(make_stream_id(0x0042)), nullptr);
 

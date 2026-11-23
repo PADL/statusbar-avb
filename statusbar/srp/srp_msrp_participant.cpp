@@ -16,7 +16,9 @@
 #include "statusbar/status/throw_or_abort.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>  // stderr (diagnostic [srp-mrp] logging)
+#include <optional>
 #include <print>
 #include <string_view>
 
@@ -81,6 +83,16 @@ constexpr auto translate_sndmsg(applicant_sm::SendMessage msg, bool registrar_is
         default:
             return AttributeEvent::Mt;  // unreachable in practice; harmless default
     }
+}
+
+/// The FirstValue length of an MSRP attribute type (IEEE 802.1Q Table 35-2),
+/// or 0 for a type MSRP does not define.
+constexpr auto first_value_length(AttributeType const type) noexcept -> size_t
+{
+    constexpr std::array<size_t, 5> lengths{
+        0, TalkerAdvertiseFirstValue::LENGTH, TalkerFailedFirstValue::LENGTH, ListenerFirstValue::LENGTH, DomainFirstValue::LENGTH};
+    auto const index = static_cast<size_t>(type);
+    return index < lengths.size() ? lengths[index] : 0;
 }
 
 /// Translate a wire AttributeEvent into the Applicant/Registrar input
@@ -161,7 +173,7 @@ using mrp::VectorAttributeHeader;
 template <class Limits>
 MsrpParticipantT<Limits>::MsrpParticipantT(MsrpConfig const& config, uint64_t rng_seed)
     : config_{config}
-    , port_{rng_seed}
+    , port_{rng_seed, config.timers}
 {
     if (auto const valid = config_.validate(); !valid) {
         statusbar::throw_or_abort(valid.error());
@@ -457,7 +469,9 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
+    if (rec.pending_not_before.has_value()) {
+        rec.pending_first_value = fv;  // the old value has left: the newest one waits out the same two LeaveAll periods
+    } else if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
         change_declared_value(rec, fv, now);
     } else if (is_actively_declared(rec) && fv.accumulated_latency.get() > rec.first_value.accumulated_latency.get()) {
         return fail_talker_latency(rec, fv, now);
@@ -580,31 +594,53 @@ void MsrpParticipantT<Limits>::change_declared_value(AttributeRecord<FirstValue>
 /// After a PDU has been built: a record whose Lv went out in it (La + tx! is
 /// Vo; a message skipped for space put its Applicants back in La, see
 /// transmit_attribute_type, and waits) takes its pending value and declares
-/// it New!, to ride the next PDU. A LeaveAll of ours in between
-/// (La + txLA! is Lo, with no Lv owed) completes the change the same way.
-/// Returns whether any record did.
+/// it New, once @p hold has passed since that Lv. A LeaveAll of ours in
+/// between (La + txLA! is Lo, with no Lv owed) completes the change the same
+/// way. Returns whether any record did.
 template <class Limits>
 template <class Table>
-auto MsrpParticipantT<Limits>::complete_value_changes(Table& table, TimePoint now) -> bool
+auto MsrpParticipantT<Limits>::complete_value_changes(Table& table, std::chrono::milliseconds const hold, TimePoint now) -> bool
 {
     bool any = false;
     for (auto& rec : table) {
-        bool const lv_still_owed = rec.applicant_ctx.tx_pending || rec.applicant_sm.current_state() == applicant_sm::Def::State::La;
-        if (!rec.pending_first_value.has_value() || lv_still_owed) {
+        if (!change_may_complete(rec, hold, now)) {
             continue;
         }
+        rec.pending_not_before.reset();
         declare_new_value(rec, *rec.pending_first_value, now);
         any = true;
     }
     return any;
 }
 
-/// The changes a PDU's going out has settled, Talker Advertises and Domains alike.
+/// Whether the record has a new value waiting whose old one has left the wire
+/// at least @p hold ago. The wait starts at the first pass that finds the Lv
+/// gone.
+template <class Limits>
+template <class Record>
+auto MsrpParticipantT<Limits>::change_may_complete(Record& rec, std::chrono::milliseconds const hold, TimePoint now) -> bool
+{
+    bool const lv_still_owed = rec.applicant_ctx.tx_pending || rec.applicant_sm.current_state() == applicant_sm::Def::State::La;
+    if (!rec.pending_first_value.has_value() || lv_still_owed) {
+        return false;
+    }
+    if (!rec.pending_not_before.has_value()) {
+        rec.pending_not_before = now + hold;
+    }
+    return now >= *rec.pending_not_before;
+}
+
+/// The changes a PDU's going out has settled. A Domain's new value follows
+/// its Lv at once. A Talker Advertise's waits two LeaveAll periods: IEEE
+/// 802.1Q 35.2.2.8, "there must be at least two LeaveAllTime ... time periods
+/// between when the Talker removes the existing Stream registration and
+/// declares the new", which Milan v1.3 5.3.7.4 repeats for its talkers.
 template <class Limits>
 void MsrpParticipantT<Limits>::complete_pending_changes(TimePoint now)
 {
-    bool const talkers = complete_value_changes(talker_adv_, now);
-    bool const domains = complete_value_changes(domains_, now);
+    auto const two_leaveall_periods = 2 * port_.timers().config().leave_all_time_max;
+    bool const talkers = complete_value_changes(talker_adv_, two_leaveall_periods, now);
+    bool const domains = complete_value_changes(domains_, std::chrono::milliseconds{0}, now);
     if (talkers || domains) {
         port_.timers().start_join(now);
     }
@@ -629,6 +665,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
     for (auto& rec : talker_adv_) {
         if (rec.first_value.stream_id == stream_id) {
             rec.pending_first_value.reset();  // a withdrawal cancels a change in flight
+            rec.pending_not_before.reset();
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             found = true;
         }
@@ -761,6 +798,14 @@ void MsrpParticipantT<Limits>::tick(TimePoint now)
     if (!expired.any()) {
         return;
     }
+    run_expired_timers(expired, now);
+    reclaim();
+    request_transmit_if_owed(now);
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::run_expired_timers(mrp::TimerScheduler::Expired const& expired, TimePoint now)
+{
     // Order matches mrp.c's dispatch loop ordering: LeaveAll first
     // (triggers TxLA events on all attributes), then Leave (Registrar
     // expiry), then Periodic, then Join (actual transmit).
@@ -776,7 +821,19 @@ void MsrpParticipantT<Limits>::tick(TimePoint now)
     if (expired.join) {
         on_join_timer(now);
     }
-    reclaim();
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::request_transmit_if_owed(TimePoint now)
+{
+    auto const owes = [](auto const& table) {
+        return std::ranges::any_of(table, [](auto const& rec) {
+            return rec.operation == Operation::Declare && applicant_sm::Def::wants_transmit(rec.applicant_sm.current_state());
+        });
+    };
+    if (owes(talker_adv_) || owes(talker_failed_) || owes(listeners_) || owes(domains_)) {
+        port_.timers().start_join(now);
+    }
 }
 
 template <class Limits>
@@ -966,55 +1023,163 @@ void MsrpParticipantT<Limits>::reclaim()
 template <class Limits>
 void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoint now)
 {
-    if (pdu.size() < 3) {  // minimum: version + EndMark
+    if (pdu.size() < 3 || pdu[0] != PROTOCOL_VERSION) {  // version + EndMark at least; another version is not ours
         return;
     }
-    if (pdu[0] != PROTOCOL_VERSION) {
-        return;  // unknown protocol version
-    }
-
     rx_leaveall_seen_ = false;
+    decode_messages(pdu, now);
+    finish_receive(now);
+}
+
+/// The Messages of one MSRPDU in order, up to the PDU's EndMark. Milan v1.3
+/// 4.2.7.1.2: what precedes an invalid field has been processed; what follows
+/// it in the same AttributeList is discarded, and so is every later Message.
+template <class Limits>
+void MsrpParticipantT<Limits>::decode_messages(std::span<uint8_t const> pdu, TimePoint now)
+{
     size_t pos = 1;
-    while (pos + 2 <= pdu.size()) {
-        uint16_t const end_check = mrp::read_doublet_at(pdu, pos);
-        if (end_check == mrp::END_MARK) {
-            break;
-        }
-
-        if (pos + AttributeListHeader::LENGTH + 2 > pdu.size()) {
-            return;
-        }
-        AttributeListHeader hdr;
-        (void)load_unchecked(pdu.subspan(pos), &hdr);
-        pos += AttributeListHeader::LENGTH;
-
-        // AttributeListLength (IEEE 802.1Q-2014 Clause 10.8.2.3): length in
-        // octets of the AttributeList (vectors + trailing EndMark). Consumed
-        // here and used to bound the per-message decode scope so a malformed
-        // length can't make us read past the message.
-        uint16_t const attr_list_length = mrp::read_doublet_at(pdu, pos);
-        pos += 2;
-
-        size_t const attr_list_end = pos + attr_list_length;
-        if (attr_list_end > pdu.size()) {
-            return;
-        }
-
-        auto const attr_type = static_cast<AttributeType>(hdr.attribute_type.get());
-        uint8_t const attr_length = hdr.attribute_length.get();
-
-        auto const message_payload = pdu.first(attr_list_end);
-        decode_attribute_list(attr_type, attr_length, message_payload, pos, now);
-
-        // Skip over any trailing bytes the inner decoder didn't consume,
-        // keeping the outer message-walk cursor aligned with the sender.
-        pos = attr_list_end;
+    bool valid = true;
+    while (valid && pos + 2 <= pdu.size() && mrp::read_doublet_at(pdu, pos) != mrp::END_MARK) {
+        valid = decode_message(pdu, pos, now);
     }
+}
 
+/// The header of the Message at @p pos, or nullopt when the header or the
+/// AttributeListLength it gives (IEEE 802.1Q 10.8.2.3: the vectors and their
+/// EndMark) runs past the PDU.
+template <class Limits>
+auto MsrpParticipantT<Limits>::parse_message_header(std::span<uint8_t const> pdu, size_t const pos) -> std::optional<RxMessage>
+{
+    if (pos + AttributeListHeader::LENGTH + 2 > pdu.size()) {
+        return std::nullopt;
+    }
+    AttributeListHeader hdr;
+    (void)load_unchecked(pdu.subspan(pos), &hdr);
+    size_t const list_begin = pos + AttributeListHeader::LENGTH + 2;
+    RxMessage const message{
+        .type = static_cast<AttributeType>(hdr.attribute_type.get()),
+        .attr_length = hdr.attribute_length.get(),
+        .list_begin = list_begin,
+        .list_end = list_begin + mrp::read_doublet_at(pdu, pos + AttributeListHeader::LENGTH)};
+    return message.list_end > pdu.size() ? std::nullopt : std::optional<RxMessage>{message};
+}
+
+/// One Message. @p pos moves to the next one by the AttributeListLength,
+/// whatever the list decoder consumed. False when the Message is invalid.
+template <class Limits>
+auto MsrpParticipantT<Limits>::decode_message(std::span<uint8_t const> pdu, size_t& pos, TimePoint now) -> bool
+{
+    auto const message = parse_message_header(pdu, pos);
+    if (!message) {
+        return false;
+    }
+    pos = message->list_end;
+    return decode_attribute_list(*message, pdu.first(message->list_end), now);
+}
+
+/// The VectorAttributes of one Message up to the list's EndMark. A type MSRP
+/// does not define is passed over whole; a known type whose AttributeLength
+/// is short of its FirstValue, a vector that overruns the list and a list
+/// that ends without its EndMark are invalid.
+template <class Limits>
+auto MsrpParticipantT<Limits>::decode_attribute_list(RxMessage const& message, std::span<uint8_t const> payload, TimePoint now)
+    -> bool
+{
+    size_t const first_value_length = detail_msrp::first_value_length(message.type);
+    if (first_value_length == 0 || message.attr_length < first_value_length) {
+        return first_value_length == 0;
+    }
+    size_t pos = message.list_begin;
+    bool valid = true;
+    while (valid && pos + 2 <= payload.size() && mrp::read_doublet_at(payload, pos) != mrp::END_MARK) {
+        valid = decode_vector_attribute(message, payload, pos, now);
+    }
+    return valid && pos + 2 <= payload.size();
+}
+
+/// One VectorAttribute at @p pos: its header, the LeaveAll it may carry, then
+/// its FirstValue and packed events. False when it overruns the list or holds
+/// an event value outside the six.
+template <class Limits>
+auto MsrpParticipantT<Limits>::decode_vector_attribute(
+    RxMessage const& message, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool
+{
+    VectorAttributeHeader vec_hdr;
+    (void)load_unchecked(payload.subspan(pos), &vec_hdr);
+    pos += VectorAttributeHeader::LENGTH;
+    uint16_t const num_values = vec_hdr.get_number_of_values();
+    if (vec_hdr.get_leave_all()) {
+        receive_leaveall(message.type, num_values, now);
+    }
+    return decode_vector_values(message, num_values, payload, pos, now);
+}
+
+/// A LeaveAll in a vector's header applies to every attribute of the
+/// Message's type on this port, and restarts our own leavealltimer.
+template <class Limits>
+void MsrpParticipantT<Limits>::receive_leaveall(AttributeType const type, uint16_t const num_values, TimePoint now)
+{
+    rx_leaveall_seen_ = true;  // finish_receive re-declares at once (see there)
+    // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
+    // registrar to Leaving (registrar_in -> false) until the next Join
+    // re-registers it -- a prime suspect for the listener-ready flap.
+    if (logger_ && type == AttributeType::Listener) {
+        logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
+    }
+    for_each_record_of(type, [&](auto& rec) {
+        mrp::dispatch_applicant(rec, applicant_sm::Def::Event::RLeaveAll, now);
+        mrp::dispatch_registrar(rec, registrar_sm::Def::Event::RLeaveAll, now, port_.timers());
+    });
+    // Also ack the LeaveAll into our LeaveAll FSM to restart its timer.
+    port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::RLeaveAll, now);
+}
+
+/// The FirstValue, ThreePackedEvents and (for a Listener) FourPackedEvents of
+/// one vector of @p num_values values; @p pos moves past them.
+template <class Limits>
+auto MsrpParticipantT<Limits>::decode_vector_values(
+    RxMessage const& message, uint16_t const num_values, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool
+{
+    size_t const event_octets = mrp::threepacked_octet_count(num_values);
+    size_t const decl_octets = (message.type == AttributeType::Listener) ? mrp::fourpacked_octet_count(num_values) : 0;
+    if (pos + message.attr_length + event_octets + decl_octets > payload.size()) {
+        return false;
+    }
+    RxVector const vector{
+        .first_value = payload.subspan(pos, message.attr_length),
+        .events = payload.subspan(pos + message.attr_length, event_octets),
+        .declarations = payload.subspan(pos + message.attr_length + event_octets, decl_octets)};
+    pos += message.attr_length + event_octets + decl_octets;
+    return deliver_vector_values(message, num_values, vector, now);
+}
+
+/// Each value of one vector to the machines, in order. An AttributeEvent
+/// outside the six the standard defines is an invalid field: the values
+/// before it have been delivered, and nothing after it is.
+template <class Limits>
+auto MsrpParticipantT<Limits>::deliver_vector_values(
+    RxMessage const& message, uint16_t const num_values, RxVector const& vector, TimePoint now) -> bool
+{
+    for (uint16_t i = 0; i < num_values; ++i) {
+        AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(vector.events[i / 3]), i);
+        if (detail_msrp::rx_events_for(event).applicant == applicant_sm::Def::Event::Count) {
+            return false;
+        }
+        uint8_t const decl =
+            vector.declarations.empty() ? uint8_t{0} : mrp::nth_of_four(mrp::unpack4_declarations(vector.declarations[i / 4]), i);
+        handle_rx_event(
+            message.type, message.attr_length, vector.first_value, i, event, static_cast<ListenerDeclaration>(decl), now);
+    }
+    return true;
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::finish_receive(TimePoint now)
+{
     // A received LeaveAll asked everyone to re-declare. Do it SYNCHRONOUSLY here
-    // rather than only arming the join timer (~100 ms): the bridge that sent the
+    // rather than only arming the join timer: the bridge that sent the
     // LeaveAll declares our (now-leaving) attributes as Mt toward downstream
-    // listeners on its own ~100 ms join timer, and a re-declare that lands just
+    // listeners on its own join timer, and a re-declare that lands just
     // after that window makes the listener see our talker momentarily disappear
     // and tear down its reservation (observed feeding a downstream listener through an
     // AVB switch: the downstream stream stopped being forwarded). Emitting our re-declarations
@@ -1022,106 +1187,10 @@ void MsrpParticipantT<Limits>::receive_pdu(std::span<uint8_t const> pdu, TimePoi
     if (rx_leaveall_seen_) {
         build_and_send_pdu(now);
     }
-
     // After processing received events, a join timer opportunity may
     // be needed so that state transitions triggered by rx events can
     // be transmitted.
     port_.timers().start_join(now);
-}
-
-template <class Limits>
-void MsrpParticipantT<Limits>::decode_attribute_list(
-    AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
-{
-    while (pos + 2 <= payload.size()) {
-        uint16_t const end_check = mrp::read_doublet_at(payload, pos);
-        if (end_check == mrp::END_MARK) {
-            pos += 2;
-            return;
-        }
-        decode_vector_attribute(attr_type, attr_length, payload, pos, now);
-    }
-}
-
-template <class Limits>
-void MsrpParticipantT<Limits>::decode_vector_attribute(
-    AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now)
-{
-    if (pos + VectorAttributeHeader::LENGTH > payload.size()) {
-        return;
-    }
-    VectorAttributeHeader vec_hdr;
-    (void)load_unchecked(payload.subspan(pos), &vec_hdr);
-    pos += VectorAttributeHeader::LENGTH;
-
-    bool const leave_all = vec_hdr.get_leave_all();
-    uint16_t const num_values = vec_hdr.get_number_of_values();
-
-    // If the vector carries a LeaveAll flag, deliver it to every
-    // attribute of this type.
-    if (leave_all) {
-        rx_leaveall_seen_ = true;  // receive_pdu re-declares immediately (see there)
-        if (attr_type == AttributeType::Listener) {
-            // Diagnostic: a LeaveAll on the Listener type drives EVERY listener
-            // registrar to Leaving (registrar_in -> false) until the next Join
-            // re-registers it -- a prime suspect for the listener-ready flap.
-            if (logger_) {
-                logger_->debug("msrp: Listener LeaveAll (num_values={}) -> all listener registrars leave", num_values);
-            }
-        }
-        auto drive_leaveall = [&](auto& records) {
-            for (auto& rec : records) {
-                mrp::dispatch_applicant(rec, applicant_sm::Def::Event::RLeaveAll, now);
-                mrp::dispatch_registrar(rec, registrar_sm::Def::Event::RLeaveAll, now, port_.timers());
-            }
-        };
-        switch (attr_type) {
-            case AttributeType::TalkerAdvertise:
-                drive_leaveall(talker_adv_);
-                break;
-            case AttributeType::TalkerFailed:
-                drive_leaveall(talker_failed_);
-                break;
-            case AttributeType::Listener:
-                drive_leaveall(listeners_);
-                break;
-            case AttributeType::Domain:
-                drive_leaveall(domains_);
-                break;
-        }
-        // Also ack the LeaveAll into our LeaveAll FSM to restart its timer.
-        port_.dispatch_leaveall(mrp::leaveall_sm::Def::Event::RLeaveAll, now);
-    }
-
-    if (pos + attr_length > payload.size()) {
-        return;
-    }
-    auto const first_value_bytes = payload.subspan(pos, attr_length);
-    pos += attr_length;
-
-    size_t const num_event_octets = mrp::threepacked_octet_count(num_values);
-    bool const has_declarations = (attr_type == AttributeType::Listener);
-    size_t const num_decl_octets = has_declarations ? mrp::fourpacked_octet_count(num_values) : 0;
-
-    if (pos + num_event_octets + num_decl_octets > payload.size()) {
-        return;
-    }
-    auto const event_bytes = payload.subspan(pos, num_event_octets);
-    auto const decl_bytes =
-        has_declarations ? payload.subspan(pos + num_event_octets, num_decl_octets) : std::span<uint8_t const>{};
-    pos += num_event_octets + num_decl_octets;
-
-    // Walk each of the num_values attributes in this vector.
-    for (uint16_t i = 0; i < num_values; ++i) {
-        AttributeEvent const event = mrp::nth_of_three(mrp::unpack3_events(event_bytes[i / 3]), i);
-
-        ListenerDeclaration decl = ListenerDeclaration::Ignore;
-        if (has_declarations) {
-            decl = static_cast<ListenerDeclaration>(mrp::nth_of_four(mrp::unpack4_declarations(decl_bytes[i / 4]), i));
-        }
-
-        handle_rx_event(attr_type, attr_length, first_value_bytes, i, event, decl, now);
-    }
 }
 
 template <class Limits>
@@ -1171,7 +1240,11 @@ void MsrpParticipantT<Limits>::handle_talker_advertise_rx(
         registrar_event,
         now,
         [this](TalkerAdvertiseFirstValue const& fv) { return is_interesting(fv.stream_id); },
-        [this](TalkerAdvertiseFirstValue const& fv) { return find_or_create_talker_advertise(fv.stream_id); },
+        [this, registrar_event](TalkerAdvertiseFirstValue const& fv) {
+            supersede_talker_registration(
+                talker_failed_, fv.stream_id, registrar_event, [](auto const& rec) { return rec.first_value.advertise.stream_id; });
+            return find_or_create_talker_advertise(fv.stream_id);
+        },
         [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_advertise(fv, Operation::Register); },
         [this](TalkerAdvertiseFirstValue const& fv) { notify_talker_leave(fv.stream_id); });
 }
@@ -1193,7 +1266,11 @@ void MsrpParticipantT<Limits>::handle_talker_failed_rx(
         registrar_event,
         now,
         [this](TalkerFailedFirstValue const& fv) { return is_interesting(fv.advertise.stream_id); },
-        [this](TalkerFailedFirstValue const& fv) { return find_or_create_talker_failed(fv.advertise.stream_id); },
+        [this, registrar_event](TalkerFailedFirstValue const& fv) {
+            supersede_talker_registration(
+                talker_adv_, fv.advertise.stream_id, registrar_event, [](auto const& rec) { return rec.first_value.stream_id; });
+            return find_or_create_talker_failed(fv.advertise.stream_id);
+        },
         [this](TalkerFailedFirstValue const& fv) { notify_talker_failed(fv, Operation::Register); },
         [this](TalkerFailedFirstValue const& fv) { notify_talker_leave(fv.advertise.stream_id); });
 }
@@ -1226,9 +1303,7 @@ auto MsrpParticipantT<Limits>::adopt_listener_rx(ListenerRecord& rec, ListenerFi
     -> ListenerRxBefore
 {
     ListenerRxBefore const before{
-        .state = rec.registrar_sm.current_state(),
-        .was_registered = rec.registrar_sm.current_state() == registrar_sm::Def::State::In,
-        .substate = rec.substate};
+        .state = rec.registrar_sm.current_state(), .was_registered = rec.registrar_is_registered(), .substate = rec.substate};
     // Adopt the received listener declaration ONLY for a pure peer registration. If
     // WE declare this StreamID, keep OUR substate (first_value is just the StreamID
     // here; substate is the payload) so our next JoinIn re-advertises our own.
@@ -1286,10 +1361,13 @@ template <class Limits>
 void MsrpParticipantT<Limits>::notify_listener_rx(
     ListenerRecord const& rec, ListenerRxBefore const& before, ListenerDeclaration decl)
 {
-    auto const n = rec.registrar_ctx.notify;
-    if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join || (before.was_registered && before.substate != decl)) {
+    // One indication per change, as for the other attribute types (see
+    // notify_peer_rx): registered, a registered Declaration Type that changed
+    // (IEEE 802.1Q 35.2.6, with no Leave between), and the registration ended.
+    bool const registered = rec.registrar_is_registered();
+    if (registered && (!before.was_registered || before.substate != decl)) {
         notify_listener(rec.first_value.stream_id, decl, Operation::Register);
-    } else if (n == registrar_sm::Notify::Leave && before.was_registered) {
+    } else if (!registered && before.was_registered) {
         notify_listener_leave(rec.first_value.stream_id);
     }
 }
@@ -1723,6 +1801,8 @@ auto MsrpParticipantT<Limits>::begin_pdu() -> bool
 /// the peers would never hear it. With @p shed_optional the optional encodings
 /// are left out: their tx! transitions are self-loops, so not sending them
 /// changes no state, which is the permission the brackets in Table 10-3 give.
+/// The optional In or Mt of an Applicant that declares nothing is always left
+/// out: a value this port has withdrawn is not put on the wire again as Mt.
 template <class Limits>
 template <class Table, class Saved>
 auto MsrpParticipantT<Limits>::transmit_attribute_type(
@@ -1736,7 +1816,8 @@ auto MsrpParticipantT<Limits>::transmit_attribute_type(
 {
     for (auto& rec : records) {
         mrp::dispatch_applicant_tx(rec, now);
-        if (shed_optional && rec.applicant_ctx.encode == applicant_sm::Encoding::Optional) {
+        bool const shed = shed_optional || applicant_sm::Def::is_observer(rec.applicant_sm.current_state());
+        if (shed && rec.applicant_ctx.encode == applicant_sm::Encoding::Optional) {
             rec.applicant_ctx.clear_outputs();
         }
     }

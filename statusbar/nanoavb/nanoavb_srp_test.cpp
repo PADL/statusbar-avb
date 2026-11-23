@@ -1017,7 +1017,7 @@ TEST(nanoavb_srp_msrp, withdraw_all_sends_the_leaves_at_once)
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.declare_domain(now).has_value());
     EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(sent > 0);
 
@@ -1049,7 +1049,7 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
                         }}};
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.register_vlan(2, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(sent > 0);
 
@@ -1122,7 +1122,7 @@ TEST(nanoavb_srp_msrp, a_pdu_goes_to_the_sender_in_force_even_before_a_tick)
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.declare_domain(now).has_value());
     EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(*first > 0);
 
@@ -1150,7 +1150,7 @@ TEST(nanoavb_srp_msrp, a_dropped_sender_is_let_go_and_nothing_is_sent_after_it)
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.declare_domain(now).has_value());
     EXPECT_TRUE(handler.talker_advertise(info, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(*count > 0);
 
@@ -1175,7 +1175,7 @@ TEST(nanoavb_srp_mvrp, a_pdu_goes_to_the_sender_in_force_even_before_a_tick)
     MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = counting_sender(first)}};
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.register_vlan(2, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(*first > 0);
 
@@ -1195,7 +1195,7 @@ TEST(nanoavb_srp_mvrp, a_dropped_sender_is_let_go_and_nothing_is_sent_after_it)
     MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = counting_sender(count)}};
     auto now = TimePoint{std::chrono::seconds{1}};
     EXPECT_TRUE(handler.register_vlan(2, now).has_value());
-    now += std::chrono::milliseconds{150};
+    now += std::chrono::milliseconds{250};
     handler.tick(now);
     EXPECT_TRUE(*count > 0);
 

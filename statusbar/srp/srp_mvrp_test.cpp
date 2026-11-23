@@ -367,7 +367,7 @@ TEST(mvrp_participant, declare_emits_pdu)
     obs.on_vlan_registered = [&](uint16_t vid, Operation) { b_vid = vid; };
     b.subscribe(obs);
     (void)a.declare_vlan(100, c.now);
-    auto t1 = c.advance(std::chrono::milliseconds(150));
+    auto t1 = c.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
     fab.deliver_a_to_b(b, t1);
@@ -392,11 +392,11 @@ TEST(mvrp_participant, withdraw_notifies_leave)
     obs.on_vlan_leave = [&](uint16_t vid) { leave_vid = vid; };
     b.subscribe(obs);
     (void)a.declare_vlan(200, c.now);
-    auto t1 = c.advance(std::chrono::milliseconds(150));
+    auto t1 = c.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     (void)a.withdraw_vlan(200, c.now);
-    auto t2 = c.advance(std::chrono::milliseconds(150));
+    auto t2 = c.advance(std::chrono::milliseconds(250));
     a.tick(t2);
     fab.deliver_a_to_b(b, t2);
     auto t3 = c.advance(std::chrono::milliseconds(1100));
@@ -426,14 +426,14 @@ TEST(mvrp_participant, a_leaveall_in_the_same_tick_does_not_expire_the_registrar
     obs.on_vlan_leave = [&](uint16_t vid) { timer_left.push_back(vid); };
     (void)a.declare_vlan(200, c.now);
     (void)a.declare_vlan(300, c.now);
-    auto const t1 = c.advance(std::chrono::milliseconds(150));
+    auto const t1 = c.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_TRUE(b.has_vlan(200));
     EXPECT_TRUE(b.has_vlan(300));
 
     (void)a.withdraw_vlan(300, c.now);
-    auto const t2 = c.advance(std::chrono::milliseconds(150));
+    auto const t2 = c.advance(std::chrono::milliseconds(250));
     a.tick(t2);
     fab.deliver_a_to_b(b, t2);  // b's Registrar for 300 enters Lv at t2 (and notifies the peer's Lv)
     b.subscribe(obs);           // from here only the timers can notify
@@ -487,7 +487,7 @@ TEST(mvrp_participant, the_leaveall_timer_puts_the_leaveall_event_on_the_wire)
     a.start(c.now);
     b.start(c.now);
     (void)a.declare_vlan(200, c.now);
-    auto const t1 = c.advance(std::chrono::milliseconds(150));
+    auto const t1 = c.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     fab.deliver_a_to_b(b, t1);
     EXPECT_TRUE(b.has_vlan(200));
@@ -525,7 +525,7 @@ TEST(mvrp_participant, a_leaveall_with_declarations_sets_the_flag_on_the_first_v
     a.start(c.now);
     (void)a.declare_vlan(200, c.now);
     (void)a.declare_vlan(300, c.now);
-    a.tick(c.advance(std::chrono::milliseconds(150)));
+    a.tick(c.advance(std::chrono::milliseconds(250)));
     fab.a_to_b.clear();
 
     a.tick(c.advance(std::chrono::seconds(20)));
@@ -586,7 +586,7 @@ TEST(mvrp_print, format_mvrp_of_declare_pdu)
     MvrpTestClock c{};
     a.start(c.now);
     (void)a.declare_vlan(100, c.now);
-    auto t1 = c.advance(std::chrono::milliseconds(150));
+    auto t1 = c.advance(std::chrono::milliseconds(250));
     a.tick(t1);
     EXPECT_TRUE(!fab.a_to_b.empty());
 

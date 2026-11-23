@@ -256,6 +256,9 @@ class AvbEntityKit
 
     /// The VLAN the streams use now: the adopted one, else the configured one.
     [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
+    /// The MRP timers of both SRP handlers: Milan v1.3 Table 4.3's under the
+    /// Milan profile, IEEE 802.1Q Table 10-7's otherwise.
+    void apply_mrp_timers(bool milan);
     /// Give the AEM handler the GET_MILAN_INFO answer a Milan model makes, or
     /// none for any other model.
     void install_milan_info();
