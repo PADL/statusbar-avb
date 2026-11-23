@@ -142,12 +142,19 @@ class AvbEntityKit
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
     /// How long the loop driving the reactor may wait this cycle: @p max_ms,
-    /// or less when a MAAP probe or announce falls due sooner, told the
-    /// reactor-clock @p now_ns the loop read. Reactor thread only.
+    /// or less when a MAAP probe or announce or an MRP timer falls due
+    /// sooner, told the reactor-clock @p now_ns the loop read. Reactor
+    /// thread only.
     [[nodiscard]] auto poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
     {
-        return avtp::MaapHandler::poll_timeout_ms(maap_.next_deadline_ns(), now_ns, max_ms);
+        return avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
     }
+
+    /// The earliest of the MAAP deadline and the MSRP and MVRP timers. An MRP
+    /// jointimer is 200 ms, so a loop that only woke every 100 ms sent a
+    /// declaration's second New, and the Join after a LeaveAll, up to 100 ms
+    /// past the JoinTime.
+    [[nodiscard]] auto next_control_deadline_ns() const noexcept -> std::optional<int64_t>;
 
     // --- Media-thread (RT) calls ----------------------------------------------
     /// Whether talker stream @p idx should put its AVTP stream on the wire this

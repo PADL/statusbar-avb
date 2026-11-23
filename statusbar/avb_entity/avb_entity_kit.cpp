@@ -478,6 +478,18 @@ void AvbEntityKit::close_streams() noexcept
     stream_port_.close();
 }
 
+auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<int64_t>
+{
+    auto earliest = maap_.next_deadline_ns();
+    auto const& components = host_.components();
+    for (auto const next : {components.msrp_handler.next_deadline_ns(), components.mvrp_handler.next_deadline_ns()}) {
+        if (next && (!earliest || *next < *earliest)) {
+            earliest = next;
+        }
+    }
+    return earliest;
+}
+
 void AvbEntityKit::apply_mrp_timers(bool const milan)
 {
     auto const timers = milan ? nanoavb::MILAN_MRP_TIMERS : srp::mrp::TimerConfig{};

@@ -308,6 +308,24 @@ TEST(avb_entity_kit_profile, a_milan_kit_runs_mrp_on_table_4_3_and_a_classic_kit
     EXPECT_TRUE(classic->host().components().mvrp_handler.mrp_timers() == srp::mrp::TimerConfig{});
 }
 
+TEST(avb_entity_kit_profile, the_loop_does_not_sleep_past_an_mrp_timer)
+{
+    // The reactor loop waits at most 100 ms a cycle. An MRP jointimer falls
+    // due 200 ms after a declaration: the wait is cut to what is left of it,
+    // so its message goes out on time and not up to 100 ms late.
+    KitUnderTest kit{make_config(2, "classic")};
+    auto& msrp = kit->host().components().msrp_handler;
+    EXPECT_FALSE(msrp.next_deadline_ns().has_value());  // not running yet
+    statusbar::tsn::StreamId sid{ieee::Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, 1};
+    int64_t const start_ns = 5'000'000'000;
+    EXPECT_TRUE(msrp.listener_ready(sid, TimePoint{std::chrono::nanoseconds{start_ns}}).has_value());
+    EXPECT_EQ(msrp.next_deadline_ns().value_or(0), start_ns + 200'000'000);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns), 100);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 150'000'000), 50);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 199'500'000), 1);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 200'000'000), 0);
+}
+
 TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)
 {
     // Nothing said: a plain 1722.1 model answers to 1722.1 and has no Milan info.

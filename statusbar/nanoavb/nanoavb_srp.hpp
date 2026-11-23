@@ -242,6 +242,19 @@ class MvrpHandler
     /// of a run, stopped by withdraw_all() at its end.
     [[nodiscard]] auto started() const noexcept -> bool { return started_; }
 
+    /// When this port's MRP timers next need tick(), on the clock tick() is
+    /// told, as nanoseconds; nullopt while the participant is not running.
+    /// The loop that drives the handler must not sleep past it: a jointimer
+    /// served late sends its message late.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>
+    {
+        auto const next = participant_.next_deadline();
+        if (!started_ || next == TimePoint::max()) {
+            return std::nullopt;
+        }
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(next.time_since_epoch()).count();
+    }
+
   private:
     /// The one way a PDU leaves: through the send_packet in force now.
     auto send(std::span<uint8_t const> const packet) -> bool
@@ -625,6 +638,19 @@ class MsrpHandler
     /// Whether the participant is running: started (BEGIN!) by the first use
     /// of a run, stopped by withdraw_all() at its end.
     [[nodiscard]] auto started() const noexcept -> bool { return started_; }
+
+    /// When this port's MRP timers next need tick(), on the clock tick() is
+    /// told, as nanoseconds; nullopt while the participant is not running.
+    /// The loop that drives the handler must not sleep past it: a jointimer
+    /// served late sends its message late.
+    [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>
+    {
+        auto const next = participant_.next_deadline();
+        if (!started_ || next == TimePoint::max()) {
+            return std::nullopt;
+        }
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(next.time_since_epoch()).count();
+    }
 
     [[nodiscard]] auto get_listener_stream(StreamId const& stream_id) const noexcept -> ListenerStreamSrpInfo const*
     {
