@@ -372,7 +372,7 @@ auto run_entity_main_loop(
         media_dur_hist.update(dur_ns);
         media_dur_stats.update(dur_ns);
         last_wake_count.publish(wake_info.wake_count);
-        last_wake_error_ns.publish(wake_info.error_ns);
+        last_wake_error_ns.publish(wake_info.error_ns());
     };
 
     auto timer = ptpclient::make_ptp_timer(
@@ -383,7 +383,7 @@ auto run_entity_main_loop(
                 timer_error_count.add(1);
                 return;
             }
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
+            auto const now = TimePoint{wake_info->actual_time.time_since_epoch()};
             auto const cb_t0 = std::chrono::steady_clock::now();
             entity.process_audio(now, wake_info->actual_raw);
             note_wake(cb_t0, *wake_info);

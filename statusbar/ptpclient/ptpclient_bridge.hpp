@@ -409,29 +409,32 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// rate and sizes the early-wake guard.
     struct SleepPlan
     {
-        int64_t raw_deadline_ns{0};
-        int64_t mono_deadline_ns{0};
+        realtime::MonotonicRawClock::time_point raw_deadline{};
+        realtime::MonotonicClock::time_point mono_deadline{};
         double mono_per_raw_slope{1.0};
         TimeMapping before{};
     };
 
     /// Prepare for sleep: validate state and convert the PTP deadline into the
     /// RAW and (coarse) MONOTONIC domains.
+    /// @param ptp_deadline The instant to wake at, on the PHC's clock
     /// @return SleepPlan, or error if not running / unhealthy
-    [[nodiscard]] auto prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>;
+    [[nodiscard]] auto prepare_sleep(realtime::GptpClock0::time_point ptp_deadline) noexcept -> StatusValue<SleepPlan>;
 
     /// Told form of the coarse sleep's target: the CLOCK_MONOTONIC instant
-    /// to sleep to for @p plan, told that RAW now reads @p raw_now_ns. It
+    /// to sleep to for @p plan, told that RAW now reads @p raw_now. It
     /// is the plan's monotonic deadline less a guard: wake_refine_spin_ns
     /// for the wakeup latency, plus the divergence CLOCK_MONOTONIC could
     /// accrue against RAW over the sleep at the line's rate. A target that
     /// is not ahead of CLOCK_MONOTONIC means no sleep, only the spin.
-    [[nodiscard]] auto early_wake_monotonic_ns(SleepPlan const& plan, int64_t raw_now_ns) const noexcept -> int64_t;
+    [[nodiscard]] auto early_wake_monotonic(SleepPlan const& plan, realtime::MonotonicRawClock::time_point raw_now) const noexcept
+        -> realtime::MonotonicClock::time_point;
 
     /// Finalize after sleep: validate epoch and convert the RAW wake time back to
     /// PTP via the primary (PHC<->RAW) mapping.
     /// @return current PTP time, or error if epoch changed or mapping unhealthy
-    [[nodiscard]] auto finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>;
+    [[nodiscard]] auto finalize_wake(realtime::MonotonicRawClock::time_point wake_raw, TimeMapping const& before) noexcept
+        -> StatusValue<realtime::GptpClock0::time_point>;
 
     /// The wake instant on both clocks: one CLOCK_MONOTONIC_RAW read at the
     /// end of the spin, and the PTP time it converts to through the primary
@@ -439,22 +442,22 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// below it reads a clock of its own.
     struct WakeTimes
     {
-        int64_t ptp_ns{0};
-        int64_t raw_ns{0};
+        realtime::GptpClock0::time_point ptp{};
+        realtime::MonotonicRawClock::time_point raw{};
     };
 
     /// Sleep until a PTP deadline: coarse clock_nanosleep on CLOCK_MONOTONIC
     /// through raw_line(), then a spin on CLOCK_MONOTONIC_RAW to the deadline.
-    /// @param ptp_deadline_ns Target PTP time in nanoseconds
+    /// @param ptp_deadline The instant to wake at, on the PHC's clock
     /// @param keep_going Optional: the caller's own running flag. Read before
     ///        the sleep and in the final spin to the deadline: once it is
     ///        false the call returns bridge_not_running, as it already does
     ///        when this bridge stops, so a timer being stopped returns to its
     ///        loop at once instead of sleeping out its period.
     /// @return The wake instant on both clocks (the caller measures its wake
-    ///         accuracy from ptp_ns), or an error
-    /// @note On Linux, uses clock_nanosleep for precision. On other platforms, uses std::this_thread::sleep_until.
-    [[nodiscard]] auto sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going = nullptr) noexcept
+    ///         accuracy from ptp), or an error
+    [[nodiscard]] auto sleep_until_ptp(
+        realtime::GptpClock0::time_point ptp_deadline, std::atomic<bool> const* keep_going = nullptr) noexcept
         -> StatusValue<WakeTimes>;
 
     // Manual Epoch Control
@@ -472,6 +475,18 @@ class PtpTimeBridge : public PtpTimeBridgeBase
 
     /// Take one reading from the PHC reader and the system clocks.
     [[nodiscard]] auto take_reading() -> Reading;
+
+    /// The steps of sleep_until_ptp() after the plan.
+    [[nodiscard]] static auto told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool;
+    /// The coarse sleep on CLOCK_MONOTONIC, to the plan's early wake. No sleep
+    /// at all when that instant is not ahead.
+    [[nodiscard]] auto sleep_early(SleepPlan const& plan) const noexcept -> Status;
+    /// Spin on CLOCK_MONOTONIC_RAW to @p raw_deadline.
+    /// @return false when the bridge or the caller stopped first
+    [[nodiscard]] auto spin_to(
+        realtime::MonotonicRawClock::time_point raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool;
+    /// One RAW read at the end of the spin, and the PTP time it converts to.
+    [[nodiscard]] auto wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>;
 
     /// The PHC half of a reading: record its bracket, reject an over-long
     /// one, else push (RAW midpoint, PHC) into the primary window.

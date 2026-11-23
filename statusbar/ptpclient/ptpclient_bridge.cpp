@@ -239,7 +239,7 @@ auto PtpTimeBridge::from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t
     return from_raw_ns(raw_line_.from_monotonic_ns(mono_ns));
 }
 
-auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>
+auto PtpTimeBridge::prepare_sleep(realtime::GptpClock0::time_point const ptp_deadline) noexcept -> StatusValue<SleepPlan>
 {
     if (!is_running_atomic()) {
         return failure(PtpError::bridge_not_running);
@@ -252,19 +252,22 @@ auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusVal
 
     // 1. PTP deadline -> RAW deadline via the primary (PHC <-> RAW) mapping
     //    captured in `before`: ptp = rate * raw + offset => raw = (ptp - offset) / rate.
-    int64_t const raw_deadline = ptp_to_monotonic_precise(
-        ptp_deadline_ns, FixedPointSlope::from_double(before.rate), static_cast<int64_t>(before.offset_ns));
+    auto const raw_deadline = realtime::MonotonicRawClock::from_ns(ptp_to_monotonic_precise(
+        realtime::GptpClock0::to_ns(ptp_deadline),
+        FixedPointSlope::from_double(before.rate),
+        static_cast<int64_t>(before.offset_ns)));
 
     // 2. RAW deadline -> coarse CLOCK_MONOTONIC deadline through the
     //    RAW<->MONOTONIC line, for clock_nanosleep; its rate sizes the guard.
     return success(SleepPlan{
-        .raw_deadline_ns = raw_deadline,
-        .mono_deadline_ns = raw_line_.to_monotonic_ns(raw_deadline),
+        .raw_deadline = raw_deadline,
+        .mono_deadline = raw_line_.to_monotonic(raw_deadline),
         .mono_per_raw_slope = raw_line_.consume().rate,
         .before = before});
 }
 
-auto PtpTimeBridge::early_wake_monotonic_ns(SleepPlan const& plan, int64_t const raw_now_ns) const noexcept -> int64_t
+auto PtpTimeBridge::early_wake_monotonic(SleepPlan const& plan, realtime::MonotonicRawClock::time_point const raw_now)
+    const noexcept -> realtime::MonotonicClock::time_point
 {
     // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
     // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
@@ -273,14 +276,15 @@ auto PtpTimeBridge::early_wake_monotonic_ns(SleepPlan const& plan, int64_t const
     // divergence accrued over the sleep [slew term] so we never oversleep past
     // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
     // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
-    int64_t const sleep_dur = plan.raw_deadline_ns - raw_now_ns;
+    int64_t const sleep_dur = (plan.raw_deadline - raw_now).count();
     int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
     int64_t const slew_guard =
         sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
-    return plan.mono_deadline_ns - (base_guard + slew_guard);
+    return plan.mono_deadline - realtime::Nanoseconds{base_guard + slew_guard};
 }
 
-auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>
+auto PtpTimeBridge::finalize_wake(realtime::MonotonicRawClock::time_point const wake_raw, TimeMapping const& before) noexcept
+    -> StatusValue<realtime::GptpClock0::time_point>
 {
     auto const after = get_mapping();
     if (after.epoch != before.epoch) {
@@ -293,7 +297,8 @@ auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) n
     // RAW wake time -> PTP via the primary (PHC <-> RAW) mapping.
     auto const slope = FixedPointSlope::from_double(after.rate);
     int64_t const offset_ns = static_cast<int64_t>(after.offset_ns);
-    return success(monotonic_to_ptp_precise(wake_raw, slope, offset_ns));
+    return success(
+        realtime::GptpClock0::from_ns(monotonic_to_ptp_precise(realtime::MonotonicRawClock::to_ns(wake_raw), slope, offset_ns)));
 }
 
 void PtpTimeBridge::reset_epoch() noexcept
@@ -419,61 +424,75 @@ auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcep
     return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
-auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going) noexcept -> StatusValue<WakeTimes>
-{  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
-    auto prep = prepare_sleep(ptp_deadline_ns);
-    if (!prep) {
-        return forward_failure(prep);
+auto PtpTimeBridge::sleep_until_ptp(
+    realtime::GptpClock0::time_point const ptp_deadline, std::atomic<bool> const* keep_going) noexcept -> StatusValue<WakeTimes>
+{
+    auto const plan = prepare_sleep(ptp_deadline);
+    if (!plan) {
+        return forward_failure(plan);
     }
-    auto const plan = *prep;
-    int64_t const raw_deadline = plan.raw_deadline_ns;
     // A caller already told to stop does not sleep at all; the spin below
     // reads the flag too, for a stop that arrives during the sleep. Here
     // first because a host whose coarse sleep overshoots the deadline would
     // otherwise hand a stopped caller a wake time it no longer wants.
-    if (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed)) {
+    if (told_to_stop(keep_going)) {
         return failure(PtpError::bridge_not_running);
     }
+    if (auto const slept = sleep_early(*plan); !slept) {
+        return forward_failure(slept);
+    }
+    if (!spin_to(plan->raw_deadline, keep_going)) {
+        return failure(PtpError::bridge_not_running);
+    }
+    return wake_times(plan->before);
+}
 
-    int64_t const mono_wake = early_wake_monotonic_ns(plan, realtime::read_monotonic_raw_ns());
+auto PtpTimeBridge::told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool
+{
+    return keep_going != nullptr && !keep_going->load(std::memory_order_relaxed);
+}
 
+auto PtpTimeBridge::sleep_early(SleepPlan const& plan) const noexcept -> Status
+{
     // One kernel sleep primitive on every platform, on the clock the line
     // maps to. (The macOS branch used to sleep on std::chrono::steady_clock,
     // which is CLOCK_MONOTONIC_RAW there, against a deadline on a different
     // counter: harmless on a desktop, a full-period spin on a laptop that had
     // ever slept.)
-    if (mono_wake > realtime::read_monotonic_ns()) {
-        int const rc = realtime::sleep_until_monotonic_ns(mono_wake);
-        if (rc == EINTR) {
-            // Signal received -- return error so caller can check shutdown flag
-            return failure(std::error_code(EINTR, std::system_category()));
-        }
-        if (rc != 0) {
-            return failure(std::error_code(rc, std::system_category()));
-        }
+    auto const mono_wake = early_wake_monotonic(plan, realtime::read_monotonic_raw());
+    if (mono_wake <= realtime::read_monotonic()) {
+        return {};
     }
+    // EINTR is a signal received: an error, so the caller can check its
+    // shutdown flag.
+    int const rc = realtime::sleep_until_monotonic(mono_wake);
+    return rc == 0 ? Status{} : failure(std::error_code(rc, std::system_category()));
+}
 
+auto PtpTimeBridge::spin_to(
+    realtime::MonotonicRawClock::time_point const raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool
+{
     // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
     // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.
-    while (true) {
-        int64_t const now_raw = realtime::read_monotonic_raw_ns();
-        if (now_raw >= raw_deadline) {
-            break;
+    for (auto now = realtime::read_monotonic_raw(); now < raw_deadline; now = realtime::read_monotonic_raw()) {
+        if (!is_running_atomic() || told_to_stop(keep_going)) {
+            return false;
         }
-        if (!is_running_atomic() || (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed))) {
-            return failure(PtpError::bridge_not_running);
-        }
-        if (raw_deadline - now_raw > 10'000) {
+        if (raw_deadline - now > realtime::Nanoseconds{10'000}) {
             ::sched_yield();
         }
     }
+    return true;
+}
 
-    int64_t const wake_raw = realtime::read_monotonic_raw_ns();
-    auto const wake_ptp = finalize_wake(wake_raw, plan.before);
+auto PtpTimeBridge::wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>
+{
+    auto const wake_raw = realtime::read_monotonic_raw();
+    auto const wake_ptp = finalize_wake(wake_raw, before);
     if (!wake_ptp) {
         return forward_failure(wake_ptp);
     }
-    return success(WakeTimes{.ptp_ns = *wake_ptp, .raw_ns = wake_raw});
+    return success(WakeTimes{.ptp = *wake_ptp, .raw = wake_raw});
 }
 
 auto PtpTimeBridge::take_reading() -> Reading

@@ -30,8 +30,25 @@ using namespace statusbar::ptpclient;
 
 namespace {
 
+using statusbar::realtime::GptpClock0;
+using statusbar::realtime::MonotonicClock;
 using statusbar::realtime::MonotonicRawClock;
 using statusbar::realtime::Nanoseconds;
+using namespace std::chrono_literals;
+
+/// A made-up nanosecond count as an instant on each clock the bridge names.
+constexpr auto ptp(int64_t const ns) -> GptpClock0::time_point
+{
+    return GptpClock0::from_ns(ns);
+}
+constexpr auto raw(int64_t const ns) -> MonotonicRawClock::time_point
+{
+    return MonotonicRawClock::from_ns(ns);
+}
+constexpr auto mono(int64_t const ns) -> MonotonicClock::time_point
+{
+    return MonotonicClock::from_ns(ns);
+}
 
 /// A made-up PHC, a fixed distance ahead of RAW and running `ppm` fast of
 /// it, read every 2 ms, beside a made-up CLOCK_MONOTONIC running `mono_ppm`
@@ -547,7 +564,7 @@ TEST(ptp_bridge_sleep, sleep_fails_when_not_running)
 {
     PtpTimeBridge bridge;
 
-    auto result = bridge.sleep_until_ptp(1'000'000'000LL);
+    auto result = bridge.sleep_until_ptp(ptp(1'000'000'000LL));
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_running));
@@ -562,11 +579,11 @@ TEST(ptp_bridge_sleep, sleep_fails_when_unhealthy)
     feed(bridge, state, phc, 16);
 
     // Refused in the plan, before any clock is read or anything waits.
-    auto result = bridge.sleep_until_ptp(phc.phc_ns + 1'000'000LL);
+    auto result = bridge.sleep_until_ptp(ptp(phc.phc_ns + 1'000'000LL));
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_healthy));
-    EXPECT_EQ(bridge.prepare_sleep(phc.phc_ns + 1'000'000LL).error().value(), static_cast<int>(PtpError::bridge_not_healthy));
+    EXPECT_EQ(bridge.prepare_sleep(ptp(phc.phc_ns + 1'000'000LL)).error().value(), static_cast<int>(PtpError::bridge_not_healthy));
 }
 
 TEST(ptp_bridge_sleep, sleep_bails_when_the_caller_stops)
@@ -580,7 +597,7 @@ TEST(ptp_bridge_sleep, sleep_bails_when_the_caller_stops)
     // A caller that has already been told to stop does not sleep at all:
     // bridge_not_running instead of a wake time, whatever the deadline.
     std::atomic<bool> const keep_going{false};
-    auto result = bridge.sleep_until_ptp(phc.phc_ns + 10'000'000LL, &keep_going);
+    auto result = bridge.sleep_until_ptp(ptp(phc.phc_ns + 10'000'000LL), &keep_going);
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_running));
@@ -594,11 +611,11 @@ TEST(ptp_bridge_sleep, the_plan_is_the_deadline_on_both_local_clocks)
     feed(bridge, state, phc, 64);
 
     // 10 ms after the instant the next reading would start at.
-    auto const plan = bridge.prepare_sleep(phc.phc_ns + 10'000'000LL);
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
     EXPECT_TRUE(plan.has_value());
-    EXPECT_EQ(plan->raw_deadline_ns, phc.raw_ns + 10'000'000LL);
-    EXPECT_EQ(plan->mono_deadline_ns, phc.mono_ns + 10'000'000LL);
-    EXPECT_EQ(plan->mono_deadline_ns, bridge.raw_line().to_monotonic_ns(plan->raw_deadline_ns));
+    EXPECT_TRUE(plan->raw_deadline == raw(phc.raw_ns + 10'000'000LL));
+    EXPECT_TRUE(plan->mono_deadline == mono(phc.mono_ns + 10'000'000LL));
+    EXPECT_TRUE(plan->mono_deadline == bridge.raw_line().to_monotonic(plan->raw_deadline));
     EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.0) < 1e-9);
     EXPECT_EQ(plan->before.epoch, bridge.epoch());
 }
@@ -613,11 +630,11 @@ TEST(ptp_bridge_sleep, the_coarse_sleep_ends_a_guard_before_the_deadline)
     feed(bridge, state, phc, 64);
 
     // CLOCK_MONOTONIC at rate one against RAW: only the wakeup guard.
-    auto const plan = bridge.prepare_sleep(phc.phc_ns + 10'000'000LL);
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
     EXPECT_TRUE(plan.has_value());
-    EXPECT_EQ(bridge.early_wake_monotonic_ns(*plan, phc.raw_ns), plan->mono_deadline_ns - 50'000);
+    EXPECT_TRUE(bridge.early_wake_monotonic(*plan, raw(phc.raw_ns)) == plan->mono_deadline - 50us);
     // Told a RAW time already past the deadline, the slew term is nothing.
-    EXPECT_EQ(bridge.early_wake_monotonic_ns(*plan, plan->raw_deadline_ns + 1), plan->mono_deadline_ns - 50'000);
+    EXPECT_TRUE(bridge.early_wake_monotonic(*plan, plan->raw_deadline + 1ns) == plan->mono_deadline - 50us);
 }
 
 TEST(ptp_bridge_sleep, a_slewed_monotonic_clock_widens_the_guard_by_what_the_sleep_could_accrue)
@@ -629,11 +646,11 @@ TEST(ptp_bridge_sleep, a_slewed_monotonic_clock_widens_the_guard_by_what_the_sle
     ToldPhc phc{.mono_ppm = 1'000};  // CLOCK_MONOTONIC slewed 1000 ppm fast
     feed(bridge, state, phc, 64);
 
-    auto const plan = bridge.prepare_sleep(phc.phc_ns + 10'000'000LL);
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
     EXPECT_TRUE(plan.has_value());
     EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.001) < 1e-6);
     // 10 ms of sleep at 1000 ppm could diverge by 10 us: that much earlier.
-    int64_t const guard = plan->mono_deadline_ns - bridge.early_wake_monotonic_ns(*plan, phc.raw_ns);
+    int64_t const guard = (plan->mono_deadline - bridge.early_wake_monotonic(*plan, raw(phc.raw_ns))).count();
     EXPECT_TRUE(guard >= 50'000 + 9'950 && guard <= 50'000 + 10'050);
 }
 
@@ -643,17 +660,17 @@ TEST(ptp_bridge_sleep, the_wake_is_told_in_ptp_through_the_mapping_it_slept_unde
     auto state = bridge.begin_told_sampling(told_params());
     ToldPhc phc;
     feed(bridge, state, phc, 64);
-    auto const plan = bridge.prepare_sleep(phc.phc_ns + 10'000'000LL);
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
     EXPECT_TRUE(plan.has_value());
 
     // Woken 150 ns after the RAW deadline: 150 ns after the PTP one.
-    auto const wake = bridge.finalize_wake(plan->raw_deadline_ns + 150, plan->before);
+    auto const wake = bridge.finalize_wake(plan->raw_deadline + 150ns, plan->before);
     EXPECT_TRUE(wake.has_value());
-    EXPECT_EQ(wake.value_or(0), phc.phc_ns + 10'000'000LL + 150);
+    EXPECT_TRUE(*wake == ptp(phc.phc_ns + 10'000'000LL + 150));
 
     // A new epoch while it slept: the wake belongs to no timeline.
     bridge.reset_epoch();
-    auto const stale = bridge.finalize_wake(plan->raw_deadline_ns + 150, plan->before);
+    auto const stale = bridge.finalize_wake(plan->raw_deadline + 150ns, plan->before);
     EXPECT_FALSE(stale.has_value());
     EXPECT_EQ(stale.error().value(), static_cast<int>(PtpError::bridge_epoch_changed));
 }
@@ -669,13 +686,13 @@ TEST(ptp_bridge_sleep, a_real_sleep_never_ends_before_its_deadline)
     ToldPhc const phc = tell_history_ending_now(bridge, state);
 
     int64_t const deadline_ptp = phc.phc_ns + 2'000'000LL;
-    auto const result = bridge.sleep_until_ptp(deadline_ptp);
+    auto const result = bridge.sleep_until_ptp(ptp(deadline_ptp));
 
     EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(result->ptp_ns >= deadline_ptp);
-    EXPECT_TRUE(result->raw_ns >= bridge.to_raw_ns(deadline_ptp));
-    EXPECT_EQ(bridge.from_raw_ns(result->raw_ns), result->ptp_ns);
-    EXPECT_TRUE(statusbar::realtime::read_monotonic_raw_ns() >= result->raw_ns);
+    EXPECT_TRUE(result->ptp >= ptp(deadline_ptp));
+    EXPECT_TRUE(result->raw >= raw(bridge.to_raw_ns(deadline_ptp)));
+    EXPECT_TRUE(ptp(bridge.from_raw_ns(MonotonicRawClock::to_ns(result->raw))) == result->ptp);
+    EXPECT_TRUE(statusbar::realtime::read_monotonic_raw() >= result->raw);
 }
 
 //
@@ -777,8 +794,8 @@ TEST(ptp_timer, each_wake_carries_the_raw_instant_its_ptp_time_was_made_from)
             }
             int64_t const raw_ns = statusbar::realtime::MonotonicRawClock::to_ns(info->actual_raw);
             raw_skew_ns.store(statusbar::realtime::read_monotonic_raw_ns() - raw_ns);
-            ptp_skew_ns.store(bridge.from_raw_ns(raw_ns) - info->actual_time_ns);
-            error_skew_ns.store((info->actual_time_ns - info->scheduled_time_ns) - info->error_ns);
+            ptp_skew_ns.store(bridge.from_raw_ns(raw_ns) - info->actual_time_ns());
+            error_skew_ns.store(((info->actual_time - info->scheduled_time) - info->error).count());
             told.store(true);
             told.notify_all();
         },

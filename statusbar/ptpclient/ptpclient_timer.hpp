@@ -75,15 +75,23 @@ class PtpTimerBase
 /// clock the callback may care about, so nothing it calls reads a clock.
 struct TimerWakeInfo
 {
-    int64_t scheduled_time_ns;  ///< Target wake time (PTP nanoseconds)
-    int64_t actual_time_ns;     ///< Actual wake time (PTP nanoseconds)
-    int64_t error_ns;           ///< actual - scheduled (positive = late, negative = early)
-    int64_t wake_count;         ///< Total successful wakes so far
-    /// The wake instant on CLOCK_MONOTONIC_RAW: the one reading actual_time_ns
+    realtime::GptpClock0::time_point scheduled_time;  ///< Target wake time, on the PHC's clock
+    realtime::GptpClock0::time_point actual_time;     ///< Actual wake time, on the PHC's clock
+    realtime::Nanoseconds error;                      ///< actual - scheduled (positive = late, negative = early)
+    int64_t wake_count;                               ///< Total successful wakes so far
+    /// The wake instant on CLOCK_MONOTONIC_RAW: the one reading actual_time
     /// was converted from. Typed, so it can only be told to something that
-    /// takes the RAW clock (an RX drain, which tells it to the port). The PTP
-    /// fields stay plain nanoseconds: PtpTimer is not bound to a gPTP domain type.
+    /// takes the RAW clock (an RX drain, which tells it to the port).
     realtime::MonotonicRawClock::time_point actual_raw{};
+
+    /// The same three as bare nanosecond counts, for a callback that prints
+    /// or records them.
+    [[nodiscard]] constexpr auto scheduled_time_ns() const noexcept -> int64_t
+    {
+        return realtime::GptpClock0::to_ns(scheduled_time);
+    }
+    [[nodiscard]] constexpr auto actual_time_ns() const noexcept -> int64_t { return realtime::GptpClock0::to_ns(actual_time); }
+    [[nodiscard]] constexpr auto error_ns() const noexcept -> int64_t { return error.count(); }
 };
 
 //
@@ -103,7 +111,7 @@ struct TimerWakeInfo
 ///   auto timer = make_ptp_timer(bridge, 1'000'000,  // 1ms period
 ///       [](StatusValue<TimerWakeInfo> const& info) {
 ///           if (info) {
-///               // Handle wake at info->scheduled_time_ns
+///               // Handle wake at info->scheduled_time
 ///           } else {
 ///               // Handle error
 ///           }
@@ -216,35 +224,45 @@ class PtpTimer : public PtpTimerBase
     [[nodiscard]] auto missed_cycles() const noexcept -> int64_t { return load_missed_cycles(); }
 
   private:
-    /// The schedule after a wake at @p actual_wake_ptp: the next period, or,
+    using PtpTimePoint = realtime::GptpClock0::time_point;
+
+    /// The schedule after a wake at @p actual_wake: the next period, or,
     /// when that is already behind the wake, the first period boundary still
     /// ahead, the skipped ones counted as missed cycles.
-    auto advance_schedule(int64_t const actual_wake_ptp, int64_t& next_wake) noexcept -> void
+    auto advance_schedule(PtpTimePoint const actual_wake, PtpTimePoint& next_wake) noexcept -> void
     {
-        next_wake += period_ns_;
-        if (actual_wake_ptp > next_wake) {
-            int64_t const periods_behind = ((actual_wake_ptp - next_wake) / period_ns_) + 1;
-            next_wake += periods_behind * period_ns_;
+        next_wake += period();
+        if (actual_wake > next_wake) {
+            int64_t const periods_behind = ((actual_wake - next_wake).count() / period_ns_) + 1;
+            next_wake += periods_behind * period();
             add_missed_cycles(periods_behind);
         }
     }
 
+    [[nodiscard]] auto period() const noexcept -> realtime::Nanoseconds { return realtime::Nanoseconds{period_ns_}; }
+
+    /// The first period boundary after @p now on the PHC's clock.
+    [[nodiscard]] auto next_boundary(PtpTimePoint const now) const noexcept -> PtpTimePoint
+    {
+        return PtpTimePoint{((now.time_since_epoch() / period()) + 1) * period()};
+    }
+
     /// Process a successful wake: update stats, call the callback with the
     /// wake told on both clocks, advance the schedule.
-    /// @return wake error in nanoseconds
-    auto process_wake(PtpTimeBridge::WakeTimes const& wake, int64_t& next_wake) -> int64_t
+    /// @return wake error
+    auto process_wake(PtpTimeBridge::WakeTimes const& wake, PtpTimePoint& next_wake) -> realtime::Nanoseconds
     {
-        int64_t const error_ns = wake.ptp_ns - next_wake;
-        stats_.update(error_ns);
+        realtime::Nanoseconds const error = wake.ptp - next_wake;
+        stats_.update(error.count());
         TimerWakeInfo const info{
-            .scheduled_time_ns = next_wake,
-            .actual_time_ns = wake.ptp_ns,
-            .error_ns = error_ns,
+            .scheduled_time = next_wake,
+            .actual_time = wake.ptp,
+            .error = error,
             .wake_count = stats_.count(),
-            .actual_raw = realtime::MonotonicRawClock::from_ns(wake.raw_ns)};
+            .actual_raw = wake.raw};
         callback_(success(info));
-        advance_schedule(wake.ptp_ns, next_wake);
-        return error_ns;
+        advance_schedule(wake.ptp, next_wake);
+        return error;
     }
 
     void timer_loop()
@@ -281,7 +299,7 @@ class PtpTimer : public PtpTimerBase
         // sync arrives (or returns) we realign to the next period boundary and
         // resume firing. The timer must keep running and recover on its own
         // whenever time sync comes back, however long it takes.
-        int64_t next_wake = 0;
+        PtpTimePoint next_wake{};
         bool aligned = false;
 
         while (is_running_atomic()) {
@@ -299,12 +317,11 @@ class PtpTimer : public PtpTimerBase
                 // Sync (re)acquired: align to the next period boundary. now_ns()
                 // reads the authoritative RAW clock and converts via the bridge's
                 // PHC<->RAW mapping.
-                auto const current_ptp = bridge_.now_ns();
-                next_wake = ((current_ptp / period_ns_) + 1) * period_ns_;
+                next_wake = next_boundary(realtime::GptpClock0::from_ns(bridge_.now_ns()));
                 aligned = true;
             }
 
-            auto wake_result = bridge_.sleep_until_ptp(next_wake + compensation_ns_, running_flag_ptr());
+            auto wake_result = bridge_.sleep_until_ptp(next_wake + realtime::Nanoseconds{compensation_ns_}, running_flag_ptr());
 
             if (!wake_result) {
                 if (!is_running_atomic()) {

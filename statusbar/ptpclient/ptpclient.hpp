@@ -30,7 +30,7 @@
 ///   // ... wait for healthy mapping ...
 ///   if (bridge.is_healthy()) {
 ///       auto result = bridge.convert_ptp_to_monotonic(ptp_ns);
-///       bridge.sleep_until_ptp(deadline_ptp_ns);
+///       bridge.sleep_until_ptp(deadline_ptp);
 ///   }
 ///   // guard destructor stops sampling
 

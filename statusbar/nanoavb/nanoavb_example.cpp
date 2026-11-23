@@ -719,101 +719,76 @@ struct MainLoopResult
     int64_t missed_cycles{0};
 };
 
-MainLoopResult run_main_loop(
-    statusbar::net::MessageReactor& reactor,
-    statusbar::ptpclient::PtpAppContext& ctx,
-    statusbar::itc::TelemetryCounter<int64_t>& ptp_wake_count,
-    SupervisedNanoAvb& supervised,
-    statusbar::nanoavb::NanoAvbNetHandlers& handlers)
+/// The example's PTP wake: counts it, tells the supervisor when a gPTP
+/// grandmaster appears, and prints the wake error now and then.
+struct PtpWakeHandler
 {
-    using namespace statusbar::ptpclient;
     using TimePoint = statusbar::sm::TimePoint;
 
-    MainLoopResult result;
-    result.compensation_ns = ctx.compensation_ns;
+    statusbar::itc::TelemetryCounter<int64_t>& ptp_wake_count;
+    SupervisedNanoAvb& supervised;
+    statusbar::nanoavb::NanoAvbNetHandlers& handlers;
+    bool had_grandmaster;
 
-    // Track gPTP announce status for state machine events
-    bool had_grandmaster = handlers.gptp_handler().has_grandmaster();
-
-    // Create PTP timer for realtime audio packet handling
-    auto timer = make_ptp_timer(
-        *ctx.bridge,
-        ctx.period_ns,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& wake_info) {
-            if (!wake_info) {
-                std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
-                return;
-            }
-
-            ptp_wake_count.add();
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
-
-            // Check for gPTP grandmaster changes
-            bool const has_gm = handlers.gptp_handler().has_grandmaster();
-            if (has_gm && !had_grandmaster) {
-                supervised.on_gptp_announce(now, true);
-            }
-            had_grandmaster = has_gm;
-
-            // Print periodic status (every 1000 wakes)
-            if (wake_info->wake_count % 1000 == 0) {
-                std::print(
-                    "PTP Wake: {:8}  Error: {:+8} ns ({:+.3f} us)\n",
-                    wake_info->wake_count,
-                    wake_info->error_ns,
-                    static_cast<double>(wake_info->error_ns) / 1000.0);
-                supervised.print_state();
-            }
-        },
-        ctx.compensation_ns,
-        ctx.enable_realtime,
-        ctx.cpu_affinity);
-
-    // Start PTP timer
-    auto start_result = timer.start();
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start timer: {}\n", start_result.error().message());
-        result.exit_code = EXIT_FAILURE;
-        return result;
+    void operator()(statusbar::StatusValue<statusbar::ptpclient::TimerWakeInfo> const& wake_info)
+    {
+        if (!wake_info) {
+            std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
+            return;
+        }
+        ptp_wake_count.add();
+        // The supervisor's clock is told the wake as the PHC read it.
+        note_grandmaster(TimePoint{wake_info->actual_time.time_since_epoch()});
+        // Print periodic status (every 1000 wakes)
+        if (wake_info->wake_count % 1000 == 0) {
+            print_wake(*wake_info);
+        }
     }
 
-    // Simulate link up on startup (in a real system, this would come from netlink)
-    auto startup_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    supervised.on_link_up(startup_time);
+    void note_grandmaster(TimePoint const now)
+    {
+        bool const has_gm = handlers.gptp_handler().has_grandmaster();
+        if (has_gm && !had_grandmaster) {
+            supervised.on_gptp_announce(now, true);
+        }
+        had_grandmaster = has_gm;
+    }
 
-    // Watchdog timeout configuration (gPTP lock only; there is no VLAN gate).
-    // In a real system, timeouts would be tuned to the network environment.
-    constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
-    auto last_state_change_time = std::chrono::steady_clock::now();
-    auto last_supervisor_state = supervised.supervisor.current_state();
+    void print_wake(statusbar::ptpclient::TimerWakeInfo const& wake) const
+    {
+        std::print(
+            "PTP Wake: {:8}  Error: {:+8} ns ({:+.3f} us)\n",
+            wake.wake_count,
+            wake.error_ns(),
+            static_cast<double>(wake.error_ns()) / 1000.0);
+        supervised.print_state();
+    }
+};
 
-    // Poll reactor for network I/O until shutdown
-    while (!statusbar::realtime::is_shutdown_requested()) {
-        (void)reactor.poll_once(100);
+/// The supervisor's watchdog (gPTP lock only; there is no VLAN gate). In a
+/// real system, timeouts would be tuned to the network environment.
+struct SupervisorWatchdog
+{
+    using TimePoint = statusbar::sm::TimePoint;
+    using State = statusbar::nanoavb::supervisor_sm::Def::State;
+    static constexpr auto GPTP_LOCK_TIMEOUT = std::chrono::seconds{10};
 
-        // Check for state changes to reset watchdog
+    SupervisedNanoAvb& supervised;
+    std::chrono::steady_clock::time_point last_state_change_time{std::chrono::steady_clock::now()};
+    State last_supervisor_state{supervised.supervisor.current_state()};
+
+    void check(std::chrono::steady_clock::time_point const now)
+    {
         auto const current_state = supervised.supervisor.current_state();
         if (current_state != last_supervisor_state) {
-            last_state_change_time = std::chrono::steady_clock::now();
-            last_supervisor_state = current_state;
-
-            // Reset recovery counter when we reach Ready state
-            if (current_state == statusbar::nanoavb::supervisor_sm::Def::State::Ready) {
-                supervised.reset_recovery();
-            }
+            note_state_change(current_state, now);
         }
-
-        // Check for watchdog timeout in waiting states
-        auto const now = std::chrono::steady_clock::now();
-        auto const time_in_state = now - last_state_change_time;
         auto const sm_now = TimePoint{now.time_since_epoch()};
-
-        using statusbar::nanoavb::supervisor_sm::Def;
-        if (current_state == Def::State::Init && time_in_state > GPTP_LOCK_TIMEOUT) {
+        // Check for watchdog timeout in waiting states
+        if (current_state == State::Init && now - last_state_change_time > GPTP_LOCK_TIMEOUT) {
             supervised.on_timeout(sm_now);
             last_state_change_time = now;
         }
-
         // Attempt recovery if needed and possible
         if (supervised.needs_recovery()) {
             (void)supervised.attempt_recovery(sm_now);
@@ -821,13 +796,63 @@ MainLoopResult run_main_loop(
         }
     }
 
-    // Stop timers and capture statistics
+    /// A state change resets the watchdog; reaching Ready resets the recovery counter.
+    void note_state_change(State const state, std::chrono::steady_clock::time_point const now)
+    {
+        last_state_change_time = now;
+        last_supervisor_state = state;
+        if (state == State::Ready) {
+            supervised.reset_recovery();
+        }
+    }
+};
+
+/// Poll the reactor for network I/O until shutdown, with the watchdog.
+void supervise_until_shutdown(statusbar::net::MessageReactor& reactor, SupervisedNanoAvb& supervised)
+{
+    // Simulate link up on startup (in a real system, this would come from netlink)
+    supervised.on_link_up(statusbar::sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    SupervisorWatchdog watchdog{supervised};
+    while (!statusbar::realtime::is_shutdown_requested()) {
+        (void)reactor.poll_once(100);
+        watchdog.check(std::chrono::steady_clock::now());
+    }
+}
+
+/// Stop the timer and capture its statistics.
+template <typename TimerT>
+void stop_and_collect(TimerT& timer, statusbar::ptpclient::PtpAppContext& ctx, MainLoopResult& result)
+{
     timer.stop();
     result.wake_stats = timer.stats();
     result.recovery_count = timer.recovery_count();
     result.missed_cycles = timer.missed_cycles();
     ctx.guard.stop();
+}
 
+MainLoopResult run_main_loop(
+    statusbar::net::MessageReactor& reactor,
+    statusbar::ptpclient::PtpAppContext& ctx,
+    statusbar::itc::TelemetryCounter<int64_t>& ptp_wake_count,
+    SupervisedNanoAvb& supervised,
+    statusbar::nanoavb::NanoAvbNetHandlers& handlers)
+{
+    MainLoopResult result{.compensation_ns = ctx.compensation_ns};
+    // Create PTP timer for realtime audio packet handling
+    auto timer = statusbar::ptpclient::make_ptp_timer(
+        *ctx.bridge,
+        ctx.period_ns,
+        PtpWakeHandler{ptp_wake_count, supervised, handlers, handlers.gptp_handler().has_grandmaster()},
+        ctx.compensation_ns,
+        ctx.enable_realtime,
+        ctx.cpu_affinity);
+    if (auto const started = timer.start(); !started) {
+        std::print(stderr, "Error: Failed to start timer: {}\n", started.error().message());
+        result.exit_code = EXIT_FAILURE;
+        return result;
+    }
+    supervise_until_shutdown(reactor, supervised);
+    stop_and_collect(timer, ctx, result);
     return result;
 }
 
