@@ -94,14 +94,23 @@ auto format_clock_times_to(OutputIt out, PtpClientBase& client) -> OutputIt
     auto ptp_now = client.get_time_ns();
     if (ptp_now) {
         out = std::format_to(
-            out, "  Current PTP time:       {} ns ({:.3f} seconds)\n", *ptp_now, static_cast<double>(*ptp_now) / 1e9);
+            out,
+            "  Current PTP time:       {} ns ({}.{:03} seconds)\n",
+            *ptp_now,
+            *ptp_now / 1'000'000'000,
+            (*ptp_now % 1'000'000'000) / 1'000'000);
     } else {
         out = std::format_to(out, "  Error reading PTP time: {}\n", ptp_now.error().message());
     }
 
     // The timing reference, the clock the bridge fits the PHC against.
     int64_t const raw_now = realtime::read_monotonic_raw_ns();
-    out = std::format_to(out, "  Current MONOTONIC_RAW:  {} ns ({:.3f} seconds)\n", raw_now, static_cast<double>(raw_now) / 1e9);
+    out = std::format_to(
+        out,
+        "  Current MONOTONIC_RAW:  {} ns ({}.{:03} seconds)\n",
+        raw_now,
+        raw_now / 1'000'000'000,
+        (raw_now % 1'000'000'000) / 1'000'000);
 
     if (ptp_now) {
         int64_t const diff = *ptp_now - raw_now;

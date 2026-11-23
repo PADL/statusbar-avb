@@ -154,6 +154,53 @@ TEST(ptp_fit_time, large_timestamps)
     EXPECT_TRUE(std::fabs(result.slope - 1.0) < 1e-6);
 }
 
+// An absolute nanosecond count must never reach a double: on the TAI epoch a
+// double steps by 256 ns, and a sum of a window of them by tens of
+// microseconds. Readings that lie exactly on a line are fitted exactly,
+// wherever on the time line they are.
+TEST(ptp_fit_time, a_tai_scale_epoch_is_fitted_as_exactly_as_one_near_zero)
+{
+    constexpr int64_t EPOCHS_NS[] = {1'000'000'000'000LL, 9'000'000'000'000'000LL, 1'795'000'000'000'000'000LL};
+    for (int64_t const epoch_ns : EPOCHS_NS) {
+        // 70 hours of uptime; a PHC 30 ppm fast, read every 2 ms: 60 ns more per sample.
+        std::array<TimeSample, 256> samples{};
+        for (size_t i = 0; i < samples.size(); ++i) {
+            auto const n = static_cast<int64_t>(i);
+            samples[i] = {
+                .monotonic_ns = 252'000'000'000'000LL + (n * 2'000'000), .ptp_ns = epoch_ns + (n * 2'000'060), .bracket_ns = 400};
+        }
+        auto const fit = fit_time_mapping(samples, 200.0);
+        EXPECT_TRUE(fit.valid);
+        EXPECT_TRUE(std::fabs(fit.slope - 1.00003) < 1e-9);
+        // Nothing lies off the line...
+        EXPECT_TRUE(fit.max_residual < 0.01);
+        EXPECT_TRUE(fit.rms_residual < 0.01);
+        // ...and the published line gives back every sample to the nanosecond.
+        auto const slope = FixedPointSlope::from_double(fit.slope);
+        for (auto const& sample : samples) {
+            EXPECT_TRUE(std::abs(monotonic_to_ptp_precise(sample.monotonic_ns, slope, fit.intercept_ns) - sample.ptp_ns) <= 1);
+            EXPECT_TRUE(std::abs(ptp_to_monotonic_precise(sample.ptp_ns, slope, fit.intercept_ns) - sample.monotonic_ns) <= 1);
+        }
+    }
+}
+
+// The residual is what the samples really miss the line by, at any epoch:
+// one sample 700 ns off a line of 256 reads as 700 ns less its own pull.
+TEST(ptp_fit_time, a_residual_at_a_tai_scale_epoch_is_the_real_one)
+{
+    std::array<TimeSample, 256> samples{};
+    for (size_t i = 0; i < samples.size(); ++i) {
+        auto const n = static_cast<int64_t>(i);
+        samples[i] = {
+            .monotonic_ns = 252'000'000'000'000LL + (n * 2'000'000),
+            .ptp_ns = 1'795'000'000'000'000'000LL + (n * 2'000'000) + (i == 128 ? 700 : 0),
+            .bracket_ns = 400};
+    }
+    auto const fit = fit_time_mapping(samples, 200.0);
+    EXPECT_TRUE(fit.max_residual > 690.0 && fit.max_residual < 700.0);
+    EXPECT_TRUE(fit.rms_residual < 50.0);
+}
+
 TEST(ptp_fit_time, identical_monotonic_values)
 {
     // Degenerate case: all monotonic values the same (zero variance)

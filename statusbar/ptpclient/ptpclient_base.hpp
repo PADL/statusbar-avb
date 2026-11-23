@@ -10,10 +10,13 @@
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -205,14 +208,143 @@ struct FixedPointSlope
     }
 };
 
+//
+// The fit
+//
+// An absolute nanosecond count never becomes floating point here. A PTP time
+// on the TAI epoch is near 1.8e18 ns, where a double steps by 256 ns, and a
+// sum of a window of them steps by tens of microseconds. So every sample is
+// first taken, in integers, as a pair of deltas from the window's first
+// sample. A window spans seconds, and a delta of seconds is exact in a
+// double. Only the intercept needs the absolute values back, and it is put
+// together in integers.
+//
+
+namespace detail {
+
+/// A sample as its distance from the window's mean point, in nanoseconds.
+struct CentredSample
+{
+    double m;
+    double p;
+};
+
+/// Where a window is centred: its first sample, kept as the integers it
+/// came as, and the mean of the samples' deltas from it.
+struct FitCentre
+{
+    int64_t first_m{0};
+    int64_t first_p{0};
+    double mean_dm{0.0};
+    double mean_dp{0.0};
+
+    [[nodiscard]] constexpr auto centred(TimeSample const& sample) const noexcept -> CentredSample
+    {
+        return {
+            .m = static_cast<double>(sample.monotonic_ns - first_m) - mean_dm,
+            .p = static_cast<double>(sample.ptp_ns - first_p) - mean_dp};
+    }
+};
+
+/// Centre a window of at least one sample.
+template <typename Container>
+[[nodiscard]] auto fit_centre(Container const& samples) noexcept -> FitCentre
+{
+    FitCentre centre{.first_m = samples[0].monotonic_ns, .first_p = samples[0].ptp_ns};
+    for (size_t i = 0; i < samples.size(); ++i) {
+        centre.mean_dm += static_cast<double>(samples[i].monotonic_ns - centre.first_m);
+        centre.mean_dp += static_cast<double>(samples[i].ptp_ns - centre.first_p);
+    }
+    auto const n = static_cast<double>(samples.size());
+    centre.mean_dm /= n;
+    centre.mean_dp /= n;
+    return centre;
+}
+
+/// The least-squares slope, sum((m - mean_m)(p - mean_p)) / sum((m - mean_m)^2),
+/// or nothing when the monotonic values do not spread.
+template <typename Container>
+[[nodiscard]] auto fit_slope(Container const& samples, FitCentre const& centre) noexcept -> std::optional<double>
+{
+    double sum_mm = 0.0;
+    double sum_mp = 0.0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        CentredSample const c = centre.centred(samples[i]);
+        sum_mm += c.m * c.m;
+        sum_mp += c.m * c.p;
+    }
+    if (std::abs(sum_mm) < 1e-9) {
+        return std::nullopt;
+    }
+    return sum_mp / sum_mm;
+}
+
+/// The intercept of the published line `ptp = slope * mono + intercept`,
+/// which passes through the window's mean point:
+///   intercept = (first_p + mean_dp) - slope * (first_m + mean_dm)
+/// The part from the absolute values is integer arithmetic; the part from
+/// the means is small. It uses the published slope, so that the pair is a
+/// self-consistent conversion line.
+[[nodiscard]] inline auto fit_intercept(FitCentre const& centre, FixedPointSlope slope) noexcept -> int64_t
+{
+    __int128 const slope_first_m = (static_cast<__int128>(centre.first_m) * slope.numerator) / slope.denominator;
+    double const from_means = centre.mean_dp - (slope.to_double() * centre.mean_dm);
+    return static_cast<int64_t>(static_cast<__int128>(centre.first_p) - slope_first_m) + std::llround(from_means);
+}
+
+/// How far the samples lie from the best-fit line.
+struct FitResiduals
+{
+    double rms{0.0};
+    double max{0.0};
+};
+
+template <typename Container>
+[[nodiscard]] auto fit_residuals(Container const& samples, FitCentre const& centre, double slope_fit) noexcept -> FitResiduals
+{
+    double rss = 0.0;
+    double max_abs = 0.0;
+    for (size_t i = 0; i < samples.size(); ++i) {
+        CentredSample const c = centre.centred(samples[i]);
+        double const residual = c.p - (slope_fit * c.m);
+        rss += residual * residual;
+        max_abs = std::max(max_abs, std::abs(residual));
+    }
+    return {.rms = std::sqrt(rss / static_cast<double>(samples.size())), .max = max_abs};
+}
+
+/// The result for a window whose best-fit slope is @p slope_fit.
+template <typename Container>
+[[nodiscard]] auto fit_result(Container const& samples, FitCentre const& centre, double slope_fit, double max_rate_ppm) noexcept
+    -> LinearFitResult
+{
+    // The PUBLISHED slope is clamped to a plausible window only as a safety bound
+    // on scheduling (a degenerate fit must not be able to throw a wake an
+    // arbitrary distance into the future). Callers that legitimately expect a
+    // large slope (e.g. the RAW<->MONOTONIC tracking fit during a phc2sys slew)
+    // pass a wide max_rate_ppm so the real slope passes through unclamped.
+    double const max_ppm = std::max(10.0, max_rate_ppm);
+    double const slope_pub = std::clamp(slope_fit, 1.0 - (max_ppm * 1e-6), 1.0 + (max_ppm * 1e-6));
+    // Residuals are judged against the UNCLAMPED best-fit slope: a clean but
+    // steep line (CLOCK_MONOTONIC slewed by phc2sys while the bridge tracks
+    // it) is a good fit and must read as healthy, not be pinned to
+    // +/-max_rate_ppm and then measured against the wrong line.
+    FitResiduals const residuals = fit_residuals(samples, centre, slope_fit);
+    return {
+        .slope = slope_pub,
+        .intercept_ns = fit_intercept(centre, FixedPointSlope::from_double(slope_pub)),
+        .rms_residual = residuals.rms,
+        .max_residual = residuals.max,
+        .valid = true};
+}
+
+}  // namespace detail
+
 /// Perform least-squares linear regression: ptp = slope * monotonic + intercept
 /// @param samples Array of time samples
 /// @param count Number of samples
 /// @param max_rate_ppm Maximum allowed rate deviation from 1.0 in ppm (clamped)
 /// @return Fit result with slope, intercept, and residual statistics
-///
-/// Uses centered coordinates to avoid numerical precision issues with large
-/// nanosecond timestamps (e.g., 10^14 ns values would overflow when squared).
 [[nodiscard]] auto fit_time_mapping(TimeSample const* samples, size_t count, double max_rate_ppm) noexcept -> LinearFitResult;
 
 /// Fit linear mapping from an indexable container of TimeSample
@@ -223,114 +355,15 @@ struct FixedPointSlope
 template <typename Container>
 [[nodiscard]] auto fit_time_mapping(Container const& samples, double max_rate_ppm) noexcept -> LinearFitResult
 {
-    LinearFitResult result;
-
-    size_t const count = samples.size();
-    if (count < 2) {
-        return result;
+    if (samples.size() < 2) {
+        return {};
     }
-
-    double const n = static_cast<double>(count);
-
-    // First pass: compute means for centering (numerical stability)
-    double sum_m = 0, sum_p = 0;
-    for (size_t i = 0; i < count; ++i) {
-        sum_m += static_cast<double>(samples[i].monotonic_ns);
-        sum_p += static_cast<double>(samples[i].ptp_ns);
+    auto const centre = detail::fit_centre(samples);
+    auto const slope_fit = detail::fit_slope(samples, centre);
+    if (!slope_fit) {
+        return {};
     }
-    double const mean_m = sum_m / n;
-    double const mean_p = sum_p / n;
-
-    // Second pass: compute centered sums for least squares
-    double sum_mm_centered = 0, sum_mp_centered = 0;
-    for (size_t i = 0; i < count; ++i) {
-        double const m_centered = static_cast<double>(samples[i].monotonic_ns) - mean_m;
-        double const p_centered = static_cast<double>(samples[i].ptp_ns) - mean_p;
-        sum_mm_centered += m_centered * m_centered;
-        sum_mp_centered += m_centered * p_centered;
-    }
-
-    if (sum_mm_centered == 0.0 || std::abs(sum_mm_centered) < 1e-9) {
-        return result;
-    }
-
-    // Best-fit slope (UNCLAMPED). Fit quality (residual, below) is judged against
-    // this line: a clean but steep slope — e.g. CLOCK_MONOTONIC being slewed by
-    // phc2sys while the bridge tracks it — is a *good* fit and must read as
-    // healthy, not be pinned to ±max_rate_ppm and then measured against the wrong
-    // line (which would manufacture a huge residual and a false "unhealthy").
-    // slope = sum((m - mean_m)(p - mean_p)) / sum((m - mean_m)^2)
-    double const slope_fit = sum_mp_centered / sum_mm_centered;
-
-    // The PUBLISHED slope is clamped to a plausible window only as a safety bound
-    // on scheduling (a degenerate fit must not be able to throw a wake an
-    // arbitrary distance into the future). The clamp does NOT affect the residual
-    // / health computed below. Callers that legitimately expect a large slope
-    // (e.g. the RAW<->MONOTONIC tracking fit during a phc2sys slew) pass a wide
-    // max_rate_ppm so the real slope passes through unclamped.
-    double const max_ppm = std::max(10.0, max_rate_ppm);
-    double const lo = 1.0 - (max_ppm * 1e-6);
-    double const hi = 1.0 + (max_ppm * 1e-6);
-    double slope_pub = slope_fit;
-    if (slope_pub < lo) {
-        slope_pub = lo;
-    } else if (slope_pub > hi) {
-        slope_pub = hi;
-    }
-
-    // intercept = mean_p - slope_pub * mean_m  (uses the published slope so the
-    // (slope_pub, intercept) pair is a self-consistent conversion line).
-    // Use __int128 for precision with large timestamps (~10^18 ns)
-    auto const slope_fp = FixedPointSlope::from_double(slope_pub);
-    __int128 const mean_m_int = static_cast<__int128>(std::llround(mean_m));
-    __int128 const mean_p_int = static_cast<__int128>(std::llround(mean_p));
-    __int128 const slope_mean_m = (mean_m_int * slope_fp.numerator) / slope_fp.denominator;
-    int64_t const intercept_ns = static_cast<int64_t>(mean_p_int - slope_mean_m);
-
-    // Residuals against the UNCLAMPED best-fit slope = true fit quality.
-    double rss = 0;
-    double max_abs = 0;
-    for (size_t i = 0; i < count; ++i) {
-        double const m_centered = static_cast<double>(samples[i].monotonic_ns) - mean_m;
-        double const p_centered = static_cast<double>(samples[i].ptp_ns) - mean_p;
-        double const residual = p_centered - (slope_fit * m_centered);
-        rss += residual * residual;
-        double const abs_resid = std::abs(residual);
-        if (abs_resid > max_abs) {
-            max_abs = abs_resid;
-        }
-    }
-
-    result.slope = slope_pub;
-    result.intercept_ns = intercept_ns;
-    result.rms_residual = std::sqrt(rss / n);
-    result.max_residual = max_abs;
-    result.valid = true;
-
-    return result;
-}
-
-/// Convert PTP time to monotonic time using a linear mapping
-/// @param ptp_ns PTP time in nanoseconds
-/// @param slope Mapping slope (rate)
-/// @param intercept Mapping intercept (offset)
-/// @return Monotonic time in nanoseconds
-[[nodiscard]] constexpr auto ptp_to_monotonic(int64_t ptp_ns, double slope, double intercept) noexcept
-{
-    // ptp = slope * mono + intercept
-    // mono = (ptp - intercept) / slope
-    return dsp::lround((static_cast<double>(ptp_ns) - intercept) / slope);
-}
-
-/// Convert monotonic time to PTP time using a linear mapping
-/// @param monotonic_ns Monotonic time in nanoseconds
-/// @param slope Mapping slope (rate)
-/// @param intercept Mapping intercept (offset)
-/// @return PTP time in nanoseconds
-[[nodiscard]] constexpr auto monotonic_to_ptp(int64_t monotonic_ns, double slope, double intercept) noexcept
-{
-    // ptp = slope * mono + intercept
-    return dsp::lround((slope * static_cast<double>(monotonic_ns)) + intercept);
+    return detail::fit_result(samples, centre, *slope_fit, max_rate_ppm);
 }
 
 //
