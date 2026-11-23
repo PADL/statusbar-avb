@@ -1,9 +1,9 @@
 // Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
 // SPDX-License-Identifier: MIT
 
-// The stream contexts told the time as a signed Nanoseconds value: the same
-// answers as the unsigned form wherever that one has an answer, and an answer
-// on a timeline that starts near zero or runs below it.
+// The stream contexts told the time as a Nanoseconds value, a count that is
+// never below zero held in a signed type: the same answers as the unsigned
+// form on every input, at the start of a timeline as far along it.
 
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
@@ -75,6 +75,22 @@ TEST(avtp_nanoseconds, the_signed_reconstruction_agrees_with_the_unsigned_one)
     }
 }
 
+TEST(avtp_nanoseconds, the_two_forms_agree_on_every_field_at_the_start_of_a_timeline_too)
+{
+    // Any field at all, true or not, told a time in the first wraps of a
+    // timeline: the answer is the unsigned form's, and never below zero.
+    constexpr std::array<int64_t, 9> NOWS{
+        0, 1, 500'000'000, 2'000'000'000, 0x7FFF'FFFF, 0x8000'0000LL, 0x8000'0001LL, WRAP - 1, WRAP};
+    for (int64_t const now : NOWS) {
+        for (uint64_t field = 0; field < static_cast<uint64_t>(WRAP); field += 0x00FF'FFF1U) {
+            int64_t const time = signed_form(static_cast<uint32_t>(field), now);
+            EXPECT_TRUE(time >= 0);
+            EXPECT_EQ(time, unsigned_form(static_cast<uint32_t>(field), now));
+        }
+        EXPECT_EQ(signed_form(0xFFFF'FFFFU, now), unsigned_form(0xFFFF'FFFFU, now));
+    }
+}
+
 TEST(avtp_nanoseconds, the_reconstruction_is_the_nearest_time_with_those_low_bits)
 {
     int64_t const now = TAI_SCALE;
@@ -90,41 +106,39 @@ TEST(avtp_nanoseconds, the_reconstruction_is_the_nearest_time_with_those_low_bit
 TEST(avtp_nanoseconds, any_time_within_a_second_of_now_is_reconstructed_exactly)
 {
     // What a caller is expected to keep to, wherever on the timeline now is:
-    // far along it, either side of a wrap of the field, just after zero and below it.
-    constexpr std::array<int64_t, 8> NOWS{
-        TAI_SCALE, (7 * WRAP) - 1, 7 * WRAP, (7 * WRAP) + 1, 0, 250'000'000, -250'000'000, -TAI_SCALE};
+    // at its start, just after it, either side of a wrap of the field, and far along it.
+    constexpr std::array<int64_t, 9> NOWS{
+        0, 1000, 250'000'000, 1'500'000'000, (7 * WRAP) - 1, 7 * WRAP, (7 * WRAP) + 1, TAI_SCALE, TAI_SCALE + 0x8000'0000LL};
     constexpr int64_t SECOND = 1'000'000'000;
     for (int64_t const now : NOWS) {
+        // A stream time is never below zero, so near the start the second behind now is cut short.
         for (int64_t step = -SECOND; step <= SECOND; step += 12'345'679) {
-            EXPECT_EQ(signed_form(field_of(now + step), now), now + step);
+            if (now + step >= 0) {
+                EXPECT_EQ(signed_form(field_of(now + step), now), now + step);
+            }
         }
         EXPECT_EQ(signed_form(field_of(now + SECOND), now), now + SECOND);
     }
 }
 
-TEST(avtp_nanoseconds, a_time_before_the_timelines_zero_is_a_small_negative_time)
+TEST(avtp_nanoseconds, at_the_start_of_a_timeline_the_upper_bits_of_the_result_are_clear)
 {
-    // One second after the timeline began, a field from 4096 ns before it.
-    int64_t const now = 1'000'000'000;
-    uint32_t const field = field_of(-4096);
-    EXPECT_EQ(signed_form(field, now), -4096);
-    // The unsigned form cannot go below zero and answers a whole wrap late.
-    EXPECT_EQ(unsigned_form(field, now), WRAP - 4096);
-}
-
-TEST(avtp_nanoseconds, a_timeline_below_zero_reconstructs_like_any_other)
-{
-    int64_t const now = -10'000'000'000;  // ten seconds before the timeline's zero
-    EXPECT_EQ(signed_form(field_of(now + 2'000'000), now), now + 2'000'000);
-    EXPECT_EQ(signed_form(field_of(now - 2'000'000), now), now - 2'000'000);
-    // And straddling zero itself.
-    EXPECT_EQ(signed_form(field_of(1500), -500), 1500);
-    EXPECT_EQ(signed_form(field_of(-1500), 500), -1500);
+    // A talker that has just started stamps small times, and the listener's
+    // time is small too: the full time is the field, with nothing above it.
+    for (int64_t const now : {int64_t{0}, int64_t{100}, int64_t{2'000'000}, int64_t{900'000'000}}) {
+        for (int64_t const pts : {now + 2'000'000, now + 999'000'000, now / 2}) {
+            int64_t const time = signed_form(field_of(pts), now);
+            EXPECT_EQ(time, pts);
+            EXPECT_TRUE(time < WRAP);
+        }
+    }
+    // A field too far ahead to be a true one is answered as it stands, not as a time before zero.
+    EXPECT_EQ(signed_form(0xFFFF'F000U, 500'000'000), int64_t{0xFFFF'F000});
 }
 
 TEST(avtp_nanoseconds, an_aaf_packet_built_and_read_on_the_signed_time_keeps_its_presentation_time)
 {
-    for (Nanoseconds const now : {Nanoseconds{TAI_SCALE}, Nanoseconds{500'000}, Nanoseconds{-10'000'000'000}}) {
+    for (Nanoseconds const now : {Nanoseconds{TAI_SCALE}, Nanoseconds{500'000}, Nanoseconds{(9 * WRAP) - 1'000'000}}) {
         AafStreamOutputContext talker{
             tsn::StreamId{}, AafFormat::int_24bit, AafSampleRate::rate_48_khz, 2, 24, static_cast<uint64_t>(OFFSET.count())};
         AafStreamInputContext listener{AafFormat::int_24bit, AafSampleRate::rate_48_khz, 2, 24};
@@ -173,7 +187,7 @@ TEST(avtp_nanoseconds, the_unsigned_aaf_calls_are_the_signed_ones_with_the_same_
 
 TEST(avtp_nanoseconds, an_am824_packet_built_and_read_on_the_signed_time_keeps_its_presentation_time)
 {
-    for (Nanoseconds const now : {Nanoseconds{TAI_SCALE}, Nanoseconds{500'000}, Nanoseconds{-10'000'000'000}}) {
+    for (Nanoseconds const now : {Nanoseconds{TAI_SCALE}, Nanoseconds{500'000}, Nanoseconds{(9 * WRAP) - 1'000'000}}) {
         Am824StreamOutputContext talker{tsn::StreamId{}, Am824SampleRate::rate_48_khz, 2, static_cast<uint64_t>(OFFSET.count())};
         Am824StreamInputContext listener{Am824SampleRate::rate_48_khz, 2};
         Am824Pdu pdu{};
@@ -217,7 +231,7 @@ TEST(avtp_nanoseconds, the_unsigned_am824_calls_are_the_signed_ones_with_the_sam
 
 TEST(avtp_nanoseconds, the_mixed_am824_decoder_hands_each_callback_signed_times)
 {
-    Nanoseconds const now{-3'000'000'000};
+    Nanoseconds const now{(9 * WRAP) - 1'000'000};  // the field wraps inside the presentation offset
     Am824StreamOutputContext talker{tsn::StreamId{}, Am824SampleRate::rate_48_khz, 2, static_cast<uint64_t>(OFFSET.count())};
     Am824StreamInputContext listener{Am824SampleRate::rate_48_khz, 2};
     Am824Pdu pdu{};

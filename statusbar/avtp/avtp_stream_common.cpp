@@ -7,6 +7,11 @@
 
 namespace statusbar::avtp {
 
+namespace {
+/// The 32-bit timestamp field counts nanoseconds and wraps after this many.
+constexpr int64_t FIELD_WRAP_NS = int64_t{1} << 32;
+}  // namespace
+
 auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) noexcept -> uint64_t
 {
     // The AVTP timestamp carries the lower 32 bits of the gPTP time in nanoseconds.
@@ -61,7 +66,11 @@ auto reconstruct_avtp_timestamp(uint32_t const avtp_timestamp, Nanoseconds const
     if (step == INT32_MIN && avtp_timestamp > now_low) {
         step = -step;
     }
-    return Nanoseconds{static_cast<int64_t>(now_bits + static_cast<uint64_t>(step))};
+    // A stream time is never below zero. In the first half wrap of a timeline
+    // the nearest value can be, for a field too far ahead to be a true one;
+    // the answer is then the field as it stands, the same value a wrap later.
+    auto const nearest = static_cast<int64_t>(now_bits + static_cast<uint64_t>(step));
+    return Nanoseconds{nearest < 0 ? nearest + FIELD_WRAP_NS : nearest};
 }
 
 }  // namespace statusbar::avtp
