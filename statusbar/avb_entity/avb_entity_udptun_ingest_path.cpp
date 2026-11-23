@@ -112,50 +112,76 @@ auto UdptunIngestPath::ingest_gps_tai(int64_t const master_ns, bool const rt_cal
 {
     if (rt_caller) {
         bool const have = rate_tracker_.has_tai_sample();
-        return {.have_sample = have, .tai_ns = have ? rate_tracker_.tai_ns(master_ns) : 0};
+        return {
+            .have_sample = have, .tai_ns = have ? rate_tracker_.tai_ns(master_ns) : 0, .tai_usable = rate_tracker_.tai_usable()};
     }
     auto const snap = tai_snapshot_.consume();  // reactor thread: sole consumer
-    return {.have_sample = snap.have_sample, .tai_ns = snap.have_sample ? ptpclient::tai_ns(snap, master_ns) : 0};
+    return {
+        .have_sample = snap.have_sample,
+        .tai_ns = snap.have_sample ? ptpclient::tai_ns(snap, master_ns) : 0,
+        .tai_usable = snap.tai_usable};
 }
 
 void UdptunIngestPath::send_encoded(
-    ieee::Eui64 const& stream_id, uint32_t const sequence, int64_t const tai_ns, std::span<uint8_t const> const pcm)
+    ieee::Eui64 const& stream_id,
+    uint32_t const sequence,
+    int64_t const tai_ns,
+    std::span<uint8_t const> const pcm,
+    bool const timestamp_uncertain)
 {
     if (!transport_.tx_ready() || !codec_) {
         return;
     }
-    size_t const hdr = codec_->encode(txbuf_, stream_id, sequence, tai_ns, /*interval_us=*/1000);
-    size_t const total = hdr + pcm.size();
-    if (total > txbuf_.size()) {
+    size_t const hdr = codec_->encode(txbuf_, stream_id, sequence, tai_ns, /*interval_us=*/1000, timestamp_uncertain);
+    if (hdr + pcm.size() > txbuf_.size()) {
         return;
     }
     span_copy(make_span(txbuf_, {.start = hdr}), pcm);
-    transport_.send(std::span<uint8_t const>{txbuf_}.first(total));
+    transport_.send(std::span<uint8_t const>{txbuf_}.first(hdr + pcm.size()));
+    count_sent(timestamp_uncertain);
+}
+
+void UdptunIngestPath::count_sent(bool const timestamp_uncertain)
+{
     telemetry_.tx_packets().add(1);
+    if (timestamp_uncertain) {
+        telemetry_.tx_uncertain().add(1);
+    }
 }
 
 void UdptunIngestPath::send(int64_t const tai_ns, std::span<uint8_t const> const pcm)
 {
     uint32_t const seq = seq_++;
-    send_encoded(stream_id_, seq, tai_ns, pcm);
+    send_encoded(stream_id_, seq, tai_ns, pcm, timestamp_uncertain_);
 
     // Redundancy: store this primary in the delay ring and replay the one from
     // redun_depth_ sends ago as the redundant copy (same seq + TAI, the
     // distinct redundant stream_id, sent ~temporal_shift later).
     if (config_.udptun_redundant && !redun_ring_.empty()) {
-        auto& cur = redun_ring_[redun_head_];
-        cur.seq = seq;
-        cur.tai = tai_ns;
-        cur.valid = true;
-        if (cur.pcm.size() >= pcm.size()) {
-            span_copy(make_span(cur.pcm), pcm);
-        }
-        size_t const back = (redun_head_ + redun_ring_.size() - redun_depth_) % redun_ring_.size();
-        auto const& rep = redun_ring_[back];
-        if (rep.valid && rep.pcm.size() >= pcm.size()) {
-            send_encoded(redundant_id_, rep.seq, rep.tai, std::span<uint8_t const>{rep.pcm}.first(pcm.size()));
-        }
+        store_primary(seq, tai_ns, pcm);
+        replay_redundant(pcm.size());
         redun_head_ = (redun_head_ + 1) % redun_ring_.size();
+    }
+}
+
+void UdptunIngestPath::store_primary(uint32_t const seq, int64_t const tai_ns, std::span<uint8_t const> const pcm)
+{
+    auto& cur = redun_ring_[redun_head_];
+    cur.seq = seq;
+    cur.tai = tai_ns;
+    cur.valid = true;
+    cur.timestamp_uncertain = timestamp_uncertain_;
+    if (cur.pcm.size() >= pcm.size()) {
+        span_copy(make_span(cur.pcm), pcm);
+    }
+}
+
+void UdptunIngestPath::replay_redundant(size_t const pcm_bytes)
+{
+    size_t const back = (redun_head_ + redun_ring_.size() - redun_depth_) % redun_ring_.size();
+    auto const& rep = redun_ring_[back];
+    if (rep.valid && rep.pcm.size() >= pcm_bytes) {
+        send_encoded(redundant_id_, rep.seq, rep.tai, std::span<uint8_t const>{rep.pcm}.first(pcm_bytes), rep.timestamp_uncertain);
     }
 }
 
@@ -203,6 +229,9 @@ void UdptunIngestPath::ingest_audio(std::span<uint8_t const> const audio, bool c
     // consumes the media-thread-published snapshot (never the live Kalman); on the
     // media thread (rt_caller) it reads the Kalman directly, which is coherent.
     auto const gps_tai = ingest_gps_tai(last_gptp_ns_.load(std::memory_order_relaxed), rt_caller);
+    // What these packets say about their timestamps: the tu bit is set while
+    // the system clock the TAI is made from is outside config_.udptun_max_tai_error_ns.
+    timestamp_uncertain_ = !gps_tai.tai_usable;
     if (!anchored_) {
         // Anchor the ingest timeline to GPS-TAI (gPTP master -> GPS-TAI), the same
         // clock that paces the source and that the egress plays on -- so the ingest

@@ -130,6 +130,13 @@ struct Config
     /// TAI − UTC in ns, applied manually (37 s since 2017-01-01). Only
     /// used with --wire-clock=gps-tai.
     int64_t tai_minus_utc_ns{37'000'000'000LL};
+    /// Largest worst-case error of the master clock link to measure on, in
+    /// microseconds. Negative takes any bounded link.
+    int64_t max_clock_error_us{::statusbar::udptun::DEFAULT_MAX_CLOCK_ERROR_NS / 1'000};
+    /// Largest worst-case error of the system clock to measure on, in
+    /// microseconds, when the wire timeline is made from it. 0 reports the
+    /// bound without enforcing one.
+    int64_t max_utc_error_us{0};
     /// Per-packet CSV output path. Empty = disabled (no file opened,
     /// the RX hot path does only a null-pointer check per packet). When
     /// non-empty, Session opens the file in its constructor and runs a
@@ -323,6 +330,23 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
         "force since 2017-01-01). The kernel's TAI offset is never consulted.",
         37'000'000'000LL,
         [&](auto v) { c.tai_minus_utc_ns = v; });
+    s.add<int64_t>(
+        "max-clock-error-us",
+        "Largest worst-case error of the master clock link (gPTP slave or ptp4l PHC bridge) to "
+        "measure and send on, in microseconds. When synchronization is interrupted the link keeps "
+        "its rate and offset and its error grows; measurement runs on until the error passes this "
+        "limit and resumes when synchronization returns. The report shows the current figure. "
+        "Negative takes any bounded link. Not used by --time-source=realtime.",
+        c.max_clock_error_us,
+        [&](auto v) { c.max_clock_error_us = v; });
+    s.add<int64_t>(
+        "max-utc-error-us",
+        "Largest worst-case error of the system clock to measure and send on, in microseconds, "
+        "when the wire timeline is made from it (--wire-clock=gps-tai or --time-source=realtime). "
+        "The figure is the operating system's own (what chrony or ntpd last told it), coasted at "
+        "15 ppm between updates. 0 (default) shows it in the report without enforcing a limit.",
+        c.max_utc_error_us,
+        [&](auto v) { c.max_utc_error_us = v; });
     ::statusbar::ptpclient::add_ptp_arg_specs(s, c.ptp4l);
     s.add_flag(
         "gptp-verbose",
@@ -481,6 +505,8 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.peer_tai_offset_ns = cli.peer_tai_offset_ns;
     cfg.wire_clock_gps_tai = cli.wire_clock_gps_tai;
     cfg.tai_minus_utc_ns = cli.tai_minus_utc_ns;
+    cfg.max_clock_error_ns = cli.max_clock_error_us < 0 ? -1 : cli.max_clock_error_us * 1'000;
+    cfg.max_utc_error_ns = cli.max_utc_error_us > 0 ? cli.max_utc_error_us * 1'000 : 0;
     cfg.bridge_stable_samples = cli.bridge_stable_samples;
     cfg.bridge_stable_rate_ppm = cli.bridge_stable_rate_ppm;
     cfg.bridge_stable_offset_ns = cli.bridge_stable_offset_ns;

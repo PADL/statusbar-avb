@@ -97,6 +97,17 @@ class UdptunEgressPath
     void commit_colbin();
 
   private:
+    /// One received datagram: counted, decoded, queued for playout, and
+    /// written to the timing recorder when one is open.
+    void take_datagram(size_t len, size_t frame_bytes);
+    /// @return The whole frames the datagram carried
+    auto queue_for_playout(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, size_t frame_bytes) -> uint16_t;
+    void count_received(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec);
+    void record_timing(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, uint16_t nf);
+    [[nodiscard]] auto timing_record(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, int64_t rx_tai, uint16_t nf) const
+        -> udptun::UdpTunCsvRecord;
+    [[nodiscard]] auto role_of(uint64_t stream_id) const noexcept -> udptun::PacketRole;
+
     AvbEntityAudioIOConfig const& config_;
     size_t const& channels_;
     std::pmr::vector<float>& audio_buffer_;

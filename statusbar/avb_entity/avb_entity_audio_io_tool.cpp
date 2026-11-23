@@ -122,6 +122,28 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "r would otherwise wander and wobble the listener's recovered clock. Default false (GPS-rate-pinned)",
         config.entity.media_lock_to_gptp,
         [&](auto v) { config.entity.media_lock_to_gptp = v; });
+    specs.add<int64_t>(
+        "media.max_utc_error_us",
+        "Largest worst-case error of the system clock, in microseconds, at which the entity still follows its "
+        "rate for the media-clock ratio and the tunnel's TAI mapping. The figure is the operating system's own "
+        "(what chrony last told it), coasted through a loss of the time server. Outside the limit the ratio "
+        "holds. The default is loose (one second): a rate is as good from a clock tens of milliseconds off. "
+        "Negative takes any bounded clock",
+        config.entity.max_utc_error_ns / 1'000,
+        [&](auto v) { config.entity.max_utc_error_ns = v < 0 ? -1 : v * 1'000; });
+    specs.add<int64_t>(
+        "udptun.max_tai_error_us",
+        "Largest worst-case error of the system clock, in microseconds, at which the tunnel's talker vouches "
+        "for its TAI timestamps. Outside it tunnel packets carry the tu (timestamp uncertain) bit; audio and "
+        "timestamps are sent as before. Negative takes any bounded clock",
+        config.entity.udptun_max_tai_error_ns / 1'000,
+        [&](auto v) { config.entity.udptun_max_tai_error_ns = v < 0 ? -1 : v * 1'000; });
+    specs.add<uint64_t>(
+        "media.utc_holdover_drift_ppb",
+        "How fast the system clock's worst-case error grows while its time daemon has no server, in parts per "
+        "billion (default 15000, the tolerance NTP assumes of any clock)",
+        static_cast<uint64_t>(config.entity.utc_holdover_drift_ppb),
+        [&](auto v) { config.entity.utc_holdover_drift_ppb = static_cast<uint32_t>((v > 0xFFFFFFFFULL) ? 0xFFFFFFFFULL : v); });
     specs.add<bool>(
         "stream_rx.rt_timer",
         "Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the "

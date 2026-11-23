@@ -8,6 +8,7 @@
 /// EntityUdptunBridge can hold a config_ ref without an include cycle.
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <cstdint>
@@ -16,6 +17,22 @@
 #include <vector>
 
 namespace statusbar::avb_entity {
+
+/// The default limit on the system clock's worst-case error for following
+/// its rate: one second. A rate is as good from a clock 30 ms off as from an
+/// exact one, and the operating system's own figure climbs by half a
+/// millisecond every second between its time daemon's updates (32 ms over a
+/// 64 s poll), so the limit sits well above that. It tells a disciplined
+/// clock from one that never synchronized, or that has had no server for
+/// most of a day.
+inline constexpr int64_t DEFAULT_MAX_UTC_ERROR_NS = 1'000'000'000;
+
+/// The default limit on the system clock's worst-case error for vouching for
+/// a TAI timestamp made from it: ten milliseconds. A clock disciplined by a
+/// GPS receiver on the local network is rated at one or two; one that has
+/// lost its server coasts at the default 15 ppm for about nine minutes before
+/// it passes this.
+inline constexpr int64_t DEFAULT_MAX_TAI_ERROR_NS = 10'000'000;
 
 /// Configuration for the dual-format AVB Audio I/O Entity
 struct AvbEntityAudioIOConfig
@@ -381,6 +398,24 @@ struct AvbEntityAudioIOConfig
     /// wobble the recovered clock. Skips the CLOCK_REALTIME sampling entirely.
     /// Default false (GPS-rate-pinned, for multi-site agreement). Diagnostic/test.
     bool media_lock_to_gptp{false};
+
+    /// The largest worst-case error of the system clock (the operating
+    /// system's own figure, set by the time daemon and coasted here through a
+    /// loss of its server) at which the entity still follows that clock's
+    /// rate. Inside it the media-clock ratio and the tunnel's TAI mapping are
+    /// trained from the clock; outside it they hold what they had. Negative
+    /// takes any bounded clock.
+    int64_t max_utc_error_ns{DEFAULT_MAX_UTC_ERROR_NS};
+
+    /// The largest worst-case error of the system clock at which the tunnel's
+    /// talker vouches for the TAI timestamps it makes from that clock. Outside
+    /// it the packets carry the tu (timestamp uncertain) bit; the audio and
+    /// the timestamps are sent as before. Negative takes any bounded clock.
+    int64_t udptun_max_tai_error_ns{DEFAULT_MAX_TAI_ERROR_NS};
+
+    /// How fast the system clock's error may grow while its time daemon has
+    /// no server: the deployment's oscillator and temperature figure.
+    uint32_t utc_holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
     /// MEDIA_LOCKED detector tolerance (ns). A received stream locks when 8
     /// consecutive avtp_timestamp deltas fall within +/- this of the expected

@@ -266,7 +266,7 @@ void AvbEntityAudioIO::print_state() const
     std::print(
         "State: supervisor={} gptp={} mvrp={} acmp[am824={} aaf={}] channels={} | "
         "AM824 tx={} rx={} rx_samples={} rx_bad={} | AAF tx={} rx={} rx_samples={} rx_bad={} | "
-        "egress[resets={} repunch={}]\n",
+        "egress[resets={} repunch={}] | tunnel-clock[utc_error_ns={} excursions={} tu_tx={} tu_rx={}]\n",
         state_string(),
         kit_.host().gptp_locked() ? "Locked" : "Unlocked",
         kit_.host().mvrp_joined() ? "Joined" : "NotJoined",
@@ -282,7 +282,11 @@ void AvbEntityAudioIO::print_state() const
         rx_aaf != nullptr ? rx_aaf->rx_samples.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
         udptun_->telemetry().egress_reset_count().load(),
-        udptun_->telemetry().egress_repunch_count().load());
+        udptun_->telemetry().egress_repunch_count().load(),
+        udptun_->telemetry().utc_accuracy_ns().load(),
+        udptun_->telemetry().utc_excursions().load(),
+        udptun_->telemetry().tx_uncertain().load(),
+        udptun_->telemetry().rx_uncertain().load());
     if (auto const* listener = kit_.listener(); listener != nullptr) {
         listener->print_timing();
     }
@@ -307,11 +311,11 @@ void AvbEntityAudioIO::process_audio(TimePoint time, realtime::MonotonicRawClock
     // burst-of-N egress is not strict Class A shaping; presentation_offset_ns
     // (>> N*125 us) absorbs it at the listener. See packets_per_wake doc.
     // Re-estimate the GPS frequency ratio that pins the media-clock rate. When
-    // media_lock_to_gptp is set, r stays 1.0 (media clock == gPTP) and we skip the
-    // CLOCK_REALTIME sampling entirely -- see Config::media_lock_to_gptp.
-    if (!config_.media_lock_to_gptp) {
-        update_gps_ratio(base_now_ns);
-    }
+    // media_lock_to_gptp is set, r stays 1.0 (media clock == gPTP) and no pair
+    // is fed to the ratio filter -- see Config::media_lock_to_gptp.
+    // The system clock is judged either way: the tunnel's timestamps are made
+    // from it even when the media clock does not follow it.
+    update_gps_ratio(base_now_ns);
 
     // Inter-site rendezvous punch-retry (media-thread half): install a freshly
     // hole-punched socket staged by the worker and watchdog the RX. Runs before
@@ -422,41 +426,66 @@ void AvbEntityAudioIO::update_gps_ratio(uint64_t gptp_now_ns)
     // against gPTP a few times per second; the rate tracker turns the offset
     // slope into r = switch/GPS, which pins the media-clock rate, and feeds the
     // same pair to its GPS-TAI translator for the tunnel timeline. Rate-limited
-    // so the CLOCK_REALTIME syscall stays off the per-packet hot path.
+    // so the clock reads stay off the per-packet hot path. A pair is fed only
+    // while the system clock is within the entity's limit for following it:
+    // outside it r holds.
     if (!rate_tracker_.should_sample(gptp_now_ns)) {
         return;
     }
-    timespec ts{};
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
-        return;
-    }
-    uint64_t const gps_ns = (static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL) + static_cast<uint64_t>(ts.tv_nsec);
-    auto const est = rate_tracker_.add_sample(gptp_now_ns, gps_ns);
-    // Publish the updated GPS-TAI mapping for the reactor-thread tunnel ingest,
-    // which must never read the single-threaded Kalman directly (data race).
+    auto const clock = read_system_clock();
+    auto const est = rate_tracker_.observe(gptp_now_ns, clock.utc_ns, clock.verdict, !config_.media_lock_to_gptp);
+    // Publish the updated GPS-TAI mapping and the verdict for the reactor-thread
+    // tunnel ingest, which must never read the single-threaded Kalman directly.
     tai_snapshot_.publish(rate_tracker_.tai_snapshot());
-    if (est.valid && rate_tracker_.should_log(gptp_now_ns)) {
-        // Live media-clock telemetry (rate-limited; runs on the media-timer
-        // thread, so keep it to once every few seconds). Lets an operator SEE the
-        // GPS-vs-switch frequency tracking and catch a clock-coupling mistake:
-        //   - r is switch_rate/GPS_rate; offset-slope = (r-1) in ppm = the
-        //     fractional frequency between the gPTP PHC and GPS CLOCK_REALTIME.
-        //   - PHC-REALTIME is the raw instantaneous phase offset (ns).
-        // A HEALTHY decoupled setup (ptp4l -> /dev/ptp0 <- switch GM; chrony ->
-        // CLOCK_REALTIME <- local GPS; NO phc2sys) shows a small but NON-ZERO,
-        // stable slope -- the switch GM's free-running oscillator drifting against
-        // GPS. A slope pinned at ~0.000 ppm with a flat offset means the PHC and
-        // CLOCK_REALTIME are coupled (e.g. phc2sys is running) and the media clock
-        // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
-        // RT media thread: deferred-formatting logger — never std::print here.
-        kit_.host().media_log().status(
-            "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb",
-            est.r,
-            est.ppm(),
-            static_cast<int64_t>(est.filtered_offset_ns),
-            est.freq_uncertainty_ppb);
-        rate_tracker_.mark_logged(gptp_now_ns);
+    if (est && est->valid && rate_tracker_.should_log(gptp_now_ns)) {
+        log_media_clock(*est, gptp_now_ns);
     }
+}
+
+auto AvbEntityAudioIO::read_system_clock() -> SystemClockReading
+{
+    auto const raw = realtime::read_monotonic_raw();
+    auto const utc = realtime::read_utc();
+    if (raw >= next_utc_report_) {
+        utc_tracker_.observe(raw, utc, realtime::read_system_clock_error());
+        next_utc_report_ = raw + UTC_REPORT_INTERVAL;
+    }
+    auto const tai = tai_limit_.judge(utc_tracker_.quality(), raw);
+    publish_system_clock(tai);
+    return {
+        .utc_ns = static_cast<uint64_t>(realtime::UtcClock::to_ns(utc)),
+        .verdict = {.follow = utc_follow_limit_.judge(utc_tracker_.quality(), raw), .tai_usable = tai.usable}};
+}
+
+void AvbEntityAudioIO::publish_system_clock(realtime::AccuracyVerdict const& tai)
+{
+    auto telemetry = udptun_->telemetry();
+    telemetry.utc_accuracy_ns().publish(tai.accuracy == realtime::UNBOUNDED_ACCURACY ? -1 : tai.accuracy.count());
+    telemetry.utc_excursions().publish(tai_limit_.record().excursions);
+}
+
+void AvbEntityAudioIO::log_media_clock(ptpclient::RatioEstimate const& est, uint64_t const gptp_now_ns)
+{
+    // Live media-clock telemetry (rate-limited; runs on the media-timer
+    // thread, so keep it to once every few seconds). Lets an operator SEE the
+    // GPS-vs-switch frequency tracking and catch a clock-coupling mistake:
+    //   - r is switch_rate/GPS_rate; offset-slope = (r-1) in ppm = the
+    //     fractional frequency between the gPTP PHC and GPS CLOCK_REALTIME.
+    //   - PHC-REALTIME is the raw instantaneous phase offset (ns).
+    // A HEALTHY decoupled setup (ptp4l -> /dev/ptp0 <- switch GM; chrony ->
+    // CLOCK_REALTIME <- local GPS; NO phc2sys) shows a small but NON-ZERO,
+    // stable slope -- the switch GM's free-running oscillator drifting against
+    // GPS. A slope pinned at ~0.000 ppm with a flat offset means the PHC and
+    // CLOCK_REALTIME are coupled (e.g. phc2sys is running) and the media clock
+    // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
+    // RT media thread: deferred-formatting logger — never std::print here.
+    kit_.host().media_log().status(
+        "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb",
+        est.r,
+        est.ppm(),
+        static_cast<int64_t>(est.filtered_offset_ns),
+        est.freq_uncertainty_ppb);
+    rate_tracker_.mark_logged(gptp_now_ns);
 }
 
 void AvbEntityAudioIO::configure_filter(double const freq_hz, double const gain_db, double const q)

@@ -199,6 +199,8 @@ networks.
 | `--dscp N`                 | `46` (EF)        | DSCP value (0–63); pass `-1` to disable. Wi-Fi maps EF→AC_VO |
 | `--ipv6`                   | off              | Bind IPv6 in RX-only mode (TX mode infers from `--peer`)   |
 | `--max-sources N`          | `32`             | Cap on tracked sources                                     |
+| `--max-clock-error-us US`  | `100`            | Largest worst-case error of the master clock link to measure on; negative takes any bounded link. See Accuracy |
+| `--max-utc-error-us US`    | `0` (report only)| Largest worst-case error of the system clock to measure on, when the wire timeline is made from it |
 | `--hist-low-ns NS`         | `0`              | Histogram lower bound                                      |
 | `--hist-high-ns NS`        | `300000000`      | Histogram upper bound (300 ms)                             |
 | `--hist-bucket-ns NS`      | `500000`         | Histogram bucket width (500 µs → 600 bins)                 |
@@ -216,6 +218,44 @@ a quiet wired Linux box: **±100 µs**. Sources of jitter:
 - Kernel scheduling between `recvfrom` return and our timestamp call
 - gPTP bridge offset / rate update granularity (sub-µs typical)
 - Sender-side syscall path before the packet reaches the wire
+
+### How well the clocks are known
+
+Every figure owlm prints rests on its master clock link: the gPTP slave's
+bridge, or the ptp4l PHC bridge. The link reports a worst-case error that is
+refreshed at each synchronization and grows while synchronization is
+interrupted, because the link keeps converting with the rate and offset it
+had. owlm compares that error with `--max-clock-error-us` (default 100) and
+measures and sends only while it is inside. Three missed Syncs add a few
+microseconds and change nothing. A link that coasts at the default holdover
+figure of 15 ppm leaves a 100 µs limit after about six and a half seconds;
+measurement stops there and resumes when synchronization returns. A new
+grandmaster is a new timeline: the link is unbounded until it has been
+fitted again.
+
+When the wire timeline is made from the system clock (`--wire-clock=gps-tai`
+or `--time-source=realtime`), a figure compared across two sites also
+depends on how well each site's system clock knows UTC. owlm reads the
+operating system's own worst-case error once a second (what chrony or ntpd
+last told the kernel) and coasts it through a loss of the time server. It is
+shown in the report. It is enforced only when `--max-utc-error-us` is set,
+since a round trip or a self-loopback is measured on one clock and does not
+depend on it. The kernel grows its figure by half a millisecond every second
+between the time daemon's updates, so the first figure owlm sees can be tens
+or hundreds of milliseconds; it tightens to the daemon's own rating at the
+next update and is coasted from there.
+
+Each live report and the final summary end with one line:
+
+```
+  clock: link +/-7.7 us (limit +/-100.0 us, synced 0.3 s ago) excursions=0 outside=0.0 s timeline_changes=0 utc +/-1.5 ms
+```
+
+`excursions` counts the times the link left its limit, `outside` the time
+spent there, `timeline_changes` the grandmaster changes and time steps seen.
+`NOT USABLE` is appended while nothing is being measured or sent. The bounds
+are worst cases, rounded up: a one-way figure between two sites is good to
+the sum of both sites' bounds, and usually far better.
 
 Hardware timestamping on the UDP NIC is *not* used — its PHC drifts
 independently of the gPTP NIC's PHC, and bridging across two PHCs

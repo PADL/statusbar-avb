@@ -106,11 +106,13 @@ class UdptunIngestPath
     /// GPS-TAI mapping for the ingest anchor/discipline, resolved without racing
     /// the single-threaded Kalman. On the media thread (rt_caller) the Kalman is
     /// coherent (same thread as its writer) so read it directly; on the reactor
-    /// thread consume the latest published snapshot. Returns {have_sample, tai_ns}.
+    /// thread consume the latest published snapshot. Returns {have_sample, tai_ns}
+    /// and the media thread's verdict on the system clock behind the mapping.
     struct IngestTai
     {
         bool have_sample;
         int64_t tai_ns;
+        bool tai_usable;
     };
     [[nodiscard]] auto ingest_gps_tai(int64_t master_ns, bool rt_caller) -> IngestTai;
 
@@ -118,7 +120,13 @@ class UdptunIngestPath
     void ingest_am824_as_int32(std::span<uint8_t const> mbla);
     void ingest_sweep(size_t frames);
     void send(int64_t tai_ns, std::span<uint8_t const> pcm);
-    void send_encoded(ieee::Eui64 const& stream_id, uint32_t sequence, int64_t tai_ns, std::span<uint8_t const> pcm);
+    void count_sent(bool timestamp_uncertain);
+    /// The redundancy delay line: keep this primary, and replay as the
+    /// redundant copy the one from redun_depth_ sends ago.
+    void store_primary(uint32_t seq, int64_t tai_ns, std::span<uint8_t const> pcm);
+    void replay_redundant(size_t pcm_bytes);
+    void send_encoded(
+        ieee::Eui64 const& stream_id, uint32_t sequence, int64_t tai_ns, std::span<uint8_t const> pcm, bool timestamp_uncertain);
 
     AvbEntityAudioIOConfig const& config_;
     size_t const& channels_;
@@ -136,6 +144,10 @@ class UdptunIngestPath
     ieee::Eui64 stream_id_{};
     uint32_t seq_{0};
     bool anchored_{false};
+    /// The tu bit of the packets being made now: set while the system clock the
+    /// TAI comes from is outside the limit for vouching for it (or not yet judged).
+    /// Written and read under the tunnel's tx lock.
+    bool timestamp_uncertain_{true};
 
     // --- Redundant-TX delay line (optional) -----------------------------------
     ieee::Eui64 redundant_id_{};
@@ -144,6 +156,7 @@ class UdptunIngestPath
         uint32_t seq{0};
         int64_t tai{0};
         bool valid{false};
+        bool timestamp_uncertain{false};  ///< the copy says what its primary said
         std::vector<uint8_t> pcm{};
     };
     std::vector<RedunSlot> redun_ring_{};

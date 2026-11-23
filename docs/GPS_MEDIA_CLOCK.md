@@ -114,7 +114,33 @@ follows it. Do not cache the delta and walk away.
 3. **Media-clock generator** = produce at GPS rate, stamp avtp/SYT in PHC time. `r`
    (switch/GPS) is the key state; for AM824 this is the CIP SYT (see
    [[am824-cip-syt-missing]]), for AAF the per-packet avtp_timestamp.
-4. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
+4. **The system clock is followed only while it knows the time.** The media
+   thread reads the operating system's worst-case error for CLOCK_REALTIME once
+   a second (what chronyd last told the kernel) and coasts it at
+   `media.utc_holdover_drift_ppb` (default 15 ppm) through a loss of the time
+   server. The entity holds that error against two limits:
+   - `media.max_utc_error_us` (default 1 000 000, one second) for following the
+     clock's rate. Inside it the ratio filter and the TAI translator are fed;
+     outside it `r` holds the last value it trusted, so the media clock coasts
+     on the switch's oscillator at the last known ratio. The limit is loose on
+     purpose: a rate is as good from a clock tens of milliseconds off, and the
+     kernel's own figure climbs by half a millisecond every second between
+     chronyd's updates (32 ms over a 64 s poll). It tells a disciplined clock
+     from one that never synchronized or has had no server for most of a day.
+   - `udptun.max_tai_error_us` (default 10 000, ten milliseconds) for vouching
+     for a TAI timestamp. Outside it every tunnel packet carries the AVTPDU
+     `tu` (timestamp uncertain) bit; the audio and the timestamps are sent as
+     before. A GPS receiver on the local network is rated at one or two
+     milliseconds. For up to one poll interval after the entity starts the
+     only figure it has is the one the kernel has grown since chronyd's last
+     update, so `tu` is set until the next update arrives; a node whose
+     chronyd has lost its server takes about nine minutes to pass ten.
+
+   A step of the system clock restarts the filters and keeps `r` until they
+   have a new estimate. The receiver counts packets that arrive with `tu` set
+   and plays them as any other. The entity's state line shows the figures:
+   `tunnel-clock[utc_error_ns=… excursions=… tu_tx=… tu_rx=…]`.
+5. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
    path via chronyd doesn't need NIC HW timestamps.
 
 ## Refinements / future

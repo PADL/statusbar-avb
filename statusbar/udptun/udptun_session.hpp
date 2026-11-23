@@ -29,6 +29,7 @@
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/catch_or_status.hpp"
 #include "statusbar/status/throw_or_abort.hpp"
+#include "statusbar/udptun/udptun_clock_gate.hpp"
 #include "statusbar/udptun/udptun_codec_concept.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"
 #include "statusbar/udptun/udptun_deadline_timer.hpp"
@@ -503,6 +504,23 @@ struct SessionConfig
     /// 2017-01-01). Only used when wire_clock_gps_tai is set.
     int64_t tai_minus_utc_ns{37'000'000'000LL};
 
+    /// The largest worst-case error of the master clock link (the gPTP
+    /// slave's bridge, or the ptp4l PHC bridge) the session measures and
+    /// transmits on. The link keeps converting with the rate and offset it
+    /// had when synchronization is interrupted, and its error grows from
+    /// then; the session runs on until the error passes this limit, and
+    /// resumes when synchronization brings it back inside. Negative takes
+    /// any bounded link. Not consulted by the realtime time source, which
+    /// has no master link.
+    int64_t max_clock_error_ns{DEFAULT_MAX_CLOCK_ERROR_NS};
+
+    /// The largest worst-case error of the system clock the session runs
+    /// on, when the wire timeline is made from it (wire_clock_gps_tai, or
+    /// the realtime time source). 0 reports the bound without enforcing
+    /// one: a figure measured on one machine's own clock does not depend
+    /// on it, only a figure compared across sites does.
+    int64_t max_utc_error_ns{0};
+
     // Payload size past the codec header.
     uint32_t payload_bytes{0};
 
@@ -624,38 +642,10 @@ class Session
         , self_redundancy_{slot_width_ns_for_tracker(cfg_.tx_interval_us)}
         , record_sink_{cfg_.csv_output_path, cfg_.bin_output_path, cfg_.bin_capacity_bytes}
     {
-        auto mac = bring_up_local_identity();
-        if (!mac) {
-            statusbar::throw_or_abort(std::errc::io_error, "local identity setup failed");
-        }
-        local_mac_ = *mac;
-        auto built = build_identity(local_mac_);
-        tx_state_ = built.first;
-        my_pair_id_ = built.second;
-        master_clock_.translate = build_wire_translator();
-        if (cfg_.wire_clock_gps_tai) {
-            tai_translator_ = ptpclient::GpsTaiTranslator{ptpclient::GpsTaiTranslator::Config{
-                .tai_minus_utc_ns = cfg_.tai_minus_utc_ns,
-            }};
-            // Compose master→TAI on top of the master translator. Captures
-            // only `this` (fits inplace_function); GpsTaiTranslator::tai_ns
-            // is identity until the first sample, and tai_sample_tick()
-            // feeds a sample on the very first loop tick — before any TX.
-            clock_.translate = [this](int64_t mraw_ns) -> int64_t {
-                return tai_translator_.tai_ns(master_clock_.wire_ns(mraw_ns));
-            };
-        } else {
-            clock_.translate = master_clock_.translate;
-        }
-
+        adopt_identity(build_identity);
+        setup_wire_clock();
         setup_udp();
-        start_mraw_ = monotonic_raw_ns();
-        if (cfg_.tx_interval_us > 0) {
-            int64_t const interval_ns = static_cast<int64_t>(cfg_.tx_interval_us) * 1'000;
-            tx_timer_.arm(start_mraw_ + interval_ns, interval_ns);
-        }
-        int64_t const report_interval_ns = static_cast<int64_t>(cfg_.report_interval_us) * 1'000;
-        report_timer_.arm(start_mraw_ + report_interval_ns, report_interval_ns);
+        arm_timers();
         // The per-packet recorder (CSV/colbin ring + writer thread) is the record_sink_
         // member: it opened its files and started its thread during member init, and
         // its dtor stops+joins on destruction or a throw here (RAII replaces the old
@@ -694,39 +684,58 @@ class Session
 
         while (!stop.stop_requested()) {
             auto fds = build_session_pollfds();
-
-            int64_t const now_mraw_pre = monotonic_raw_ns();
-            int64_t const earliest = std::min(tx_timer_.next_deadline_ns(), report_timer_.next_deadline_ns());
-            int const timeout_ms = deadline_to_poll_timeout_ms(now_mraw_pre, earliest, /*max_ms=*/100);
-
-            int const rv = ::poll(fds.data(), fds.size(), timeout_ms);
-            if (rv < 0 && errno == EINTR) {
+            if (!poll_until_due(fds)) {
                 continue;
             }
+            bool const usable = serve_ready(fds, rx_ctx);
+            serve_timers(tx_ctx, usable);
+        }
+    }
 
-            auto const now = std::chrono::steady_clock::now();
-            bool const synced = gptp_synced();
-            for (auto const& pfd : fds) {
-                if ((pfd.revents & POLLIN) == 0) {
-                    continue;
-                }
-                if (gptp_dispatch_if_owned(pfd.fd, now)) {
-                    continue;
-                }
-                if (pfd.fd == udp_.get()) {
-                    drain_rx(codec_, rx_ctx, synced);
-                }
-            }
-            gptp_periodic_tick(now);
+    /// Wait in poll() for a ready fd or the nearest DeadlineTimer.
+    /// @return False when a signal interrupted the wait: nothing to serve
+    [[nodiscard]] auto poll_until_due(SessionPollFds& fds) noexcept -> bool
+    {
+        int64_t const now_mraw = monotonic_raw_ns();
+        int64_t const earliest = std::min(tx_timer_.next_deadline_ns(), report_timer_.next_deadline_ns());
+        int const timeout_ms = deadline_to_poll_timeout_ms(now_mraw, earliest, /*max_ms=*/100);
+        int const rv = ::poll(fds.data(), fds.size(), timeout_ms);
+        return !(rv < 0 && errno == EINTR);
+    }
 
-            int64_t const now_mraw_post = monotonic_raw_ns();
-            periodic_samples(now_mraw_post);
-            if (tx_timer_.consume_due(now_mraw_post) > 0) {
-                send_packet(codec_, tx_ctx, sequence_, synced);
+    /// Judge the clocks, then dispatch every ready fd: gPTP to the slave,
+    /// the UDP socket to the RX drain. Ends with the slave's periodic tick.
+    /// @return The verdict on the clocks, for what the caller does next
+    auto serve_ready(SessionPollFds const& fds, RxContext const& rx_ctx) noexcept -> bool
+    {
+        auto const now = std::chrono::steady_clock::now();
+        bool const usable = judge_clocks(monotonic_raw_ns());
+        for (auto const& pfd : fds) {
+            if ((pfd.revents & POLLIN) == 0) {
+                continue;
             }
-            if (report_timer_.consume_due(now_mraw_post) > 0) {
-                handle_report_tick();
+            if (gptp_dispatch_if_owned(pfd.fd, now)) {
+                continue;
             }
+            if (pfd.fd == udp_.get()) {
+                drain_rx(codec_, rx_ctx, usable);
+            }
+        }
+        gptp_periodic_tick(now);
+        return usable;
+    }
+
+    /// The polling loop's due work: the periodic samples, a packet when the
+    /// TX timer fired, the report when its timer did.
+    void serve_timers(TxContext const& tx_ctx, bool const usable) noexcept
+    {
+        int64_t const now_mraw = monotonic_raw_ns();
+        periodic_samples(now_mraw);
+        if (tx_timer_.consume_due(now_mraw) > 0) {
+            send_packet(codec_, tx_ctx, sequence_, usable);
+        }
+        if (report_timer_.consume_due(now_mraw) > 0) {
+            handle_report_tick();
         }
     }
 
@@ -882,78 +891,98 @@ class Session
         statusbar::realtime::TripwireMonitor* monitor_ptr,
         statusbar::itc::StopToken& stop)
     {
-        // Suppress the tripwire if either:
-        //   - stop flag is set (shutdown drain may be slow / blocked),
-        //   - master clock isn't synced (mid-run sync loss invalidates
-        //     the bridge mapping, so wake error becomes meaningless
-        //     until sync re-acquires).
-        // Wake check at entry, duration check at exit; either gate
-        // closing mid-callback short-circuits the duration trip.
-        int64_t tripwire_start_ns = 0;
-        if (monitor_ptr != nullptr && !stop.stop_requested() && gptp_synced()) {
-            tripwire_start_ns = observe_wake_and_handle_tripwire(*monitor_ptr, event);
-            if (tripwire_start_ns == 0) {
-                return;  // wake threshold exceeded — abort this tick
-            }
+        auto const tripwire_start_ns = wake_gate(event, monitor_ptr, stop);
+        if (!tripwire_start_ns) {
+            return;  // wake threshold exceeded — abort this tick
         }
+        bool const usable = drain_ready(rx_ctx);
+        periodic_samples(monotonic_raw_ns());
+        if (tx_interval_ns > 0 && usable) {
+            send_if_due(tx_ctx, tx_interval_ns);
+        }
+        duration_gate(event, monitor_ptr, stop, *tripwire_start_ns);
+    }
 
-        // Drain gPTP + udp non-blocking. timeout_ms=0 means "tell
-        // me what's ready right now"; we already slept inside the
-        // timer's wait_until_deadline. In ptp4l mode the gPTP
-        // helpers are no-ops (gptp_session_ is empty).
+    /// The tripwire's wake check, at the entry of a tick. Suppressed when
+    /// either:
+    ///   - stop flag is set (shutdown drain may be slow / blocked),
+    ///   - the master clock is outside the session's limit (never
+    ///     synchronized, on a new timeline, or coasting for too long:
+    ///     the wake error says nothing until it is back inside).
+    /// @return The tripwire's start time for duration_gate(), 0 when the
+    ///         check was suppressed, or nothing when the wake threshold was
+    ///         exceeded and the tick is to be abandoned
+    template <typename ClockT>
+    [[nodiscard]] auto wake_gate(
+        statusbar::realtime::TimerEvent<ClockT> const& event,
+        statusbar::realtime::TripwireMonitor* monitor_ptr,
+        statusbar::itc::StopToken& stop) -> std::optional<int64_t>
+    {
+        if (monitor_ptr == nullptr || stop.stop_requested() || !judge_clocks(monotonic_raw_ns())) {
+            return 0;
+        }
+        int64_t const tripwire_start_ns = observe_wake_and_handle_tripwire(*monitor_ptr, event);
+        if (tripwire_start_ns == 0) {
+            return std::nullopt;
+        }
+        return tripwire_start_ns;
+    }
+
+    /// Drain gPTP + udp non-blocking. timeout_ms=0 means "tell me what's
+    /// ready right now"; the timer already slept to the deadline. In ptp4l
+    /// mode the gPTP helpers are no-ops (gptp_session_ is empty).
+    /// @return The verdict on the clocks
+    auto drain_ready(RxContext const& rx_ctx) noexcept -> bool
+    {
         auto fds = build_session_pollfds();
         ::poll(fds.data(), fds.size(), /*timeout_ms*/ 0);
+        return serve_ready(fds, rx_ctx);
+    }
 
-        auto const now_steady = std::chrono::steady_clock::now();
-        bool const synced = gptp_synced();
-        for (auto const& pfd : fds) {
-            if ((pfd.revents & POLLIN) == 0) {
-                continue;
-            }
-            if (gptp_dispatch_if_owned(pfd.fd, now_steady)) {
-                continue;
-            }
-            if (pfd.fd == udp_.get()) {
-                drain_rx(codec_, rx_ctx, synced);
-            }
+    /// Send the next primary packet when the master clock has reached the
+    /// TX cursor.
+    void send_if_due(TxContext const& tx_ctx, int64_t const tx_interval_ns) noexcept
+    {
+        // Use the bridge's live master-clock reading, not
+        // event.scheduled_time. realtime::Timer's scheduled_time
+        // is anchored to adapter.now_ns() at run_loop start and
+        // increments by period_ns each tick, but that anchor
+        // doesn't track mid-run clock steps (the gPTP slave's
+        // clock_settime fallback for large initial offsets
+        // bypasses the bridge offset; ptp4l-fed PHC step is
+        // similar). The live read is always in the current
+        // time domain — at the cost of a clock read per send,
+        // we get correct PT values even after a discontinuity.
+        // The TX cadence cursor stays in the master (bridge-now)
+        // domain. The stamped PT, however, MUST go through the same
+        // WireClock+mraw path that RX (ctx.clock.wire_ns(rx_mraw)) and
+        // the gps-tai training sampler (master_clock_.wire_ns(mraw))
+        // use. Stamping it from consume_master_ns()/bridge->now_ns()
+        // instead diverges from master_clock_.wire_ns(mraw) by a large,
+        // PHC-epoch-dependent constant that does NOT cancel in fwd+rev
+        // (it produced an impossible negative cross-site RTT on a-e —
+        // see ptpclient_tai_translator_test tx_must_share_rx_master_source).
+        // In master mode clock_.wire_ns == master_clock_.wire_ns, so
+        // this also makes RT-mode TX match the portable polling path
+        // (send_packet, which already stamps via ctx.clock.wire_ns).
+        int64_t const sched_gptp_ns = consume_master_ns();
+        if (sched_gptp_ns >= next_tx_gptp_ns_) {
+            send_packet_at_gptp(codec_, tx_ctx, sequence_, clock_.wire_ns(monotonic_raw_ns()));
+            next_tx_gptp_ns_ += tx_interval_ns;
         }
-        gptp_periodic_tick(now_steady);
-        periodic_samples(monotonic_raw_ns());
+    }
 
-        if (tx_interval_ns > 0 && synced) {
-            // Use the bridge's live master-clock reading, not
-            // event.scheduled_time. realtime::Timer's scheduled_time
-            // is anchored to adapter.now_ns() at run_loop start and
-            // increments by period_ns each tick, but that anchor
-            // doesn't track mid-run clock steps (the gPTP slave's
-            // clock_settime fallback for large initial offsets
-            // bypasses the bridge offset; ptp4l-fed PHC step is
-            // similar). The live read is always in the current
-            // time domain — at the cost of a clock read per send,
-            // we get correct PT values even after a discontinuity.
-            // The TX cadence cursor stays in the master (bridge-now)
-            // domain. The stamped PT, however, MUST go through the same
-            // WireClock+mraw path that RX (ctx.clock.wire_ns(rx_mraw)) and
-            // the gps-tai training sampler (master_clock_.wire_ns(mraw))
-            // use. Stamping it from consume_master_ns()/bridge->now_ns()
-            // instead diverges from master_clock_.wire_ns(mraw) by a large,
-            // PHC-epoch-dependent constant that does NOT cancel in fwd+rev
-            // (it produced an impossible negative cross-site RTT on a-e —
-            // see ptpclient_tai_translator_test tx_must_share_rx_master_source).
-            // In master mode clock_.wire_ns == master_clock_.wire_ns, so
-            // this also makes RT-mode TX match the portable polling path
-            // (send_packet, which already stamps via ctx.clock.wire_ns).
-            int64_t const sched_gptp_ns = consume_master_ns();
-            if (sched_gptp_ns >= next_tx_gptp_ns_) {
-                send_packet_at_gptp(codec_, tx_ctx, sequence_, clock_.wire_ns(monotonic_raw_ns()));
-                next_tx_gptp_ns_ += tx_interval_ns;
-            }
-        }
-
-        // Duration check gated on the same conditions as the wake
-        // check; either stop or sync loss mid-callback suppresses
-        // the duration trip.
-        if (monitor_ptr != nullptr && tripwire_start_ns != 0 && !stop.stop_requested() && gptp_synced()) {
+    /// The tripwire's duration check, at the exit of a tick: gated on the
+    /// same conditions as the wake check, so a stop or a clock that left
+    /// its limit during the callback suppresses the trip.
+    template <typename ClockT>
+    void duration_gate(
+        statusbar::realtime::TimerEvent<ClockT> const& event,
+        statusbar::realtime::TripwireMonitor* monitor_ptr,
+        statusbar::itc::StopToken& stop,
+        int64_t const tripwire_start_ns)
+    {
+        if (monitor_ptr != nullptr && tripwire_start_ns != 0 && !stop.stop_requested() && clock_gate_.usable()) {
             (void)observe_duration_and_handle_tripwire(*monitor_ptr, event, tripwire_start_ns);
         }
     }
@@ -1087,7 +1116,9 @@ class Session
     void drain_after_stop(int64_t drain_ns)
     {
         gptp_stop();
-        bool const drain_synced = gptp_synced();
+        // The stopped slave's bridge still converts, coasting: packets in
+        // flight are measured for as long as it stays inside the limit.
+        bool const drain_synced = judge_clocks(monotonic_raw_ns());
         RxContext const rx_ctx = build_rx_context();
         drain_inflight_after_stop(codec_, rx_ctx, drain_synced, drain_ns);
     }
@@ -1106,23 +1137,43 @@ class Session
     void print_live_report(std::ostream& out)
     {
         double const wall = static_cast<double>(monotonic_raw_ns() - start_mraw_) / 1e9;
-        // The TX history and the redundancy tracker belong to the packet
-        // thread; this is their latest published snapshot (publish_loss_snapshot).
-        LossSnapshot const loss = loss_snapshot_.consume();
-        TxLossStats tx{
-            .sent_total = loss.sent_total,
-            .sent_at_cutoff = loss.sent_at_cutoff,
-            .tx_failures = tx_failures_.load(),
-        };
-        RedundancyDisplayStats red{
-            .recovered = loss.recovered, .true_loss = loss.true_loss, .primary_received = loss.primary_received};
+        auto const loss = live_loss_stats();
         bool const red_enabled = tx_state_.redundant_enabled;
         // Show wire-timeline time: master + the published TAI shift
         // (0 unless --wire-clock=gps-tai), so the printed gptp_ns matches
         // what actually goes on the wire.
         ::statusbar::udptun::print_live_report(
-            out, wall, tracker_, &rtt_stats_, &tx, red_enabled ? &red : nullptr, cached_master_ns() + last_tai_shift_ns_.load());
+            out,
+            wall,
+            tracker_,
+            &rtt_stats_,
+            &loss.tx,
+            red_enabled ? &loss.redundancy : nullptr,
+            cached_master_ns() + last_tai_shift_ns_.load());
+        print_clock_report(out, clock_report_.consume());
     }
+
+    /// The loss figures of a report, TX side and redundancy.
+    struct LossDisplay
+    {
+        TxLossStats tx;
+        RedundancyDisplayStats redundancy;
+    };
+
+    /// The live report's loss figures. The TX history and the redundancy
+    /// tracker belong to the packet thread; this is their latest published
+    /// snapshot (publish_loss_snapshot).
+    [[nodiscard]] auto live_loss_stats() -> LossDisplay
+    {
+        LossSnapshot const loss = loss_snapshot_.consume();
+        return {
+            .tx = {.sent_total = loss.sent_total, .sent_at_cutoff = loss.sent_at_cutoff, .tx_failures = tx_failures_.load()},
+            .redundancy = {.recovered = loss.recovered, .true_loss = loss.true_loss, .primary_received = loss.primary_received}};
+    }
+
+    /// The session's clocks as the packet thread last judged them: each
+    /// worst-case error, the limit, and how the link has kept to it.
+    [[nodiscard]] auto clock_report() noexcept -> ClockReport { return clock_report_.consume(); }
 
     /// Drain and close the record-sink writer thread. No-op when recording is
     /// disabled. Returns the first write error the writer thread observed, if any.
@@ -1142,23 +1193,23 @@ class Session
     void print_final_summary(std::ostream& out, std::string_view label)
     {
         uint32_t const sent = sequence_.load(std::memory_order_relaxed);
-        TxLossStats tx{
-            .sent_total = sent,
-            .sent_at_cutoff = sent,
-            .tx_failures = tx_failures_.load(),
-        };
-        RedundancyDisplayStats red{};
+        TxLossStats tx{.sent_total = sent, .sent_at_cutoff = sent, .tx_failures = tx_failures_.load()};
         bool const red_enabled = tx_state_.redundant_enabled;
-        if (red_enabled) {
-            // Sweep the cursor through every PT we sent; empty slots
-            // along the way count as true_loss.
-            self_redundancy_.flush_all(last_tx_pt_.load());
-            red.recovered = self_redundancy_.recovered();
-            red.true_loss = self_redundancy_.true_loss();
-            red.primary_received = self_redundancy_.primary_received();
-        }
+        RedundancyDisplayStats const red = red_enabled ? final_redundancy() : RedundancyDisplayStats{};
         ::statusbar::udptun::print_final_summary(
             out, label, tracker_, &rtt_stats_, &tx, red_enabled ? &red : nullptr, cached_master_ns() + last_tai_shift_ns_.load());
+        print_clock_report(out, clock_report_.consume());
+    }
+
+    /// The end-of-run redundancy figures: sweep the cursor through every PT
+    /// we sent; empty slots along the way count as true_loss.
+    [[nodiscard]] auto final_redundancy() -> RedundancyDisplayStats
+    {
+        self_redundancy_.flush_all(last_tx_pt_.load());
+        return {
+            .recovered = self_redundancy_.recovered(),
+            .true_loss = self_redundancy_.true_loss(),
+            .primary_received = self_redundancy_.primary_received()};
     }
 
     /// Final snapshot of the realtime timer's wake-error and
@@ -1339,6 +1390,60 @@ class Session
         return read_mac_from_interface(iface);
     }
 
+    /// Bring up the time source, learn the local MAC and let the caller's
+    /// builder name the session's TX identities from it.
+    void adopt_identity(IdentityBuilder const& build_identity)
+    {
+        auto mac = bring_up_local_identity();
+        if (!mac) {
+            statusbar::throw_or_abort(std::errc::io_error, "local identity setup failed");
+        }
+        local_mac_ = *mac;
+        auto built = build_identity(local_mac_);
+        tx_state_ = built.first;
+        my_pair_id_ = built.second;
+    }
+
+    /// The wire timeline: the master translator, the GPS-TAI mapping on
+    /// top of it when configured, and the gate that judges both clocks.
+    void setup_wire_clock()
+    {
+        master_clock_.translate = build_wire_translator();
+        if (cfg_.wire_clock_gps_tai) {
+            compose_gps_tai_clock();
+        } else {
+            clock_.translate = master_clock_.translate;
+        }
+        clock_gate_ = ClockGate{ClockGate::Config{
+            .max_link_error_ns = cfg_.max_clock_error_ns,
+            .max_utc_error_ns = cfg_.max_utc_error_ns,
+            .has_link = has_master_link(),
+            .tracks_utc = cfg_.wire_clock_gps_tai || !has_master_link()}};
+    }
+
+    void compose_gps_tai_clock()
+    {
+        tai_translator_ = ptpclient::GpsTaiTranslator{ptpclient::GpsTaiTranslator::Config{
+            .tai_minus_utc_ns = cfg_.tai_minus_utc_ns,
+        }};
+        // Compose master→TAI on top of the master translator. Captures
+        // only `this` (fits inplace_function); GpsTaiTranslator::tai_ns
+        // is identity until the first sample, and tai_sample_tick()
+        // feeds a sample on the very first loop tick — before any TX.
+        clock_.translate = [this](int64_t mraw_ns) -> int64_t { return tai_translator_.tai_ns(master_clock_.wire_ns(mraw_ns)); };
+    }
+
+    void arm_timers()
+    {
+        start_mraw_ = monotonic_raw_ns();
+        if (cfg_.tx_interval_us > 0) {
+            int64_t const interval_ns = static_cast<int64_t>(cfg_.tx_interval_us) * 1'000;
+            tx_timer_.arm(start_mraw_ + interval_ns, interval_ns);
+        }
+        int64_t const report_interval_ns = static_cast<int64_t>(cfg_.report_interval_us) * 1'000;
+        report_timer_.arm(start_mraw_ + report_interval_ns, report_interval_ns);
+    }
+
     [[nodiscard]] auto build_wire_translator() -> WireClock::Translator
     {
 #if defined(__linux__)
@@ -1354,18 +1459,64 @@ class Session
         return WireClock::Translator{};
     }
 
-    [[nodiscard]] auto gptp_synced() const noexcept -> bool
+    /// Whether a master clock link exists: the gPTP slave's bridge or the
+    /// ptp4l PHC bridge. The realtime time source has none.
+    [[nodiscard]] auto has_master_link() const noexcept -> bool
+    {
+#if defined(__linux__)
+        return gptp_session_.has_value() || ptp4l_ctx_.has_value();
+#else
+        return false;
+#endif
+    }
+
+    /// How well the master link is known now. It is refreshed at each
+    /// synchronization and coasts in between and through a loss, so this
+    /// never says "unsynchronized": it says how large the error may be.
+    [[nodiscard]] auto link_quality() const noexcept -> realtime::ClockQuality
     {
 #if defined(__linux__)
         if (gptp_session_.has_value()) {
-            return gptp_session_->synced();
+            return gptp_session_->bridge().quality();
         }
         if (ptp4l_ctx_.has_value()) {
-            return ptp4l_ctx_->bridge->is_healthy();
+            return ptp4l_ctx_->bridge->quality();
         }
 #endif
-        // Realtime mode: always "synced" — no master clock to wait for.
-        return true;
+        return {};
+    }
+
+    /// Judge the session's clocks against its limits at @p now_mraw, on the
+    /// packet thread. This is the session's one question about its time
+    /// source; it replaces the protocol's synchronized flag.
+    /// @return Whether the session may measure and transmit
+    auto judge_clocks(int64_t const now_mraw) noexcept -> bool
+    {
+        sample_utc(now_mraw);
+        bool const usable =
+            clock_gate_.judge(link_quality(), utc_tracker_.quality(), realtime::MonotonicRawClock::from_ns(now_mraw));
+        publish_clock_report(now_mraw);
+        return usable;
+    }
+
+    /// The system clock's own report of its error, read once a second when
+    /// the wire timeline is made from that clock.
+    void sample_utc(int64_t const now_mraw) noexcept
+    {
+        if (!clock_gate_.tracks_utc() || now_mraw < next_utc_sample_mraw_) {
+            return;
+        }
+        next_utc_sample_mraw_ = now_mraw + utc_sample_interval_ns_;
+        utc_tracker_.sample();
+    }
+
+    void publish_clock_report(int64_t const now_mraw) noexcept
+    {
+        if (now_mraw < next_clock_report_mraw_) {
+            return;
+        }
+        next_clock_report_mraw_ = now_mraw + loss_snapshot_interval_ns_;
+        clock_report_.publish(clock_gate_.report());
     }
 
     /// SPSC consumer. Reads the active time source's "now" once
@@ -1534,6 +1685,14 @@ class Session
     statusbar::itc::AtomicTripleBuffer<LossSnapshot> loss_snapshot_{};
     int64_t next_loss_snapshot_mraw_{0};
     static constexpr int64_t loss_snapshot_interval_ns_ = 50'000'000;  // 20 Hz
+    /// The session's clocks against its limits. Packet thread only; the
+    /// reporter reads what it publishes in clock_report_.
+    ClockGate clock_gate_{};
+    realtime::UtcClockQualityTracker utc_tracker_{};
+    int64_t next_utc_sample_mraw_{0};
+    static constexpr int64_t utc_sample_interval_ns_ = 1'000'000'000;  // the system updates its figure once a second
+    statusbar::itc::AtomicTripleBuffer<ClockReport> clock_report_{};
+    int64_t next_clock_report_mraw_{0};
     net::SocketAddress peer_{};
     net::FileDescriptor udp_{-1};
     DeadlineTimer tx_timer_{};

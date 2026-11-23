@@ -52,6 +52,12 @@ struct GpsTaiSnapshot
     double drift_ppm_per_hr = 0.0;
     std::int64_t last_master_ns = 0;
     std::int64_t tai_minus_utc_ns = 37'000'000'000LL;
+    /// The owner's verdict on the TAI this mapping gives: the system clock
+    /// it is trained from was within the owner's limit for vouching for a
+    /// timestamp when this snapshot was taken. The translator makes no such
+    /// judgement itself and leaves this false; an owner that judges the
+    /// clock sets it.
+    bool tai_usable = false;
 };
 
 /// Pure evaluation of the GPS-TAI mapping from a snapshot. Identical formula to

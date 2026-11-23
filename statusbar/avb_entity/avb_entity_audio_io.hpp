@@ -259,6 +259,26 @@ class AvbEntityAudioIO
     /// thread; cheap and rate-limited.
     void update_gps_ratio(uint64_t gptp_now_ns);
 
+    /// The system clock read against the media thread's own counter, with the
+    /// entity's verdict on it.
+    struct SystemClockReading
+    {
+        uint64_t utc_ns;
+        SystemClockVerdict verdict;
+    };
+    /// Read the system clock and judge it against the entity's two limits
+    /// (config_.max_utc_error_ns, config_.udptun_max_tai_error_ns). The
+    /// operating system's report of its error is read once a second (it
+    /// changes no faster); between reports the bound coasts. Media thread.
+    [[nodiscard]] auto read_system_clock() -> SystemClockReading;
+    void publish_system_clock(realtime::AccuracyVerdict const& tai);
+    void log_media_clock(ptpclient::RatioEstimate const& est, uint64_t gptp_now_ns);
+    /// A configured limit in nanoseconds as an accuracy: negative takes any bounded clock.
+    [[nodiscard]] static constexpr auto accuracy_limit_of(int64_t const max_error_ns) noexcept -> realtime::Nanoseconds
+    {
+        return max_error_ns < 0 ? realtime::AccuracyLimit::ANY_BOUNDED : realtime::Nanoseconds{max_error_ns};
+    }
+
     AvbEntityAudioIOConfig config_;
     AudioProcessCallback audio_callback_;
 
@@ -292,6 +312,16 @@ class AvbEntityAudioIO
     /// playout all ride this single cross-site-common clock). Fed by
     /// update_gps_ratio on the media thread. See avb_entity_media_rate.hpp.
     MediaClockRateTracker rate_tracker_{};
+
+    /// How well the system clock knows the time, from the operating system's
+    /// own report, and the entity's two limits on it: for following its rate,
+    /// and for vouching for a TAI timestamp made from it. Media thread only.
+    realtime::UtcClockQualityTracker utc_tracker_{
+        realtime::UtcClockQualityTracker::Config{.drift_bound_ppb = config_.utc_holdover_drift_ppb}};
+    realtime::AccuracyLimit utc_follow_limit_{accuracy_limit_of(config_.max_utc_error_ns)};
+    realtime::AccuracyLimit tai_limit_{accuracy_limit_of(config_.udptun_max_tai_error_ns)};
+    realtime::MonotonicRawClock::time_point next_utc_report_{};
+    static constexpr realtime::Nanoseconds UTC_REPORT_INTERVAL{1'000'000'000};
 
     /// Latest GPS-TAI translator snapshot, published by update_gps_ratio on the
     /// media thread and consumed by the tunnel bridge's reactor-thread ingest

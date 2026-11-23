@@ -225,6 +225,25 @@ the slot indexed by their PT regardless of arrival order.
   directly. Both endpoints rely on NTP for rough alignment — fine for
   ms-level RTT, acceptable for one-way LAN measurement.
 
+### When the session trusts its clocks
+
+A session does not ask its time source whether it is synchronized. It asks
+how large the worst-case error is and compares that with its configuration
+(`udptun_clock_gate.hpp`):
+
+| `SessionConfig` field | Default | Clock judged |
+|---|---|---|
+| `max_clock_error_ns` | 100 000 (100 µs) | the master link: the gPTP slave's bridge or the ptp4l PHC bridge. Negative takes any bounded link |
+| `max_utc_error_ns` | 0 (reported, not enforced) | the system clock, when the wire timeline is made from it (`wire_clock_gps_tai`, or the realtime time source) |
+
+Inside its limits the session measures and transmits; outside them it does
+neither, exactly as it used to while unsynchronized. The difference is when
+that happens: a link that misses a few Syncs keeps its rate and offset and
+its error grows slowly, so the session runs on for seconds and stops only
+when the error passes the limit. `Session::clock_report()` returns the
+current bounds and the record of excursions, and `print_clock_report()`
+writes them as the report's last line.
+
 For RTT measurement against a reflector, the sender's wire_ns appears
 on both ends of the interval (it stamps tx, then receives its own echo
 and computes `rx_wire - tx_wire`), so the rate calibration cancels and

@@ -56,6 +56,18 @@ class UdptunTelemetry
     {
         return block_->egress_repunch_count;
     }
+    /// tunnel datagrams sent with the tu (timestamp uncertain) bit set
+    [[nodiscard]] auto tx_uncertain() noexcept -> itc::TelemetryCounter<uint64_t>& { return block_->tx_uncertain; }
+    [[nodiscard]] auto tx_uncertain() const noexcept -> itc::TelemetryCounter<uint64_t> const& { return block_->tx_uncertain; }
+    /// tunnel-audio datagrams received with the tu bit set
+    [[nodiscard]] auto rx_uncertain() noexcept -> itc::TelemetryCounter<uint64_t>& { return block_->rx_uncertain; }
+    [[nodiscard]] auto rx_uncertain() const noexcept -> itc::TelemetryCounter<uint64_t> const& { return block_->rx_uncertain; }
+    /// this node's system clock, worst-case error in ns as last judged (-1: unbounded)
+    [[nodiscard]] auto utc_accuracy_ns() noexcept -> itc::Published<int64_t>& { return block_->utc_accuracy_ns; }
+    [[nodiscard]] auto utc_accuracy_ns() const noexcept -> itc::Published<int64_t> const& { return block_->utc_accuracy_ns; }
+    /// times this node's system clock left the limit for vouching for a TAI timestamp
+    [[nodiscard]] auto utc_excursions() noexcept -> itc::Published<uint64_t>& { return block_->utc_excursions; }
+    [[nodiscard]] auto utc_excursions() const noexcept -> itc::Published<uint64_t> const& { return block_->utc_excursions; }
     /// last real tunnel-audio ingest TAI (ns)
     [[nodiscard]] auto last_real_ingest_tai() noexcept -> itc::Published<int64_t>& { return block_->last_real_ingest_tai; }
     [[nodiscard]] auto last_real_ingest_tai() const noexcept -> itc::Published<int64_t> const&
@@ -77,6 +89,10 @@ class UdptunTelemetry
         itc::TelemetryCounter<uint64_t> any_rx{};
         itc::TelemetryCounter<uint64_t> egress_reset_count{};
         itc::TelemetryCounter<uint64_t> egress_repunch_count{};
+        itc::TelemetryCounter<uint64_t> tx_uncertain{};
+        itc::TelemetryCounter<uint64_t> rx_uncertain{};
+        itc::Published<int64_t> utc_accuracy_ns{-1};
+        itc::Published<uint64_t> utc_excursions{};
         itc::Published<int64_t> last_real_ingest_tai{};
     };
     std::shared_ptr<Block> block_;
