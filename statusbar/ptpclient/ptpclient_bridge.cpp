@@ -264,6 +264,22 @@ auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusVal
         .before = before});
 }
 
+auto PtpTimeBridge::early_wake_monotonic_ns(SleepPlan const& plan, int64_t const raw_now_ns) const noexcept -> int64_t
+{
+    // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
+    // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
+    // slew-immune CLOCK_MONOTONIC_RAW to the exact deadline. The early-wake guard
+    // must cover (a) OS wakeup latency [base] and (b) the MONOTONIC-vs-RAW
+    // divergence accrued over the sleep [slew term] so we never oversleep past
+    // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
+    // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
+    int64_t const sleep_dur = plan.raw_deadline_ns - raw_now_ns;
+    int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
+    int64_t const slew_guard =
+        sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
+    return plan.mono_deadline_ns - (base_guard + slew_guard);
+}
+
 auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>
 {
     auto const after = get_mapping();
@@ -337,6 +353,7 @@ auto PtpTimeBridge::begin_told_sampling(BridgeSamplingParams const& params) -> S
 {
     params_ = params;
     set_reset_requested(false);
+    set_running(true);
     return SamplerState{raw_line_, static_cast<size_t>(params_.window_size)};
 }
 
@@ -418,19 +435,7 @@ auto PtpTimeBridge::sleep_until_ptp(int64_t ptp_deadline_ns, std::atomic<bool> c
         return failure(PtpError::bridge_not_running);
     }
 
-    // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
-    // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
-    // slew-immune CLOCK_MONOTONIC_RAW to the exact deadline. The early-wake guard
-    // must cover (a) OS wakeup latency [base] and (b) the MONOTONIC-vs-RAW
-    // divergence accrued over the sleep [slew term] so we never oversleep past
-    // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
-    // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
-    int64_t const raw_now = realtime::read_monotonic_raw_ns();
-    int64_t const sleep_dur = raw_deadline - raw_now;
-    int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
-    int64_t const slew_guard =
-        sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
-    int64_t const mono_wake = plan.mono_deadline_ns - (base_guard + slew_guard);
+    int64_t const mono_wake = early_wake_monotonic_ns(plan, realtime::read_monotonic_raw_ns());
 
     // One kernel sleep primitive on every platform, on the clock the line
     // maps to. (The macOS branch used to sleep on std::chrono::steady_clock,

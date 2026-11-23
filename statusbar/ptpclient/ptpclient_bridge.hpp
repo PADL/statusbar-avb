@@ -306,7 +306,8 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     };
 
     /// Set the bridge up to be told its readings instead of taking them on
-    /// its own thread. Not while sampling is running.
+    /// its own thread. Not while sampling is running. The bridge counts as
+    /// running from here until stop_sampling(): the caller is its sampler.
     [[nodiscard]] auto begin_told_sampling(BridgeSamplingParams const& params = {}) -> SamplerState;
 
     /// Told form of one sampler pass: feed the RAW<->MONOTONIC pair of
@@ -418,6 +419,14 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// RAW and (coarse) MONOTONIC domains.
     /// @return SleepPlan, or error if not running / unhealthy
     [[nodiscard]] auto prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>;
+
+    /// Told form of the coarse sleep's target: the CLOCK_MONOTONIC instant
+    /// to sleep to for @p plan, told that RAW now reads @p raw_now_ns. It
+    /// is the plan's monotonic deadline less a guard: wake_refine_spin_ns
+    /// for the wakeup latency, plus the divergence CLOCK_MONOTONIC could
+    /// accrue against RAW over the sleep at the line's rate. A target that
+    /// is not ahead of CLOCK_MONOTONIC means no sleep, only the spin.
+    [[nodiscard]] auto early_wake_monotonic_ns(SleepPlan const& plan, int64_t raw_now_ns) const noexcept -> int64_t;
 
     /// Finalize after sleep: validate epoch and convert the RAW wake time back to
     /// PTP via the primary (PHC<->RAW) mapping.
