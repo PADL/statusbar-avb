@@ -147,18 +147,42 @@ void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn f
     defer_consume(stream_index, std::move(fn));
 }
 
+void ListenerStreams::set_consume_timed(uint16_t const stream_index, StreamTimedConsumeFn fn)
+{
+    if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        slot->consume_timed = std::move(fn);
+        return;
+    }
+    defer_consume_timed(stream_index, std::move(fn));
+}
+
+auto ListenerStreams::pending_consume_for(uint16_t const stream_index) -> PendingConsume*
+{
+    for (auto& pending : pending_consume_) {
+        if (pending.stream_index == stream_index) {
+            return &pending;
+        }
+    }
+    if (pending_consume_.size() >= MAX_ENTITY_STREAMS) {
+        return nullptr;
+    }
+    pending_consume_.push_back(PendingConsume{.stream_index = stream_index});
+    return &pending_consume_.back();
+}
+
 void ListenerStreams::defer_consume(uint16_t const stream_index, StreamConsumeFn fn)
 {
     // No slot (yet): keep it pending. open_stream() binds it when the model
     // declares the index; otherwise it stays here, inert (menu/selection).
-    for (auto& pending : pending_consume_) {
-        if (pending.stream_index == stream_index) {
-            pending.fn = std::move(fn);
-            return;
-        }
+    if (auto* pending = pending_consume_for(stream_index); pending != nullptr) {
+        pending->fn = std::move(fn);
     }
-    if (pending_consume_.size() < MAX_ENTITY_STREAMS) {
-        pending_consume_.push_back(PendingConsume{.stream_index = stream_index, .fn = std::move(fn)});
+}
+
+void ListenerStreams::defer_consume_timed(uint16_t const stream_index, StreamTimedConsumeFn fn)
+{
+    if (auto* pending = pending_consume_for(stream_index); pending != nullptr) {
+        pending->timed = std::move(fn);
     }
 }
 
@@ -190,7 +214,10 @@ void ListenerStreams::bind_pending_consume(ListenerStreamSlot& slot)
         if (pending.stream_index == slot.spec.index && pending.fn) {
             slot.consume = std::move(pending.fn);
             pending.fn = {};  // consumed; entry stays (never erased, slots are stable)
-            break;
+        }
+        if (pending.stream_index == slot.spec.index && pending.timed) {
+            slot.consume_timed = std::move(pending.timed);
+            pending.timed = {};
         }
     }
     for (auto& pending : pending_crf_) {
@@ -267,6 +294,9 @@ void ListenerStreams::close_rx() noexcept
         if (slot.consume) {
             defer_consume(slot.spec.index, std::move(slot.consume));
         }
+        if (slot.consume_timed) {
+            defer_consume_timed(slot.spec.index, std::move(slot.consume_timed));
+        }
         if (slot.on_crf) {
             defer_crf(slot.spec.index, std::move(slot.on_crf));
         }
@@ -315,12 +345,12 @@ auto ListenerStreams::drain_rx(realtime::GptpClock0::time_point const gptp_now, 
     // without the begin the budget is never reset: the first 32 frames
     // arrive and nothing after them.
     begin_port_cycle();
-    size_t const drained = drain_frames(realtime::GptpClock0::to_ns(gptp_now), rx_now);
+    size_t const drained = drain_frames(gptp_now.time_since_epoch(), rx_now);
     end_port_cycle();
     return drained;
 }
 
-auto ListenerStreams::drain_frames(int64_t const gptp_now_ns, net::RxTimePoint const rx_now) -> size_t
+auto ListenerStreams::drain_frames(avtp::Nanoseconds const now, net::RxTimePoint const rx_now) -> size_t
 {
     size_t drained = 0;
     while (drained < MAX_DRAIN_PER_CALL) {
@@ -332,7 +362,7 @@ auto ListenerStreams::drain_frames(int64_t const gptp_now_ns, net::RxTimePoint c
         // it is simply not a stream frame. It must not end the pass, or every
         // stream frame queued behind it waits for the next drain.
         if (*length != 0) {
-            on_stream_rx_frame({rx_buf_.data(), *length}, gptp_now_ns);
+            on_stream_rx_frame({rx_buf_.data(), *length}, now);
         }
         ++drained;
     }
@@ -377,7 +407,28 @@ auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> Lis
     return nullptr;
 }
 
-auto ListenerStreams::parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+namespace {
+
+/// One decoded channel to the slot's consumers. A consumer registered in
+/// unsigned nanoseconds (set_consume) is handed the same counts in that type.
+void offer_audio(
+    ListenerStreamSlot& slot,
+    uint8_t const ch,
+    std::span<float const> samples,
+    avtp::Nanoseconds const pts,
+    avtp::Nanoseconds const period)
+{
+    if (slot.consume_timed) {
+        slot.consume_timed(ch, samples, pts, period);
+    }
+    if (slot.consume) {
+        slot.consume(ch, samples, static_cast<uint64_t>(pts.count()), static_cast<uint64_t>(period.count()));
+    }
+}
+
+}  // namespace
+
+auto ListenerStreams::parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
     -> std::optional<avtp::Am824Pdu>
 {
     if (frame.size() < avtp::Am824Pdu::HEADER_LENGTH) {
@@ -387,44 +438,42 @@ auto ListenerStreams::parse_am824_frame(ListenerStreamSlot& slot, std::span<uint
     span_load(pdu, frame.first(avtp::Am824Pdu::HEADER_LENGTH));
     if (!pdu.is_valid()) {
         slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, gptp_now_ns);
+        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/true, now);
         return std::nullopt;
     }
     return pdu;
 }
 
 auto ListenerStreams::deliver_am824_audio(
-    ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t
+    ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds const now) -> uint64_t
 {
     uint64_t samples_this = 0;
     avtp::am824_deserialize_mbla(
         *slot.am824,
         pdu,
         audio,
-        static_cast<uint64_t>(gptp_now_ns),
-        [&samples_this, &slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+        now,
+        [&samples_this, &slot](uint8_t ch, std::span<float> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
             samples_this = s.size();
             // Kit phase 2: decoded floats + reconstructed PTS reach the
-            // registered per-stream consumer (previously discarded).
-            if (slot.consume) {
-                slot.consume(ch, s, pts, period);
-            }
+            // registered per-stream consumers (previously discarded).
+            offer_audio(slot, ch, s, pts, period);
         });
     slot.rx_packets.add(1);
     slot.rx_samples.add(samples_this);
     return samples_this;
 }
 
-void ListenerStreams::receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+void ListenerStreams::receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
 {
-    auto const pdu = parse_am824_frame(slot, frame, gptp_now_ns);
+    auto const pdu = parse_am824_frame(slot, frame, now);
     if (!pdu) {
         return;
     }
     // The declared audio, not the frame's tail: a minimum-size frame carries
     // padding that would decode as silent samples and drift the DBC.
     std::span<uint8_t const> const audio = avtp::am824_get_audio_payload(*pdu, frame);
-    uint64_t const samples_this = deliver_am824_audio(slot, *pdu, audio, gptp_now_ns);
+    uint64_t const samples_this = deliver_am824_audio(slot, *pdu, audio, now);
     update_stream_input_counters(
         slot,
         pdu->stream_header.sequence_num.get(),
@@ -435,7 +484,7 @@ void ListenerStreams::receive_am824_frame(ListenerStreamSlot& slot, std::span<ui
         /*format_ok=*/true,
         samples_this,
         /*ts_sparse=*/true,  // 61883-6 SYT cadence: tv=0 between SYT packets is normal
-        gptp_now_ns);
+        now);
 
     // Hand the accepted audio to the RX sink (today the WAN tunnel; the sink
     // decides whether to consume it -- e.g. only when this is the configured
@@ -445,81 +494,103 @@ void ListenerStreams::receive_am824_frame(ListenerStreamSlot& slot, std::span<ui
     }
 }
 
-void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns)
+void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t const gptp_now_ns)
 {
-    if (frame.empty()) {
-        return;
-    }
-    ListenerStreamSlot* const slot = find_slot_for_frame(frame);
+    on_stream_rx_frame(frame, avtp::Nanoseconds{gptp_now_ns});
+}
+
+void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+{
+    ListenerStreamSlot* const slot = frame.empty() ? nullptr : find_slot_for_frame(frame);
     if (slot == nullptr) {
         return;
     }
-
     if (slot->am824) {
-        receive_am824_frame(*slot, frame, gptp_now_ns);
+        receive_am824_frame(*slot, frame, now);
     } else if (slot->aaf) {
-        // --- AAF ---
-        auto pdu_opt = avtp::aaf_parse_header(frame);
-        if (!pdu_opt) {
-            slot->rx_bad.add(1);
-            update_stream_input_counters(
-                *slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, gptp_now_ns);
-            return;
-        }
-        std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
-        uint64_t samples_this = 0;
-        avtp::aaf_stream_deserialize(
-            *slot->aaf,
-            *pdu_opt,
-            audio,
-            static_cast<uint64_t>(gptp_now_ns),
-            [&samples_this, slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
-                samples_this = s.size();
-                if (slot->consume) {
-                    slot->consume(ch, s, pts, period);
-                }
-            });
-        slot->rx_packets.add(1);
-        slot->rx_samples.add(samples_this);
-        update_stream_input_counters(
-            *slot,
-            pdu_opt->get_sequence_num(),
-            pdu_opt->get_avtp_timestamp(),
-            pdu_opt->tv(),
-            pdu_opt->tu(),
-            pdu_opt->mr(),
-            /*format_ok=*/true,
-            samples_this,
-            /*ts_sparse=*/false,  // AAF timestamps every packet: tv=0 is a real fault
-            gptp_now_ns);
-
-        // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
-        // to the AM824 path above; the sink ignores it unless AAF is its source.
-        if (audio_sink_ != nullptr) {
-            audio_sink_->on_listener_audio(slot->spec.index, StreamAudioFormat::aaf_int32, audio);
-        }
+        receive_aaf_frame(*slot, frame, now);
     } else if (slot->crf) {
-        // --- CRF (kit phase 3): media-clock reference, no audio payload ---
-        if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
-            return;
-        }
-        avtp::CrfPdu pdu{};
-        span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
-        if (!pdu.is_valid()) {
-            slot->rx_bad.add(1);
-            return;
-        }
-        std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
-        slot->crf->process_packet(pdu, ts_data, [slot, gptp_now_ns](uint64_t ts_ns, uint16_t index) {
-            // Each (CRF timestamp, local receive time) pair feeds media-clock
-            // recovery via the registered consumer.
-            if (slot->on_crf) {
-                slot->on_crf(ts_ns, index, gptp_now_ns);
-            }
-        });
-        slot->rx_packets.add(1);
-        slot->rx_samples.add(slot->crf->last_timestamp_count);
+        receive_crf_frame(*slot, frame, now);
     }
+}
+
+auto ListenerStreams::deliver_aaf_audio(
+    ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds const now) -> uint64_t
+{
+    uint64_t samples_this = 0;
+    avtp::aaf_stream_deserialize(
+        *slot.aaf,
+        pdu,
+        audio,
+        now,
+        [&samples_this, &slot](uint8_t ch, std::span<float> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
+            samples_this = s.size();
+            offer_audio(slot, ch, s, pts, period);
+        });
+    slot.rx_packets.add(1);
+    slot.rx_samples.add(samples_this);
+    return samples_this;
+}
+
+void ListenerStreams::receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+{
+    auto const pdu = avtp::aaf_parse_header(frame);
+    if (!pdu) {
+        slot.rx_bad.add(1);
+        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, now);
+        return;
+    }
+    std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
+    uint64_t const samples_this = deliver_aaf_audio(slot, *pdu, audio, now);
+    update_stream_input_counters(
+        slot,
+        pdu->get_sequence_num(),
+        pdu->get_avtp_timestamp(),
+        pdu->tv(),
+        pdu->tu(),
+        pdu->mr(),
+        /*format_ok=*/true,
+        samples_this,
+        /*ts_sparse=*/false,  // AAF timestamps every packet: tv=0 is a real fault
+        now);
+
+    // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
+    // to the AM824 path above; the sink ignores it unless AAF is its source.
+    if (audio_sink_ != nullptr) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, audio);
+    }
+}
+
+auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
+{
+    if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
+        return std::nullopt;
+    }
+    avtp::CrfPdu pdu{};
+    span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
+    if (!pdu.is_valid()) {
+        slot.rx_bad.add(1);
+        return std::nullopt;
+    }
+    return pdu;
+}
+
+void ListenerStreams::receive_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+{
+    auto pdu = parse_crf_frame(slot, frame);
+    if (!pdu) {
+        return;
+    }
+    std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
+    slot.crf->process_packet(*pdu, ts_data, [&slot, rx_ns = now.count()](uint64_t ts_ns, uint16_t index) {
+        // Each (CRF timestamp, local receive time) pair feeds media-clock
+        // recovery via the registered consumer.
+        if (slot.on_crf) {
+            slot.on_crf(ts_ns, index, rx_ns);
+        }
+    });
+    slot.rx_packets.add(1);
+    slot.rx_samples.add(slot.crf->last_timestamp_count);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
@@ -555,10 +626,10 @@ void ListenerStreams::update_stream_input_counters(
     bool const format_ok,
     uint64_t const samples_per_ch,
     bool const ts_sparse,
-    int64_t const gptp_now_ns)
+    avtp::Nanoseconds const now)
 {
     // The bookkeeping itself lives in avb_entity_stream_counters.* (unit-tested); feed
-    // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). gptp_now_ns
+    // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). now
     // is the caller's fresh receive time -- the reactor path passes current_gptp_ns()
     // (the media-timer wake), the RT-timer path passes its own wake time.
     tally_stream_input_packet(
@@ -571,7 +642,7 @@ void ListenerStreams::update_stream_input_counters(
         format_ok,
         samples_per_ch,
         ts_sparse,
-        gptp_now_ns,
+        now.count(),
         lock_tolerance_ns_,
         sample_rate_);
 }

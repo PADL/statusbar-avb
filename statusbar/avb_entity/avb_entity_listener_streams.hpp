@@ -88,6 +88,10 @@ struct ListenerStreamSlot
     /// decode for counters only (and the raw-byte StreamRxAudioSink, if any).
     StreamConsumeFn consume{};
 
+    /// The same hand-off with its times as avtp::Nanoseconds
+    /// (set_consume_timed). Either, both or neither may be set.
+    StreamTimedConsumeFn consume_timed{};
+
     /// Per-stream CRF ingest (kit phase 3): receives each CRF timestamp with
     /// the local receive time — feed for media-clock recovery. CRF slots only.
     StreamCrfFn on_crf{};
@@ -149,6 +153,11 @@ struct ListenerStreams
     /// declares stays pending and inert (never an error). RX-thread callback.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn);
 
+    /// set_consume() for a consumer that takes its times as avtp::Nanoseconds.
+    /// It is kept beside a set_consume() consumer for the same stream, not in
+    /// place of it. Same pending and menu/selection semantics.
+    void set_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn);
+
     /// Register a per-stream CRF timestamp consumer for STREAM_INPUT
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
     /// semantics as set_consume. RX-thread callback.
@@ -203,6 +212,10 @@ struct ListenerStreams
     /// LATE/EARLY classification. Reactor/RX thread.
     void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns);
 
+    /// on_stream_rx_frame() told the receive time as avtp::Nanoseconds, a count
+    /// on the stream's timeline that is never below zero.
+    void on_stream_rx_frame(std::span<uint8_t const> frame, avtp::Nanoseconds now);
+
     /// True if @p frame belongs to the stream currently connected to STREAM_INPUT
     /// @p stream_index: the slot's published connection is set and the
     /// stream_id at offset 4 matches it. RX thread.
@@ -213,13 +226,26 @@ struct ListenerStreams
     [[nodiscard]] auto find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
 
     /// One received AM824 frame for @p slot: parse, decode to the consumer, count, hand on.
-    void receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns);
+    void receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
     /// The frame's AM824 header when it is one; a bad frame is counted and yields nullopt.
-    [[nodiscard]] auto parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, int64_t gptp_now_ns)
+    [[nodiscard]] auto parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now)
         -> std::optional<avtp::Am824Pdu>;
-    /// Decode the audio to the slot's consumer and count the packet; the samples per channel it held.
+    /// Decode the audio to the slot's consumers and count the packet; the samples per channel it held.
     [[nodiscard]] auto deliver_am824_audio(
-        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, int64_t gptp_now_ns) -> uint64_t;
+        ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds now) -> uint64_t;
+
+    /// The same three steps for an AAF frame; a frame that is not AAF is counted as bad.
+    void receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
+    [[nodiscard]] auto deliver_aaf_audio(
+        ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds now) -> uint64_t;
+
+    /// One received CRF frame for @p slot: each timestamp to the CRF consumer
+    /// with the receive time. A CRF stream is a media-clock reference and
+    /// carries no audio.
+    void receive_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
+    /// The frame's CRF header when it is one; a bad frame is counted and yields nullopt.
+    [[nodiscard]] static auto parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame)
+        -> std::optional<avtp::CrfPdu>;
 
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.
@@ -233,7 +259,7 @@ struct ListenerStreams
         bool format_ok,
         uint64_t samples_per_ch,
         bool ts_sparse,
-        int64_t gptp_now_ns);
+        avtp::Nanoseconds now);
 
     /// Fill the GET_COUNTERS bitmap + values for a STREAM_INPUT index (true if it is
     /// one of our stream inputs). Control plane (AEM handler).
@@ -290,6 +316,7 @@ struct ListenerStreams
     /// Keep a registration for a slot that does not exist (yet, or any more)
     /// under its stream index, replacing one already kept for that index.
     void defer_consume(uint16_t stream_index, StreamConsumeFn fn);
+    void defer_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn);
     void defer_crf(uint16_t stream_index, StreamCrfFn fn);
 
     /// A fresh slot for @p spec, its margin histogram sized for this listener.
@@ -324,8 +351,8 @@ struct ListenerStreams
     /// the port is told it (net::EthernetPort::rx_start(now)), not asked.
     [[nodiscard]] auto take_rx_frame(net::RxTimePoint rx_now) -> std::optional<size_t>;
     /// The frames of one pass, up to MAX_DRAIN_PER_CALL, each told @p rx_now
-    /// and stamped @p gptp_now_ns: how many the port gave.
-    [[nodiscard]] auto drain_frames(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> size_t;
+    /// and stamped @p now: how many the port gave.
+    [[nodiscard]] auto drain_frames(avtp::Nanoseconds now, net::RxTimePoint rx_now) -> size_t;
     /// One drain_rx pass is one port cycle: begin resets the XDP backend's
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();
@@ -345,7 +372,10 @@ struct ListenerStreams
     {
         uint16_t stream_index{0};
         StreamConsumeFn fn{};
+        StreamTimedConsumeFn timed{};
     };
+    /// The entry kept for @p stream_index, made if there is room; nullptr when there is none.
+    [[nodiscard]] auto pending_consume_for(uint16_t stream_index) -> PendingConsume*;
     sg14::inplace_vector<PendingConsume, MAX_ENTITY_STREAMS> pending_consume_{};
     struct PendingCrf
     {

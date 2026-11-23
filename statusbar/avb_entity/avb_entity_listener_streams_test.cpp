@@ -15,6 +15,8 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
+#include "statusbar/avtp/avtp_aaf_stream_output.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/test/test.hpp"
@@ -366,6 +368,86 @@ TEST(listener_consume, close_rx_keeps_the_consumers_for_the_next_open)
     slot->consume(0, {}, 0, 0);
     EXPECT_EQ(delivered, 1);
     EXPECT_EQ(ls.slot_of(StreamKind::aaf), slot);
+}
+
+// A consumer may take its times as avtp::Nanoseconds. It is kept beside the
+// consumer in unsigned nanoseconds, and both are handed every channel of
+// every packet, with the same counts.
+TEST(listener_consume, a_timed_consumer_is_handed_the_same_times_as_nanoseconds)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+
+    // One AAF packet of the slot's format, as a talker builds it: twelve
+    // samples presented 2 ms after the time it is received at.
+    constexpr avtp::Nanoseconds NOW{1'795'000'000'000'000'000};
+    constexpr avtp::Nanoseconds AHEAD{2'000'000};
+    auto const& format = ls.slot_for(0)->spec.format;
+    avtp::AafStreamOutputContext talker{
+        tsn::StreamId{},
+        format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(format.sample_rate_hz),
+        format.channels,
+        format.bit_depth,
+        0};
+    avtp::AafPdu pdu{};
+    std::array<uint8_t, avtp::AafPdu::HEADER_LENGTH + (12 * 8 * 4)> frame{};
+    auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    EXPECT_EQ(avtp::aaf_stream_serialize(talker, pdu, payload, 12, NOW + AHEAD, [](uint8_t, std::span<float>) {}), payload.size());
+    span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+
+    int timed_calls = 0;
+    int unsigned_calls = 0;
+    avtp::Nanoseconds timed_pts{};
+    avtp::Nanoseconds timed_period{};
+    uint64_t unsigned_pts = 0;
+    ls.set_consume_timed(0, [&](uint8_t, std::span<float const> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
+        ++timed_calls;
+        timed_pts = pts;
+        timed_period = period;
+        EXPECT_EQ(s.size(), 12U);
+    });
+    ls.set_consume(0, [&](uint8_t, std::span<float const>, uint64_t pts, uint64_t) {
+        ++unsigned_calls;
+        unsigned_pts = pts;
+    });
+
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(timed_calls, 8);     // once a channel
+    EXPECT_EQ(unsigned_calls, 8);  // the other consumer is still served
+    EXPECT_TRUE(timed_pts == NOW + AHEAD);
+    EXPECT_TRUE(timed_period == avtp::Nanoseconds{10416});
+    EXPECT_EQ(unsigned_pts, static_cast<uint64_t>((NOW + AHEAD).count()));
+
+    // The receive time as a bare count reaches the same code.
+    ls.on_stream_rx_frame(frame, NOW.count());
+    EXPECT_EQ(timed_calls, 16);
+}
+
+TEST(listener_consume, a_timed_consumer_is_kept_pending_and_through_a_close_like_the_other)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    // Before the slot exists, and beside a consumer of the other form for the same stream.
+    ls.set_consume_timed(0, [](uint8_t, std::span<float const>, avtp::Nanoseconds, avtp::Nanoseconds) {});
+    ls.set_consume(0, [](uint8_t, std::span<float const>, uint64_t, uint64_t) {});
+    ls.set_consume_timed(9, [](uint8_t, std::span<float const>, avtp::Nanoseconds, avtp::Nanoseconds) {});
+
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume_timed));
+    EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume));
+    EXPECT_EQ(ls.slot_for(9), nullptr);
+
+    ls.close_rx();
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume_timed));
+    EXPECT_TRUE(static_cast<bool>(ls.slot_for(0)->consume));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

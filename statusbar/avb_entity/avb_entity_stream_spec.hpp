@@ -28,6 +28,7 @@
 
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/avtp/avtp_types.hpp"
 #include "statusbar/sg14/inplace_function.h"
@@ -262,6 +263,15 @@ using StreamRenderFn =
 /// thread: keep it cheap and non-blocking.
 using StreamConsumeFn =
     sg14::inplace_function<void(uint8_t channel, std::span<float const> samples, uint64_t pts_ns, uint64_t period_ns), 64>;
+
+/// StreamConsumeFn with its times as avtp::Nanoseconds, the signed count the
+/// stream contexts hand out: the presentation time of the channel's first
+/// sample and the time between two samples, on the stream's timeline (gPTP
+/// time on an AVB network). A stream may have a consumer of either form, or
+/// one of each; both are handed every channel. Same thread and same rules as
+/// StreamConsumeFn.
+using StreamTimedConsumeFn = sg14::
+    inplace_function<void(uint8_t channel, std::span<float const> samples, avtp::Nanoseconds pts, avtp::Nanoseconds period), 64>;
 
 /// Per-stream CRF ingest (kit phase 3): one received CRF timestamp — a full
 /// 64-bit gPTP-domain media-clock event time — with its index within the PDU

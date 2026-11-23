@@ -140,8 +140,6 @@ void TalkerStreams::transmit_am824(
     if (!slot.am824 || port_ == nullptr) {
         return;
     }
-    // The wire takes the presentation time as unsigned nanoseconds (and keeps 32 bits of it).
-    auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     static constexpr size_t MAX_FRAME =
         avtp::Am824Pdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -160,7 +158,7 @@ void TalkerStreams::transmit_am824(
         pdu,
         payload,
         static_cast<uint8_t>(samples),
-        presentation_ns,
+        presentation.time_since_epoch(),  // the first sample's time; the context's offset is zero
         [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = src[(s * channels) + ch];
@@ -189,7 +187,6 @@ void TalkerStreams::transmit_aaf(
     if (!slot.aaf || port_ == nullptr) {
         return;
     }
-    auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     static constexpr size_t MAX_FRAME =
         avtp::AafPdu::HEADER_LENGTH + (avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET * avtp::Am824Pdu::MAX_CHANNELS * 4);
     std::array<uint8_t, MAX_FRAME> frame{};
@@ -198,7 +195,7 @@ void TalkerStreams::transmit_aaf(
     avtp::AafPdu pdu{};
     std::span<uint8_t> const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
     size_t const audio_bytes = avtp::aaf_stream_serialize(
-        *slot.aaf, pdu, payload, samples, presentation_ns, [src, channels](uint8_t ch, std::span<float> dest) {
+        *slot.aaf, pdu, payload, samples, presentation.time_since_epoch(), [src, channels](uint8_t ch, std::span<float> dest) {
             for (size_t s = 0; s < dest.size(); ++s) {
                 dest[s] = src[(s * channels) + ch];
             }
