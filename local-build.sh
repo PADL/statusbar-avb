@@ -5,7 +5,7 @@
 # the right -Dstatusbar-<dep>_DIR flags through to cmake. Extra args
 # are forwarded to `cmake` configure:
 #
-#   ./local-build.sh                  # configure + build + ctest
+#   ./local-build.sh                  # configure + build + the unit tests
 #   ./local-build.sh -DENABLE_ASAN=ON # forward cmake args
 #
 # Dependency resolution per dep (first match wins):
@@ -87,4 +87,8 @@ cmake -S . -B build -G Ninja \
     "${dep_flags[@]}" \
     "$@"
 cmake --build build
-ctest --test-dir build
+# Everything is built, the functional tests among it, and the unit tests are
+# run. The functional tests (real sockets, a real kernel) run when committing:
+# core's run-functional-tests.sh, from the pre-commit hook, or by hand with
+#   ctest --test-dir build -L functional
+ctest --test-dir build -LE functional

@@ -64,7 +64,9 @@ statusbar_add_module(
   tx_pcap_recorder_test.cpp
   log_sweep_generator_test.cpp
   FUNCTIONAL_TESTS
-  avb_entity_kit_functional_test.cpp)
+  avb_entity_kit_functional_test.cpp
+  FUNCTIONAL_TEST_DATA
+  testdata/entity_tone.bin)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(avb_entity_stereo_io_tool avb_entity_stereo_io_tool.cpp)

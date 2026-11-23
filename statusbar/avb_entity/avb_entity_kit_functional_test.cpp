@@ -20,6 +20,7 @@
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
+#include "statusbar/test/test_data.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -55,7 +56,7 @@ auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 // Talker-only descriptor blob (committed fixture; source: examples/tone.json).
 auto entity_tone_bin_path() -> std::filesystem::path
 {
-    return std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone.bin";
+    return statusbar::test::functional_test_data(__FILE__, "testdata/entity_tone.bin");
 }
 
 /// The reactor's clock for a kit started in a test: deterministic, 1 ms a read.
