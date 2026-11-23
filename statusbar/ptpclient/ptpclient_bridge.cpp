@@ -229,14 +229,15 @@ auto PtpTimeBridge::from_raw_ns(int64_t raw_ns) const noexcept -> int64_t
     return monotonic_to_ptp_precise(raw_ns, slope, ro.offset_ns);
 }
 
-auto PtpTimeBridge::to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t
+auto PtpTimeBridge::to_monotonic(realtime::GptpClock0::time_point const ptp) const noexcept -> realtime::MonotonicClock::time_point
 {
-    return raw_line_.to_monotonic_ns(to_raw_ns(ptp_ns));
+    return raw_line_.to_monotonic(realtime::MonotonicRawClock::from_ns(to_raw_ns(realtime::GptpClock0::to_ns(ptp))));
 }
 
-auto PtpTimeBridge::from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t
+auto PtpTimeBridge::from_monotonic(realtime::MonotonicClock::time_point const mono) const noexcept
+    -> realtime::GptpClock0::time_point
 {
-    return from_raw_ns(raw_line_.from_monotonic_ns(mono_ns));
+    return realtime::GptpClock0::from_ns(from_raw_ns(realtime::MonotonicRawClock::to_ns(raw_line_.from_monotonic(mono))));
 }
 
 auto PtpTimeBridge::prepare_sleep(realtime::GptpClock0::time_point const ptp_deadline) noexcept -> StatusValue<SleepPlan>
@@ -402,26 +403,6 @@ auto PtpTimeBridge::telemetry() const noexcept -> BridgeTelemetry
     t.last_step_residual_ns = last_step_residual_ns_.load(std::memory_order_relaxed);
     t.regression_overruns = regression_buffer_overruns();
     return t;
-}
-
-auto PtpTimeBridge::convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = to_raw_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = from_raw_ns(raw_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = to_monotonic_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
 }
 
 auto PtpTimeBridge::sleep_until_ptp(

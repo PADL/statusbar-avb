@@ -347,6 +347,9 @@ ptp_ns = raw_ns * rate + offset
 ```
 
 The mapping is continuously updated using samples to track clock drift.
-`to_raw_ns()` / `from_raw_ns()` are the primary conversions; the
-`to_monotonic_ns()` / `from_monotonic_ns()` pair goes through the
-RAW↔MONOTONIC line as well and exists for sleeping.
+`to_raw_ns()` / `from_raw_ns()` are the primary conversions, in the bare
+nanoseconds a `realtime::ClockAdapter<GptpClock0, PtpTimeBridge>` gives
+their clocks: hold typed time through the adapter, which also reports the
+bridge's health and the worst-case accuracy of each conversion. The typed
+`to_monotonic()` / `from_monotonic()` pair goes through the RAW↔MONOTONIC
+line as well and exists for sleeping.

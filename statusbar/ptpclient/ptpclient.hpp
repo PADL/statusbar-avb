@@ -29,7 +29,8 @@
 ///   auto guard = bridge.start_sampling(**client);
 ///   // ... wait for healthy mapping ...
 ///   if (bridge.is_healthy()) {
-///       auto result = bridge.convert_ptp_to_monotonic(ptp_ns);
+///       realtime::ClockAdapter<realtime::GptpClock0, PtpTimeBridge> phc{bridge};
+///       auto const raw = phc.to_raw(deadline_ptp);   // typed, RAW the reference
 ///       bridge.sleep_until_ptp(deadline_ptp);
 ///   }
 ///   // guard destructor stops sampling

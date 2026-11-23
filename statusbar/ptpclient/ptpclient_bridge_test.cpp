@@ -49,6 +49,11 @@ constexpr auto mono(int64_t const ns) -> MonotonicClock::time_point
 {
     return MonotonicClock::from_ns(ns);
 }
+/// How far apart two instants of one clock are, either way round.
+constexpr auto abs_ns(Nanoseconds const d) -> int64_t
+{
+    return d.count() < 0 ? -d.count() : d.count();
+}
 
 /// A made-up PHC, a fixed distance ahead of RAW and running `ppm` fast of
 /// it, read every 2 ms, beside a made-up CLOCK_MONOTONIC running `mono_ppm`
@@ -274,25 +279,15 @@ TEST(ptp_bridge_health, a_read_that_took_too_long_is_not_a_sample)
 // Tests: PtpTimeBridge - Time conversion
 //
 
-TEST(ptp_bridge_convert, ptp_to_monotonic_with_unity_mapping)
+TEST(ptp_bridge_convert, before_any_sample_the_lines_are_identity_and_nothing_is_vouched_for)
 {
     PtpTimeBridge bridge;
 
-    // Default mapping: rate=1.0, offset=0
-    auto result = bridge.convert_ptp_to_monotonic(1'000'000'000LL);
-
-    EXPECT_EQ(result.time_ns, 1'000'000'000LL);
-    EXPECT_EQ(result.epoch, 0U);
-    EXPECT_FALSE(result.healthy);  // Not healthy until samples are collected
-}
-
-TEST(ptp_bridge_convert, monotonic_to_ptp_with_unity_mapping)
-{
-    PtpTimeBridge bridge;
-
-    auto result = bridge.convert_monotonic_to_ptp(1'000'000'000LL);
-
-    EXPECT_EQ(result.time_ns, 1'000'000'000LL);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(1'000'000'000LL)) == mono(1'000'000'000LL));
+    EXPECT_TRUE(bridge.from_monotonic(mono(1'000'000'000LL)) == ptp(1'000'000'000LL));
+    EXPECT_EQ(bridge.epoch(), 0U);
+    EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_FALSE(bridge.quality().is_bounded());  // the bound a caller judges a conversion by
 }
 
 TEST(ptp_bridge_convert, conversion_after_convergence)
@@ -302,17 +297,18 @@ TEST(ptp_bridge_convert, conversion_after_convergence)
     ToldPhc phc;
     feed(bridge, state, phc, 64);
     EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_TRUE(bridge.quality().is_bounded());
 
     // The instant the next reading would start at, on all three clocks.
-    auto const ptp_result = bridge.convert_monotonic_to_ptp(phc.mono_ns);
-    EXPECT_EQ(ptp_result.time_ns, phc.phc_ns);
-    EXPECT_TRUE(ptp_result.healthy);
-    EXPECT_EQ(ptp_result.epoch, bridge.epoch());
+    EXPECT_TRUE(bridge.from_monotonic(mono(phc.mono_ns)) == ptp(phc.phc_ns));
+    EXPECT_TRUE(bridge.to_monotonic(ptp(phc.phc_ns)) == mono(phc.mono_ns));
+    EXPECT_EQ(bridge.from_raw_ns(phc.raw_ns), phc.phc_ns);
+    EXPECT_EQ(bridge.to_raw_ns(phc.phc_ns), phc.raw_ns);
 
-    auto const mono_result = bridge.convert_ptp_to_monotonic(ptp_result.time_ns);
-    EXPECT_EQ(mono_result.time_ns, phc.mono_ns);
-    EXPECT_EQ(bridge.convert_raw_to_ptp(phc.raw_ns).time_ns, phc.phc_ns);
-    EXPECT_EQ(bridge.convert_ptp_to_raw(phc.phc_ns).time_ns, phc.raw_ns);
+    // The same through the adapter, which is how a caller holds typed time.
+    statusbar::realtime::ClockAdapter<GptpClock0, PtpTimeBridge> const adapter{bridge};
+    EXPECT_TRUE(adapter.to_raw(ptp(phc.phc_ns)) == raw(phc.raw_ns));
+    EXPECT_TRUE(adapter.from_raw(raw(phc.raw_ns)) == ptp(phc.phc_ns));
 }
 
 //
@@ -734,12 +730,12 @@ TEST(ptp_bridge_raw, the_raw_conversions_are_the_primary_line_and_the_mono_line_
 
     EXPECT_EQ(bridge.to_raw_ns(1'000'000'000LL), 1'000'000'000LL);
     EXPECT_EQ(bridge.from_raw_ns(1'000'000'000LL), 1'000'000'000LL);
-    EXPECT_EQ(bridge.to_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
-    EXPECT_EQ(bridge.from_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(1'000'000'000LL)) == mono(1'000'000'000LL));
+    EXPECT_TRUE(bridge.from_monotonic(mono(1'000'000'000LL)) == ptp(1'000'000'000LL));
     EXPECT_EQ(bridge.raw_line().consume().rate, 1.0);
     EXPECT_EQ(bridge.raw_line().consume().offset_ns, 0);
-    EXPECT_FALSE(bridge.convert_ptp_to_raw(5).healthy);
-    EXPECT_EQ(bridge.convert_raw_to_ptp(5).time_ns, 5);
+    EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_EQ(bridge.from_raw_ns(5), 5);
 }
 
 TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
@@ -751,15 +747,15 @@ TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
     EXPECT_TRUE(bridge.is_healthy());
 
     // The same instant on each clock: to_raw_ns gives the RAW one,
-    // to_monotonic_ns the CLOCK_MONOTONIC one, through the line the sampler keeps.
+    // to_monotonic the CLOCK_MONOTONIC one, through the line the sampler keeps.
     EXPECT_TRUE(std::abs(bridge.to_raw_ns(phc.phc_ns) - phc.raw_ns) <= 2);
-    EXPECT_TRUE(std::abs(bridge.to_monotonic_ns(phc.phc_ns) - phc.mono_ns) <= 2);
+    EXPECT_TRUE(abs_ns(bridge.to_monotonic(ptp(phc.phc_ns)) - mono(phc.mono_ns)) <= 2);
     EXPECT_TRUE(std::abs(bridge.raw_line().to_monotonic_ns(phc.raw_ns) - phc.mono_ns) <= 2);
 
     // Both pairs round-trip, and the two pairs compose the same way.
     EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(phc.phc_ns)) - phc.phc_ns) <= 2);
-    EXPECT_TRUE(std::abs(bridge.from_monotonic_ns(bridge.to_monotonic_ns(phc.phc_ns)) - phc.phc_ns) <= 2);
-    EXPECT_EQ(bridge.to_monotonic_ns(phc.phc_ns), bridge.raw_line().to_monotonic_ns(bridge.to_raw_ns(phc.phc_ns)));
+    EXPECT_TRUE(abs_ns(bridge.from_monotonic(bridge.to_monotonic(ptp(phc.phc_ns))) - ptp(phc.phc_ns)) <= 2);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(phc.phc_ns)) == bridge.raw_line().to_monotonic(raw(bridge.to_raw_ns(phc.phc_ns))));
 }
 
 //

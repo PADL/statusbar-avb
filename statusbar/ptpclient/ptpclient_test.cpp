@@ -399,18 +399,6 @@ TEST(ptpclient_mapping, default_values)
 }
 
 //
-// TimeConvertResult Struct Tests
-//
-
-TEST(ptpclient_result, default_values)
-{
-    TimeConvertResult result;
-    EXPECT_EQ(result.time_ns, 0);
-    EXPECT_EQ(result.epoch, 0U);
-    EXPECT_FALSE(result.healthy);
-}
-
-//
 // TimeSample Struct Tests
 //
 

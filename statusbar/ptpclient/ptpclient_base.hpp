@@ -88,14 +88,6 @@ struct TimeMapping
     int sample_count = 0;          ///< Number of samples in current window
 };
 
-/// Result of time conversion between PTP and monotonic clocks
-struct TimeConvertResult
-{
-    int64_t time_ns = 0;   ///< Converted time in nanoseconds
-    uint64_t epoch = 0;    ///< Epoch at time of conversion
-    bool healthy = false;  ///< Whether mapping was healthy
-};
-
 /// Configuration parameters for PTP time bridge sampling
 struct BridgeSamplingParams
 {

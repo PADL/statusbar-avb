@@ -358,10 +358,11 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     // The reference clock is CLOCK_MONOTONIC_RAW: the sampler fits the PHC
     // against RAW, so to_raw_ns()/from_raw_ns() are the primary line and a
     // realtime::Timer on this source sleeps early on CLOCK_MONOTONIC and
-    // spins on RAW to each deadline. to_monotonic_ns()/from_monotonic_ns()
-    // go through raw_line(), the RAW<->MONOTONIC line the sampler keeps
-    // alongside, so each conversion names the clock it returns. All of
-    // them are exact (__int128), so a large offset costs no precision.
+    // spins on RAW to each deadline. All three are exact (__int128), so a
+    // large offset costs no precision. These are the bare boundary a
+    // realtime::ClockAdapter<GptpClock0, PtpTimeBridge> types: use the
+    // adapter for now(), to_raw() and from_raw() on typed time points, and
+    // for the same conversions with their worst-case accuracy.
 
     /// Current PTP time in nanoseconds: reads CLOCK_MONOTONIC_RAW once and
     /// converts it through the primary mapping.
@@ -373,34 +374,18 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// CLOCK_MONOTONIC_RAW nanoseconds -> PTP nanoseconds (primary mapping).
     [[nodiscard]] auto from_raw_ns(int64_t raw_ns) const noexcept -> int64_t;
 
-    /// PTP nanoseconds -> CLOCK_MONOTONIC nanoseconds: to_raw_ns(), then raw_line().
-    [[nodiscard]] auto to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t;
+    /// An instant on the PHC's clock as CLOCK_MONOTONIC: the primary line to
+    /// RAW, then raw_line(). CLOCK_MONOTONIC is the clock the kernel sleeps
+    /// on and is for nothing else, so this is for a sleeper.
+    [[nodiscard]] auto to_monotonic(realtime::GptpClock0::time_point ptp) const noexcept -> realtime::MonotonicClock::time_point;
 
-    /// CLOCK_MONOTONIC nanoseconds -> PTP nanoseconds: raw_line(), then from_raw_ns().
-    [[nodiscard]] auto from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t;
+    /// A CLOCK_MONOTONIC instant on the PHC's clock: raw_line(), then the primary line.
+    [[nodiscard]] auto from_monotonic(realtime::MonotonicClock::time_point mono) const noexcept -> realtime::GptpClock0::time_point;
 
     /// The RAW<->CLOCK_MONOTONIC line the sampler keeps (seqlocked, read from
     /// any thread; identity until the first sample). A sleeper derives the
     /// CLOCK_MONOTONIC early-wake instant for a RAW deadline from it.
     [[nodiscard]] auto raw_line() const noexcept -> realtime::MonotonicRawLine const& { return raw_line_; }
-
-    // Time Conversion (returning TimeConvertResult with epoch/health info)
-
-    /// PTP time -> CLOCK_MONOTONIC_RAW time, with the epoch and health it was made under
-    /// @param ptp_ns PTP time in nanoseconds to convert
-    [[nodiscard]] auto convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult;
-
-    /// CLOCK_MONOTONIC_RAW time -> PTP time, with the epoch and health it was made under
-    /// @param raw_ns CLOCK_MONOTONIC_RAW time in nanoseconds to convert
-    [[nodiscard]] auto convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult;
-
-    /// PTP time -> CLOCK_MONOTONIC time (through raw_line()), with epoch and health
-    /// @param ptp_ns PTP time in nanoseconds to convert
-    [[nodiscard]] auto convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult;
-
-    /// CLOCK_MONOTONIC time -> PTP time (through raw_line()), with epoch and health
-    /// @param monotonic_ns CLOCK_MONOTONIC time in nanoseconds to convert
-    [[nodiscard]] auto convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult;
 
     /// Plan for one bracketed sleep: the PTP deadline expressed in both clock
     /// domains. raw_deadline (CLOCK_MONOTONIC_RAW) is authoritative — we spin to
@@ -537,7 +522,7 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     std::thread sampler_thread_;
 
     // RAW<->CLOCK_MONOTONIC line: written by the sampler thread's tracker,
-    // read by any sleeper (prepare_sleep, to_monotonic_ns, raw_line()).
+    // read by any sleeper (prepare_sleep, to_monotonic, raw_line()).
     realtime::MonotonicRawLine raw_line_;
 
     // Quality of the primary line: written by the sampler thread at each
