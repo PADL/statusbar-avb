@@ -87,6 +87,21 @@ TEST(avtp_nanoseconds, the_reconstruction_is_the_nearest_time_with_those_low_bit
     EXPECT_EQ(signed_form(field_of(after_wrap - 3000), after_wrap), after_wrap - 3000);
 }
 
+TEST(avtp_nanoseconds, any_time_within_a_second_of_now_is_reconstructed_exactly)
+{
+    // What a caller is expected to keep to, wherever on the timeline now is:
+    // far along it, either side of a wrap of the field, just after zero and below it.
+    constexpr std::array<int64_t, 8> NOWS{
+        TAI_SCALE, (7 * WRAP) - 1, 7 * WRAP, (7 * WRAP) + 1, 0, 250'000'000, -250'000'000, -TAI_SCALE};
+    constexpr int64_t SECOND = 1'000'000'000;
+    for (int64_t const now : NOWS) {
+        for (int64_t step = -SECOND; step <= SECOND; step += 12'345'679) {
+            EXPECT_EQ(signed_form(field_of(now + step), now), now + step);
+        }
+        EXPECT_EQ(signed_form(field_of(now + SECOND), now), now + SECOND);
+    }
+}
+
 TEST(avtp_nanoseconds, a_time_before_the_timelines_zero_is_a_small_negative_time)
 {
     // One second after the timeline began, a field from 4096 ns before it.

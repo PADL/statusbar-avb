@@ -45,6 +45,13 @@ using Nanoseconds = std::chrono::duration<int64_t, std::nano>;
 /// start reconstructs to a small negative time, where the unsigned form can
 /// only answer with a time a whole wrap too late.
 ///
+/// What the caller owes: @p now is expected to be within one second of the
+/// time the field stands for. A listener's receive time and a talker's
+/// presentation time are a few milliseconds apart, so that is met with a
+/// great deal to spare. The answer is exact for any time less than half a
+/// wrap (2.147 s) from @p now; a time further away than that cannot be told
+/// from a nearer one with the same low bits, and the nearer one is returned.
+///
 /// @param avtp_timestamp The 32-bit AVTP presentation timestamp from the AVTPDU
 /// @param now            Approximate time on the stream's timeline when the packet was received
 /// @return The full presentation time
