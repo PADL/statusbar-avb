@@ -139,7 +139,9 @@ follows it. Do not cache the delta and walk away.
    A step of the system clock restarts the filters and keeps `r` until they
    have a new estimate. The receiver counts packets that arrive with `tu` set
    and plays them as any other. The entity's state line shows the figures:
-   `tunnel-clock[utc_error_ns=… excursions=… tu_tx=… tu_rx=…]`.
+   `tunnel-clock[utc_error_ns=… excursions=… tu_tx=… tu_rx=…]`. The media log
+   has one `tunnel-clock:` line for the first verdict and one for each change,
+   and the periodic `media-clock` line ends with the current `utc_error`.
 5. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
    path via chronyd doesn't need NIC HW timestamps.
 
