@@ -7,6 +7,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <random>
@@ -152,6 +153,90 @@ TEST(kalman_ratio_tracker, runtime_step_reacquires_true_rate)
     // Filtered phase tracks the NEW (stepped) offset level, not the old one.
     std::int64_t const expected = synth_offset(kR, 399) + kStep;
     EXPECT_TRUE(std::llabs(e.filtered_offset_ns - expected) < 200'000);
+}
+
+// A run of samples outside the gate is the clocks telling the filter it is
+// wrong. These cases are the two ways that happened on the bench, and the one
+// that must keep being rejected.
+
+TEST(kalman_ratio_tracker, a_seed_from_a_pair_with_a_read_error_corrects_itself_within_seconds)
+{
+    // The fault as captured between two sites: the second sample ever read was
+    // 2.2 us off, so the frequency seeded from the first pair was 8.8 ppm wrong
+    // and five sigma away. Every exact sample after it was gated; the filter
+    // coasted on the wrong frequency for two minutes, until the error passed a
+    // millisecond and the step detector re-acquired.
+    constexpr double kR = 1.000043;
+    KalmanRatioTracker kf{};  // the defaults the tunnel's translator runs on
+    double worst_ns = 0.0;
+    for (int k = 0; k < 4 * 60; ++k) {
+        kf.add(synth_offset(kR, k) + (k == 1 ? 2200 : 0), k_dt);
+        double const error_ns = static_cast<double>(kf.estimate().filtered_offset_ns - synth_offset(kR, k));
+        worst_ns = std::max(worst_ns, std::fabs(error_ns));
+        if (k >= 4 * 10) {
+            EXPECT_TRUE(std::fabs(error_ns) < 500.0);  // on the clocks again ten seconds in
+        }
+    }
+    EXPECT_TRUE(worst_ns < 25'000.0);  // two seconds of coasting at 8.8 ppm, not two minutes
+    EXPECT_EQ(kf.self_corrections(), std::uint64_t{1});
+    EXPECT_TRUE(kf.estimate().valid);  // it never re-based: the frequency was corrected, not thrown away
+    EXPECT_TRUE(std::fabs(kf.estimate().ppm() - 43.0) < 0.05);
+}
+
+TEST(kalman_ratio_tracker, a_slew_too_small_for_a_step_is_followed)
+{
+    // A time daemon removing a 33 us offset: it runs its clock 3.3 ppm off for
+    // ten seconds. That is far outside the gate and far below a step. The
+    // filter used to reject the next 519 samples and sit 33 us behind for two
+    // minutes, until its own uncertainty had grown over the miss.
+    constexpr double kR = 1.000045;
+    constexpr int kSlewStart = 4 * 60;
+    constexpr int kSlewEnd = kSlewStart + (4 * 10);
+    auto const offset_at = [](int k) {
+        int const slewed = std::clamp(k - kSlewStart, 0, kSlewEnd - kSlewStart);
+        return synth_offset(kR, k) + (std::int64_t{slewed} * 825);  // 3.3 ppm for a quarter second, 33 us in all
+    };
+    KalmanRatioTracker kf{};
+    for (int k = 0; k < kSlewEnd + (4 * 20); ++k) {
+        kf.add(offset_at(k), k_dt);
+    }
+    int const last = kSlewEnd + (4 * 20) - 1;
+    EXPECT_TRUE(std::llabs(kf.estimate().filtered_offset_ns - offset_at(last)) < 500);  // on the new level, not 33 us behind
+    EXPECT_TRUE(std::fabs(kf.estimate().ppm() - 45.0) < 0.1);                           // and back on the true rate
+    EXPECT_TRUE(kf.self_corrections() >= 1U);
+}
+
+TEST(kalman_ratio_tracker, a_short_run_of_bad_reads_is_still_rejected)
+{
+    constexpr double kR = 1.000045;
+    KalmanRatioTracker kf{};
+    for (int k = 0; k < 200; ++k) {
+        kf.add(synth_offset(kR, k), k_dt);
+    }
+    // Eight bad reads in a row, each 50 us off: as many as the filter tolerates.
+    for (int k = 200; k < 208; ++k) {
+        EXPECT_TRUE(std::isnan(kf.add(synth_offset(kR, k) + 50'000, k_dt)));
+    }
+    EXPECT_FALSE(std::isnan(kf.add(synth_offset(kR, 208), k_dt)));  // a good read ends the run
+    EXPECT_EQ(kf.self_corrections(), std::uint64_t{0});
+    EXPECT_TRUE(std::llabs(kf.estimate().filtered_offset_ns - synth_offset(kR, 208)) < 200);
+    EXPECT_TRUE(std::fabs(kf.estimate().ppm() - 45.0) < 0.02);
+}
+
+TEST(kalman_ratio_tracker, the_ninth_sample_outside_the_gate_is_taken)
+{
+    constexpr double kR = 1.000045;
+    KalmanRatioTracker kf{};
+    for (int k = 0; k < 200; ++k) {
+        kf.add(synth_offset(kR, k), k_dt);
+    }
+    // The offset moves 50 us and stays there: not a bad read, a new level.
+    for (int k = 200; k < 208; ++k) {
+        EXPECT_TRUE(std::isnan(kf.add(synth_offset(kR, k) + 50'000, k_dt)));
+    }
+    EXPECT_FALSE(std::isnan(kf.add(synth_offset(kR, 208) + 50'000, k_dt)));
+    EXPECT_EQ(kf.self_corrections(), std::uint64_t{1});
+    EXPECT_TRUE(std::llabs(kf.estimate().filtered_offset_ns - (synth_offset(kR, 208) + 50'000)) < 500);
 }
 
 TEST(ratio_estimate, helpers)

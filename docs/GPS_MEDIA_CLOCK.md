@@ -202,6 +202,30 @@ update uses the **Joseph form** — so it can't run away the way an `f=0` +
 huge-initial-P start could (which diverged on a loaded box at R=400). Covered by
 the `robust_noisy_startup` regression test.
 
+### When the ratio filter disagrees with the clocks
+
+`KalmanRatioTracker` drops a sample that falls more than `gate_sigmas` from
+its prediction, so one bad read does not move the estimate, and re-acquires
+on a jump of a millisecond or more, which is a step. Between those two lies
+the case that used to trap it: a run of samples that all disagree with the
+prediction by more than the gate and less than a step. That is the clocks
+being right and the filter wrong. It happens when the frequency was seeded
+from a first pair that held a read error of a microsecond or two (the seed
+is then several ppm off, and each later sample lands further outside the
+gate than the last), and when the time daemon slews its clock by tens of
+microseconds. The filter then coasted on its stale state: across two sites
+this showed as their timelines ramping apart at 8.7 ppm for two minutes,
+until the error passed a millisecond and the step detector re-acquired.
+
+After `persistent_outliers` samples in a row outside the gate (default 8,
+two seconds at four samples a second) the filter takes itself to be the one
+that is wrong. It widens its phase uncertainty by the miss and its frequency
+uncertainty by the miss over the time the run lasted, keeps its state, and
+takes the sample. The same bad seed now costs 20 us for two seconds, and a
+33 us slew is followed within two seconds where it used to leave the filter
+33 us behind for two minutes. `self_corrections()` counts the times it did
+so.
+
 ## Status
 
 **All four nodes across three sites are converged on the decoupled design** —
