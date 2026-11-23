@@ -758,15 +758,16 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         stream_index,
         kind_lit(slot_for(stream_index)),
         dest_mac.to_uint64(),
-        ready ? logging::lit("Ready") : logging::lit("AskingFailed (talker not advertising yet)"),
+        ready ? logging::lit("Ready") : logging::lit("not Ready yet (no Talker Advertise registered)"),
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
 auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
 {
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
-    // registered, AskingFailed until then (e.g. a fast-connect racing the
-    // talker's boot) -- the handler upgrades to Ready when it appears.
+    // registered. Until then (e.g. a fast-connect racing the talker's boot)
+    // the handler waits with nothing declared and declares Ready when it
+    // appears; a registered Talker Failed gets Asking Failed.
     auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }

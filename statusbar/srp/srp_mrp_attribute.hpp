@@ -78,11 +78,30 @@ struct AttributeRecord
         return registrar_sm.current_state() == registrar_sm::Def::State::In;
     }
 
-    /// Convenience: has this attribute fully decayed?
+    /// Whether a peer's declaration of this attribute is registered: the
+    /// Registrar is In, or Lv until its leavetimer expires (IEEE 802.1Q
+    /// 10.7.7). A LeaveAll takes In to Lv and the peer's next Join takes it
+    /// back, so Lv is not a deregistration; only Mt is.
+    [[nodiscard]] auto registrar_is_registered() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
+    }
+
+    /// Whether the Registrar holds nothing: Mt, or Start, the state before
+    /// its first event, which that event's UCT takes to Mt. The Registrar of
+    /// an attribute only this port declares may never see an event at all.
+    [[nodiscard]] auto registrar_is_empty() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::Mt || s == registrar_sm::Def::State::Start;
+    }
+
+    /// Convenience: has this attribute fully decayed? Nothing declared
+    /// (Applicant in Vo) and nothing registered.
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
-        return applicant_sm.current_state() == applicant_sm::Def::State::Vo &&
-            registrar_sm.current_state() == registrar_sm::Def::State::Mt;
+        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty();
     }
 };
 

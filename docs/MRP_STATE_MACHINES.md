@@ -236,14 +236,24 @@ Exposes:
   `withdraw_listener`, `declare_domain`, `withdraw_domain`. Each
   returns `Status` that will be `TsnError::AttributeTableFull` if the
   backing table is at capacity.
-  The first declaration of an attribute the port was not declaring is
-  told `New!`. A Listener whose Declaration Type changes under a
-  StreamID the port already declares (Asking Failed to Ready when the
-  Talker Advertise arrives, and back) sends a Join carrying the new
-  FourPackedEvent, with no Leave before it: IEEE 802.1Q 35.2.6 has the
-  receiver treat it as the old registration leaving and the new one
-  joining. A changed Talker Advertise or Domain value is a different
-  attribute and leaves the old value first.
+  A declaration the port is not making is told `New!`: a first one, and
+  one made again after its Leave went out. A Listener whose Declaration
+  Type changes under a StreamID the port already declares (Asking
+  Failed to Ready when a Talker Advertise replaces a Talker Failed, and
+  back) sends a Join carrying the new FourPackedEvent, with no Leave
+  before it: IEEE 802.1Q 35.2.6 has the receiver treat it as the old
+  registration leaving and the new one joining. A changed Talker
+  Advertise or Domain value is a different attribute and leaves the old
+  value first.
+- **Registered talkers**: `find_registered_talker_advertise(stream_id)`
+  and `find_registered_talker_failed(stream_id)` answer only while a
+  peer's declaration is registered (Registrar `In`, or `Lv` until its
+  leavetimer expires). nanoavb's `MsrpHandler::listener_attach` goes by
+  them: Listener Ready for a registered Talker Advertise, Asking Failed
+  for a registered Talker Failed, and nothing declared while neither is
+  there (Milan v1.3 5.3.8.5 allows that, and IEEE 802.1Q 35.1.2.2 sets
+  no order between the two declarations). The Listener is declared when
+  the talker's attribute arrives and withdrawn when it has gone.
 - **Talker transmit authorization** — `listener_permits_transmit(stream_id)`
   returns `true` iff a peer listener declaration for this stream has
   been received with substate `Ready` or `ReadyFailed` *and* the

@@ -1963,6 +1963,107 @@ TEST(msrp_participant, a_peer_listener_whose_type_changes_with_a_join_is_reporte
     EXPECT_EQ(leaves, 0);
 }
 
+// A declaration made again after its withdrawal has gone out is a new
+// declaration, whether or not the reclaim sweep has taken the record yet.
+TEST(msrp_participant, a_declaration_made_again_after_its_leave_went_out_is_new)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd106};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto const sid = make_stream_id(0x0054);
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    for (int i = 0; i < 12; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.withdraw_listener(sid, clock.now)));
+    a.transmit_pending(clock.now);  // the Lv goes out; no reclaim sweep runs here
+    auto const left = test_support::listener_carried(fab.a_to_b);
+    EXPECT_TRUE(left.size() == 1 && left.front().event == AttributeEvent::Lv);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    a.transmit_pending(clock.now);
+    auto const again = test_support::listener_carried(fab.a_to_b);
+    EXPECT_TRUE(again.size() == 1 && again.front().event == AttributeEvent::New);
+}
+
+// A declaration no peer ever declared back has a Registrar that never saw an
+// event. Once it is withdrawn and its Leave has gone out the record is
+// reclaimed all the same, and nothing more is sent for it.
+TEST(msrp_participant, a_withdrawn_declaration_is_reclaimed_once_its_leave_has_gone_out)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd109};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto const sid = make_stream_id(0x0056);
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    for (int i = 0; i < 12; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    EXPECT_EQ(a.listener_count(), 1u);
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.withdraw_listener(sid, clock.now)));
+    for (int i = 0; i < 12; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    auto const sent = test_support::listener_carried(fab.a_to_b);
+    EXPECT_TRUE(sent.size() == 1 && sent.front().event == AttributeEvent::Lv);
+    EXPECT_EQ(a.listener_count(), 0u);
+}
+
+// find_registered_talker_advertise() answers only while the peer's declaration
+// is registered. The Leave is told twice: on the peer's Lv message, when the
+// registration still stands for a LeaveTime, and when that time has run out.
+// From then on the talker is not found registered, though the record itself
+// stands until the reclaim sweep and find_talker_advertise() still answers it.
+TEST(msrp_participant, a_talker_that_has_left_is_no_longer_found_registered)
+{
+    MsrpParticipant talker{test_msrp_config(), 0xd107};
+    MsrpParticipant listener{test_msrp_config(), 0xd108};
+    Fabric fab{};
+    talker.set_send_pdu(fab.make_a_sender());
+    listener.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    talker.start(clock.now);
+    listener.start(clock.now);
+    auto const sid = make_stream_id(0x0055);
+    std::vector<bool> registered_at_leave{};
+    bool known_at_last_leave = false;
+    Observer obs{};
+    obs.on_talker_leave = [&](tsn::StreamId const& id) {
+        registered_at_leave.push_back(listener.find_registered_talker_advertise(id) != nullptr);
+        known_at_last_leave = listener.find_talker_advertise(id) != nullptr;
+    };
+    listener.subscribe(obs);
+    auto const run = [&](int const ticks) {
+        for (int i = 0; i < ticks; ++i) {
+            auto const now = clock.advance(std::chrono::milliseconds(250));
+            talker.tick(now);
+            listener.tick(now);
+            fab.deliver_a_to_b(listener, now);
+        }
+    };
+
+    EXPECT_EQ(listener.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_TRUE(is_success(talker.declare_talker_advertise(make_talker_adv(0x0055), clock.now)));
+    run(4);
+    EXPECT_NE(listener.find_registered_talker_advertise(sid), nullptr);
+    EXPECT_EQ(listener.find_registered_talker_failed(sid), nullptr);
+
+    EXPECT_TRUE(is_success(talker.withdraw_talker(sid, clock.now)));
+    run(12);
+    EXPECT_TRUE(registered_at_leave == (std::vector<bool>{true, false}));
+    EXPECT_TRUE(known_at_last_leave);
+    EXPECT_EQ(listener.find_registered_talker_advertise(sid), nullptr);
+}
+
 // Declaring the type that already stands changes nothing a peer has to act
 // on: it stays a Join (a second input attaching to the same stream does this).
 TEST(msrp_participant, a_listener_redeclared_with_the_type_that_stands_is_not_new)

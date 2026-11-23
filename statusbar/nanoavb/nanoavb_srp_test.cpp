@@ -18,6 +18,7 @@
 #include <optional>
 #include <span>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 using namespace statusbar::nanoavb;
@@ -329,10 +330,10 @@ TEST(nanoavb_srp_msrp, on_talker_listener_fires_when_listener_ready)
     EXPECT_FALSE(fired_for_other);
 }
 
-// Kit phase 5d: listener_attach declares AskingFailed until the talker's
-// Advertise is registered from the wire, then upgrades to Ready
-// automatically (802.1Q 35.2.4.4) — the MSRP half of a fast-connect
-// racing a talker's boot.
+// Kit phase 5d: listener_attach holds the listener Waiting, with nothing
+// declared, until the talker's Advertise is registered from the wire, then
+// declares Ready by itself: the MSRP half of a fast-connect racing a talker's
+// boot.
 TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
 {
     using statusbar::srp::msrp::MsrpConfig;
@@ -370,12 +371,12 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
                     }
                 }}};
 
-    // Attach before the talker exists on the wire: AskingFailed.
+    // Attach before the talker exists on the wire: Waiting.
     auto const attached = listener.listener_attach(sid, now);
     EXPECT_TRUE(attached.has_value());
-    EXPECT_EQ(*attached, ListenerReservationState::AskingFailed);
+    EXPECT_EQ(*attached, ListenerReservationState::Waiting);
     EXPECT_TRUE(!listener.talker_advertise_registered(sid));
-    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::AskingFailed);
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
 
     // The talker boots and advertises; pump PDUs both ways.
     TalkerStreamSrpInfo info;
@@ -398,7 +399,7 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
         pump(listener_out, talker);
     }
 
-    // The Advertise registered and the attached listener upgraded to Ready,
+    // The Advertise registered and the attached listener went to Ready,
     // surfacing the change through on_listener_state_change.
     EXPECT_TRUE(listener.talker_advertise_registered(sid));
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
@@ -415,65 +416,180 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
     EXPECT_EQ(*reattached, ListenerReservationState::Ready);
 }
 
-// The upgrade is a change of Declaration Type under the StreamID the listener
-// already declares. It goes on the wire as IEEE 802.1Q 35.2.6 has it: a Join
-// carrying Ready, with no Leave before it and no New.
-TEST(nanoavb_srp_msrp, an_attached_listener_upgrades_to_ready_with_a_join)
+namespace {
+
+/// A talker's MSRP participant and a listener's MsrpHandler on one link: what
+/// each sends reaches the other on the next run() round, and every PDU the
+/// listener sent is kept for the test to read.
+struct ListenerLink
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> talker_out{};
+    std::vector<std::vector<uint8_t>> listener_out{};
+    std::vector<std::vector<uint8_t>> listener_sent{};
+    std::vector<ListenerReservationState> states{};
+    statusbar::tsn::StreamId sid{Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, 9};
+    statusbar::srp::msrp::MsrpParticipant talker{statusbar::srp::msrp::MsrpConfig{}, 0x7a11};
+    MsrpHandler<> listener{
+        statusbar::srp::msrp::MsrpConfig{},
+        MsrpCallbacks{
+            .send_packet =
+                [this](std::span<uint8_t const> p) {
+                    listener_out.emplace_back(p.begin(), p.end());
+                    return true;
+                },
+            .on_listener_state_change =
+                [this](StreamId const&, ListenerReservationState const state, TimePoint) { states.push_back(state); }}};
+
+    ListenerLink()
+    {
+        talker.set_send_pdu([this](std::span<uint8_t const> p) {
+            talker_out.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        talker.start(now);
+    }
+
+    void deliver()
+    {
+        for (auto const& p : std::exchange(talker_out, {})) {
+            listener.receive_packet(p, now);
+        }
+        for (auto const& p : std::exchange(listener_out, {})) {
+            talker.receive_pdu(p, now);
+            listener_sent.push_back(p);
+        }
+    }
+
+    void run(int const rounds)
+    {
+        for (int i = 0; i < rounds; ++i) {
+            now += std::chrono::milliseconds{120};
+            talker.tick(now);
+            listener.tick(now);
+            deliver();
+        }
+    }
+
+    /// The Listener values the listener has sent since the last call.
+    [[nodiscard]] auto take_sent() -> std::vector<statusbar::srp::msrp::test_support::CarriedListener>
+    {
+        return statusbar::srp::msrp::test_support::listener_carried(std::exchange(listener_sent, {}));
+    }
+
+    [[nodiscard]] auto state() const -> ListenerReservationState { return listener.get_listener_stream(sid)->state; }
+
+    [[nodiscard]] auto advertise() const -> statusbar::srp::msrp::TalkerAdvertiseFirstValue
+    {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fv.stream_id = sid;
+        fv.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x34};
+        fv.vlan_identifier = statusbar::srp::msrp::default_sr_class_vid;
+        fv.max_frame_size = 416;
+        return fv;
+    }
+
+    [[nodiscard]] auto failed() const -> statusbar::srp::msrp::TalkerFailedFirstValue
+    {
+        statusbar::srp::msrp::TalkerFailedFirstValue fv{};
+        fv.advertise = advertise();
+        fv.set_failure_code(statusbar::srp::msrp::FailureCode::InsufficientBandwidth);
+        return fv;
+    }
+};
+
+}  // namespace
+
+// A listener attached before its talker advertises declares nothing (Milan
+// v1.3 5.3.8.5 allows either that or Asking Failed). When the Talker
+// Advertise is registered its first declaration is Ready, as New: a bridge
+// first learns of this listener as a new registration of the type that
+// holds, with no change of Declaration Type for it to act on.
+TEST(nanoavb_srp_msrp, a_listener_attached_before_its_talker_declares_nothing_until_the_advertise_arrives)
 {
     using statusbar::srp::mrp::AttributeEvent;
     using statusbar::srp::msrp::ListenerDeclaration;
-    using statusbar::srp::msrp::MsrpConfig;
-    using statusbar::srp::msrp::test_support::listener_carried;
+    ListenerLink link{};
 
-    TimePoint now{std::chrono::seconds{1}};
-    std::vector<std::vector<uint8_t>> talker_out;
-    std::vector<std::vector<uint8_t>> listener_out;
-    statusbar::tsn::StreamId sid;
-    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
-    sid.set_unique_id(9);
-    MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
-                             talker_out.emplace_back(p.begin(), p.end());
-                             return true;
-                         }}};
-    MsrpHandler<> listener{MsrpConfig{}, MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
-                               listener_out.emplace_back(p.begin(), p.end());
-                               return true;
-                           }}};
+    auto const attached = link.listener.listener_attach(link.sid, link.now);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Waiting);
+    link.run(30);
+    EXPECT_TRUE(link.take_sent().empty());
+    EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 1);
+    EXPECT_TRUE(link.states.empty());
 
-    // Attached with nobody advertising: Asking Failed, settled on the wire.
-    EXPECT_TRUE(listener.listener_attach(sid, now).has_value());
-    for (int round = 0; round < 30; ++round) {
-        now += std::chrono::milliseconds{120};
-        listener.tick(now);
-    }
-    auto const before = listener_carried(listener_out);
-    EXPECT_TRUE(!before.empty() && before.back().declaration == ListenerDeclaration::AskingFailed);
-    EXPECT_TRUE(!before.empty() && before.back().event != AttributeEvent::New);
-    listener_out.clear();
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(12);
+    EXPECT_EQ(link.state(), ListenerReservationState::Ready);
+    EXPECT_TRUE(link.states == std::vector<ListenerReservationState>{ListenerReservationState::Ready});
+    auto const sent = link.take_sent();
+    EXPECT_TRUE(!sent.empty() && sent.front().event == AttributeEvent::New);
+    EXPECT_TRUE(std::ranges::all_of(sent, [](auto const& value) {
+        return value.declaration == ListenerDeclaration::Ready && value.event != AttributeEvent::Lv;
+    }));
+}
 
-    // The talker starts advertising; what the listener sends is kept.
-    TalkerStreamSrpInfo info;
-    info.stream_id = sid;
-    info.max_frame_size = 416;
-    info.max_interval_frames = 1;
-    (void)talker.talker_advertise(info, now);
-    for (int round = 0; round < 12; ++round) {
-        now += std::chrono::milliseconds{120};
-        talker.tick(now);
-        listener.tick(now);
-        for (auto const& p : talker_out) {
-            listener.receive_packet(p, now);
-        }
-        talker_out.clear();
-    }
-    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
+// The listener's declaration follows the talker's: when the Talker Advertise
+// has gone the Listener is withdrawn with a Leave and the stream is Waiting
+// again, and when the talker returns the Listener is declared anew.
+TEST(nanoavb_srp_msrp, a_listener_withdraws_when_its_talker_has_gone_and_declares_again_when_it_returns)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    ListenerLink link{};
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(8);
+    auto const attached = link.listener.listener_attach(link.sid, link.now);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Ready);
+    link.run(30);
+    (void)link.take_sent();
 
-    auto const after = listener_carried(listener_out);
+    EXPECT_TRUE(link.talker.withdraw_talker(link.sid, link.now).has_value());
+    link.run(30);
+    EXPECT_EQ(link.state(), ListenerReservationState::Waiting);
+    EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 1);
+    auto const gone = link.take_sent();
+    EXPECT_TRUE(!gone.empty() && gone.back().event == AttributeEvent::Lv);
+
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(12);
+    EXPECT_EQ(link.state(), ListenerReservationState::Ready);
+    auto const back = link.take_sent();
+    EXPECT_TRUE(!back.empty() && back.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!back.empty() && back.front().declaration == ListenerDeclaration::Ready);
+    std::vector<ListenerReservationState> const expected{ListenerReservationState::Waiting, ListenerReservationState::Ready};
+    EXPECT_TRUE(link.states == expected);
+}
+
+// IEEE 802.1Q 35.1.2.2: a registered Talker Failed gets Listener Asking
+// Failed. When the Talker Advertise replaces it the Declaration Type changes
+// under the StreamID already declared, and that goes out as a Join carrying
+// Ready (35.2.6), with no Leave and no New.
+TEST(nanoavb_srp_msrp, a_listener_of_a_failed_talker_asks_and_goes_ready_with_a_join)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    ListenerLink link{};
+    EXPECT_TRUE(link.talker.declare_talker_failed(link.failed(), link.now).has_value());
+    link.run(8);
+    auto const attached = link.listener.listener_attach(link.sid, link.now);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::AskingFailed);
+    link.run(30);
+    auto const asking = link.take_sent();
+    EXPECT_TRUE(!asking.empty() && asking.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!asking.empty() && asking.front().declaration == ListenerDeclaration::AskingFailed);
+
+    EXPECT_TRUE(link.talker.withdraw_talker(link.sid, link.now).has_value());
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(30);
+    EXPECT_EQ(link.state(), ListenerReservationState::Ready);
+    EXPECT_TRUE(link.states == std::vector<ListenerReservationState>{ListenerReservationState::Ready});
+    auto const sent = link.take_sent();
     auto const first_ready =
-        std::ranges::find_if(after, [](auto const& value) { return value.declaration == ListenerDeclaration::Ready; });
-    EXPECT_TRUE(first_ready != after.end());
+        std::ranges::find_if(sent, [](auto const& value) { return value.declaration == ListenerDeclaration::Ready; });
+    EXPECT_TRUE(first_ready != sent.end());
     EXPECT_TRUE(std::ranges::none_of(
-        after, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
+        sent, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
 }
 
 //

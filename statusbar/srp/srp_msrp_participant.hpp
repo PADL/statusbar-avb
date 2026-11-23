@@ -118,10 +118,18 @@ struct ListenerRecord
         return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
     }
 
+    /// Whether the Registrar holds nothing: Mt, or Start, the state before
+    /// its first event. No peer may ever declare the Listener this port
+    /// declares, so its Registrar can stay in Start for the record's life.
+    [[nodiscard]] auto registrar_is_empty() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::Mt || s == registrar_sm::Def::State::Start;
+    }
+
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
-        return applicant_sm.current_state() == applicant_sm::Def::State::Vo &&
-            registrar_sm.current_state() == registrar_sm::Def::State::Mt;
+        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty();
     }
 };
 
@@ -360,6 +368,18 @@ class MsrpParticipantT
 
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
+
+    /// The Talker Advertise for @p id while a peer's declaration of it is
+    /// registered on this port (Registrar In, or Lv until its leavetimer
+    /// expires), or nullptr. find_talker_advertise() also answers a record
+    /// this port declares itself and one whose registration has lapsed and
+    /// waits for the reclaim sweep, which is what an observer told of a
+    /// Leave still finds.
+    [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
+
+    /// The Talker Failed for @p id while a peer's declaration of it is
+    /// registered on this port, or nullptr.
+    [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
     /// Look up a locally known Listener by tsn::StreamId and return its
     /// current substate if found.
@@ -885,29 +905,27 @@ class MsrpParticipantT
         return &table.back();
     }
 
-    /// The applicant event for a local (re)declaration: New when the attribute is not
-    /// yet actively declared (operation Register AND applicant idle in Start/Vo), else
-    /// Join. It reads the record as it stood BEFORE this declaration, so it is asked
-    /// through mark_declared(), which keeps the question ahead of the mark.
+    /// The applicant event for a local declaration: New! when the port is not
+    /// making this declaration (its Applicant is idle in Start or Vo: never
+    /// declared, or withdrawn with its Leave sent), Join! when the declaration
+    /// stands or its Leave has not gone out yet. IEEE 802.1Q Table 10-3 starts
+    /// a new declaration in VN, which sends New.
     template <class Record>
     [[nodiscard]] static auto first_declare_event(Record const& rec) noexcept -> applicant_sm::Def::Event
     {
-        bool const is_new = (rec.operation == Operation::Register) &&
-            (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-             rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
-        return is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+        bool const idle = rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
+            rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo;
+        return idle ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
     }
 
-    /// Marks the record as one this port declares and answers the applicant event
-    /// that goes with it (first_declare_event of the record as it stood). Every
-    /// declare_* handler takes its event from here: a handler that set the mark
-    /// first and asked afterwards would never be told New.
+    /// Marks the record as one this port declares and answers the applicant
+    /// event that goes with it. Every declare_* handler takes its event from
+    /// here.
     template <class Record>
     [[nodiscard]] static auto mark_declared(Record& rec) noexcept -> applicant_sm::Def::Event
     {
-        auto const event = first_declare_event(rec);
         rec.operation = Operation::Declare;
-        return event;
+        return first_declare_event(rec);
     }
 
     //
