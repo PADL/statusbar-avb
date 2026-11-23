@@ -39,8 +39,8 @@ struct Am824StreamInputContext
     uint8_t last_dbc{0};
     uint8_t last_sequence_num{0};
     uint32_t last_avtp_timestamp{0};
-    uint64_t last_anchor_pts_ns{0};  ///< Full 64-bit gPTP-domain anchor time
-    uint64_t last_gptp_time_ns{0};   ///< Approximate gPTP time of last received packet
+    int64_t last_anchor_pts_ns{0};  ///< Full anchor time on the stream's timeline (signed, see Nanoseconds)
+    int64_t last_gptp_time_ns{0};   ///< Approximate time of the last received packet, on the stream's timeline
     uint32_t last_anchor_dbc{0};
     uint32_t running_dbc{0};
     bool has_valid_anchor{false};
@@ -67,9 +67,21 @@ struct Am824StreamInputContext
     ///                       Used to reconstruct the upper 32 bits of the presentation time.
     void update_timestamp(bool tv, uint32_t avtp_timestamp, uint8_t dbc, uint64_t gptp_now_ns) noexcept;
 
+    /// update_timestamp() told the time as a signed Nanoseconds value.
+    void update_timestamp(bool tv, uint32_t avtp_timestamp, uint8_t dbc, Nanoseconds now) noexcept;
+
     /// Compute presentation time of the first data block in the current packet.
     /// Returns a full 64-bit gPTP-domain timestamp (not just the lower 32 bits).
     [[nodiscard]] auto compute_base_pts_ns() const noexcept -> uint64_t;
+
+    /// compute_base_pts_ns() as a signed Nanoseconds value, zero before any anchor.
+    [[nodiscard]] auto compute_base_pts() const noexcept -> Nanoseconds;
+
+    /// The time between two samples.
+    [[nodiscard]] auto sample_period() const noexcept -> Nanoseconds
+    {
+        return Nanoseconds{static_cast<int64_t>(config.sample_period_ns)};
+    }
 
     /// Update sequence number and detect gaps
     void update_sequence_num(uint8_t seq_num) noexcept;
@@ -79,6 +91,9 @@ struct Am824StreamInputContext
     /// @param sample_count Number of data blocks (samples per channel) in this packet
     /// @param gptp_now_ns  Approximate gPTP time when the packet was received (full 64-bit)
     void process_packet_header(Am824Pdu const& pdu, size_t sample_count, uint64_t gptp_now_ns) noexcept;
+
+    /// process_packet_header() told the time as a signed Nanoseconds value.
+    void process_packet_header(Am824Pdu const& pdu, size_t sample_count, Nanoseconds now) noexcept;
 };
 
 /// The data blocks in a packet the deserializers accept, with the header processed:
@@ -94,6 +109,20 @@ template <size_t MaxChannels, size_t MaxSamples>
         return 0;
     }
     ctx.process_packet_header(pdu, samples, gptp_now_ns);
+    return samples;
+}
+
+/// am824_accept_packet() on the signed time.
+template <size_t MaxChannels, size_t MaxSamples>
+[[nodiscard]] auto am824_accept_packet(
+    Am824StreamInputContext& ctx, Am824Pdu const& pdu, std::span<uint8_t const> payload, Nanoseconds const now) noexcept -> size_t
+{
+    uint8_t const channels = ctx.config.channel_count;
+    size_t const samples = channels == 0 ? 0 : payload.size() / (size_t{4} * channels);
+    if (!is_valid_am824_deserialize_params<MaxChannels, MaxSamples>(samples, channels)) {
+        return 0;
+    }
+    ctx.process_packet_header(pdu, samples, now);
     return samples;
 }
 
@@ -143,6 +172,32 @@ void am824_deserialize_mbla(
     uint64_t const base_pts = ctx.compute_base_pts_ns();
     for (uint8_t ch = 0; ch < ctx.config.channel_count; ++ch) {
         on_audio(ch, std::span<float>{scratch.data() + (ch * samples), samples}, base_pts, ctx.config.sample_period_ns);
+    }
+}
+
+/// am824_deserialize_mbla() on the signed time: told @p now as Nanoseconds, it
+/// hands each channel's presentation time and sample period on as Nanoseconds.
+///
+/// @param now       Approximate time on the stream's timeline when the packet was received
+/// @param on_audio  Callback: void(uint8_t channel, std::span<float> samples,
+///                             Nanoseconds pts, Nanoseconds sample_period)
+template <size_t MaxChannels = Am824Pdu::MAX_CHANNELS, size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET, typename AudioCallback>
+void am824_deserialize_mbla(
+    Am824StreamInputContext& ctx,
+    Am824Pdu const& pdu,
+    std::span<uint8_t const> payload,
+    Nanoseconds const now,
+    AudioCallback const& on_audio)
+{
+    size_t const samples = am824_accept_packet<MaxChannels, MaxSamples>(ctx, pdu, payload, now);
+    if (samples == 0) {
+        return;
+    }
+    std::array<float, MaxChannels * MaxSamples> scratch{};
+    am824_decode_mbla_lanes(payload, ctx.config.channel_count, samples, scratch);
+    Nanoseconds const base_pts = ctx.compute_base_pts();
+    for (uint8_t ch = 0; ch < ctx.config.channel_count; ++ch) {
+        on_audio(ch, std::span<float>{scratch.data() + (ch * samples), samples}, base_pts, ctx.sample_period());
     }
 }
 
@@ -238,6 +293,43 @@ void am824_deserialize_mixed(
             on_midi(ch, lanes.midi_lane(ch, samples), base_pts, ctx.config.sample_period_ns);
         }
     }
+}
+
+/// am824_deserialize_mixed() on the signed time: told @p now as Nanoseconds,
+/// each callback is handed its presentation time and the sample period as
+/// Nanoseconds where the unsigned form hands them as uint64_t.
+template <
+    size_t MaxChannels = Am824Pdu::MAX_CHANNELS,
+    size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET,
+    typename AudioCb,
+    typename MidiCb,
+    typename SmpteCb>
+void am824_deserialize_mixed(
+    Am824StreamInputContext& ctx,
+    Am824Pdu const& pdu,
+    std::span<uint8_t const> payload,
+    Nanoseconds const now,
+    AudioCb const& on_audio,
+    MidiCb const& on_midi,
+    SmpteCb const& on_smpte)
+{
+    // One decoder for both forms: the unsigned one, with each time it hands
+    // out given its sign back.
+    auto const signed_time = [](uint64_t const t) { return Nanoseconds{static_cast<int64_t>(t)}; };
+    am824_deserialize_mixed<MaxChannels, MaxSamples>(
+        ctx,
+        pdu,
+        payload,
+        static_cast<uint64_t>(now.count()),
+        [&](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+            on_audio(ch, s, signed_time(pts), signed_time(period));
+        },
+        [&](uint8_t ch, std::span<uint8_t const> m, uint64_t pts, uint64_t period) {
+            on_midi(ch, m, signed_time(pts), signed_time(period));
+        },
+        [&](uint8_t ch, uint8_t part, std::span<uint8_t const, 3> bytes, uint64_t pts, uint64_t period) {
+            on_smpte(ch, part, bytes, signed_time(pts), signed_time(period));
+        });
 }
 
 }  // namespace statusbar::avtp

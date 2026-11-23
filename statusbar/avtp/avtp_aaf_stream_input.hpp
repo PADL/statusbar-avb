@@ -45,9 +45,9 @@ struct AafStreamInputContext
 
     // Running state
     uint8_t last_sequence_num{0};
-    uint64_t last_pts_ns{0};        ///< Last reconstructed full 64-bit presentation time
-    uint64_t last_gptp_time_ns{0};  ///< Approximate gPTP time of last received packet
-    uint32_t samples_since_ts{0};   ///< Samples received since last valid timestamp
+    int64_t last_pts_ns{0};        ///< Last reconstructed full presentation time (signed, see Nanoseconds)
+    int64_t last_gptp_time_ns{0};  ///< Approximate time of the last received packet, on the stream's timeline
+    uint32_t samples_since_ts{0};  ///< Samples received since last valid timestamp
     bool has_valid_timestamp{false};
 
     // Statistics
@@ -70,10 +70,23 @@ struct AafStreamInputContext
     /// @param gptp_now_ns  Approximate gPTP time when the packet was received (full 64-bit)
     void process_packet_header(AafPdu const& pdu, uint64_t gptp_now_ns) noexcept;
 
+    /// process_packet_header() told the time as a signed Nanoseconds value.
+    /// Call compute_pts() after this but before advance_samples().
+    /// @param pdu  The parsed AAF PDU header
+    /// @param now  Approximate time on the stream's timeline when the packet was received
+    void process_packet_header(AafPdu const& pdu, Nanoseconds now) noexcept;
+
     /// Compute presentation time of the first sample in the current packet.
     /// Must be called after process_packet_header() and before advance_samples().
     /// Returns a full 64-bit gPTP-domain timestamp.
     [[nodiscard]] auto compute_pts_ns() const noexcept -> uint64_t;
+
+    /// compute_pts_ns() as a signed Nanoseconds value: the presentation time
+    /// of the first sample in the current packet, zero before any timestamp.
+    [[nodiscard]] auto compute_pts() const noexcept -> Nanoseconds;
+
+    /// The time between two samples.
+    [[nodiscard]] auto sample_period() const noexcept -> Nanoseconds { return Nanoseconds{static_cast<int64_t>(sample_period_ns)}; }
 
     /// Advance the sample counter after processing a packet's audio data.
     /// @param sample_count Number of samples per channel in the packet just processed
@@ -103,6 +116,16 @@ template <size_t MaxChannels, size_t MaxSamples>
 {
     ctx.process_packet_header(pdu, gptp_now_ns);
     uint64_t const pts = ctx.compute_pts_ns();
+    ctx.advance_samples(static_cast<uint16_t>(samples));
+    return pts;
+}
+
+/// aaf_account_packet() on the signed time.
+[[nodiscard]] inline auto aaf_account_packet(
+    AafStreamInputContext& ctx, AafPdu const& pdu, Nanoseconds const now, size_t const samples) noexcept -> Nanoseconds
+{
+    ctx.process_packet_header(pdu, now);
+    Nanoseconds const pts = ctx.compute_pts();
     ctx.advance_samples(static_cast<uint16_t>(samples));
     return pts;
 }
@@ -154,6 +177,32 @@ void aaf_stream_deserialize(
     aaf_decode_lanes(payload, ctx.format, ctx.channel_count, samples, scratch);
     for (uint16_t ch = 0; ch < ctx.channel_count; ++ch) {
         on_audio(static_cast<uint8_t>(ch), std::span<float>{scratch.data() + (ch * samples), samples}, pts, ctx.sample_period_ns);
+    }
+}
+
+/// aaf_stream_deserialize() on the signed time: told @p now as Nanoseconds, it
+/// hands each channel's presentation time and sample period on as Nanoseconds.
+///
+/// @param now       Approximate time on the stream's timeline when the packet was received
+/// @param on_audio  Callback: void(uint8_t channel, std::span<float> samples,
+///                             Nanoseconds pts, Nanoseconds sample_period)
+template <size_t MaxChannels = 64, size_t MaxSamples = 256, typename AudioCallback>
+void aaf_stream_deserialize(
+    AafStreamInputContext& ctx,
+    AafPdu const& pdu,
+    std::span<uint8_t const> payload,
+    Nanoseconds const now,
+    AudioCallback const& on_audio)
+{
+    size_t const samples = aaf_samples_in_packet<MaxChannels, MaxSamples>(ctx, payload.size());
+    if (samples == 0) {
+        return;
+    }
+    Nanoseconds const pts = aaf_account_packet(ctx, pdu, now, samples);
+    std::array<float, MaxChannels * MaxSamples> scratch{};
+    aaf_decode_lanes(payload, ctx.format, ctx.channel_count, samples, scratch);
+    for (uint16_t ch = 0; ch < ctx.channel_count; ++ch) {
+        on_audio(static_cast<uint8_t>(ch), std::span<float>{scratch.data() + (ch * samples), samples}, pts, ctx.sample_period());
     }
 }
 

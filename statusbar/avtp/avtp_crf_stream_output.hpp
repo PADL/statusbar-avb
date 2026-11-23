@@ -12,6 +12,7 @@
 ///   IEEE Std 1722-2016 Section 10 (Clock Reference Format)
 
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 
 #include <cstdint>
 #include <span>
@@ -72,6 +73,18 @@ struct CrfStreamOutputContext
     /// @param gptp_now_ns    Current gPTP time
     /// @return Number of bytes written to timestamp_data
     auto build_packet(CrfPdu& pdu, std::span<uint8_t> timestamp_data, uint64_t gptp_now_ns) noexcept -> size_t;
+
+    /// build_packet() told the time as a signed Nanoseconds value.
+    ///
+    /// @p first_timestamp is used by the first call only: it is the first CRF
+    /// timestamp written, and every later one is counted on from it by the
+    /// timestamp spacing. A caller that wants a presentation offset in the
+    /// stream adds it before the first call. A CRF timestamp is 64 bits
+    /// unsigned on the wire and takes the count's bits as they are.
+    auto build_packet(CrfPdu& pdu, std::span<uint8_t> timestamp_data, Nanoseconds first_timestamp) noexcept -> size_t
+    {
+        return build_packet(pdu, timestamp_data, static_cast<uint64_t>(first_timestamp.count()));
+    }
 };
 
 }  // namespace statusbar::avtp

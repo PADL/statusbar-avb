@@ -95,6 +95,7 @@ statusbar_add_module(
   avtp_maap_sm_test.cpp
   avtp_maap_handler_test.cpp
   avtp_stream_format_test.cpp
+  avtp_stream_nanoseconds_test.cpp
   avtp_types_test.cpp)
 
 add_executable(avtp_retransmit_tool avtp_retransmit_tool.cpp)

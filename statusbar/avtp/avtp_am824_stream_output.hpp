@@ -13,6 +13,7 @@
 /// (125μs interval), you get a repeating pattern of 5/6/7 samples per packet.
 
 #include "statusbar/avtp/avtp_am824_stream.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 
 namespace statusbar::avtp {
 
@@ -59,6 +60,21 @@ struct Am824StreamOutputContext
     /// @param samples_per_channel  Number of samples in this packet (e.g. 5, 6, or 7)
     /// @param gptp_now_ns          Current gPTP time (used to compute presentation timestamp)
     void build_packet_header(Am824Pdu& pdu, uint8_t samples_per_channel, uint64_t gptp_now_ns) noexcept;
+
+    /// build_packet_header() told the time as a signed Nanoseconds value.
+    ///
+    /// @p first_sample_time is the time of the first data block of this AVTPDU on
+    /// the stream's timeline. It is "now" only for a talker that packs samples
+    /// as it captures them. The AVTPDU's timestamp is this time plus
+    /// presentation_offset_ns, so a caller that already holds the presentation
+    /// time builds the context with an offset of zero and passes that time.
+    /// AM824 stamps the data block on the SYT interval boundary, so the
+    /// timestamp written is that block's, counted on from the first one.
+    /// The wire carries the low 32 bits, the same bits whichever way the count is read.
+    void build_packet_header(Am824Pdu& pdu, uint8_t samples_per_channel, Nanoseconds first_sample_time) noexcept
+    {
+        build_packet_header(pdu, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()));
+    }
 };
 
 /// Serialize MBLA-only AM824 stream — all channels are audio (hot path)
@@ -113,6 +129,22 @@ auto am824_serialize_mbla(
     }
 
     return required;
+}
+
+/// am824_serialize_mbla() told the time as a signed Nanoseconds value.
+/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline;
+///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+template <size_t MaxChannels = Am824Pdu::MAX_CHANNELS, size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET, typename AudioSource>
+auto am824_serialize_mbla(
+    Am824StreamOutputContext& ctx,
+    Am824Pdu& pdu,
+    std::span<uint8_t> payload,
+    uint8_t samples_per_channel,
+    Nanoseconds const first_sample_time,
+    AudioSource const& get_audio) -> size_t
+{
+    return am824_serialize_mbla<MaxChannels, MaxSamples>(
+        ctx, pdu, payload, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()), get_audio);
 }
 
 /// Serialize mixed AM824 stream — channels may be audio, MIDI, or SMPTE
@@ -204,6 +236,38 @@ auto am824_serialize_mixed(
     }
 
     return required;
+}
+
+/// am824_serialize_mixed() told the time as a signed Nanoseconds value.
+/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline;
+///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+template <
+    size_t MaxChannels = Am824Pdu::MAX_CHANNELS,
+    size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET,
+    typename AudioSource,
+    typename MidiSource,
+    typename SmpteSource>
+auto am824_serialize_mixed(
+    Am824StreamOutputContext& ctx,
+    Am824Pdu& pdu,
+    std::span<uint8_t> payload,
+    uint8_t samples_per_channel,
+    Nanoseconds const first_sample_time,
+    std::span<Am824ChannelType const> channel_types,
+    AudioSource const& get_audio,
+    MidiSource const& get_midi,
+    SmpteSource const& get_smpte) -> size_t
+{
+    return am824_serialize_mixed<MaxChannels, MaxSamples>(
+        ctx,
+        pdu,
+        payload,
+        samples_per_channel,
+        static_cast<uint64_t>(first_sample_time.count()),
+        channel_types,
+        get_audio,
+        get_midi,
+        get_smpte);
 }
 
 }  // namespace statusbar::avtp

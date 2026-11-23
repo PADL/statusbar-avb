@@ -3,6 +3,8 @@
 
 #include "statusbar/avtp/avtp_stream_common.hpp"
 
+#include <cstdint>
+
 namespace statusbar::avtp {
 
 auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) noexcept -> uint64_t
@@ -45,6 +47,21 @@ auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) n
     }
 
     return best;
+}
+
+auto reconstruct_avtp_timestamp(uint32_t const avtp_timestamp, Nanoseconds const now) noexcept -> Nanoseconds
+{
+    // The field is the low 32 bits of the time, so the time nearest to now
+    // that carries it is now plus the signed 32-bit step from now's own low
+    // bits to the field. Exactly half a wrap away two times are as near; the
+    // one that shares now's upper bits is kept, as the unsigned form keeps it.
+    auto const now_bits = static_cast<uint64_t>(now.count());
+    auto const now_low = static_cast<uint32_t>(now_bits);
+    int64_t step = static_cast<int32_t>(avtp_timestamp - now_low);
+    if (step == INT32_MIN && avtp_timestamp > now_low) {
+        step = -step;
+    }
+    return Nanoseconds{static_cast<int64_t>(now_bits + static_cast<uint64_t>(step))};
 }
 
 }  // namespace statusbar::avtp
