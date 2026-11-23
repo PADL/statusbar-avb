@@ -28,11 +28,16 @@ namespace statusbar::avb_entity {
 inline constexpr int64_t DEFAULT_MAX_UTC_ERROR_NS = 1'000'000'000;
 
 /// The default limit on the system clock's worst-case error for vouching for
-/// a TAI timestamp made from it: ten milliseconds. A clock disciplined by a
-/// GPS receiver on the local network is rated at one or two; one that has
-/// lost its server coasts at the default 15 ppm for about nine minutes before
-/// it passes this.
-inline constexpr int64_t DEFAULT_MAX_TAI_ERROR_NS = 10'000'000;
+/// a TAI timestamp made from it: three milliseconds. Between two sites across
+/// the internet the relative phase does not need the accuracy a gPTP network
+/// keeps; what the tunnel needs is an accurate rate at both ends, and a phase
+/// error well under its worst-case latency (tens of milliseconds). A clock
+/// disciplined by a GPS receiver on the local network is rated between one
+/// and a half and two and a half milliseconds, so it sits inside this with
+/// little to spare: one that has lost its server coasts at the default 15 ppm
+/// for a minute or so before it passes it. A deployment that knows its
+/// oscillator sets utc_holdover_drift_ppb lower and coasts for longer.
+inline constexpr int64_t DEFAULT_MAX_TAI_ERROR_NS = 3'000'000;
 
 /// Configuration for the dual-format AVB Audio I/O Entity
 struct AvbEntityAudioIOConfig

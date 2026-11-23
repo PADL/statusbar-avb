@@ -127,14 +127,23 @@ follows it. Do not cache the delta and walk away.
      kernel's own figure climbs by half a millisecond every second between
      chronyd's updates (32 ms over a 64 s poll). It tells a disciplined clock
      from one that never synchronized or has had no server for most of a day.
-   - `udptun.max_tai_error_us` (default 10 000, ten milliseconds) for vouching
-     for a TAI timestamp. Outside it every tunnel packet carries the AVTPDU
-     `tu` (timestamp uncertain) bit; the audio and the timestamps are sent as
-     before. A GPS receiver on the local network is rated at one or two
-     milliseconds. For up to one poll interval after the entity starts the
-     only figure it has is the one the kernel has grown since chronyd's last
+   - `udptun.max_tai_error_us` (default 3 000, three milliseconds) for
+     vouching for a TAI timestamp. Outside it every tunnel packet carries the
+     AVTPDU `tu` (timestamp uncertain) bit; the audio and the timestamps are
+     sent as before. Three milliseconds is enough between sites: the relative
+     phase across the internet does not need the accuracy a gPTP network
+     keeps, only to stay well under the tunnel's worst-case latency, while
+     the rate at both ends has to be accurate. chronyd rates a GPS receiver
+     on the local network between 1.5 and 2.5 ms, and the figure coasts up by
+     about 1 ms over a 64 s poll at the default 15 ppm, so the limit is met
+     with little to spare (five polls on a Pi 5 pair peaked at 2.8 ms with no
+     excursion). A deployment that knows its oscillator sets
+     `media.utc_holdover_drift_ppb` lower: at 2 ppm the same poll adds
+     0.13 ms. For up to one poll interval after the entity starts the only
+     figure it has is the one the kernel has grown since chronyd's last
      update, so `tu` is set until the next update arrives; a node whose
-     chronyd has lost its server takes about nine minutes to pass ten.
+     chronyd has lost its server passes the limit after a minute or so at
+     15 ppm.
 
    A step of the system clock restarts the filters and keeps `r` until they
    have a new estimate. The receiver counts packets that arrive with `tu` set
