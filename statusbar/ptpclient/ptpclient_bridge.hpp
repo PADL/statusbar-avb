@@ -152,7 +152,7 @@ class PtpTimeBridgeBase
     // {rate=1.0, offset_ns=0} via the initial-value constructor so
     // the first load() before any regression fit returns sensible defaults.
     // Single writer (the sampler thread) via store(); many readers via load() --
-    // now_ns()/get_mapping()/convert_*() are public const and may be called from
+    // now_ns()/get_mapping()/to_raw_ns()/from_raw_ns() are public const and may be called from
     // any thread (RT timer, ClockAdapter, status/telemetry). A seqlock (not the
     // strictly-SPSC AtomicTripleBuffer, whose consume() is single-consumer) is the
     // right primitive: every reader observes a consistent (rate, offset) snapshot.

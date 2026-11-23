@@ -80,7 +80,11 @@ auto AafV1StreamInputContext::compute_pts() const noexcept -> Nanoseconds
     if (!has_valid_timestamp) {
         return Nanoseconds::zero();
     }
-    return Nanoseconds{last_pts_ns + (static_cast<int64_t>(samples_since_ts) * static_cast<int64_t>(sample_period_ns))};
+    // The stored time is the 64-bit wire field as it came. The sum is made on
+    // unsigned counts, where it cannot overflow into undefined behaviour
+    // whatever a talker sent; for any true time the result is the same.
+    uint64_t const sum = static_cast<uint64_t>(last_pts_ns) + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    return Nanoseconds{static_cast<int64_t>(sum)};
 }
 
 void AafV1StreamInputContext::advance_samples(uint16_t sample_count) noexcept

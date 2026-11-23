@@ -68,7 +68,10 @@ auto Am824StreamInputContext::compute_base_pts() const noexcept -> Nanoseconds
         return Nanoseconds::zero();
     }
     int64_t const dbc_delta = static_cast<int64_t>(running_dbc) - static_cast<int64_t>(last_anchor_dbc);
-    return Nanoseconds{last_anchor_pts_ns + (dbc_delta * static_cast<int64_t>(config.sample_period_ns))};
+    // Summed on unsigned counts, as it always was: no overflow to undefined behaviour.
+    uint64_t const sum = static_cast<uint64_t>(last_anchor_pts_ns) +
+        static_cast<uint64_t>(dbc_delta * static_cast<int64_t>(config.sample_period_ns));
+    return Nanoseconds{static_cast<int64_t>(sum)};
 }
 
 void Am824StreamInputContext::update_sequence_num(uint8_t seq_num) noexcept

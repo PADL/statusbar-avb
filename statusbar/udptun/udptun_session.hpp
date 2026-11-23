@@ -180,7 +180,7 @@ void send_redundant_replay(C const& codec, TxContext const& ctx, RedundantTxBuff
 /// Drain the TX timerfd, send a primary packet, record into both
 /// tx_history (for the report path) and redundant_buffer (for the
 /// redundant TX path), and conditionally send the redundant replay.
-/// Skipped if `synced` is false (gPTP not yet locked).
+/// Skipped if `synced` is false (the clocks are outside the user's limits, see judge_clocks()).
 ///
 /// On-wire timestamp is the **presentation time**:
 /// `PT = wire_ns(now_mraw) + worst_case_latency_ns`. The receiver uses
@@ -229,7 +229,7 @@ template <Codec C>
 void send_packet(C const& codec, TxContext const& ctx, std::atomic<uint32_t>& sequence, bool synced) noexcept
 {
     if (!synced) {
-        return;  // skip transmit until the wire-time source is locked
+        return;  // no transmit while the clocks are outside the user's limits
     }
     int64_t const now_mraw = monotonic_raw_ns();
     int64_t const presentation_time_ns = ctx.clock.wire_ns(now_mraw) + ctx.worst_case_latency_ns;

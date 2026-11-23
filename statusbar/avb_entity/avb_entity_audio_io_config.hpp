@@ -400,7 +400,8 @@ struct AvbEntityAudioIOConfig
     /// gPTP grandmaster IS the reference the listener recovers against (e.g. the
     /// listener is itself the GM, or the GM and listener share one timebase) and
     /// CLOCK_REALTIME is NOT GPS-disciplined (NTP), so r would otherwise wander and
-    /// wobble the recovered clock. Skips the CLOCK_REALTIME sampling entirely.
+    /// wobble the recovered clock. The system clock is still read and judged (its
+    /// error figure decides the tunnel's tu bit); only its rate is not followed.
     /// Default false (GPS-rate-pinned, for multi-site agreement). Diagnostic/test.
     bool media_lock_to_gptp{false};
 

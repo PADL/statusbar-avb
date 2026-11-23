@@ -114,7 +114,15 @@ auto format_clock_times_to(OutputIt out, PtpClientBase& client) -> OutputIt
 
     if (ptp_now) {
         int64_t const diff = *ptp_now - raw_now;
-        out = std::format_to(out, "  Difference (PTP-raw):   {} ns ({:.3f} seconds)\n", diff, static_cast<double>(diff) / 1e9);
+        // An epoch-scale count stays in integers, in display code too.
+        int64_t const size = diff < 0 ? -diff : diff;
+        out = std::format_to(
+            out,
+            "  Difference (PTP-raw):   {} ns ({}{}.{:03} seconds)\n",
+            diff,
+            diff < 0 ? "-" : "",
+            size / 1'000'000'000,
+            (size % 1'000'000'000) / 1'000'000);
     }
 
     return out;

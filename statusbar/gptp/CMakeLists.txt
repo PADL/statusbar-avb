@@ -26,6 +26,7 @@ statusbar_add_module(
   statusbar::buffer
   statusbar::ieee
   statusbar::itc
+  statusbar::realtime
   statusbar::sm
   statusbar::status
   statusbar::tsn

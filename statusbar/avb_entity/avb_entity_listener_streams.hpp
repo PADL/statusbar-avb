@@ -127,9 +127,9 @@ struct ListenerStreams
     {}
 
     /// Add an RX slot shaped by @p spec, constructing the kind-matching
-    /// deserializer. A pending set_consume() registration for spec.index is
-    /// bound here. Errors: unsupported kind (CRF input is kit phase 3;
-    /// `other` never), unknown rate, or more than MAX_ENTITY_STREAMS slots.
+    /// deserializer. Pending set_consume(), set_consume_timed() and set_crf()
+    /// registrations for spec.index are bound here. Errors: unsupported kind
+    /// (`other`), unknown rate, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec) -> Status;
 
     /// Size every input's presentation-margin histogram for a talker that
@@ -225,7 +225,7 @@ struct ListenerStreams
     /// its stream_id the stream connected to that input), or nullptr.
     [[nodiscard]] auto find_slot_for_frame(std::span<uint8_t const> frame) -> ListenerStreamSlot*;
 
-    /// One received AM824 frame for @p slot: parse, decode to the consumer, count, hand on.
+    /// One received AM824 frame for @p slot: parse, decode to the slot's consumers, count, hand on.
     void receive_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
     /// The frame's AM824 header when it is one; a bad frame is counted and yields nullopt.
     [[nodiscard]] auto parse_am824_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now)

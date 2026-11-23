@@ -132,8 +132,10 @@ auto am824_serialize_mbla(
 }
 
 /// am824_serialize_mbla() told the time as a signed Nanoseconds value.
-/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline;
-///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline.
+///                           A packet that holds a SYT interval boundary is stamped with that block's
+///                           time: this plus ctx.presentation_offset_ns, counted on to the block.
+///                           A packet that holds none carries no timestamp.
 template <size_t MaxChannels = Am824Pdu::MAX_CHANNELS, size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET, typename AudioSource>
 auto am824_serialize_mbla(
     Am824StreamOutputContext& ctx,
@@ -239,8 +241,10 @@ auto am824_serialize_mixed(
 }
 
 /// am824_serialize_mixed() told the time as a signed Nanoseconds value.
-/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline;
-///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+/// @param first_sample_time  Time of the first data block of this AVTPDU on the stream's timeline.
+///                           A packet that holds a SYT interval boundary is stamped with that block's
+///                           time: this plus ctx.presentation_offset_ns, counted on to the block.
+///                           A packet that holds none carries no timestamp.
 template <
     size_t MaxChannels = Am824Pdu::MAX_CHANNELS,
     size_t MaxSamples = Am824Pdu::MAX_SAMPLES_PER_PACKET,

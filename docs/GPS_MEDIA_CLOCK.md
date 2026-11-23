@@ -181,7 +181,7 @@ by definition — and emit `r`, offset, `freq_uncertainty_ppb`, and (Kalman) dri
 |---|---|---|
 | method | sliding-window OLS slope | recursive clock filter |
 | thermal-ramp lag | window/2 (~7.5 min @ 15 min) | **zero** (drift state absorbs it) |
-| acquisition | needs the full window | **~5 s** (large initial P) |
+| acquisition | needs the full window | **~5 s** (seeded from the first pair) |
 | outlier rejection | none | innovation gate (drops GPS grandmaster ±500 ns spikes) |
 | uncertainty out | slope variance | covariance (both fill `freq_uncertainty_ppb`) |
 | GPS holdover | freezes last window avg | **coasts on freq + drift** |
@@ -219,9 +219,9 @@ until the error passed a millisecond and the step detector re-acquired.
 
 After `persistent_outliers` samples in a row outside the gate (default 8,
 two seconds at four samples a second) the filter takes itself to be the one
-that is wrong. It widens its phase uncertainty by the miss and its frequency
-uncertainty by the miss over the time the run lasted, keeps its state, and
-takes the sample. The same bad seed now costs 20 us for two seconds, and a
+that is wrong. On the next sample it widens its phase uncertainty by the miss
+and its frequency uncertainty by the miss over the time the run lasted, keeps
+its state, and takes that sample. The same bad seed now costs 20 us for two seconds, and a
 33 us slew is followed within two seconds where it used to leave the filter
 33 us behind for two minutes. `self_corrections()` counts the times it did
 so.

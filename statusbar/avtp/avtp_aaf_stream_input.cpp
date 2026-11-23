@@ -70,7 +70,8 @@ auto AafStreamInputContext::compute_pts() const noexcept -> Nanoseconds
     }
     // PTS of the first sample in the current packet.
     // samples_since_ts is the number of samples between the anchor and this packet.
-    return Nanoseconds{last_pts_ns + (static_cast<int64_t>(samples_since_ts) * static_cast<int64_t>(sample_period_ns))};
+    uint64_t const sum = static_cast<uint64_t>(last_pts_ns) + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    return Nanoseconds{static_cast<int64_t>(sum)};  // summed unsigned: no overflow to undefined behaviour
 }
 
 void AafStreamInputContext::advance_samples(uint16_t sample_count) noexcept

@@ -107,8 +107,9 @@ sanity check), pass `--no-gptp`. Behaviour:
   no `CAP_NET_RAW`);
 - packet PT (the `tx_gptp_ns` field) and `rx_gptp_ns` are read
   directly from `CLOCK_REALTIME`;
-- TX/RX are always considered "synced" (there's no clock-rate bridge
-  to wait for);
+- there is no master clock link to judge, so nothing holds TX/RX back on
+  its account; with `--max-utc-error-us` set, the system clock's own error
+  figure is the limit and the session stops while it is outside;
 - the EUI-64 is built from the MAC of `--owlm-interface` (or
   `--gptp-interface` if the former is empty).
 
@@ -232,6 +233,15 @@ figure of 15 ppm leaves a 100 µs limit after about six and a half seconds;
 measurement stops there and resumes when synchronization returns. A new
 grandmaster is a new timeline: the link is unbounded until it has been
 fitted again.
+
+Two limits of that figure, one per time source. With `--time-source=ptp4l`
+the link is the PHC as ptp4l disciplines it: the bound says how well the PHC
+is read, not whether ptp4l still follows its grandmaster, so a ptp4l that
+has lost its master is not seen here. With the built-in gPTP slave the
+packet stamps use the bridge's offset alone, which is exact at each Sync and
+then moves at the local crystal's rate offset until the next one; the bound
+printed is for the rate-corrected conversion and does not include that
+movement, which matters only once Syncs are missing.
 
 When the wire timeline is made from the system clock (`--wire-clock=gps-tai`
 or `--time-source=realtime`), a figure compared across two sites also

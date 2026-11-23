@@ -286,6 +286,22 @@ TEST(avtp_nanoseconds, an_aaf_v1_packet_built_and_read_on_the_signed_time_keeps_
     EXPECT_EQ(listener.packets_received, 1U);
 }
 
+TEST(avtp_nanoseconds, an_aaf_v1_wire_timestamp_at_the_top_of_its_range_is_extrapolated_without_overflow)
+{
+    // The 64-bit field comes off the wire unchecked. A talker that sends the
+    // largest count must get the bits the unsigned form has always returned,
+    // through a sum that cannot overflow a signed type.
+    AafV1StreamInputContext listener{AafFormat::int_24bit, AafSampleRate::rate_48_khz, 2, 24};
+    AafV1Pdu stamped{};
+    stamped.init(tsn::StreamId{}, AafFormat::int_24bit, AafSampleRate::rate_48_khz, 2, 24);
+    stamped.set_tv(true);
+    stamped.set_avtp_timestamp(0x7FFF'FFFF'FFFF'FFFFULL);
+    listener.process_packet_header(stamped, Nanoseconds{TAI_SCALE});
+    listener.advance_samples(6);
+    EXPECT_EQ(listener.compute_pts_ns(), 0x7FFF'FFFF'FFFF'FFFFULL + (6ULL * 20833ULL));
+    EXPECT_EQ(static_cast<uint64_t>(listener.compute_pts().count()), listener.compute_pts_ns());
+}
+
 TEST(avtp_nanoseconds, a_crf_packet_built_on_the_signed_time_carries_the_same_timestamps)
 {
     constexpr uint64_t NOW = 1'795'000'000'000'123'456ULL;

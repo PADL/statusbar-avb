@@ -5,25 +5,25 @@
 
 //
 // GptpTimeBridge — bidirectional conversion between gPTP master time
-// and any application-side POSIX clock.
+// and CLOCK_MONOTONIC_RAW, the application's one timing reference.
 //
 // Usage:
 //
 //   // Setup: bind the two clocks and take one cross-timestamp.
-//   GptpTimeBridge bridge{
-//       .get_gptp_time_ns = [&soft_clock]() { return soft_clock.get_ptp_time_ns(realtime_ns()); },
-//       .get_app_time_ns  = []() { return read_monotonic_raw_ns(); },
-//   };
+//   GptpTimeBridge bridge{};
+//   bridge.get_gptp_time_ns = [&soft_clock]() { return soft_clock.get_ptp_time_ns(realtime_ns()); };
+//   bridge.get_app_time_ns  = []() { return realtime::read_monotonic_raw_ns(); };
 //   bridge.update();
 //
-//   // On every Sync+FollowUp pairing, TOLD the pair: the app-clock instant
-//   // of the Sync's arrival and the master time it carried. The bridge
-//   // reads no clock here (gptp_slave_session wires this).
-//   bridge.update_from_anchor(sync_rx_app_ns, tx_master_ns);
+//   // On every Sync+FollowUp pairing, TOLD the pair: the RAW instant of
+//   // the Sync's arrival and the master time it carried, each on its own
+//   // clock type. The bridge reads no clock here (gptp_slave_session wires this).
+//   bridge.update_from_anchor(sync_rx_raw, tx_master);
 //
-//   // Conversions are told an instant and read nothing:
-//   int64_t play_at_app = bridge.from_gptp(avtp_header.get_timestamp());
-//   int64_t play_at_app = bridge.from_gptp_rated(avtp_header.get_timestamp());
+//   // Conversions are told an instant and read nothing. A gPTP instant in,
+//   // a RAW instant out:
+//   realtime::MonotonicRawClock::time_point play_at = bridge.from_gptp(presentation);
+//   realtime::MonotonicRawClock::time_point play_at = bridge.from_gptp_rated(presentation);
 //
 // The bridge keeps a cached offset between the two clocks plus a rate
 // measurement. The rated conversions extrapolate from the last anchor
@@ -32,10 +32,10 @@
 // anchors. update() reads both clocks itself and is the setup path;
 // refresh_offset() likewise, for exit-time diagnostics.
 //
-// Time domains: the app clock is whichever clock the owner binds, by
-// policy CLOCK_MONOTONIC_RAW (the timing reference, see
-// realtime::MonotonicRawClock) so that a RAW instant goes straight
-// through to_gptp(). The master side is gPTP TAI nanoseconds.
+// Time domains: the app side is CLOCK_MONOTONIC_RAW and nothing else (the
+// timing reference, see realtime::MonotonicRawClock): the conversions take
+// and return RAW instants. The master side is gPTP time, a GptpClock0
+// instant.
 //
 // Rate representation — int64 picoseconds-per-second:
 //
@@ -59,17 +59,16 @@
 // A master step or restart_timeline() is a different matter: the epoch
 // changes and the bound starts again.
 //
-// Thread safety: the four cached fields (offset, rate_offset, prev_app,
-// prev_gptp) are published together under a single-writer seqlock
-// (`rated_seq_`). Readers that need a consistent snapshot of the rated
-// regression line (e.g. `to_gptp_rated` / `from_gptp_rated`) load all
-// four under the seqlock; readers that only need the unrated offset
-// (e.g. `to_gptp` / `from_gptp`) read `offset_ns_` directly with a
-// single atomic load and are unaffected. The seqlock guards against
-// the failure mode where a writer's update is observed mid-publish —
-// in the worst case (a phase-jump update that bumps offset by the step
-// size while leaving rate untouched), a torn read of OLD offset paired
-// with NEW prev_a yields an error of exactly `−step`, i.e. potentially
+// Thread safety: one writer (the thread that calls update(),
+// update_from_anchor() and refresh_offset()). The four fields of the rated
+// line (offset, rate_offset, prev_app, prev_gptp) are published together
+// through `rated_buffer_`, a triple buffer with ONE consumer: to_gptp_rated()
+// and from_gptp_rated() may be called from one reader thread only. A reader
+// that needs only the unrated offset (to_gptp() / from_gptp()) reads
+// `offset_ns_` with a single atomic load and may be any thread; so may
+// quality(). Publishing the four together guards against a rated reader
+// pairing an OLD offset with a NEW anchor across a phase jump, an error of
+// the whole step,
 // 100 ms+ for a real servo step.
 //
 
@@ -249,7 +248,7 @@ struct GptpTimeBridge
         }
         int64_t const app = get_app_time_ns();
         int64_t const gptp = get_gptp_time_ns();
-        // Bump the seqlock around the offset write so a concurrent
+        // Publish the rated fields with the offset write so a concurrent
         // rated reader sees a consistent (NEW offset, OLD prev_a/g,
         // OLD ppt) snapshot rather than risking a torn pair. The
         // resulting snapshot is intentionally NOT internally
@@ -345,8 +344,8 @@ struct GptpTimeBridge
     /// been taken.
     [[nodiscard]] auto rate_offset_ppt() const noexcept -> int64_t { return rate_offset_ppt_.load(std::memory_order_relaxed); }
 
-    /// Last anchor point's app-clock timestamp (the value of
-    /// get_app_time_ns() at the most recent update() call). Used by
+    /// Last anchor point's RAW timestamp, as a bare count: the Sync arrival
+    /// told to update_from_anchor(), or the read update() made. Used by
     /// to_gptp_rated / from_gptp_rated and exposed for diagnostics.
     [[nodiscard]] auto last_anchor_app_ns() const noexcept -> int64_t { return prev_app_ns_.load(std::memory_order_relaxed); }
 

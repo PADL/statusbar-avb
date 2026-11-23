@@ -11,7 +11,7 @@ The PTP Wake Example demonstrates precision wake timing by:
 1. Reading the PTP hardware clock via `/dev/ptp*` devices
 2. Fitting PTP time against the local timing reference, `CLOCK_MONOTONIC_RAW`, with a continuously sampled linear mapping (`PtpTimeBridge`)
 3. Waking at precise PTP-synchronized times: each PTP deadline becomes a `CLOCK_MONOTONIC_RAW` deadline, the thread sleeps early on `CLOCK_MONOTONIC` through the RAW↔MONOTONIC line (`realtime::MonotonicRawLine`, the only clock `clock_nanosleep()` can target), then spins on RAW to the exact instant
-4. Telling the wake to the callback on both clocks (`TimerWakeInfo`: PTP nanoseconds and the typed RAW instant), so nothing the callback runs reads a clock
+4. Telling the wake to the callback on both clocks (`TimerWakeInfo`: the scheduled and actual wake as typed PTP instants, and the same wake as a typed RAW instant), so nothing the callback runs reads a clock
 
 ## Command Line Usage
 
@@ -336,8 +336,10 @@ the continuously sampled RAW fit.
 
 ### The wake is told on both clocks
 
-`TimerWakeInfo` carries `scheduled_time_ns` / `actual_time_ns` / `error_ns`
-in PTP nanoseconds and `actual_raw`, the same wake as a typed
+`TimerWakeInfo` carries `scheduled_time` and `actual_time` as
+`realtime::GptpClock0::time_point`, `error` as `realtime::Nanoseconds`
+(`scheduled_time_ns()` / `actual_time_ns()` / `error_ns()` give the bare
+counts), and `actual_raw`, the same wake as a typed
 `realtime::MonotonicRawClock::time_point`. A callback tells PTP time to what
 stamps on PTP (AVTP presentation) and the RAW instant to what stamps on RAW
 (an RX drain, a transmit gate); it reads no clock of its own. See
