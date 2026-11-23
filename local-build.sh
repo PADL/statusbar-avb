@@ -87,8 +87,15 @@ cmake -S . -B build -G Ninja \
     "${dep_flags[@]}" \
     "$@"
 cmake --build build
-# Everything is built, the functional tests among it, and the unit tests are
-# run. The functional tests (real sockets, a real kernel) run when committing:
-# core's run-functional-tests.sh, from the pre-commit hook, or by hand with
-#   ctest --test-dir build -L functional
+# Two test runs, kept apart. The unit tests first: they test logic, open no
+# socket and wait for nothing.
 ctest --test-dir build -LE functional
+# Then the functional tests (real sockets, a real kernel). They count the same:
+# one that fails fails the build. STATUSBAR_SKIP_FUNCTIONAL_TESTS=1 leaves them
+# out, for a host that cannot run them; the unit tests above still run.
+if [ "${STATUSBAR_SKIP_FUNCTIONAL_TESTS:-0}" = "1" ]; then
+    set +x
+    echo "local-build: STATUSBAR_SKIP_FUNCTIONAL_TESTS=1, the functional tests are not run" >&2
+else
+    ctest --test-dir build -L functional
+fi
