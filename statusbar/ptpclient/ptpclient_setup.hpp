@@ -266,6 +266,10 @@ struct PtpAppContext
     int cpu_affinity{3};
     bool enable_realtime{true};
     int64_t threshold{50'000};
+    /// The process locks its memory (realtime, and not ptp.no-mlock): each
+    /// timer made from this context is told to lock again from its own
+    /// thread, which takes in that thread's stack (PtpTimer::set_lock_memory).
+    bool lock_memory{false};
 
     // Move only
     ~PtpAppContext() = default;
@@ -457,6 +461,130 @@ auto format_ptp_config_to(OutputIt out, PtpAppConfig const& config, std::string_
     return out;
 }
 
+/// Copy the settings a timer is later made from out of the application's
+/// configuration into its context.
+inline void copy_timer_settings(PtpAppConfig const& config, PtpAppContext& ctx)
+{
+    ctx.period_ns = config.period_ns;
+    ctx.compensation_ns = config.compensation_ns;
+    ctx.cpu_affinity = config.cpu_affinity;
+    ctx.enable_realtime = config.enable_realtime;
+    ctx.threshold = config.threshold;
+    ctx.lock_memory = config.enable_realtime && config.lock_memory;
+}
+
+/// What a verbose start says of the opened client: its description, the
+/// times of its clocks, and the warning of a clock that was never set.
+inline void print_client_report(PtpClientBase& client)
+{
+    std::string report{"  PTP client opened successfully\n"};
+    format_client_info_to(std::back_inserter(report), client);
+    format_clock_times_to(std::back_inserter(report), client);
+    format_clock_warning_to(std::back_inserter(report), client);
+    std::print("{}", report);
+}
+
+/// A context around an opened client, with a bridge that is not sampling yet
+/// and the timer settings of the configuration.
+[[nodiscard]] inline auto make_app_context(PtpAppConfig const& config, std::unique_ptr<PtpClientBase> client) -> PtpAppContext
+{
+    PtpAppContext ctx;
+    ctx.client = std::move(client);
+    ctx.bridge = std::make_unique<PtpTimeBridge>();
+    copy_timer_settings(config, ctx);
+    return ctx;
+}
+
+/// Open the application's PTP client and build the context around it; a
+/// verbose start reports the client.
+[[nodiscard]] inline auto open_app_context(PtpAppConfig const& config) -> StatusValue<PtpAppContext>
+{
+    auto client_result = create_client(
+        PtpSetupConfig{.driver_name = config.driver_name, .device_path = config.device_path, .verbose = config.verbose});
+    if (!client_result) {
+        return forward_failure(client_result);
+    }
+    auto ctx = make_app_context(config, std::move(*client_result));
+    if (config.verbose) {
+        print_client_report(*ctx.client);
+    }
+    return success(std::move(ctx));
+}
+
+/// Start the bridge's sampling of the client; the context keeps the guard.
+[[nodiscard]] inline auto start_app_sampling(PtpAppConfig const& config, PtpAppContext& ctx) -> Status
+{
+    auto guard_result = ctx.bridge->start_sampling(*ctx.client, config.sampling);
+    if (!guard_result) {
+        return forward_failure(guard_result);
+    }
+    ctx.guard = std::move(*guard_result);
+    if (config.verbose) {
+        std::print("  Bridge sampling started\n  Waiting for bridge to become healthy...\n");
+    }
+    return success();
+}
+
+/// Wait for the bridge to become healthy, printing its progress when verbose.
+/// A shutdown asked for during the wait ends it with the same error; the
+/// caller tells the two apart with its own shutdown check.
+template <typename ShutdownCheck>
+[[nodiscard]] auto wait_for_app_bridge(PtpAppConfig const& config, PtpAppContext& ctx, ShutdownCheck& is_shutdown) -> Status
+{
+    auto progress = config.verbose
+        ? statusbar::sg14::inplace_function<void(TimeMapping const&), 64>([](TimeMapping const& m) -> void {
+              std::string status;
+              format_mapping_status_to(std::back_inserter(status), m);
+              std::print("{}", status);
+          })
+        : nullptr;
+    if (!wait_for_healthy(*ctx.bridge, is_shutdown, progress)) {
+        return failure(PtpError::bridge_not_healthy);
+    }
+    if (config.verbose) {
+        auto mapping = ctx.bridge->get_mapping();
+        std::print("  Bridge healthy: {} samples, RMS residual {} ns\n", mapping.sample_count, mapping.rms_residual_ns);
+    }
+    return success();
+}
+
+/// Start the bridge's sampling and wait until the bridge is healthy.
+template <typename ShutdownCheck>
+[[nodiscard]] auto bring_app_bridge_up(PtpAppConfig const& config, PtpAppContext& ctx, ShutdownCheck& is_shutdown) -> Status
+{
+    if (auto const started = start_app_sampling(config, ctx); !started) {
+        return forward_failure(started);
+    }
+    return wait_for_app_bridge(config, ctx, is_shutdown);
+}
+
+/// Lock the process's memory when the application runs realtime and has not
+/// turned locking off (ptp.no-mlock), and say how that went when verbose.
+/// This takes in the mappings of the moment only: the timer threads, made
+/// later, lock again for their own (PtpTimer::set_lock_memory).
+inline void lock_app_memory(PtpAppConfig const& config)
+{
+    if (!config.enable_realtime || !config.lock_memory) {
+        return;
+    }
+    bool const locked = realtime::lock_memory();
+    if (config.verbose) {
+        std::print(
+            "{}",
+            locked ? "  Memory locked (mlockall) successfully\n"
+                   : "  Warning: Could not lock memory (run as root or with CAP_IPC_LOCK)\n");
+    }
+}
+
+/// What a verbose start says of the timer thread's priority.
+inline void print_realtime_note(PtpAppConfig const& config)
+{
+    if (config.verbose) {
+        std::print(
+            "{}", config.enable_realtime ? "  Realtime priority will be set on timer thread\n" : "  Realtime priority disabled\n");
+    }
+}
+
 /// Setup complete PTP application context
 /// Creates client, bridge, starts sampling, and waits for bridge to become healthy.
 /// Prints diagnostic output if verbose is enabled.
@@ -468,103 +596,16 @@ template <typename ShutdownCheck>
 // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - is_shutdown is called multiple times, not forwarded
 [[nodiscard]] auto setup_ptp_app(PtpAppConfig const& config, ShutdownCheck&& is_shutdown) -> StatusValue<PtpAppContext>
 {
-    // Create PTP client
-    PtpSetupConfig setup_config;
-    setup_config.driver_name = config.driver_name;
-    setup_config.device_path = config.device_path;
-    setup_config.verbose = config.verbose;
-
-    auto client_result = create_client(setup_config);
-    if (!client_result) {
-        return forward_failure(client_result);
+    auto ctx = open_app_context(config);
+    if (!ctx) {
+        return ctx;
     }
-
-    PtpAppContext ctx;
-    ctx.client = std::move(*client_result);
-    ctx.bridge = std::make_unique<PtpTimeBridge>();
-    ctx.period_ns = config.period_ns;
-    ctx.compensation_ns = config.compensation_ns;
-    ctx.cpu_affinity = config.cpu_affinity;
-    ctx.enable_realtime = config.enable_realtime;
-    ctx.threshold = config.threshold;
-
-    if (config.verbose) {
-        std::print("  PTP client opened successfully\n");
-
-        // Print client info
-        std::string info;
-        format_client_info_to(std::back_inserter(info), *ctx.client);
-        if (!info.empty()) {
-            std::print("{}", info);
-        }
-
-        // Print clock times
-        std::string times;
-        format_clock_times_to(std::back_inserter(times), *ctx.client);
-        std::print("{}", times);
-
-        // Check for uninitialized clock warning
-        std::string warning;
-        format_clock_warning_to(std::back_inserter(warning), *ctx.client);
-        if (!warning.empty()) {
-            std::print("{}", warning);
-        }
+    if (auto const up = bring_app_bridge_up(config, *ctx, is_shutdown); !up) {
+        return forward_failure(up);
     }
-
-    // Start sampling
-    auto guard_result = ctx.bridge->start_sampling(*ctx.client, config.sampling);
-    if (!guard_result) {
-        return forward_failure(guard_result);
-    }
-    ctx.guard = std::move(*guard_result);
-
-    if (config.verbose) {
-        std::print("  Bridge sampling started\n");
-        std::print("  Waiting for bridge to become healthy...\n");
-    }
-
-    // Wait for bridge to become healthy
-    auto progress = config.verbose
-        ? statusbar::sg14::inplace_function<void(TimeMapping const&), 64>([](TimeMapping const& m) -> void {
-              std::string status;
-              format_mapping_status_to(std::back_inserter(status), m);
-              std::print("{}", status);
-          })
-        : nullptr;
-
-    if (!wait_for_healthy(*ctx.bridge, is_shutdown, progress)) {
-        if (is_shutdown()) {
-            // Shutdown requested - not an error, but caller should check
-            return failure(PtpError::bridge_not_healthy);
-        }
-        return failure(PtpError::bridge_not_healthy);
-    }
-
-    if (config.verbose) {
-        auto mapping = ctx.bridge->get_mapping();
-        std::print("  Bridge healthy: {} samples, RMS residual {} ns\n", mapping.sample_count, mapping.rms_residual_ns);
-    }
-
-    // Lock memory if requested
-    if (config.enable_realtime && config.lock_memory) {
-        if (realtime::lock_memory()) {
-            if (config.verbose) {
-                std::print("  Memory locked (mlockall) successfully\n");
-            }
-        } else {
-            if (config.verbose) {
-                std::print("  Warning: Could not lock memory (run as root or with CAP_IPC_LOCK)\n");
-            }
-        }
-    }
-
-    if (config.verbose && config.enable_realtime) {
-        std::print("  Realtime priority will be set on timer thread\n");
-    } else if (config.verbose) {
-        std::print("  Realtime priority disabled\n");
-    }
-
-    return success(std::move(ctx));
+    lock_app_memory(config);
+    print_realtime_note(config);
+    return ctx;
 }
 
 /// Setup PTP application with automatic fallback to system clock

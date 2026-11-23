@@ -456,6 +456,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
         ctx.compensation_ns,
         ctx.enable_realtime,
         entity.config().stream_rx_cpu_affinity);
+    rx_timer.set_lock_memory(ctx.lock_memory);
 
     // ---- Optional dedicated TX kicker timer (stream_tx.kicker) --------------------
     // The ring backends' transmit wake-up is a syscall; on this timer it leaves
@@ -478,6 +479,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
         ctx.compensation_ns,
         ctx.enable_realtime,
         entity.config().stream_tx_cpu_affinity);
+    tx_kicker.set_lock_memory(ctx.lock_memory);
 
     bool const tx_kick = entity.config().stream_tx_kicker && !kick_in_rx;
     if (tx_kick) {

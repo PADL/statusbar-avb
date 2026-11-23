@@ -14,9 +14,17 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <cstddef>
 #include <cstdint>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <system_error>
 #include <utility>
 
 #include <sys/resource.h>
@@ -339,6 +347,99 @@ TEST(ptp_timer, a_stack_prefault_leaves_the_timer_thread_nothing_to_fault_on)
 
     EXPECT_EQ(faults.load(), 0);
     bridge.stop_sampling();
+}
+
+namespace {
+
+#if defined(__linux__)
+/// The address range a line of /proc/self/smaps opens a mapping with, when
+/// the line is one of those ("start-end perms ..." in hexadecimal).
+auto mapping_range(std::string_view const line) -> std::optional<std::pair<std::uintptr_t, std::uintptr_t>>
+{
+    std::uintptr_t first = 0;
+    std::uintptr_t last = 0;
+    char const* const line_end = line.data() + line.size();
+    auto const dash = std::from_chars(line.data(), line_end, first, 16);
+    if (dash.ec != std::errc{} || dash.ptr == line_end || *dash.ptr != '-') {
+        return std::nullopt;
+    }
+    return std::from_chars(dash.ptr + 1, line_end, last, 16).ec == std::errc{} ? std::optional{std::pair{first, last}}
+                                                                               : std::nullopt;
+}
+
+/// Whether the mapping that holds `address` is locked in memory: the "lo"
+/// flag on its VmFlags line in /proc/self/smaps.
+auto mapping_is_locked(void const* const address) -> bool
+{
+    auto const target = reinterpret_cast<std::uintptr_t>(address);
+    std::ifstream smaps{"/proc/self/smaps"};
+    bool inside = false;
+    for (std::string line; std::getline(smaps, line);) {
+        if (auto const range = mapping_range(line)) {
+            inside = range->first <= target && target < range->second;
+        } else if (inside && line.starts_with("VmFlags:")) {
+            return line.find(" lo") != std::string::npos;
+        }
+    }
+    return false;
+}
+#endif
+
+}  // namespace
+
+TEST(ptp_timer, a_timer_told_to_lock_memory_locks_what_its_own_thread_brought)
+{
+#if !defined(__linux__)
+    SKIP("a mapping's lock state is read from /proc/self/smaps");
+#else
+    // The process locks its memory first, as an application does at start-up,
+    // and only then is the timer thread made. That lock takes in the mappings
+    // of its moment: the thread's stack, mapped afterwards, would stay
+    // unlocked, and so would the allocator arena glibc gives the thread at
+    // its first allocation. The timer's own lock takes both in.
+    int on_main_stack = 0;
+    if (!statusbar::realtime::lock_memory() || !mapping_is_locked(&on_main_stack)) {
+        SKIP("this process may not lock its memory");
+    }
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    (void)tell_history_ending_now(bridge, state);
+    EXPECT_TRUE(bridge.is_healthy());
+
+    std::atomic<int> stack_locked{-1};
+    std::atomic<int> allocation_locked{-1};
+    std::atomic<bool> told{false};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (!info || told.load()) {
+                return;
+            }
+            int on_thread_stack = 0;
+            auto const allocation = std::make_unique<std::array<char, 64>>();
+            stack_locked.store(mapping_is_locked(&on_thread_stack) ? 1 : 0);
+            allocation_locked.store(mapping_is_locked(allocation.get()) ? 1 : 0);
+            told.store(true);
+            told.notify_all();
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    EXPECT_FALSE(timer.locks_memory());
+    timer.set_lock_memory(true);
+    EXPECT_TRUE(timer.locks_memory());
+    EXPECT_TRUE(timer.start().has_value());
+    told.wait(false);
+    timer.stop();
+
+    EXPECT_EQ(stack_locked.load(), 1);
+#    if defined(__GLIBC__)
+    EXPECT_EQ(allocation_locked.load(), 1);
+#    endif
+    bridge.stop_sampling();
+    (void)statusbar::realtime::unlock_memory();
+#endif
 }
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_bridge_functional_test)

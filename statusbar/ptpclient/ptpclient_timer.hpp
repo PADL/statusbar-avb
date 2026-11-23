@@ -18,6 +18,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <optional>
 #include <thread>
@@ -178,6 +179,21 @@ class PtpTimer : public PtpTimerBase
     /// Stack bytes prefaulted before the loop; 0 for none.
     [[nodiscard]] auto stack_prefault_bytes() const noexcept -> size_t { return stack_prefault_bytes_; }
 
+    /// Lock the process's memory once more from the timer thread, before its
+    /// loop (mlockall(MCL_CURRENT)). A process that locks its memory at
+    /// start-up does so before this thread exists, and MCL_CURRENT takes in
+    /// only what is mapped at that moment: the timer thread's own stack and
+    /// thread-local storage, made when the thread is, are then left unlocked,
+    /// and the kernel may migrate their pages (memory compaction) or swap them
+    /// out. A touch of a page that is being migrated waits for the migration,
+    /// which on a small host under memory pressure was seen to take 0.2 to
+    /// 2.6 ms in the middle of a callback. Off by default; set it before
+    /// start() wherever the process locks its memory.
+    auto set_lock_memory(bool const lock) noexcept -> void { lock_memory_ = lock; }
+
+    /// Whether the timer thread locks the process's memory before its loop.
+    [[nodiscard]] auto locks_memory() const noexcept -> bool { return lock_memory_; }
+
     /// Start the timer
     /// @return Success or error if timer is already running
     [[nodiscard]] auto start() -> Status
@@ -284,12 +300,30 @@ class PtpTimer : public PtpTimerBase
         run_guarded("PTP timer thread", [this]() { timer_loop_impl(); });
     }
 
-    /// Make the timer thread ready for its loop: stack prefault, CPU
+    /// Lock the process's memory from the timer thread (set_lock_memory).
+    /// The thread allocates once first: a thread's first allocation is what
+    /// makes its allocator arena, a mapping of its own in glibc, and the lock
+    /// takes in only the mappings that exist when it is called. Locked here,
+    /// the arena stays locked as it grows.
+    static void lock_thread_memory() noexcept
+    {
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory,hicpp-no-malloc)
+        void* volatile first_allocation = std::malloc(64);
+        // NOLINTNEXTLINE(cppcoreguidelines-no-malloc,cppcoreguidelines-owning-memory,hicpp-no-malloc)
+        std::free(first_allocation);
+        (void)realtime::lock_memory_ex();
+    }
+
+    /// Make the timer thread ready for its loop: stack prefault, the memory
+    /// lock that takes in this thread's stack (set_lock_memory), CPU
     /// affinity, SCHED_FIFO priority. The last two log their failure and
     /// the loop runs anyway.
     void prepare_timer_thread()
     {
         realtime::prefault_stack(stack_prefault_bytes_);
+        if (lock_memory_) {
+            lock_thread_memory();
+        }
         // Set realtime affinity if set (log failure but continue)
         if (cpu_affinity_ >= 0) {
             (void)realtime::set_realtime_affinity_logged(cpu_affinity_, "PTP timer");
@@ -364,6 +398,7 @@ class PtpTimer : public PtpTimerBase
     bool enable_realtime_;
     int cpu_affinity_;
     size_t stack_prefault_bytes_{0};      ///< prefaulted before the loop; 0 = none
+    bool lock_memory_{false};             ///< mlockall(MCL_CURRENT) from the thread before the loop
     [[maybe_unused]] int64_t threshold_;  ///< retained for API stability; ftrace tripwire that used it was removed
 
     Callback callback_;

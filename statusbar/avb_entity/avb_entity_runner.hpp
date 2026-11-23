@@ -403,6 +403,7 @@ auto run_entity_main_loop(
         ctx.compensation_ns,
         ctx.enable_realtime,
         ctx.cpu_affinity);
+    timer.set_lock_memory(ctx.lock_memory);
 
     auto start_result = timer.start();
     if (!start_result) {
