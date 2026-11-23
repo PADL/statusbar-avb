@@ -270,6 +270,51 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Stop background sampling
     void stop_sampling() noexcept;
 
+    //
+    // The sampler, told its readings
+    //
+    // Everything the sampler thread does with a reading is observe(). The
+    // thread takes each reading from the real clocks and hands it over; a
+    // caller that owns its readings (a test on made-up time, a simulation)
+    // hands over its own, and the bridge then reads no clock at all.
+    //
+
+    /// One sampler reading: the PHC read bracketed by CLOCK_MONOTONIC_RAW,
+    /// then a RAW-bracketed CLOCK_MONOTONIC read for the RAW<->MONOTONIC line.
+    struct Reading
+    {
+        int64_t raw_before_phc;
+        StatusValue<int64_t> phc;
+        int64_t raw_after_phc;
+        int64_t mono;
+        int64_t raw_after_mono;
+    };
+
+    /// What the sampler carries from one reading to the next: the primary
+    /// PHC<->RAW window and, over the same span, the tracker that keeps
+    /// raw_line() for the sleeps.
+    struct SamplerState
+    {
+        SamplerState(realtime::MonotonicRawLine& line, size_t window_size) noexcept
+            : phc_window{window_size}
+            , raw_tracker{line, window_size}
+        {}
+
+        TimingSampleWindow phc_window;
+        realtime::MonotonicRawTracker raw_tracker;
+        int64_t worst_bracket{0};
+    };
+
+    /// Set the bridge up to be told its readings instead of taking them on
+    /// its own thread. Not while sampling is running.
+    [[nodiscard]] auto begin_told_sampling(BridgeSamplingParams const& params = {}) -> SamplerState;
+
+    /// Told form of one sampler pass: feed the RAW<->MONOTONIC pair of
+    /// @p reading to the tracker, then accept its PHC half into the primary
+    /// window and refit when enough samples are in. One thread at a time.
+    /// @return true if the PHC was read, false if that half was skipped
+    auto observe(SamplerState& state, Reading const& reading) -> bool;
+
     /// Check if sampling is running
     [[nodiscard]] auto is_running() const noexcept -> bool { return is_running_atomic(); }
 
@@ -283,6 +328,29 @@ class PtpTimeBridge : public PtpTimeBridgeBase
 
     /// Get current epoch (incremented on discontinuities)
     [[nodiscard]] auto epoch() const noexcept -> uint64_t { return load_epoch(); }
+
+    /// How well the PHC is known through this bridge's line, for any thread.
+    ///
+    /// This is the quality of one link only: the PHC as read here against
+    /// CLOCK_MONOTONIC_RAW. Whether the PHC itself follows its grandmaster
+    /// is the PTP daemon's business and is not in this figure.
+    ///
+    /// The bound at each fit is the furthest any sample of the window lies
+    /// from the line plus half the longest read bracket. When the PHC
+    /// cannot be read the line stands and the uncertainty grows from the
+    /// last fit. No bound is claimed before the first healthy fit, nor
+    /// after a step until the fit is healthy again: a step is a new epoch.
+    [[nodiscard]] auto quality() const noexcept -> realtime::ClockQuality
+    {
+        // The epoch is read first: reset_epoch() withdraws the bound before
+        // it changes the epoch, so a new epoch is never told an old bound.
+        uint64_t const timeline = load_epoch();
+        bool const established = was_ever_healthy();
+        realtime::ClockQuality quality = fit_quality_.load();
+        quality.epoch = timeline;
+        quality.bound_at_sync = established ? quality.bound_at_sync : realtime::UNBOUNDED_ACCURACY;
+        return quality;
+    }
 
     // ClockSource-compatible interface (for use with ClockAdapter)
     //
@@ -393,24 +461,8 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] auto start_sampling_impl(PtpTimeReader ptp_reader, BridgeSamplingParams const& params)
         -> StatusValue<SamplingGuard>;
 
-    /// One sampler reading: the PHC read bracketed by CLOCK_MONOTONIC_RAW,
-    /// then a RAW-bracketed CLOCK_MONOTONIC read for the RAW<->MONOTONIC line.
-    struct Reading
-    {
-        int64_t raw_before_phc;
-        StatusValue<int64_t> phc;
-        int64_t raw_after_phc;
-        int64_t mono;
-        int64_t raw_after_mono;
-    };
-
+    /// Take one reading from the PHC reader and the system clocks.
     [[nodiscard]] auto take_reading() -> Reading;
-
-    /// Take a single sample: feed the RAW<->MONOTONIC pair to @p raw_tracker
-    /// (told form, the sampler owns the bracket), then accept the PHC half
-    /// into the primary window and refit when enough samples are in.
-    /// @return true if a valid sample was collected, false if skipped
-    auto collect_sample(TimingSampleWindow& phc_window, realtime::MonotonicRawTracker& raw_tracker, int64_t& worst_bracket) -> bool;
 
     /// The PHC half of a reading: record its bracket, reject an over-long
     /// one, else push (RAW midpoint, PHC) into the primary window.
@@ -426,6 +478,33 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Refit and publish the primary PHC<->RAW mapping from the window.
     void update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket);
 
+    /// Publish a fit: the line, how well it is known, its telemetry and
+    /// the health it implies.
+    void publish_fit(LinearFitResult const& fit, TimingSampleWindow const& phc_window, int64_t worst_bracket);
+
+    /// Publish how well the line of @p fit is known, as of the newest
+    /// sample of @p phc_window.
+    void publish_fit_quality(LinearFitResult const& fit, TimingSampleWindow const& phc_window);
+
+    /// How far the fitted rate has been seen to move, in parts per billion:
+    /// against the rate one full window of fits ago, and over the window
+    /// before that. Fits a window apart share no samples.
+    [[nodiscard]] auto rate_movement_ppb(double slope) noexcept -> uint32_t;
+
+    /// The published rate is rounded to a whole part per million, so the
+    /// line may run half of one off the rate that was fitted. It is added
+    /// to the drift bound whatever the deployment configures.
+    static constexpr uint32_t PUBLISHED_RATE_ROUNDING_PPB = 500;
+
+    /// The fitted rate one window of fits ago (sampler thread only).
+    struct RateCheckpoint
+    {
+        double slope{1.0};
+        int fits_since{0};
+        uint32_t previous_movement_ppb{0};
+        bool taken{false};
+    };
+
     // Configuration
     BridgeSamplingParams params_{};
     PtpTimeReader ptp_reader_;
@@ -436,6 +515,11 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     // RAW<->CLOCK_MONOTONIC line: written by the sampler thread's tracker,
     // read by any sleeper (prepare_sleep, to_monotonic_ns, raw_line()).
     realtime::MonotonicRawLine raw_line_;
+
+    // Quality of the primary line: written by the sampler thread at each
+    // fit, read by quality() together with the epoch and health atomics.
+    statusbar::itc::SeqlockValue<realtime::ClockQuality> fit_quality_{realtime::ClockQuality{}};
+    RateCheckpoint rate_checkpoint_{};
 
     // Telemetry (written by the sampler thread, read by any consumer)
     stats::AtomicTimeStats bracket_stats_;           ///< PHC-read bracket distribution (all samples)

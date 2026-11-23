@@ -7,6 +7,7 @@
 /// Provides abstract interface for reading PTP hardware clock time
 
 #include "statusbar/dsp/dsp.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <chrono>
@@ -104,6 +105,11 @@ struct BridgeSamplingParams
     int64_t wake_refine_spin_ns = 50'000;   ///< Final spin refinement for sleep (50us, 0 to disable)
     int min_samples_for_healthy = 16;       ///< Minimum samples before declaring healthy
 
+    /// How fast the PHC line may go wrong while the PHC cannot be read, in
+    /// parts per billion, unless the fits themselves showed the rate moving
+    /// more: the deployment's oscillator and temperature figure.
+    uint32_t holdover_drift_ppb = realtime::DEFAULT_HOLDOVER_DRIFT_PPB;
+
     /// Builder pattern for configuration
     [[nodiscard]] auto with_sample_hz(int hz) noexcept -> BridgeSamplingParams&
     {
@@ -143,6 +149,11 @@ struct BridgeSamplingParams
     [[nodiscard]] auto with_min_samples_for_healthy(int n) noexcept -> BridgeSamplingParams&
     {
         min_samples_for_healthy = n;
+        return *this;
+    }
+    [[nodiscard]] auto with_holdover_drift_ppb(uint32_t ppb) noexcept -> BridgeSamplingParams&
+    {
+        holdover_drift_ppb = ppb;
         return *this;
     }
 };

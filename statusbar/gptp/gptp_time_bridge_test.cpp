@@ -5,6 +5,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 
@@ -114,6 +115,165 @@ TEST(gptp_time_bridge, a_master_step_restarts_the_window_and_holds_the_rate)
 
     EXPECT_EQ(bridge.rate_offset_ppt(), rate_before);
     EXPECT_EQ(bridge.from_gptp(stepped_master), app_now);
+}
+
+//
+// Quality: how well the line is known, and coasting when Syncs stop
+//
+
+namespace {
+
+using statusbar::realtime::MonotonicRawClock;
+using statusbar::realtime::Nanoseconds;
+
+/// Deterministic user-space lateness of the app stamp, in [0, 40) us.
+auto stamp_jitter(int i) -> int64_t
+{
+    return static_cast<int64_t>((static_cast<uint64_t>(i) * 2654435761ULL) % 40'000);
+}
+
+}  // namespace
+
+TEST(gptp_time_bridge_quality, no_bound_is_claimed_before_the_rate_is_fitted)
+{
+    GptpTimeBridge bridge{};
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    // Half a second of Syncs: an offset, but no baseline for a rate yet.
+    (void)run_syncs(bridge, 4, 30.0, [](int) { return int64_t{0}; });
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_TRUE(bridge.quality().time_source == realtime::TimeSource::ptp);
+}
+
+TEST(gptp_time_bridge_quality, the_bound_is_the_furthest_an_anchor_landed_from_the_line)
+{
+    GptpTimeBridge bridge{};
+    constexpr double app_ppm = 30.0;
+    int64_t const last_master = run_syncs(bridge, 20 * 8, app_ppm, stamp_jitter);
+
+    auto const quality = bridge.quality();
+    EXPECT_TRUE(quality.is_bounded());
+    // Anchored on the app (RAW) instant of the last Sync.
+    EXPECT_EQ(MonotonicRawClock::to_ns(quality.synced_at), bridge.last_anchor_app_ns());
+    // Stamps up to 40 us late: the line misses an anchor by no more than
+    // that, and by a good part of it.
+    EXPECT_TRUE(quality.bound_at_sync > Nanoseconds{10'000});
+    EXPECT_TRUE(quality.bound_at_sync <= Nanoseconds{45'000});
+    EXPECT_EQ(quality.epoch, uint64_t{0});
+    // And it does bound the truth: the line one Sync on is within it.
+    int64_t const next_master = last_master + SYNC_INTERVAL_NS;
+    int64_t const error = bridge.to_gptp_rated(app_at(next_master, app_ppm)) - next_master;
+    EXPECT_TRUE(abs_ns(error) <= quality.uncertainty(MonotonicRawClock::from_ns(app_at(next_master, app_ppm))).count());
+}
+
+TEST(gptp_time_bridge_quality, when_syncs_stop_the_line_coasts_and_the_uncertainty_grows)
+{
+    GptpTimeBridge bridge{};
+    constexpr double app_ppm = 30.0;
+    int64_t const last_master = run_syncs(bridge, 20 * 8, app_ppm, [](int) { return int64_t{0}; });
+    auto const at_loss = bridge.quality();
+    EXPECT_TRUE(at_loss.is_bounded());
+    EXPECT_EQ(at_loss.drift_bound_ppb, realtime::DEFAULT_HOLDOVER_DRIFT_PPB);
+
+    // The master is gone. Nothing is told to the bridge; it is only asked.
+    // Three missed Syncs later, and thirty seconds later:
+    auto const raw_after = [&](int64_t master_elapsed_ns) {
+        return MonotonicRawClock::from_ns(app_at(last_master + master_elapsed_ns, app_ppm));
+    };
+    int64_t const after_three = at_loss.uncertainty(raw_after(3 * SYNC_INTERVAL_NS)).count();
+    int64_t const after_thirty_s = at_loss.uncertainty(raw_after(30'000'000'000)).count();
+    EXPECT_TRUE(bridge.quality() == at_loss);
+    // 15 ppm for 375 ms is 5.6 us; for 30 s, 450 us.
+    EXPECT_TRUE(after_three >= 5'600 && after_three <= 5'700 + at_loss.bound_at_sync.count());
+    EXPECT_TRUE(after_thirty_s >= 450'000 && after_thirty_s <= 451'000 + at_loss.bound_at_sync.count());
+
+    // The line itself still converts, with the rate and offset it had: a
+    // crystal that really held its 30 ppm is converted to within a few ns
+    // thirty seconds on, far inside the bound.
+    int64_t const master_later = last_master + 30'000'000'000;
+    EXPECT_TRUE(abs_ns(bridge.to_gptp_rated(app_at(master_later, app_ppm)) - master_later) <= 50);
+
+    // An application that tolerates 100 us rides out the three Syncs and
+    // six seconds more; one that tolerates a millisecond, the half minute.
+    EXPECT_TRUE(at_loss.within(std::chrono::microseconds{100}, raw_after(6'000'000'000)));
+    EXPECT_FALSE(at_loss.within(std::chrono::microseconds{100}, raw_after(30'000'000'000)));
+    EXPECT_TRUE(at_loss.within(std::chrono::milliseconds{1}, raw_after(30'000'000'000)));
+}
+
+TEST(gptp_time_bridge_quality, the_deployment_sets_the_drift_it_coasts_at)
+{
+    GptpTimeBridge bridge{};
+    bridge.holdover_drift_ppb = 1'000;  // a good oscillator in a steady room
+    (void)run_syncs(bridge, 20 * 8, 30.0, [](int) { return int64_t{0}; });
+    EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000});
+}
+
+TEST(gptp_time_bridge_quality, a_rate_seen_moving_raises_the_drift_bound)
+{
+    GptpTimeBridge bridge{};
+    bridge.holdover_drift_ppb = 1'000;
+    // Ten seconds at 30 ppm, then the crystal warms and runs at 34 ppm.
+    int64_t master = MASTER_EPOCH_NS;
+    int64_t app = APP_EPOCH_NS;
+    for (int i = 0; i < 20 * 8; ++i) {
+        master += SYNC_INTERVAL_NS;
+        app += SYNC_INTERVAL_NS + (SYNC_INTERVAL_NS * (i < 10 * 8 ? 30 : 34) / 1'000'000);
+        bridge.update_from_anchor(app, master);
+    }
+    // The fitted rate moved by a few ppm inside the window: the held rate
+    // may be that far out, which is more than the configured 1 ppm.
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb > uint32_t{1'000});
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb < uint32_t{6'000});
+}
+
+TEST(gptp_time_bridge_quality, a_master_step_is_a_new_timeline)
+{
+    GptpTimeBridge bridge{};
+    constexpr double app_ppm = 30.0;
+    int64_t const last_master = run_syncs(bridge, 20 * 8, app_ppm, [](int) { return int64_t{0}; });
+    EXPECT_TRUE(bridge.quality().is_bounded());
+
+    constexpr int64_t step_ns = 2'000'000'000;
+    int64_t master = last_master + SYNC_INTERVAL_NS;
+    bridge.update_from_anchor(app_at(master, app_ppm), master + step_ns);
+    // The epoch changed, and one anchor of the new timeline proves nothing yet.
+    EXPECT_EQ(bridge.quality().epoch, uint64_t{1});
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    // The next Sync of the new timeline agrees with the line: bounded again.
+    master += SYNC_INTERVAL_NS;
+    bridge.update_from_anchor(app_at(master, app_ppm), master + step_ns);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, uint64_t{1});
+    EXPECT_TRUE(bridge.quality().bound_at_sync <= Nanoseconds{50});
+}
+
+TEST(gptp_time_bridge_quality, the_owner_can_declare_a_new_timeline)
+{
+    GptpTimeBridge bridge{};
+    int64_t master = run_syncs(bridge, 20 * 8, 30.0, [](int) { return int64_t{0}; });
+    int64_t const rate_before = bridge.rate_offset_ppt();
+
+    bridge.time_source = realtime::TimeSource::gnss;  // the new grandmaster is a GPS receiver
+    bridge.restart_timeline();
+    EXPECT_EQ(bridge.quality().epoch, uint64_t{1});
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_TRUE(bridge.quality().time_source == realtime::TimeSource::gnss);
+    EXPECT_EQ(bridge.rate_offset_ppt(), rate_before);
+
+    for (int i = 0; i < 2; ++i) {
+        master += SYNC_INTERVAL_NS;
+        bridge.update_from_anchor(app_at(master, 30.0), master);
+    }
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_TRUE(bridge.quality().time_source == realtime::TimeSource::gnss);
+}
+
+TEST(gptp_time_bridge_quality, an_app_clock_that_is_not_raw_reports_no_quality)
+{
+    GptpTimeBridge bridge{};
+    bridge.app_clock_is_raw = false;
+    (void)run_syncs(bridge, 20 * 8, 30.0, [](int) { return int64_t{0}; });
+    EXPECT_FALSE(bridge.quality().is_bounded());
 }
 
 TEST_MAIN(statusbar_gptp, gptp_time_bridge_test)

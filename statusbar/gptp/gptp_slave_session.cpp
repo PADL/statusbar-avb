@@ -86,7 +86,12 @@ void print_running_banner(SlaveSessionConfig const& cfg)
 SlaveSession::SlaveSession(SlaveSessionConfig cfg)
     : cfg_{std::move(cfg)}
     , bridge_clock_name_{bridge_clock_name_for(cfg_.bridge_clock)}
-{}
+{
+    // The bridge reports how well its line is known, and coasts on this
+    // figure while no Sync arrives. Its bound is anchored on RAW instants.
+    bridge_.holdover_drift_ppb = cfg_.holdover_drift_ppb;
+    bridge_.app_clock_is_raw = (cfg_.bridge_clock == CLOCK_MONOTONIC_RAW);
+}
 
 SlaveSession::~SlaveSession()
 {
@@ -283,6 +288,25 @@ void SlaveSession::tick(sm::TimePoint now)
 {
     if (port_ != nullptr) {
         port_->tick(now);
+        follow_grandmaster();
+    }
+}
+
+void SlaveSession::follow_grandmaster()
+{
+    auto const& info = port_->grandmaster_info();
+    // No grandmaster heard (Announce timed out, say) is not a new timeline:
+    // the bridge goes on coasting on the one it had.
+    if (!info.has_value() || info->identity.get() == grandmaster_id_) {
+        return;
+    }
+    // The first grandmaster heard is the timeline the bridge is already
+    // anchoring on; any later one is a different timeline.
+    bool const changed = grandmaster_id_ != 0;
+    grandmaster_id_ = info->identity.get();
+    bridge_.time_source = static_cast<realtime::TimeSource>(info->time_source);
+    if (changed) {
+        bridge_.restart_timeline();
     }
 }
 

@@ -319,6 +319,230 @@ TEST(ptp_bridge_epoch, reset_epoch_marks_unhealthy)
 }
 
 //
+// Tests: PtpTimeBridge - quality(): how well the PHC line is known
+//
+// The bridge is told every reading here (begin_told_sampling / observe):
+// the times are made up, no thread runs and nothing waits.
+//
+
+static_assert(statusbar::realtime::QualifiedClockSource<PtpTimeBridge>);
+
+namespace {
+
+using statusbar::realtime::MonotonicRawClock;
+using statusbar::realtime::Nanoseconds;
+
+/// A made-up PHC, a fixed distance ahead of RAW and running `ppm` fast of
+/// it, read every 2 ms. Each reading takes `bracket_ns` and catches the PHC
+/// at the middle of it.
+struct ToldPhc
+{
+    static constexpr int64_t SAMPLE_INTERVAL_NS = 2'000'000;
+    static constexpr int64_t MONO_AHEAD_OF_RAW_NS = 7'000'000'000;
+
+    int64_t raw_ns{50'000'000'000};     ///< RAW at the start of the next reading
+    int64_t phc_ns{1'050'000'000'000};  ///< the PHC at that instant
+    int64_t ppm{0};
+    int64_t bracket_ns{400};
+    bool fails{false};
+
+    /// The next reading, its PHC value @p phc_error_ns off the truth.
+    auto next(int64_t phc_error_ns = 0) -> PtpTimeBridge::Reading
+    {
+        int64_t const before = raw_ns;
+        int64_t const after = before + bracket_ns;
+        int64_t const phc_mid = phc_ns + (bracket_ns / 2) + phc_error_ns;
+        raw_ns += SAMPLE_INTERVAL_NS;
+        phc_ns += SAMPLE_INTERVAL_NS + ((SAMPLE_INTERVAL_NS * ppm) / 1'000'000);
+        return {
+            .raw_before_phc = before,
+            .phc = fails ? statusbar::StatusValue<int64_t>{statusbar::failure(make_error_code(PtpError::clock_gettime_failed))}
+                         : statusbar::StatusValue<int64_t>{phc_mid},
+            .raw_after_phc = after,
+            .mono = after + 100 + MONO_AHEAD_OF_RAW_NS,
+            .raw_after_mono = after + 200};
+    }
+
+    /// The RAW midpoint of the reading taken last: where its sample sits.
+    [[nodiscard]] auto last_sample_raw_ns() const -> int64_t { return raw_ns - SAMPLE_INTERVAL_NS + (bracket_ns / 2); }
+};
+
+/// A small window so a test can fill it several times over: fitted from
+/// 8 samples on, 32 at most.
+auto told_params() -> BridgeSamplingParams
+{
+    BridgeSamplingParams params;
+    params.window_size = 32;
+    params.min_samples_for_healthy = 8;
+    return params;
+}
+
+auto feed(PtpTimeBridge& bridge, PtpTimeBridge::SamplerState& state, ToldPhc& phc, int readings) -> void
+{
+    for (int i = 0; i < readings; ++i) {
+        (void)bridge.observe(state, phc.next());
+    }
+}
+
+}  // namespace
+
+TEST(ptp_bridge_quality, no_bound_is_claimed_before_the_first_healthy_fit)
+{
+    PtpTimeBridge bridge;
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    // A PHC that cannot be read teaches nothing.
+    phc.fails = true;
+    feed(bridge, state, phc, 20);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    // Seven readings are one short of a fit; the eighth makes it.
+    phc.fails = false;
+    feed(bridge, state, phc, 7);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_FALSE(bridge.is_healthy());
+    feed(bridge, state, phc, 1);
+    EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_TRUE(bridge.quality().is_bounded());
+}
+
+TEST(ptp_bridge_quality, a_fit_is_bounded_by_its_worst_residual_and_half_its_longest_read)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 30};
+    feed(bridge, state, phc, 64);
+
+    // Readings that lie on a line, each taken in 400 ns: known to 200 ns.
+    auto quality = bridge.quality();
+    EXPECT_TRUE(quality.is_bounded());
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{200} && quality.bound_at_sync <= Nanoseconds{202});
+    // As of the newest sample, on this timeline, from a PTP clock.
+    EXPECT_EQ(MonotonicRawClock::to_ns(quality.synced_at), phc.last_sample_raw_ns());
+    EXPECT_EQ(quality.epoch, bridge.epoch());
+    EXPECT_TRUE(quality.time_source == statusbar::realtime::TimeSource::ptp);
+    // The configured drift, plus the rounding of the rate the line is published with.
+    EXPECT_EQ(quality.drift_bound_ppb, params.holdover_drift_ppb + 500);
+
+    // PHC reads that scatter 3 us either side of the line widen the bound
+    // by that. The pattern (+ - - +) has no slope of its own to tilt the fit.
+    constexpr int64_t SCATTER_NS[4] = {3'000, -3'000, -3'000, 3'000};
+    for (int i = 0; i < 64; ++i) {
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+    }
+    quality = bridge.quality();
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{3'200} && quality.bound_at_sync <= Nanoseconds{3'210});
+
+    // And slower reads by half their length: 2 us brackets, 800 ns more.
+    phc.bracket_ns = 2'000;
+    for (int i = 0; i < 64; ++i) {
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+    }
+    quality = bridge.quality();
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{4'000} && quality.bound_at_sync <= Nanoseconds{4'010});
+}
+
+TEST(ptp_bridge_quality, when_the_phc_cannot_be_read_the_line_coasts)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 30};
+    feed(bridge, state, phc, 64);
+    auto const at_loss = bridge.quality();
+    EXPECT_TRUE(at_loss.is_bounded());
+
+    // Thirty seconds in which the PHC does not answer. The sampler keeps
+    // trying; nothing is fitted and nothing is withdrawn.
+    phc.fails = true;
+    feed(bridge, state, phc, 15'000);
+    EXPECT_TRUE(bridge.quality() == at_loss);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+
+    // Only the age has grown, and the uncertainty with it: 30 s at 15.5 ppm.
+    auto const later = at_loss.synced_at + std::chrono::seconds{30};
+    EXPECT_EQ(at_loss.uncertainty(later).count(), at_loss.bound_at_sync.count() + 465'000);
+    // The line still converts with the rate and offset it had: a PHC that
+    // held its rate is where the line says, far inside the bound.
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
+    EXPECT_TRUE(std::abs(bridge.to_raw_ns(phc.phc_ns) - phc.raw_ns) <= 5);
+
+    // The PHC answers again: the anchor moves on to the new readings.
+    phc.fails = false;
+    feed(bridge, state, phc, 4);
+    EXPECT_EQ(MonotonicRawClock::to_ns(bridge.quality().synced_at), phc.last_sample_raw_ns());
+    EXPECT_EQ(bridge.quality().epoch, at_loss.epoch);
+}
+
+TEST(ptp_bridge_quality, a_new_epoch_claims_nothing_until_the_fit_is_healthy_again)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    uint64_t const epoch_before = bridge.epoch();
+
+    bridge.reset_epoch();
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    // The window starts again: seven readings are not enough, eight are.
+    feed(bridge, state, phc, 7);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    feed(bridge, state, phc, 1);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+}
+
+TEST(ptp_bridge_quality, a_step_of_the_phc_is_a_new_epoch)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+    uint64_t const epoch_before = bridge.epoch();
+
+    // The PHC is stepped a second ahead between two readings.
+    phc.phc_ns += 1'000'000'000;
+    feed(bridge, state, phc, 1);
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_FALSE(bridge.is_healthy());
+
+    // Fitted afresh on the new timeline, and bounded on it.
+    feed(bridge, state, phc, 8);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
+}
+
+TEST(ptp_bridge_quality, a_rate_seen_moving_raises_the_drift_bound)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.holdover_drift_ppb = 1'000;  // a good oscillator in a steady room
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 10};
+    feed(bridge, state, phc, 96);
+    EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000 + 500});
+
+    // The servo pulls the PHC 50 ppm: the rate the line holds was seen to
+    // move by that much within a window, so it may be that far out again.
+    phc.ppm = 60;
+    feed(bridge, state, phc, 48);
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb > uint32_t{40'000});
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb <= uint32_t{51'000});
+
+    // Steady again for a few windows, the configured figure stands.
+    feed(bridge, state, phc, 160);
+    EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000 + 500});
+}
+
+//
 // Tests: SamplingGuard - RAII behavior
 //
 

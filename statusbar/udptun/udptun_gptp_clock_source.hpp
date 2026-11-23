@@ -47,6 +47,12 @@ class GptpSlaveClockSource
 
     [[nodiscard]] auto is_healthy() const noexcept -> bool { return session_->synced(); }
 
+    /// How well the bridge's line is known. While Syncs arrive it is
+    /// refreshed at each one; when they stop it grows from the last, and
+    /// the line goes on converting with the rate and offset it had. A
+    /// realtime::Timer on this source tells every wake that accuracy.
+    [[nodiscard]] auto quality() const noexcept -> realtime::ClockQuality { return session_->bridge().quality(); }
+
   private:
     gptp::SlaveSession* session_;
 };

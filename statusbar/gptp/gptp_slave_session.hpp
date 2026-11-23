@@ -51,6 +51,11 @@ struct SlaveSessionConfig
     clockid_t bridge_clock{-1};  // <0 → bridge disabled
     bool verbose{false};
 
+    /// How fast the bridge's line may go wrong while no Sync arrives, in
+    /// parts per billion: the deployment's oscillator and temperature
+    /// figure. See GptpTimeBridge::holdover_drift_ppb.
+    uint32_t holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+
     /// When true (and software_timestamping is false), use the
     /// hardware-timestamping passthrough path: PHC is read for time
     /// and used for SO_TIMESTAMPING, but the servo's phase / frequency
@@ -110,6 +115,10 @@ class SlaveSession
     [[nodiscard]] auto synced() const noexcept -> bool { return is_synced_.load(std::memory_order_relaxed); }
 
   private:
+    /// A different grandmaster is a different timeline: tell the bridge,
+    /// with the time source the new one announces.
+    void follow_grandmaster();
+
     SlaveSessionConfig cfg_;
     int raw_fd_{-1};
     int phc_fd_{-1};
@@ -123,6 +132,7 @@ class SlaveSession
     GptpTimeBridge bridge_{};
     std::array<uint8_t, 1500> payload_buf_{};
     std::atomic<bool> is_synced_{false};
+    uint64_t grandmaster_id_{0};
 };
 
 }  // namespace statusbar::gptp
