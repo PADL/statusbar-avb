@@ -4,9 +4,11 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/sm/sm.hpp"
+#include "statusbar/srp/srp_msrp_carried_test_support.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -411,6 +413,67 @@ TEST(nanoavb_srp_msrp, listener_attach_upgrades_when_talker_advertises)
     auto const reattached = listener.listener_attach(sid, now);
     EXPECT_TRUE(reattached.has_value());
     EXPECT_EQ(*reattached, ListenerReservationState::Ready);
+}
+
+// The upgrade is a change of Declaration Type under the StreamID the listener
+// already declares. It goes on the wire as IEEE 802.1Q 35.2.6 has it: a Join
+// carrying Ready, with no Leave before it and no New.
+TEST(nanoavb_srp_msrp, an_attached_listener_upgrades_to_ready_with_a_join)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    using statusbar::srp::msrp::MsrpConfig;
+    using statusbar::srp::msrp::test_support::listener_carried;
+
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> talker_out;
+    std::vector<std::vector<uint8_t>> listener_out;
+    statusbar::tsn::StreamId sid;
+    sid.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+    sid.set_unique_id(9);
+    MsrpHandler<> talker{MsrpConfig{}, MsrpCallbacks{.send_packet = [&talker_out](std::span<uint8_t const> p) {
+                             talker_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+    MsrpHandler<> listener{MsrpConfig{}, MsrpCallbacks{.send_packet = [&listener_out](std::span<uint8_t const> p) {
+                               listener_out.emplace_back(p.begin(), p.end());
+                               return true;
+                           }}};
+
+    // Attached with nobody advertising: Asking Failed, settled on the wire.
+    EXPECT_TRUE(listener.listener_attach(sid, now).has_value());
+    for (int round = 0; round < 30; ++round) {
+        now += std::chrono::milliseconds{120};
+        listener.tick(now);
+    }
+    auto const before = listener_carried(listener_out);
+    EXPECT_TRUE(!before.empty() && before.back().declaration == ListenerDeclaration::AskingFailed);
+    EXPECT_TRUE(!before.empty() && before.back().event != AttributeEvent::New);
+    listener_out.clear();
+
+    // The talker starts advertising; what the listener sends is kept.
+    TalkerStreamSrpInfo info;
+    info.stream_id = sid;
+    info.max_frame_size = 416;
+    info.max_interval_frames = 1;
+    (void)talker.talker_advertise(info, now);
+    for (int round = 0; round < 12; ++round) {
+        now += std::chrono::milliseconds{120};
+        talker.tick(now);
+        listener.tick(now);
+        for (auto const& p : talker_out) {
+            listener.receive_packet(p, now);
+        }
+        talker_out.clear();
+    }
+    EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
+
+    auto const after = listener_carried(listener_out);
+    auto const first_ready =
+        std::ranges::find_if(after, [](auto const& value) { return value.declaration == ListenerDeclaration::Ready; });
+    EXPECT_TRUE(first_ready != after.end());
+    EXPECT_TRUE(std::ranges::none_of(
+        after, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
 }
 
 //

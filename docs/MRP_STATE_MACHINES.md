@@ -236,6 +236,14 @@ Exposes:
   `withdraw_listener`, `declare_domain`, `withdraw_domain`. Each
   returns `Status` that will be `TsnError::AttributeTableFull` if the
   backing table is at capacity.
+  The first declaration of an attribute the port was not declaring is
+  told `New!`. A Listener whose Declaration Type changes under a
+  StreamID the port already declares (Asking Failed to Ready when the
+  Talker Advertise arrives, and back) sends a Join carrying the new
+  FourPackedEvent, with no Leave before it: IEEE 802.1Q 35.2.6 has the
+  receiver treat it as the old registration leaving and the new one
+  joining. A changed Talker Advertise or Domain value is a different
+  attribute and leaves the old value first.
 - **Talker transmit authorization** — `listener_permits_transmit(stream_id)`
   returns `true` iff a peer listener declaration for this stream has
   been received with substate `Ready` or `ReadyFailed` *and* the

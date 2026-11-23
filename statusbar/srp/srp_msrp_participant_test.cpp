@@ -4,6 +4,7 @@
 #include "statusbar/srp/srp_msrp_participant.hpp"
 
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/srp/srp_msrp_carried_test_support.hpp"
 #include "statusbar/srp/srp_msrp_format.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
@@ -787,7 +788,7 @@ TEST(msrp_participant, own_leaveall_does_not_drop_listener_reservation)
     // Fire A's own LeaveAll many times (each ~20 s jump) with NO re-Join delivered
     // from b. Our own LeaveAll must never age our own Registrars (In -> Lv -> Mt):
     // it never touches them, so the transmit gate holds.
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 12; ++i) {
         t = clock.advance(std::chrono::seconds(20));
         a.tick(t);
         EXPECT_TRUE(a.listener_permits_transmit(sid));  // not dropped by our own LeaveAll
@@ -1822,6 +1823,173 @@ TEST(msrp_participant, a_leaveall_between_the_leave_and_the_new_redeclares_the_n
     }
     EXPECT_TRUE(saw_new);
     EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+}
+
+// The first declaration of an attribute the port was not declaring is told
+// New! (IEEE 802.1Q 10.7.5.4), whichever type it is: the first PDU carries a
+// Talker Advertise, a Talker Failed, a Listener and a Domain each as New.
+TEST(msrp_participant, a_first_declaration_is_told_new)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd101};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+
+    TalkerFailedFirstValue failed{};
+    failed.advertise = make_talker_adv(2);
+    failed.set_failure_code(FailureCode::InsufficientBandwidth);
+    DomainFirstValue domain{};
+    domain.sr_class_id = 6;
+    domain.sr_class_priority = 3;
+    domain.sr_class_vid.set(2);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    EXPECT_TRUE(is_success(a.declare_talker_failed(failed, clock.now)));
+    EXPECT_TRUE(is_success(a.declare_listener(make_stream_id(3), ListenerDeclaration::Ready, clock.now)));
+    EXPECT_TRUE(is_success(a.declare_domain(domain, clock.now)));
+
+    a.transmit_pending(clock.now);
+    EXPECT_EQ(fab.a_to_b.size(), 1u);
+    auto const pdu = fab.a_to_b.empty() ? std::vector<uint8_t>{} : fab.a_to_b.front();
+    auto const talkers = talker_advertise_carried(pdu);
+    auto const faileds = talker_failed_carried(pdu);
+    auto const listeners = test_support::listener_carried(std::span<uint8_t const>(pdu));
+    auto const domains = domain_carried(pdu);
+    EXPECT_TRUE(talkers.size() == 1 && talkers.front().event == AttributeEvent::New);
+    EXPECT_TRUE(faileds.size() == 1 && faileds.front().event == AttributeEvent::New);
+    EXPECT_TRUE(listeners.size() == 1 && listeners.front().event == AttributeEvent::New);
+    EXPECT_TRUE(domains.size() == 1 && domains.front().event == AttributeEvent::New);
+}
+
+// A Listener's Declaration Type changes under the StreamID the port already
+// declares: Asking Failed while the Talker Advertise is missing, Ready once
+// it has arrived, Asking Failed again when the talker has gone. IEEE 802.1Q
+// 35.2.6: the change is a JoinIn or JoinMt carrying the new FourPackedEvent,
+// with no withdrawal of the old declaration and no New.
+TEST(msrp_participant, a_listener_whose_declaration_type_changes_sends_it_as_a_join)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd102};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto const sid = make_stream_id(0x0051);
+    std::vector<test_support::CarriedListener> everything{};
+    auto const settle = [&] {
+        for (int i = 0; i < 12; ++i) {
+            a.tick(clock.advance(std::chrono::milliseconds(250)));
+        }
+        auto const carried = test_support::listener_carried(fab.a_to_b);
+        everything.insert(everything.end(), carried.begin(), carried.end());
+        fab.a_to_b.clear();
+        return carried;
+    };
+    auto const is_join = [](AttributeEvent const event) {
+        return event == AttributeEvent::JoinMt || event == AttributeEvent::JoinIn;
+    };
+
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::AskingFailed, clock.now)));
+    auto const first = settle();
+    EXPECT_TRUE(!first.empty() && first.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!first.empty() && first.front().declaration == ListenerDeclaration::AskingFailed);
+    // Settled: the declaration is re-asserted as a Join, no longer as New.
+    EXPECT_TRUE(!first.empty() && is_join(first.back().event));
+
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    a.transmit_pending(clock.now);
+    auto const upgraded = settle();
+    EXPECT_TRUE(!upgraded.empty() && is_join(upgraded.front().event));
+    EXPECT_TRUE(!upgraded.empty() && upgraded.front().declaration == ListenerDeclaration::Ready);
+    EXPECT_EQ(a.listener_count(), 1u);
+
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::AskingFailed, clock.now)));
+    a.transmit_pending(clock.now);
+    auto const downgraded = settle();
+    EXPECT_TRUE(!downgraded.empty() && is_join(downgraded.front().event));
+    EXPECT_TRUE(!downgraded.empty() && downgraded.front().declaration == ListenerDeclaration::AskingFailed);
+
+    // One attribute throughout, never left, and New only while it was new.
+    for (auto const& carried : everything) {
+        EXPECT_EQ(carried.unique_id, 0x0051);
+        EXPECT_TRUE(carried.event != AttributeEvent::Lv);
+        EXPECT_TRUE(carried.event != AttributeEvent::New || carried.declaration == ListenerDeclaration::AskingFailed);
+    }
+}
+
+// The receiving half of 35.2.6: a peer whose Listener changes its Declaration
+// Type with a Join is reported with each new type as it arrives, and is
+// never reported as having left.
+TEST(msrp_participant, a_peer_listener_whose_type_changes_with_a_join_is_reported_and_never_left)
+{
+    MsrpParticipant talker{test_msrp_config(), 0xd104};
+    MsrpParticipant listener{test_msrp_config(), 0xd105};
+    Fabric fab{};
+    talker.set_send_pdu(fab.make_a_sender());
+    listener.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    talker.start(clock.now);
+    listener.start(clock.now);
+    std::vector<ListenerDeclaration> reported{};
+    int leaves = 0;
+    Observer obs{};
+    obs.on_listener = [&](tsn::StreamId const&, ListenerDeclaration const decl, Operation) {
+        if (reported.empty() || reported.back() != decl) {
+            reported.push_back(decl);
+        }
+    };
+    obs.on_listener_leave = [&](tsn::StreamId const&) { ++leaves; };
+    talker.subscribe(obs);
+    auto const sid = make_stream_id(0x0053);
+    auto const declare_and_settle = [&](ListenerDeclaration const decl) {
+        EXPECT_TRUE(is_success(listener.declare_listener(sid, decl, clock.now)));
+        for (int i = 0; i < 12; ++i) {
+            auto const now = clock.advance(std::chrono::milliseconds(250));
+            listener.tick(now);
+            fab.deliver_b_to_a(talker, now);
+        }
+    };
+
+    declare_and_settle(ListenerDeclaration::AskingFailed);
+    declare_and_settle(ListenerDeclaration::Ready);
+    declare_and_settle(ListenerDeclaration::ReadyFailed);
+    declare_and_settle(ListenerDeclaration::AskingFailed);
+
+    std::vector<ListenerDeclaration> const expected{
+        ListenerDeclaration::AskingFailed,
+        ListenerDeclaration::Ready,
+        ListenerDeclaration::ReadyFailed,
+        ListenerDeclaration::AskingFailed};
+    EXPECT_TRUE(reported == expected);
+    EXPECT_EQ(leaves, 0);
+}
+
+// Declaring the type that already stands changes nothing a peer has to act
+// on: it stays a Join (a second input attaching to the same stream does this).
+TEST(msrp_participant, a_listener_redeclared_with_the_type_that_stands_is_not_new)
+{
+    MsrpParticipant a{test_msrp_config(), 0xd103};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto const sid = make_stream_id(0x0052);
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    for (int i = 0; i < 12; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    fab.a_to_b.clear();
+
+    EXPECT_TRUE(is_success(a.declare_listener(sid, ListenerDeclaration::Ready, clock.now)));
+    a.transmit_pending(clock.now);
+    for (int i = 0; i < 12; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+    auto const carried = test_support::listener_carried(fab.a_to_b);
+    EXPECT_FALSE(carried.empty());
+    for (auto const& value : carried) {
+        EXPECT_TRUE(value.event != AttributeEvent::New && value.event != AttributeEvent::Lv);
+        EXPECT_TRUE(value.declaration == ListenerDeclaration::Ready);
+    }
 }
 
 TEST(msrp_participant, declared_attribute_reasserts_each_periodic)

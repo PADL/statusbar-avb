@@ -525,15 +525,14 @@ void MsrpParticipantT<Limits>::declare_new_value(AttributeRecord<FirstValue>& re
 
 /// A first declaration, a same-value re-declaration or (for a Talker
 /// Advertise) an AccumulatedLatency update: the value goes into the record in
-/// place and the applicant is told New! or Join! as first_declare_event decides.
+/// place and the applicant is told New! or Join! as mark_declared decides.
 template <class Limits>
 template <class FirstValue>
 void MsrpParticipantT<Limits>::adopt_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now)
 {
     rec.first_value = fv;
-    rec.operation = Operation::Declare;
     rec.pending_first_value.reset();
-    mrp::dispatch_applicant(rec, first_declare_event(rec), now);
+    mrp::dispatch_applicant(rec, mark_declared(rec), now);
 }
 
 /// A changed value under a declared key (a Talker Advertise's StreamID, a
@@ -594,12 +593,7 @@ auto MsrpParticipantT<Limits>::declare_talker_failed(TalkerFailedFirstValue cons
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
-    auto& rec = *rec_ptr;
-    rec.first_value = fv;
-    rec.operation = Operation::Declare;
-
-    auto const event = first_declare_event(rec);
-    mrp::dispatch_applicant(rec, event, now);
+    adopt_value(*rec_ptr, fv, now);
     port_.timers().start_join(now);
     return success();
 }
@@ -634,15 +628,26 @@ auto MsrpParticipantT<Limits>::declare_listener(tsn::StreamId const& stream_id, 
     if (rec_ptr == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
-    auto& rec = *rec_ptr;
-    rec.operation = Operation::Declare;
-    rec.substate = decl;
-
-    auto const event = first_declare_event(rec);
-    rec.applicant_ctx.clear_outputs();
-    rec.applicant_sm.handle_event(rec.applicant_ctx, event, now);
+    declare_listener_type(*rec_ptr, decl, now);
     port_.timers().start_join(now);
     return success();
+}
+
+/// A Listener's Declaration Type is not part of its FirstValue (the StreamID
+/// alone): it rides the FourPackedEvents of the one attribute. A change of
+/// type under a StreamID this port already declares is a Join carrying the
+/// new FourPackedEvent, as IEEE 802.1Q 35.2.6 describes it: the receiver
+/// behaves as though the old registration left and the new one joined, which
+/// "allows an Applicant to indicate a change in a stream reservation ...
+/// without having to issue both a withdrawal of the old attribute, and a
+/// declaration of the new". Only a declaration the port was not making is New.
+template <class Limits>
+void MsrpParticipantT<Limits>::declare_listener_type(ListenerRecord& rec, ListenerDeclaration decl, TimePoint now)
+{
+    auto const event = mark_declared(rec);
+    rec.substate = decl;
+    rec.applicant_ctx.clear_outputs();
+    rec.applicant_sm.handle_event(rec.applicant_ctx, event, now);
 }
 
 template <class Limits>

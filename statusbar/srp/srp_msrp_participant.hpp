@@ -317,7 +317,13 @@ class MsrpParticipantT
     /// through LA -> VO and reclaim.
     auto withdraw_talker(tsn::StreamId const& stream_id, TimePoint now) -> Status;
 
-    /// Declare local Listener interest in a stream.
+    /// Declare local Listener interest in a stream. A first declaration is
+    /// told New!. A change of Declaration Type under a StreamID this port
+    /// already declares (Asking Failed to Ready when the Talker Advertise
+    /// arrives, and back) is a Join that carries the new FourPackedEvent,
+    /// with no Leave before it: IEEE 802.1Q 35.2.6 has the receiver treat a
+    /// JoinIn or JoinMt whose FourPackedEvent changed as the old registration
+    /// leaving and the new one joining.
     auto declare_listener(tsn::StreamId const& stream_id, ListenerDeclaration decl, TimePoint now) -> Status;
 
     /// Withdraw local Listener interest.
@@ -599,6 +605,8 @@ class MsrpParticipantT
     static void declare_new_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
     template <class FirstValue>
     static void adopt_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
+    /// The Listener record takes @p decl as this port's Declaration Type.
+    static void declare_listener_type(ListenerRecord& rec, ListenerDeclaration decl, TimePoint now);
     template <class FirstValue>
     static void change_declared_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
     template <class Table>
@@ -879,7 +887,8 @@ class MsrpParticipantT
 
     /// The applicant event for a local (re)declaration: New when the attribute is not
     /// yet actively declared (operation Register AND applicant idle in Start/Vo), else
-    /// Join. Shared by every declare_* handler so this rule lives in one place.
+    /// Join. It reads the record as it stood BEFORE this declaration, so it is asked
+    /// through mark_declared(), which keeps the question ahead of the mark.
     template <class Record>
     [[nodiscard]] static auto first_declare_event(Record const& rec) noexcept -> applicant_sm::Def::Event
     {
@@ -887,6 +896,18 @@ class MsrpParticipantT
             (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
              rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
         return is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    }
+
+    /// Marks the record as one this port declares and answers the applicant event
+    /// that goes with it (first_declare_event of the record as it stood). Every
+    /// declare_* handler takes its event from here: a handler that set the mark
+    /// first and asked afterwards would never be told New.
+    template <class Record>
+    [[nodiscard]] static auto mark_declared(Record& rec) noexcept -> applicant_sm::Def::Event
+    {
+        auto const event = first_declare_event(rec);
+        rec.operation = Operation::Declare;
+        return event;
     }
 
     //
