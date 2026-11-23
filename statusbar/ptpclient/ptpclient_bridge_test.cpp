@@ -671,6 +671,62 @@ TEST(ptp_bridge_sleep, the_wake_is_told_in_ptp_through_the_mapping_it_slept_unde
     EXPECT_EQ(stale.error().value(), static_cast<int>(PtpError::bridge_epoch_changed));
 }
 
+TEST(ptp_bridge_sleep, the_headroom_is_the_spin_window_less_how_late_the_kernel_woke_the_thread)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    auto const mono_wake = bridge.early_wake_monotonic(*plan, raw(phc.raw_ns));
+    // CLOCK_MONOTONIC at rate one: the early wake is the window before the deadline.
+    auto const on_time = plan->raw_deadline - 50us;
+
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time) == 50us);          // woken on time: all of it
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 20us) == 30us);   // 20 us late
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 50us) == 0us);    // at the deadline
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 80us) == -30us);  // overran it
+}
+
+TEST(ptp_bridge_sleep, the_slew_term_of_the_early_wake_is_not_counted_as_headroom)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.mono_ppm = 1'000};  // CLOCK_MONOTONIC slewed 1000 ppm fast
+    feed(bridge, state, phc, 64);
+
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    // The early wake is about 60 us ahead: the window and 10 us for the slew.
+    auto const mono_wake = bridge.early_wake_monotonic(*plan, raw(phc.raw_ns));
+    auto const raw_at_wake = bridge.raw_line().from_monotonic(mono_wake);
+
+    // Woken on time, the thread has the window, not the window and the slew term.
+    EXPECT_TRUE(abs_ns(bridge.spin_headroom(*plan, mono_wake, raw_at_wake) - 50us) <= 100);
+    EXPECT_TRUE(abs_ns(bridge.spin_headroom(*plan, mono_wake, raw_at_wake + 20us) - 30us) <= 100);
+}
+
+TEST(ptp_bridge_sleep, a_wake_that_never_slept_tells_no_headroom)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc const phc = tell_history_ending_now(bridge, state);
+
+    // A deadline already behind: nothing to sleep for, and the spin ends at once.
+    constexpr Nanoseconds untouched{-1};
+    Nanoseconds headroom = untouched;
+    auto const result = bridge.sleep_until_ptp(ptp(phc.phc_ns - 1'000'000LL), nullptr, &headroom);
+
+    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(headroom == untouched);
+}
+
 // The one test of the sleep itself on the real clocks. It says nothing of
 // how long the sleep took, only what no amount of load can change: it does
 // not end before its deadline, and the wake it tells is one instant on both

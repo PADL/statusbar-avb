@@ -406,7 +406,9 @@ auto PtpTimeBridge::telemetry() const noexcept -> BridgeTelemetry
 }
 
 auto PtpTimeBridge::sleep_until_ptp(
-    realtime::GptpClock0::time_point const ptp_deadline, std::atomic<bool> const* keep_going) noexcept -> StatusValue<WakeTimes>
+    realtime::GptpClock0::time_point const ptp_deadline,
+    std::atomic<bool> const* keep_going,
+    realtime::Nanoseconds* const spin_headroom) noexcept -> StatusValue<WakeTimes>
 {
     auto const plan = prepare_sleep(ptp_deadline);
     if (!plan) {
@@ -419,13 +421,11 @@ auto PtpTimeBridge::sleep_until_ptp(
     if (told_to_stop(keep_going)) {
         return failure(PtpError::bridge_not_running);
     }
-    if (auto const slept = sleep_early(*plan); !slept) {
-        return forward_failure(slept);
+    auto const headroom = sleep_early(*plan);
+    if (!headroom) {
+        return forward_failure(headroom);
     }
-    if (!spin_to(plan->raw_deadline, keep_going)) {
-        return failure(PtpError::bridge_not_running);
-    }
-    return wake_times(plan->before);
+    return finish_sleep(*plan, keep_going, *headroom, spin_headroom);
 }
 
 auto PtpTimeBridge::told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool
@@ -433,7 +433,19 @@ auto PtpTimeBridge::told_to_stop(std::atomic<bool> const* keep_going) noexcept -
     return keep_going != nullptr && !keep_going->load(std::memory_order_relaxed);
 }
 
-auto PtpTimeBridge::sleep_early(SleepPlan const& plan) const noexcept -> Status
+auto PtpTimeBridge::spin_headroom(
+    SleepPlan const& plan,
+    realtime::MonotonicClock::time_point const mono_wake,
+    realtime::MonotonicRawClock::time_point const raw_after_sleep) const noexcept -> realtime::Nanoseconds
+{
+    // The early wake is the window plus the slew term ahead of the deadline.
+    // What is left to spin, less the slew term, is what is left of the window.
+    realtime::Nanoseconds const window{std::max<int64_t>(params_.wake_refine_spin_ns, 0)};
+    realtime::Nanoseconds const slew_term = (plan.mono_deadline - mono_wake) - window;
+    return (plan.raw_deadline - raw_after_sleep) - slew_term;
+}
+
+auto PtpTimeBridge::sleep_early(SleepPlan const& plan) const noexcept -> StatusValue<std::optional<realtime::Nanoseconds>>
 {
     // One kernel sleep primitive on every platform, on the clock the line
     // maps to. (The macOS branch used to sleep on std::chrono::steady_clock,
@@ -442,28 +454,53 @@ auto PtpTimeBridge::sleep_early(SleepPlan const& plan) const noexcept -> Status
     // ever slept.)
     auto const mono_wake = early_wake_monotonic(plan, realtime::read_monotonic_raw());
     if (mono_wake <= realtime::read_monotonic()) {
-        return {};
+        return success(std::optional<realtime::Nanoseconds>{});
     }
     // EINTR is a signal received: an error, so the caller can check its
     // shutdown flag.
     int const rc = realtime::sleep_until_monotonic(mono_wake);
-    return rc == 0 ? Status{} : failure(std::error_code(rc, std::system_category()));
+    if (rc != 0) {
+        return failure(std::error_code(rc, std::system_category()));
+    }
+    return success(std::optional{spin_headroom(plan, mono_wake, realtime::read_monotonic_raw())});
 }
 
 auto PtpTimeBridge::spin_to(
     realtime::MonotonicRawClock::time_point const raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool
 {
-    // Precise finish: spin on CLOCK_MONOTONIC_RAW to the exact RAW deadline.
-    // sched_yield while still far out to avoid a hard busy-loop; bail on shutdown.
-    for (auto now = realtime::read_monotonic_raw(); now < raw_deadline; now = realtime::read_monotonic_raw()) {
+    // Precise finish: spin on CLOCK_MONOTONIC_RAW (a vDSO read) to the exact
+    // RAW deadline, bailing on shutdown. A yield is a system call and may
+    // not come back for a while, so it is rationed and kept away from the
+    // deadline; every other turn is only the CPU's pause hint.
+    auto last_yield = realtime::read_monotonic_raw();
+    for (auto now = last_yield; now < raw_deadline; now = realtime::read_monotonic_raw()) {
         if (!is_running_atomic() || told_to_stop(keep_going)) {
             return false;
         }
-        if (raw_deadline - now > realtime::Nanoseconds{10'000}) {
+        if (now - last_yield > SPIN_YIELD_INTERVAL && raw_deadline - now > SPIN_NO_YIELD) {
             ::sched_yield();
+            last_yield = now;
+        } else {
+            realtime::cpu_relax();
         }
     }
     return true;
+}
+
+auto PtpTimeBridge::finish_sleep(
+    SleepPlan const& plan,
+    std::atomic<bool> const* keep_going,
+    std::optional<realtime::Nanoseconds> const headroom,
+    realtime::Nanoseconds* const spin_headroom) noexcept -> StatusValue<WakeTimes>
+{
+    if (!spin_to(plan.raw_deadline, keep_going)) {
+        return failure(PtpError::bridge_not_running);
+    }
+    auto wake = wake_times(plan.before);
+    if (wake && headroom && spin_headroom != nullptr) {
+        *spin_headroom = *headroom;
+    }
+    return wake;
 }
 
 auto PtpTimeBridge::wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>

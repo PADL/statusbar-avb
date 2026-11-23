@@ -22,6 +22,7 @@
 #include <ctime>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -415,6 +416,19 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] auto early_wake_monotonic(SleepPlan const& plan, realtime::MonotonicRawClock::time_point raw_now) const noexcept
         -> realtime::MonotonicClock::time_point;
 
+    /// Told form of the spin headroom: what was left of the spin window
+    /// (BridgeSamplingParams::wake_refine_spin_ns) when the coarse sleep to
+    /// @p mono_wake returned, told that RAW then read @p raw_after_sleep.
+    /// The whole window when the kernel woke the thread on time, less as it
+    /// woke it later, negative once the sleep overran the window: the wake
+    /// latency is the window less the headroom. The slew term of the early
+    /// wake is planned earliness and none of the kernel's lateness, so it
+    /// is not counted.
+    [[nodiscard]] auto spin_headroom(
+        SleepPlan const& plan,
+        realtime::MonotonicClock::time_point mono_wake,
+        realtime::MonotonicRawClock::time_point raw_after_sleep) const noexcept -> realtime::Nanoseconds;
+
     /// Finalize after sleep: validate epoch and convert the RAW wake time back to
     /// PTP via the primary (PHC<->RAW) mapping.
     /// @return current PTP time, or error if epoch changed or mapping unhealthy
@@ -439,11 +453,15 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     ///        false the call returns bridge_not_running, as it already does
     ///        when this bridge stops, so a timer being stopped returns to its
     ///        loop at once instead of sleeping out its period.
+    /// @param spin_headroom Optional: gets spin_headroom() for this wake when
+    ///        the call slept and succeeded. Left alone otherwise, so a
+    ///        caller keeping statistics can tell a wake that never slept.
     /// @return The wake instant on both clocks (the caller measures its wake
     ///         accuracy from ptp), or an error
     [[nodiscard]] auto sleep_until_ptp(
-        realtime::GptpClock0::time_point ptp_deadline, std::atomic<bool> const* keep_going = nullptr) noexcept
-        -> StatusValue<WakeTimes>;
+        realtime::GptpClock0::time_point ptp_deadline,
+        std::atomic<bool> const* keep_going = nullptr,
+        realtime::Nanoseconds* spin_headroom = nullptr) noexcept -> StatusValue<WakeTimes>;
 
     // Manual Epoch Control
 
@@ -465,13 +483,26 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] static auto told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool;
     /// The coarse sleep on CLOCK_MONOTONIC, to the plan's early wake. No sleep
     /// at all when that instant is not ahead.
-    [[nodiscard]] auto sleep_early(SleepPlan const& plan) const noexcept -> Status;
-    /// Spin on CLOCK_MONOTONIC_RAW to @p raw_deadline.
+    /// @return the spin headroom the sleep left, nothing when it did not sleep
+    [[nodiscard]] auto sleep_early(SleepPlan const& plan) const noexcept -> StatusValue<std::optional<realtime::Nanoseconds>>;
+    /// Spin on CLOCK_MONOTONIC_RAW to @p raw_deadline, with a pause hint
+    /// each turn. It gives the CPU up (sched_yield) at most once in
+    /// SPIN_YIELD_INTERVAL, and not at all in the last SPIN_NO_YIELD.
     /// @return false when the bridge or the caller stopped first
     [[nodiscard]] auto spin_to(
         realtime::MonotonicRawClock::time_point raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool;
     /// One RAW read at the end of the spin, and the PTP time it converts to.
     [[nodiscard]] auto wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>;
+    /// The spin and the wake after it; a wake that succeeded tells the
+    /// caller the headroom its sleep left.
+    [[nodiscard]] auto finish_sleep(
+        SleepPlan const& plan,
+        std::atomic<bool> const* keep_going,
+        std::optional<realtime::Nanoseconds> headroom,
+        realtime::Nanoseconds* spin_headroom) noexcept -> StatusValue<WakeTimes>;
+
+    static constexpr realtime::Nanoseconds SPIN_YIELD_INTERVAL{20'000};
+    static constexpr realtime::Nanoseconds SPIN_NO_YIELD{10'000};
 
     /// The PHC half of a reading: record its bracket, reject an over-long
     /// one, else push (RAW midpoint, PHC) into the primary window.

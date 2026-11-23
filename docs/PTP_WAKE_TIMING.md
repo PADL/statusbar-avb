@@ -315,6 +315,21 @@ RAW deadline becomes a coarse `CLOCK_MONOTONIC` target, the thread wakes
 early by a guard sized from the line's rate, then spins on RAW to the
 deadline. `CLOCK_MONOTONIC` is for sleeping, never for timing.
 
+The guard is `wake_refine_spin_ns` (the spin window, 50 us by default) plus
+a slew term for what `CLOCK_MONOTONIC` could gain on RAW over the sleep. The
+spin reads RAW with the CPU's pause hint each turn. It gives the CPU up with
+`sched_yield()` at most once every 20 us and never in the last 10 us, since a
+yield is a system call that may come back late.
+
+`sleep_until_ptp()` can report the **spin headroom** of each wake through its
+third argument: what was left of the spin window when the kernel sleep
+returned. It is the whole window when the kernel woke the thread on time and
+negative when the sleep overran the window, so the kernel's wake latency is
+the window less the headroom. A window that the headroom never comes near the
+bottom of can be made smaller, which spins less; a headroom that goes negative
+means late wakes, and the window wants to be larger. A wake that did not sleep
+reports nothing. `spin_headroom()` is the same figure told its clock readings.
+
 The startup lines above print one `CLOCK_MONOTONIC_RAW` reading and the
 PTP-minus-RAW difference for orientation; the mapping the timer runs on is
 the continuously sampled RAW fit.
