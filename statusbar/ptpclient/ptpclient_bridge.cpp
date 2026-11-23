@@ -516,7 +516,9 @@ auto PtpTimeBridge::collect_sample(
     // The RAW<->MONOTONIC line does not depend on the PHC read: the tracker
     // is told the pair at the RAW midpoint of the MONOTONIC bracket whatever
     // the PHC did, so the sleeps have a fresh line even while unhealthy.
-    (void)raw_tracker.push((reading.raw_after_phc + reading.raw_after_mono) / 2, reading.mono);
+    (void)raw_tracker.push(
+        realtime::MonotonicRawClock::from_ns((reading.raw_after_phc + reading.raw_after_mono) / 2),
+        realtime::MonotonicClock::from_ns(reading.mono));
     if (!reading.phc) {
         return false;
     }

@@ -278,20 +278,10 @@ struct GptpContext
         , adapter{*ptp.bridge}
     {}
 
-    // Move only - adapter holds pointer to bridge, so moves must update it
-    GptpContext(GptpContext&& other) noexcept
-        : ptp{std::move(other.ptp)}
-        , adapter{*ptp.bridge}  // Re-bind adapter to our bridge after move
-    {}
-
-    auto operator=(GptpContext&& other) noexcept -> GptpContext&
-    {
-        if (this != &other) {
-            ptp = std::move(other.ptp);
-            adapter = Adapter{*ptp.bridge};  // Re-bind adapter to our bridge
-        }
-        return *this;
-    }
+    // Move only. The adapter points at the bridge, which ptp owns on the
+    // heap: a move hands the bridge on and the adapter still points at it.
+    GptpContext(GptpContext&&) noexcept = default;
+    auto operator=(GptpContext&&) noexcept -> GptpContext& = default;
 
     ~GptpContext() = default;
     GptpContext(GptpContext const&) = delete;

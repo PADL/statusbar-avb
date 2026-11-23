@@ -294,9 +294,6 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     // alongside, so each conversion names the clock it returns. All of
     // them are exact (__int128), so a large offset costs no precision.
 
-    /// A realtime::Timer on this source takes the RAW-authoritative wait.
-    static constexpr bool reference_is_raw = true;
-
     /// Current PTP time in nanoseconds: reads CLOCK_MONOTONIC_RAW once and
     /// converts it through the primary mapping.
     [[nodiscard]] auto now_ns() const noexcept -> int64_t;

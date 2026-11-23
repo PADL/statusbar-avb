@@ -502,9 +502,9 @@ TEST(ptp_bridge_mapping, get_mapping_returns_consistent_snapshot)
 // Tests: PtpTimeBridge - the reference clock is CLOCK_MONOTONIC_RAW
 //
 
-static_assert(PtpTimeBridge::reference_is_raw);
-static_assert(statusbar::realtime::RawReferenceClockSource<PtpTimeBridge>);
-static_assert(statusbar::realtime::ClockAdapter<statusbar::realtime::GptpClock0, PtpTimeBridge>::reference_is_raw);
+static_assert(statusbar::realtime::ClockSource<PtpTimeBridge>);
+static_assert(
+    statusbar::realtime::ClockAdapterType<statusbar::realtime::ClockAdapter<statusbar::realtime::GptpClock0, PtpTimeBridge>>);
 
 TEST(ptp_bridge_raw, the_raw_conversions_are_the_primary_line_and_the_mono_line_starts_as_identity)
 {

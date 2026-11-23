@@ -440,9 +440,9 @@ auto create_packet_timer(realtime::TripwireMonitor& tripwire_monitor, Config& co
     }
 #endif
 
-    // Use monotonic clock for packet timer (default)
+    // Use the raw monotonic clock for packet timer (default)
     return realtime::AnyTimer::create(
-        config.packet_timer, make_packet_timer_callback<realtime::MonotonicClock>(tripwire_monitor, config, port, tap));
+        config.packet_timer, make_packet_timer_callback<realtime::MonotonicRawClock>(tripwire_monitor, config, port, tap));
 }
 
 /// Run the main timer loop with type-erased timers
