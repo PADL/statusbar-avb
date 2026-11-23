@@ -592,6 +592,38 @@ TEST(nanoavb_srp_msrp, a_listener_of_a_failed_talker_asks_and_goes_ready_with_a_
         sent, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
 }
 
+// set_listener_waits_for_talker(false): the listener declares Asking Failed
+// before its talker advertises, the other choice the standards leave open.
+// The Advertise then changes the Declaration Type, which goes out as a Join
+// carrying Ready (IEEE 802.1Q 35.2.6), and the talker leaving changes it back.
+TEST(nanoavb_srp_msrp, a_listener_told_not_to_wait_declares_asking_failed_before_its_talker)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    ListenerLink link{};
+    link.listener.set_listener_waits_for_talker(false);
+
+    auto const attached = link.listener.listener_attach(link.sid, link.now);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::AskingFailed);
+    link.run(30);
+    auto const asking = link.take_sent();
+    EXPECT_TRUE(!asking.empty() && asking.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!asking.empty() && asking.front().declaration == ListenerDeclaration::AskingFailed);
+
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(30);
+    EXPECT_EQ(link.state(), ListenerReservationState::Ready);
+    EXPECT_TRUE(link.talker.withdraw_talker(link.sid, link.now).has_value());
+    link.run(30);
+    EXPECT_EQ(link.state(), ListenerReservationState::AskingFailed);
+    std::vector<ListenerReservationState> const expected{ListenerReservationState::Ready, ListenerReservationState::AskingFailed};
+    EXPECT_TRUE(link.states == expected);
+    auto const sent = link.take_sent();
+    EXPECT_TRUE(std::ranges::any_of(sent, [](auto const& value) { return value.declaration == ListenerDeclaration::Ready; }));
+    EXPECT_TRUE(std::ranges::none_of(
+        sent, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
+}
+
 //
 // MSRP Handler Listener Tests
 //

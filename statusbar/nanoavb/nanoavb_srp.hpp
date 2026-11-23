@@ -617,6 +617,14 @@ class MsrpHandler
         return listener_state_wanted(stream_id) == ListenerReservationState::Ready;
     }
 
+    /// What an attached listener declares while neither a Talker Advertise
+    /// nor a Talker Failed is registered for its stream. Waiting (the
+    /// default) declares nothing until one is; false declares Listener
+    /// Asking Failed at once, the other choice IEEE 802.1Q 35.1.2.2 and Milan
+    /// v1.3 5.3.8.5 leave open, which then changes type when the talker's
+    /// attribute arrives. Set before the listeners attach.
+    void set_listener_waits_for_talker(bool const wait) noexcept { listener_waits_for_talker_ = wait; }
+
     /// What an attached listener holds for @p stream_id as the talker's
     /// registration stands now. IEEE 802.1Q 35.1.2.2: Ready for a registered
     /// Talker Advertise, Asking Failed for a registered Talker Failed (which
@@ -624,14 +632,17 @@ class MsrpHandler
     /// listener is Waiting and declares nothing, which Milan v1.3 5.3.8.5
     /// allows ("may either be declaring a Listener Asking Failed attribute,
     /// or not be declaring anything") and 802.1Q does too: it sets no order
-    /// between the two declarations.
+    /// between the two declarations. set_listener_waits_for_talker(false)
+    /// makes that case Asking Failed.
     [[nodiscard]] auto listener_state_wanted(StreamId const& stream_id) const noexcept -> ListenerReservationState
     {
         if (participant_.find_registered_talker_failed(stream_id) != nullptr) {
             return ListenerReservationState::AskingFailed;
         }
-        return participant_.find_registered_talker_advertise(stream_id) != nullptr ? ListenerReservationState::Ready
-                                                                                   : ListenerReservationState::Waiting;
+        if (participant_.find_registered_talker_advertise(stream_id) != nullptr) {
+            return ListenerReservationState::Ready;
+        }
+        return listener_waits_for_talker_ ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
     }
 
     /// One more input attached to @p stream_id with nothing declared: the
@@ -907,9 +918,10 @@ class MsrpHandler
     }
 
     MsrpCallbacks callbacks_;
-    DomainInfo domain_;             ///< the Domain in force (configured, or adopted from the wire)
-    DomainInfo configured_domain_;  ///< what set_domain() gave; return_to_configured_domain() goes back to it
-    bool adopt_domain_{false};      ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
+    bool listener_waits_for_talker_{true};  ///< see set_listener_waits_for_talker
+    DomainInfo domain_;                     ///< the Domain in force (configured, or adopted from the wire)
+    DomainInfo configured_domain_;          ///< what set_domain() gave; return_to_configured_domain() goes back to it
+    bool adopt_domain_{false};              ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;

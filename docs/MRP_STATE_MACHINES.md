@@ -254,6 +254,8 @@ Exposes:
   there (Milan v1.3 5.3.8.5 allows that, and IEEE 802.1Q 35.1.2.2 sets
   no order between the two declarations). The Listener is declared when
   the talker's attribute arrives and withdrawn when it has gone.
+  `set_listener_waits_for_talker(false)` declares Asking Failed in that
+  case instead, which is the other choice both documents leave open.
 - **Talker transmit authorization** — `listener_permits_transmit(stream_id)`
   returns `true` iff a peer listener declaration for this stream has
   been received with substate `Ready` or `ReadyFailed` *and* the
