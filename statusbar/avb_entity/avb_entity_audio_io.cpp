@@ -64,7 +64,7 @@ using namespace statusbar::nanoavb;
 
 auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityAudioIO>>
-{
+{  // NOLINT(statusbar-block-statements) pre-dates the gate
     auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
     if (!storage_result) {
         return failure(storage_result.error());
@@ -74,7 +74,7 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
     // (retains the blob + its symbol table) instead of a parsed EntityModel. The handler
     // patches the runtime ENTITY identity + AVB_INTERFACE network/gPTP fields.
     size_t const channels = channels_from_storage(*storage_result, 2);
-    auto const iface_mac = net::read_interface_mac(config.interface_name);
+    auto const iface_mac = config.interface_mac ? config.interface_mac : net::read_interface_mac(config.interface_name);
     EntityIdentityDescriptorHandler handler{
         *storage_result,
         config.entity_id,

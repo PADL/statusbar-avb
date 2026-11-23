@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <array>
+#include <optional>
 #include <print>
 #include <string>
 #include <string_view>
@@ -54,6 +55,14 @@ namespace statusbar::avb_entity {
     ieee::Eui48 fallback{};
     span_copy(fallback.span(), make_const_span(entity_id).first(6));
     return fallback;
+}
+
+/// The same, for a caller that may have been told the NIC MAC: the told
+/// address when there is one, and the system is not asked.
+[[nodiscard]] inline auto stream_base_mac_for(
+    std::optional<ieee::Eui48> const& told_mac, std::string_view const interface_name, ieee::Eui64 const& entity_id) -> ieee::Eui48
+{
+    return told_mac ? *told_mac : stream_base_mac_for(interface_name, entity_id);
 }
 
 inline void apply_node_identity_defaults(

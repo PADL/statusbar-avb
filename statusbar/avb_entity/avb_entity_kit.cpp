@@ -77,7 +77,7 @@ AvbEntityKit::AvbEntityKit(
 
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).
-    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_name, config_.entity_id);
+    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_mac, config_.interface_name, config_.entity_id);
     for (auto const& spec : talker_specs_) {
         ieee::Eui48 dest{};
         switch (spec.format.kind) {
@@ -301,7 +301,7 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
     return maap_.setup(
         reactor,
         config_.interface_name,
-        stream_base_mac_for(config_.interface_name, config_.entity_id),
+        stream_base_mac_for(config_.interface_mac, config_.interface_name, config_.entity_id),
         host_.components(),
         *talker_,
         indices,

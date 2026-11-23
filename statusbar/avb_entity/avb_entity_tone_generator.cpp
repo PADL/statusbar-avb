@@ -49,7 +49,7 @@ auto white_key_frequency_hz(uint8_t const base_midi_note, size_t const white_ind
 auto AvbEntityToneGenerator::create(
     AvbEntityAudioIOConfig config, uint8_t base_midi_note, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityToneGenerator>>
-{
+{  // NOLINT(statusbar-block-statements) pre-dates the gate
     auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
     if (!storage_result) {
         return failure(storage_result.error());
@@ -106,7 +106,7 @@ auto AvbEntityToneGenerator::create(
         }
     }
 
-    auto const iface_mac = net::read_interface_mac(config.interface_name);
+    auto const iface_mac = config.interface_mac ? config.interface_mac : net::read_interface_mac(config.interface_name);
     EntityIdentityDescriptorHandler handler{
         *storage_result,
         config.entity_id,

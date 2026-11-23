@@ -11,6 +11,7 @@
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -31,6 +32,12 @@ struct AvbEntityAudioIOConfig
 
     /// Network interface name (e.g., "en0" on macOS, "eth0" on Linux)
     std::string interface_name{"eth0"};
+
+    /// The interface's MAC address, told by a caller that already knows it.
+    /// Left empty, the entity asks the operating system for the address of
+    /// interface_name when it is created. Telling it keeps the entity's
+    /// construction free of any call to the system (a test does this).
+    std::optional<ieee::Eui48> interface_mac{};
 
     /// How the stream frames reach the wire (net::ETHERNET_BACKEND_CHOICES):
     /// "rawnet" (default) is a transmit socket and a receive socket, plain
