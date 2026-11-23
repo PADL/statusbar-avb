@@ -8,6 +8,8 @@
 /// forget — a hardcoded entity_id makes two nodes running the same descriptor
 /// blob collide).
 
+#include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 #include "statusbar/net/net_posix_util.hpp"
@@ -63,6 +65,25 @@ namespace statusbar::avb_entity {
     std::optional<ieee::Eui48> const& told_mac, std::string_view const interface_name, ieee::Eui64 const& entity_id) -> ieee::Eui48
 {
     return told_mac ? *told_mac : stream_base_mac_for(interface_name, entity_id);
+}
+
+/// The descriptor handler of the entity @p config describes. Symbol-aware: the
+/// descriptors are served from the blob through a DescriptorStorageHandler
+/// (which keeps the blob and its symbol table) instead of a parsed EntityModel,
+/// and the handler patches in what a static blob cannot hold: the ENTITY
+/// identity and the AVB_INTERFACE's network and gPTP fields. The interface's
+/// MAC is the one the config tells, else the one the system reports.
+[[nodiscard]] inline auto identity_handler(AvbEntityAudioIOConfig const& config, nanoavb::DescriptorStorage const& storage)
+    -> EntityIdentityDescriptorHandler
+{
+    return EntityIdentityDescriptorHandler{
+        storage,
+        config.entity_id,
+        config.entity_model_id,
+        config.firmware_version,
+        config.entity_name,
+        config.interface_mac ? config.interface_mac : net::read_interface_mac(config.interface_name),
+        /*patch_avb_interface=*/true};
 }
 
 inline void apply_node_identity_defaults(

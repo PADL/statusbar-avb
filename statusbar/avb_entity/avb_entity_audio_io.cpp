@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/dsp/dsp_biquad.hpp"
@@ -62,78 +63,89 @@ using namespace statusbar::nanoavb;
 // Factory method
 //
 
+namespace {
+
+/// The format this entity gives a stream of @p kind.
+[[nodiscard]] auto fixed_stream_format(AvbEntityAudioIOConfig const& config, size_t channels, StreamKind kind) -> StreamFormatFields
+{
+    StreamFormatFields format{
+        .kind = kind,
+        .sample_rate_hz = AvbEntityAudioIO::SAMPLE_RATE,
+        .channels = static_cast<uint16_t>(channels),
+        .bit_depth = kind == StreamKind::aaf ? AvbEntityAudioIO::AAF_BIT_DEPTH : uint8_t{24},
+        .aaf_format = AvbEntityAudioIO::AAF_FORMAT};
+    if (kind == StreamKind::crf) {
+        // Milan 48 kHz audio-sample reference, pull x1.0: both 48 kHz and
+        // 96 kHz clients lock to it; our 96 kHz audio rides as a 2x multiple.
+        format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
+        format.crf_base_frequency_hz = AvbEntityAudioIO::CRF_BASE_FREQUENCY;
+        format.crf_timestamp_interval = config.crf_timestamp_interval;
+        format.crf_timestamps_per_pdu = static_cast<uint8_t>(config.crf_timestamps_per_packet);
+    }
+    return format;
+}
+
+/// This entity's fixed 3-stream topology (AM824@0, AAF@1, CRF@2) as a
+/// StreamSpec table for the kit. The input side mirrors the output side (the
+/// CRF input is the media-clock input), so one table serves both. (The tone
+/// generator derives its specs from the blob; migrating this entity's whole
+/// topology to the blob is future kit work.)
+[[nodiscard]] auto fixed_stream_specs(AvbEntityAudioIOConfig const& config, size_t channels) -> StreamSpecs
+{
+    StreamSpecs specs{};
+    for (auto const& [index, kind] :
+         {std::pair{AvbEntityAudioIO::AM824_STREAM_INDEX, StreamKind::am824},
+          std::pair{AvbEntityAudioIO::AAF_STREAM_INDEX, StreamKind::aaf},
+          std::pair{AvbEntityAudioIO::CRF_STREAM_INDEX, StreamKind::crf}}) {
+        (void)specs.try_push_back(StreamSpec{.index = index, .format = fixed_stream_format(config, channels, kind)});
+    }
+    return specs;
+}
+
+/// Everything the entity is built from that the descriptor blob decides.
+struct AudioIoPlan
+{
+    EntityIdentityDescriptorHandler handler;
+    StreamSpecs specs;
+    uint16_t initial_clock_source;
+    std::optional<uint16_t> crf_clock_source;
+    size_t channels;
+};
+
+[[nodiscard]] auto plan_audio_io(AvbEntityAudioIOConfig const& config, DescriptorStorage const& storage) -> AudioIoPlan
+{
+    size_t const channels = channels_from_storage(storage, 2);
+    // Kit phase 3c: the clock source backed by the CRF stream input
+    // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
+    // CLOCK_DOMAIN's authored default selection.
+    return AudioIoPlan{
+        .handler = identity_handler(config, storage),
+        .specs = fixed_stream_specs(config, channels),
+        .initial_clock_source = authored_clock_source(storage),
+        .crf_clock_source = find_input_stream_clock_source(storage, AvbEntityAudioIO::CRF_INPUT_STREAM_INDEX),
+        .channels = channels};
+}
+
+}  // namespace
+
 auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityAudioIO>>
-{  // NOLINT(statusbar-block-statements) pre-dates the gate
+{
     auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
     if (!storage_result) {
         return failure(storage_result.error());
     }
-
-    // Symbol-aware: serve descriptors from the blob through a DescriptorStorageHandler
-    // (retains the blob + its symbol table) instead of a parsed EntityModel. The handler
-    // patches the runtime ENTITY identity + AVB_INTERFACE network/gPTP fields.
-    size_t const channels = channels_from_storage(*storage_result, 2);
-    auto const iface_mac = config.interface_mac ? config.interface_mac : net::read_interface_mac(config.interface_name);
-    EntityIdentityDescriptorHandler handler{
-        *storage_result,
-        config.entity_id,
-        config.entity_model_id,
-        config.firmware_version,
-        config.entity_name,
-        iface_mac,
-        /*patch_avb_interface=*/true};
-
-    // Kit phase 3c: find the clock source backed by the CRF stream input
-    // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
-    // CLOCK_DOMAIN's authored default selection.
-    auto const crf_clock_source = find_input_stream_clock_source(*storage_result, CRF_INPUT_STREAM_INDEX);
-    uint16_t const initial_clock_source = authored_clock_source(*storage_result);
-
-    // This entity's fixed 3-stream topology (AM824@0, AAF@1, CRF@2) as
-    // StreamSpec tables for the kit, mirrored on the input side (the CRF input
-    // is the media-clock input). (The tone generator derives its specs from
-    // the blob; migrating this entity's whole shape to the blob is future kit
-    // work.)
-    auto const make_spec = [&](uint16_t index, StreamKind kind) {
-        StreamSpec spec{};
-        spec.index = index;
-        spec.format.kind = kind;
-        spec.format.sample_rate_hz = SAMPLE_RATE;
-        spec.format.channels = static_cast<uint16_t>(channels);
-        spec.format.aaf_format = AAF_FORMAT;
-        spec.format.bit_depth = kind == StreamKind::aaf ? AAF_BIT_DEPTH : uint8_t{24};
-        if (kind == StreamKind::crf) {
-            // Milan 48 kHz audio-sample reference, pull x1.0: both 48 kHz and
-            // 96 kHz clients lock to it; our 96 kHz audio rides as a 2x multiple.
-            spec.format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
-            spec.format.crf_base_frequency_hz = CRF_BASE_FREQUENCY;
-            spec.format.crf_timestamp_interval = config.crf_timestamp_interval;
-            spec.format.crf_timestamps_per_pdu = static_cast<uint8_t>(config.crf_timestamps_per_packet);
-        }
-        return spec;
-    };
-    StreamSpecs talker_specs{};
-    StreamSpecs listener_specs{};
-    for (auto const& [index, kind] :
-         {std::pair{AM824_STREAM_INDEX, StreamKind::am824},
-          std::pair{AAF_STREAM_INDEX, StreamKind::aaf},
-          std::pair{CRF_STREAM_INDEX, StreamKind::crf}}) {
-        (void)talker_specs.try_push_back(make_spec(index, kind));
-        (void)listener_specs.try_push_back(make_spec(index, kind));
-    }
-
-    std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
+    AudioIoPlan plan = plan_audio_io(config, *storage_result);
     auto entity = std::make_unique<AvbEntityAudioIO>(
         AvbEntityAudioIO::CreateKey{},
         std::move(config),
-        std::move(handler),
-        talker_specs,
-        listener_specs,
-        initial_clock_source,
-        crf_clock_source,
-        channels,
-        mr);
+        std::move(plan.handler),
+        plan.specs,
+        plan.specs,
+        plan.initial_clock_source,
+        plan.crf_clock_source,
+        plan.channels,
+        memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource());
 
     entity->configure_filter(entity->config_.filter_freq_hz, entity->config_.filter_gain_db, entity->config_.filter_q);
 
