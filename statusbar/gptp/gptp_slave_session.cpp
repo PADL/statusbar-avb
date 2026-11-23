@@ -21,19 +21,8 @@ namespace statusbar::gptp {
 
 namespace {
 
-[[nodiscard]] auto bridge_clock_name_for(clockid_t clk) -> std::string
-{
-    if (clk == CLOCK_MONOTONIC) {
-        return "CLOCK_MONOTONIC";
-    }
-    if (clk == CLOCK_MONOTONIC_RAW) {
-        return "CLOCK_MONOTONIC_RAW";
-    }
-    if (clk == CLOCK_REALTIME) {
-        return "CLOCK_REALTIME";
-    }
-    return {};
-}
+/// The clock the bridge is kept against, for the diagnostics.
+constexpr std::string_view BRIDGE_CLOCK_NAME = "CLOCK_MONOTONIC_RAW";
 
 [[nodiscard]] auto build_gptp_config(SlaveSessionConfig const& cfg, ieee::Eui48 mac) -> GptpConfig
 {
@@ -85,12 +74,10 @@ void print_running_banner(SlaveSessionConfig const& cfg)
 
 SlaveSession::SlaveSession(SlaveSessionConfig cfg)
     : cfg_{std::move(cfg)}
-    , bridge_clock_name_{bridge_clock_name_for(cfg_.bridge_clock)}
 {
     // The bridge reports how well its line is known, and coasts on this
     // figure while no Sync arrives. Its bound is anchored on RAW instants.
     bridge_.holdover_drift_ppb = cfg_.holdover_drift_ppb;
-    bridge_.app_clock_is_raw = (cfg_.bridge_clock == CLOCK_MONOTONIC_RAW);
 }
 
 SlaveSession::~SlaveSession()
@@ -170,8 +157,7 @@ auto SlaveSession::start() -> bool
     };
     obs.on_as_capable_change = [](bool capable) { std::println(stderr, "[gptp] asCapable: {}", capable); };
 
-    if (cfg_.bridge_clock >= 0) {
-        clockid_t const bclk = cfg_.bridge_clock;
+    if (cfg_.bridge) {
         bridge_.get_gptp_time_ns = [this]() -> int64_t {
             if (cfg_.software_timestamping) {
                 struct timespec ts{};
@@ -180,17 +166,13 @@ auto SlaveSession::start() -> bool
             }
             return ops_.get_local_time_ns ? ops_.get_local_time_ns() : 0;
         };
-        bridge_.get_app_time_ns = [bclk]() -> int64_t {
-            struct timespec ts{};
-            clock_gettime(bclk, &ts);
-            return (ts.tv_sec * 1'000'000'000LL) + ts.tv_nsec;
-        };
+        bridge_.get_app_time_ns = []() -> int64_t { return realtime::read_monotonic_raw_ns(); };
         bridge_.update();
-        std::println(stderr, "Bridge: gPTP <-> {}", bridge_clock_name_);
+        std::println(stderr, "Bridge: gPTP <-> {}", BRIDGE_CLOCK_NAME);
     }
 
     bool const verbose = cfg_.verbose;
-    bool const show_bridge = (cfg_.bridge_clock >= 0);
+    bool const show_bridge = cfg_.bridge;
 
     obs.on_sync_update = [this, verbose, show_bridge](int64_t offset_ns, double rate_ratio) {
         // Bridge anchor refresh moved to on_anchor_update so it
@@ -207,9 +189,9 @@ auto SlaveSession::start() -> bool
                 "[gptp] offset: {:+} ns  rate: {:.12f}  {}_offset: {:+} ns  {}_rate_ppt: {:+}",
                 offset_ns,
                 rate_ratio,
-                bridge_clock_name_,
+                BRIDGE_CLOCK_NAME,
                 bridge_.offset(),
-                bridge_clock_name_,
+                BRIDGE_CLOCK_NAME,
                 bridge_.rate_offset_ppt());
         } else {
             std::println(stderr, "[gptp] offset: {:+} ns  rate ratio: {:.12f}", offset_ns, rate_ratio);
@@ -225,7 +207,8 @@ auto SlaveSession::start() -> bool
     obs.on_anchor_update = [this,
                             show_bridge](int64_t /*rx_local_ns*/, int64_t rx_app_ns, int64_t tx_master_ns, double /*rate_ratio*/) {
         if (show_bridge) {
-            bridge_.update_from_anchor(rx_app_ns, tx_master_ns);
+            bridge_.update_from_anchor(
+                realtime::MonotonicRawClock::from_ns(rx_app_ns), realtime::GptpClock0::from_ns(tx_master_ns));
         }
     };
 
@@ -236,7 +219,7 @@ auto SlaveSession::start() -> bool
                 "[gptp] peer delay: {} ns  neighbor rate ratio: {:.9f}  {}_rate_ppt: {:+}",
                 delay_ns,
                 neighbor_rate_ratio,
-                bridge_clock_name_,
+                BRIDGE_CLOCK_NAME,
                 bridge_.rate_offset_ppt());
         } else {
             std::println(stderr, "[gptp] peer delay: {} ns  neighbor rate ratio: {:.9f}", delay_ns, neighbor_rate_ratio);
@@ -276,7 +259,7 @@ void SlaveSession::dispatch(int fd, sm::TimePoint now)
     // The bridge's app-clock side of a Sync anchor: read once, here, the
     // earliest user-space instant after arrival, and told through the port
     // so the anchor pairs it with the FollowUp's master time.
-    int64_t const rx_app_ns = (cfg_.bridge_clock >= 0) ? bridge_.app_now() : 0;
+    int64_t const rx_app_ns = cfg_.bridge ? realtime::MonotonicRawClock::to_ns(bridge_.raw_now()) : 0;
     bool const use_soft_clock_corrections = cfg_.software_timestamping || cfg_.phc_passthrough;
     if (use_soft_clock_corrections && rx_ns != 0) {
         rx_ns = soft_clock_.correct_timestamp(rx_ns);
@@ -326,7 +309,7 @@ void SlaveSession::stop()
         std::println(stderr, "  SoftClock offset: {:+} ns", soft_clock_.offset_ns());
         std::println(stderr, "  SoftClock rate: {:.6f} ppb", soft_clock_.rate_ppb());
     }
-    if (cfg_.bridge_clock >= 0) {
+    if (cfg_.bridge) {
         // Refresh only the offset — leave rate_offset_ppt at its last
         // sync-driven value. Calling full update() at exit computes a
         // fresh rate from a tiny app_delta whose timing is determined
@@ -336,7 +319,7 @@ void SlaveSession::stop()
         std::println(
             stderr,
             "  Bridge ({} <-> gPTP) offset: {:+} ns  rate_offset: {:+} ppt  ({:+.3f} ppm)",
-            bridge_clock_name_,
+            BRIDGE_CLOCK_NAME,
             bridge_.offset(),
             bridge_.rate_offset_ppt(),
             static_cast<double>(bridge_.rate_offset_ppt()) / 1e6);

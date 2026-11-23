@@ -96,13 +96,11 @@ struct GptpTimeBridge
     ///   ops.get_local_time_ns  (the PHC IS the gPTP clock)
     statusbar::sg14::inplace_function<int64_t(), 64> get_gptp_time_ns;
 
-    /// Function returning the current application-side clock in ns.
-    /// Typically CLOCK_MONOTONIC or CLOCK_MONOTONIC_RAW:
-    ///   []() {
-    ///       struct timespec ts{};
-    ///       clock_gettime(CLOCK_MONOTONIC, &ts);
-    ///       return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
-    ///   }
+    /// Function returning the application-side clock in ns. That clock is
+    /// CLOCK_MONOTONIC_RAW and nothing else: the one reference every timer,
+    /// stamp and deadline in the application uses, and the clock the
+    /// bridge's typed conversions and its quality name.
+    ///   []() { return realtime::read_monotonic_raw_ns(); }
     statusbar::sg14::inplace_function<int64_t(), 64> get_app_time_ns;
 
     /// How fast the line may go wrong while no Sync arrives, in parts per
@@ -114,10 +112,8 @@ struct GptpTimeBridge
     /// The owner sets it from the Announce; until then, a PTP grandmaster.
     realtime::TimeSource time_source{realtime::TimeSource::ptp};
 
-    /// Whether the app clock is CLOCK_MONOTONIC_RAW, as policy has it. A
-    /// quality is anchored on a RAW instant, so on any other app clock the
-    /// bridge reports none.
-    bool app_clock_is_raw{true};
+    using RawTimePoint = realtime::MonotonicRawClock::time_point;
+    using GptpTimePoint = realtime::GptpClock0::time_point;
 
     /// Refresh the cached offset and rate. Call this from the event loop
     /// after each servo pass (every sync interval), or at least once
@@ -169,10 +165,10 @@ struct GptpTimeBridge
     }
 
     /// Refresh the cached anchor + rate from one Sync+FollowUp pairing,
-    /// TOLD both sides of the pair: @p sync_rx_app_ns is the app-clock
+    /// TOLD both sides of the pair: @p sync_rx_raw is the CLOCK_MONOTONIC_RAW
     /// instant of the Sync's arrival (read once by the receive path, as
     /// early as user space can, and carried with the Sync until its
-    /// FollowUp pairs it); @p tx_master_ns is the grandmaster TAI time
+    /// FollowUp pairs it); @p tx_master is the grandmaster TAI time
     /// the FollowUp carried for that Sync (correctionField and
     /// rate-corrected link delay applied, i.e. master TAI at arrival).
     /// The bridge reads no clock here. Reading the app clock at this
@@ -198,7 +194,13 @@ struct GptpTimeBridge
     /// (0 from construction). A skew past the step threshold, or a
     /// master time that went backwards, is a master step: the window
     /// restarts at this anchor and the rate is held.
-    void update_from_anchor(int64_t sync_rx_app_ns, int64_t tx_master_ns) noexcept
+    void update_from_anchor(RawTimePoint const sync_rx_raw, GptpTimePoint const tx_master) noexcept
+    {
+        anchor_at(realtime::MonotonicRawClock::to_ns(sync_rx_raw), realtime::GptpClock0::to_ns(tx_master));
+    }
+
+    /// update_from_anchor() in the bare nanoseconds the line is kept in.
+    void anchor_at(int64_t sync_rx_app_ns, int64_t tx_master_ns) noexcept
     {
         int64_t ppt = rate_offset_ppt_.load(std::memory_order_relaxed);
         int64_t miss_ns = 0;
@@ -268,22 +270,22 @@ struct GptpTimeBridge
         offset_ns_.store(gptp - app, std::memory_order_relaxed);
     }
 
-    /// Convert an application-clock timestamp to gPTP master time using
+    /// Convert a CLOCK_MONOTONIC_RAW instant to gPTP master time using
     /// only the cached offset (no rate compensation). Drift between
     /// updates is at most rate × interval-since-last-update.
-    [[nodiscard]] auto to_gptp(int64_t app_ns) const noexcept -> int64_t
+    [[nodiscard]] auto to_gptp(RawTimePoint const raw) const noexcept -> GptpTimePoint
     {
-        return app_ns + offset_ns_.load(std::memory_order_relaxed);
+        return GptpTimePoint{raw.time_since_epoch() + realtime::Nanoseconds{offset_ns_.load(std::memory_order_relaxed)}};
     }
 
-    /// Convert a gPTP master timestamp to the application clock domain
-    /// using only the cached offset (no rate compensation).
-    [[nodiscard]] auto from_gptp(int64_t gptp_ns) const noexcept -> int64_t
+    /// Convert a gPTP master instant to CLOCK_MONOTONIC_RAW using only the
+    /// cached offset (no rate compensation).
+    [[nodiscard]] auto from_gptp(GptpTimePoint const gptp) const noexcept -> RawTimePoint
     {
-        return gptp_ns - offset_ns_.load(std::memory_order_relaxed);
+        return RawTimePoint{gptp.time_since_epoch() - realtime::Nanoseconds{offset_ns_.load(std::memory_order_relaxed)}};
     }
 
-    /// Convert app→gptp using the cached rate offset to extrapolate
+    /// Convert RAW→gptp using the cached rate offset to extrapolate
     /// from the most recent update's anchor point. Accurate to a few
     /// ns at any time within ~1 second of the last update for typical
     /// drift rates.
@@ -296,16 +298,17 @@ struct GptpTimeBridge
     /// The correction multiply uses double — overflow-safe for any
     /// realistic anchor age, and double precision is plenty because
     /// the correction value itself is small (µs–ms range, far from
-    /// the value-near-1.0 wart that motivated int64 ppt STORAGE).
-    [[nodiscard]] auto to_gptp_rated(int64_t app_ns) const noexcept -> int64_t
+    /// the value-near-1.0 wart that motivated int64 ppt STORAGE). Only
+    /// the delta from the anchor goes through it, never the instant.
+    [[nodiscard]] auto to_gptp_rated(RawTimePoint const raw) const noexcept -> GptpTimePoint
     {
         auto const snap = rated_buffer_.consume();
-        int64_t const app_delta = app_ns - snap.prev_app_ns;
-        double const correction_d = static_cast<double>(app_delta) * (static_cast<double>(snap.ppt) * 1e-12);
-        return app_ns + snap.offset_ns + static_cast<int64_t>(correction_d);
+        int64_t const app_ns = realtime::MonotonicRawClock::to_ns(raw);
+        double const correction_d = static_cast<double>(app_ns - snap.prev_app_ns) * (static_cast<double>(snap.ppt) * 1e-12);
+        return realtime::GptpClock0::from_ns(app_ns + snap.offset_ns + static_cast<int64_t>(correction_d));
     }
 
-    /// Convert gptp→app using the cached rate offset. Linear
+    /// Convert gptp→RAW using the cached rate offset. Linear
     /// approximation of the inverse rate; error ≤ 1 ns for ±1000 ppm
     /// drift over ≤ 1 s.
     ///
@@ -313,19 +316,25 @@ struct GptpTimeBridge
     ///   gptp_delta_from_anchor = gptp_ns - prev_gptp_ns
     ///   correction_ns = gptp_delta * rate_offset_ppt / 10¹²
     ///   app = gptp_ns - offset - correction_ns
-    [[nodiscard]] auto from_gptp_rated(int64_t gptp_ns) const noexcept -> int64_t
+    [[nodiscard]] auto from_gptp_rated(GptpTimePoint const gptp) const noexcept -> RawTimePoint
     {
         auto const snap = rated_buffer_.consume();
-        int64_t const gptp_delta = gptp_ns - snap.prev_gptp_ns;
-        double const correction_d = static_cast<double>(gptp_delta) * (static_cast<double>(snap.ppt) * 1e-12);
-        return gptp_ns - snap.offset_ns - static_cast<int64_t>(correction_d);
+        int64_t const gptp_ns = realtime::GptpClock0::to_ns(gptp);
+        double const correction_d = static_cast<double>(gptp_ns - snap.prev_gptp_ns) * (static_cast<double>(snap.ppt) * 1e-12);
+        return realtime::MonotonicRawClock::from_ns(gptp_ns - snap.offset_ns - static_cast<int64_t>(correction_d));
     }
 
     /// Get the current gPTP time (reads the gPTP source directly).
-    [[nodiscard]] auto gptp_now() const noexcept -> int64_t { return get_gptp_time_ns ? get_gptp_time_ns() : 0; }
+    [[nodiscard]] auto gptp_now() const noexcept -> GptpTimePoint
+    {
+        return realtime::GptpClock0::from_ns(get_gptp_time_ns ? get_gptp_time_ns() : 0);
+    }
 
-    /// Get the current application clock time.
-    [[nodiscard]] auto app_now() const noexcept -> int64_t { return get_app_time_ns ? get_app_time_ns() : 0; }
+    /// Get the current CLOCK_MONOTONIC_RAW time through the bridge's hook.
+    [[nodiscard]] auto raw_now() const noexcept -> RawTimePoint
+    {
+        return realtime::MonotonicRawClock::from_ns(get_app_time_ns ? get_app_time_ns() : 0);
+    }
 
     /// Current cached offset (gptp - app) in ns.
     [[nodiscard]] auto offset() const noexcept -> int64_t { return offset_ns_.load(std::memory_order_relaxed); }
@@ -460,12 +469,12 @@ struct GptpTimeBridge
 
     /// Publish how well the line is known as of the anchor at
     /// @p anchor_app_ns. No bound is claimed before the rate has been
-    /// fitted, before a second anchor of this timeline has been compared
-    /// with the line, or on an app clock that is not RAW.
+    /// fitted, or before a second anchor of this timeline has been compared
+    /// with the line.
     void publish_quality(int64_t const anchor_app_ns) noexcept
     {
         realtime::ClockQuality quality{.epoch = epoch_, .time_source = time_source};
-        if (app_clock_is_raw && rate_fitted_ && anchor_count_ >= 2) {
+        if (rate_fitted_ && anchor_count_ >= 2) {
             quality.synced_at = realtime::MonotonicRawClock::from_ns(anchor_app_ns);
             quality.bound_at_sync = realtime::Nanoseconds{worst_miss_ns()};
             quality.drift_bound_ppb = std::max(holdover_drift_ppb, rate_spread_ppb());

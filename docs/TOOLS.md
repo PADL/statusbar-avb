@@ -148,7 +148,7 @@ statusbar-rttest-send-avtp-tool --interface=eth0 --backend=mmap
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔bridge-clock offset and rate. | Linux-only |
+| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔CLOCK_MONOTONIC_RAW offset and rate. | Linux-only |
 | `statusbar-gptp-ntpshm` | Read the current PTP time and local offset from linuxptp's NTP SHM segment. One positional argument, the segment number (default 0). | Linux-only |
 | `statusbar-ptpclient-wake` | Demonstrate precision periodic wake timing disciplined to a PTP clock; prints wake-error stats. | Linux-only |
 | `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. Space-separated `--flag value` arguments (`--help` lists them). | Linux-only |
@@ -162,9 +162,9 @@ sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 
 `gptp-slave` options: `--profile=standard|automotive`, `--manual-peer-delay=<ns>`,
 `--phase-jump-threshold=<ns>`, `--servo-kp`/`--servo-ki`, `--software`,
-`--bridge-clock=monotonic_raw|...` (`monotonic_raw` is the policy value: the
-app side of the gPTP time bridge is the timing reference, and `udptun` refuses
-any other; the other values are for comparing clocks, not for running on).
+`--no-bridge` (the gPTP time bridge is kept against CLOCK_MONOTONIC_RAW, the
+application's one timing reference, and its offset and rate are printed; this
+turns it off).
 
 ## SRP / MSRP
 

@@ -25,9 +25,8 @@ namespace statusbar::udptun {
 /// session is a Session-owned member, so this is automatic for the
 /// usual usage from inside udptun::Session).
 ///
-/// The slave's bridge samples CLOCK_MONOTONIC_RAW, the clock the udptun
-/// wire timeline runs on (setup_local_identity refuses any other
-/// `SlaveSessionConfig::bridge_clock`), so to_raw_ns()/from_raw_ns() are
+/// The slave's bridge is kept against CLOCK_MONOTONIC_RAW, the clock the
+/// udptun wire timeline runs on, so to_raw_ns()/from_raw_ns() are
 /// the bridge's rated line, and a realtime::Timer on it sleeps early on
 /// CLOCK_MONOTONIC and spins on RAW to each deadline.
 class GptpSlaveClockSource
@@ -37,13 +36,19 @@ class GptpSlaveClockSource
         : session_{session}
     {}
 
-    [[nodiscard]] auto now_ns() const noexcept -> int64_t { return session_->bridge().gptp_now(); }
+    [[nodiscard]] auto now_ns() const noexcept -> int64_t { return realtime::GptpClock0::to_ns(session_->bridge().gptp_now()); }
 
     /// gPTP nanoseconds -> CLOCK_MONOTONIC_RAW nanoseconds (the bridge's rated line).
-    [[nodiscard]] auto to_raw_ns(int64_t gptp_ns) const noexcept -> int64_t { return session_->bridge().from_gptp_rated(gptp_ns); }
+    [[nodiscard]] auto to_raw_ns(int64_t gptp_ns) const noexcept -> int64_t
+    {
+        return realtime::MonotonicRawClock::to_ns(session_->bridge().from_gptp_rated(realtime::GptpClock0::from_ns(gptp_ns)));
+    }
 
     /// CLOCK_MONOTONIC_RAW nanoseconds -> gPTP nanoseconds (the bridge's rated line).
-    [[nodiscard]] auto from_raw_ns(int64_t raw_ns) const noexcept -> int64_t { return session_->bridge().to_gptp_rated(raw_ns); }
+    [[nodiscard]] auto from_raw_ns(int64_t raw_ns) const noexcept -> int64_t
+    {
+        return realtime::GptpClock0::to_ns(session_->bridge().to_gptp_rated(realtime::MonotonicRawClock::from_ns(raw_ns)));
+    }
 
     [[nodiscard]] auto is_healthy() const noexcept -> bool { return session_->synced(); }
 

@@ -46,20 +46,6 @@ enum class Mode
     return (s == "automotive") ? ::statusbar::gptp::Profile::AvnuAutomotive : ::statusbar::gptp::Profile::Standard;
 }
 
-[[nodiscard]] inline auto parse_bridge_clock(std::string_view s) noexcept -> clockid_t
-{
-    if (s == "monotonic") {
-        return CLOCK_MONOTONIC;
-    }
-    if (s == "monotonic_raw") {
-        return CLOCK_MONOTONIC_RAW;
-    }
-    if (s == "realtime") {
-        return CLOCK_REALTIME;
-    }
-    return -1;  // "none"
-}
-
 [[nodiscard]] inline auto parse_time_source(std::string_view s) noexcept -> ::statusbar::udptun::TimeSourceKind
 {
     if (s == "ptp4l") {
@@ -220,7 +206,6 @@ struct Config
 
     // Derived
     ::statusbar::gptp::Profile profile{::statusbar::gptp::Profile::Standard};
-    clockid_t bridge_clock{CLOCK_MONOTONIC_RAW};
 };
 
 inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
@@ -234,12 +219,6 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     s.add<double>("servo-ki", "Servo PI integral gain", -1.0, [&](auto v) { c.servo_ki = v; });
     s.add<double>("servo-kp", "Servo PI proportional gain", -1.0, [&](auto v) { c.servo_kp = v; });
     s.add_flag("software", "Use software timestamping (no PHC required)", [&](auto v) { c.software_timestamping = v; });
-    s.add_choice(
-        "bridge-clock",
-        "POSIX clock to bridge gPTP against (the wire timeline runs on CLOCK_MONOTONIC_RAW; only monotonic_raw is accepted)",
-        {"none", "monotonic", "monotonic_raw", "realtime"},
-        "monotonic_raw",
-        [&](auto v) { c.bridge_clock = parse_bridge_clock(v); });
     s.add_flag("verbose", "Print every sync update", [&](auto v) { c.verbose = v; });
 
     s.add_choice("mode", "Operating mode", {"normal", "reflect"}, "normal", [&](auto v) { c.mode = parse_mode(v); });
@@ -474,7 +453,7 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.identity.gptp_session_config.phase_jump_threshold_ns = cli.phase_jump_threshold_ns;
     cfg.identity.gptp_session_config.servo_kp = cli.servo_kp;
     cfg.identity.gptp_session_config.servo_ki = cli.servo_ki;
-    cfg.identity.gptp_session_config.bridge_clock = cli.bridge_clock;
+    cfg.identity.gptp_session_config.bridge = true;  // the wire timeline is read through it
     cfg.identity.gptp_session_config.verbose = cli.gptp_verbose;
     // owlm consumes master-time only via the bridge; nothing else on
     // the system needs the PHC disciplined, so keep PHC raw and let

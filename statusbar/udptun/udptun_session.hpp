@@ -1532,7 +1532,7 @@ class Session
         int64_t value = 0;
 #if defined(__linux__)
         if (gptp_session_.has_value()) {
-            value = gptp_session_->bridge().gptp_now();
+            value = realtime::GptpClock0::to_ns(gptp_session_->bridge().gptp_now());
         } else if (ptp4l_ctx_.has_value()) {
             value = ptp4l_ctx_->bridge->now_ns();
         }

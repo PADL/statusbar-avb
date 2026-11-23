@@ -63,11 +63,10 @@ struct Config
     bool software_timestamping{false};
     double servo_ki{-1.0};
     double servo_kp{-1.0};
-    std::string bridge_clock_str{};  // "" = disabled
+    bool no_bridge{false};
 
     // Derived (resolved after parsing)
     Profile profile{Profile::Standard};
-    clockid_t bridge_clock{-1};
 };
 
 auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
@@ -93,14 +92,11 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
 
     specs.add_flag("software", "Use software timestamping (no PHC required)", [&](auto v) { config.software_timestamping = v; });
 
-    specs.add_choice(
-        "bridge-clock",
-        "POSIX clock to bridge gPTP against. Defaults to monotonic_raw — the "
-        "per-sync line and exit summary always include the gPTP<->bridge "
-        "offset and rate ratio for the chosen clock.",
-        {"none", "monotonic", "monotonic_raw", "realtime"},
-        "monotonic_raw",
-        [&](auto v) { config.bridge_clock_str = std::string{v}; });
+    specs.add_flag(
+        "no-bridge",
+        "Do not keep the gPTP <-> CLOCK_MONOTONIC_RAW bridge. With it (the default) the per-sync line "
+        "and the exit summary include the bridge's offset and rate.",
+        [&](auto v) { config.no_bridge = v; });
 
     specs.add_flag("verbose", "Print every sync update", [&](auto v) { config.verbose = v; });
 
@@ -112,7 +108,7 @@ void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const&
     static constexpr std::array<std::string_view, 4> examples{
         "--interface=eth0 --profile=standard --verbose",
         "--interface=eth0 --profile=automotive --manual-peer-delay=500000 --software --verbose",
-        "--interface=eth0 --software --servo-ki=0.0001 --bridge-clock=monotonic --verbose",
+        "--interface=eth0 --software --servo-ki=0.0001 --verbose",
         "--config=gptp.toml --verbose",
     };
     config::default_print_usage(
@@ -130,14 +126,6 @@ void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const&
 void resolve_config(Config& config)
 {
     config.profile = (config.profile_str == "automotive") ? Profile::AvnuAutomotive : Profile::Standard;
-
-    if (config.bridge_clock_str == "monotonic") {
-        config.bridge_clock = CLOCK_MONOTONIC;
-    } else if (config.bridge_clock_str == "monotonic_raw") {
-        config.bridge_clock = CLOCK_MONOTONIC_RAW;
-    } else if (config.bridge_clock_str == "realtime") {
-        config.bridge_clock = CLOCK_REALTIME;
-    }
 }
 
 }  // namespace
@@ -162,7 +150,7 @@ int main(int argc, char** argv)
     sc.phase_jump_threshold_ns = cli.phase_jump_threshold_ns;
     sc.servo_kp = cli.servo_kp;
     sc.servo_ki = cli.servo_ki;
-    sc.bridge_clock = cli.bridge_clock;
+    sc.bridge = !cli.no_bridge;
     sc.verbose = cli.verbose;
 
     SlaveSession session{sc};

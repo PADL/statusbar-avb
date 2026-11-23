@@ -46,9 +46,11 @@ struct SlaveSessionConfig
     bool software_timestamping{false};
     int64_t manual_peer_delay_ns{-1};
     int64_t phase_jump_threshold_ns{-1};
-    double servo_kp{-1.0};       // <0 → use profile default
-    double servo_ki{-1.0};       // <0 → use profile default
-    clockid_t bridge_clock{-1};  // <0 → bridge disabled
+    double servo_kp{-1.0};  // <0 → use profile default
+    double servo_ki{-1.0};  // <0 → use profile default
+    /// Keep a gPTP <-> CLOCK_MONOTONIC_RAW bridge. RAW is the one clock the
+    /// bridge is kept against: it is the application's only timing reference.
+    bool bridge{false};
     bool verbose{false};
 
     /// How fast the bridge's line may go wrong while no Sync arrives, in
@@ -127,7 +129,6 @@ class SlaveSession
     ieee::Eui48 mac_{};
     int if_index_{-1};
     std::array<int, 1> poll_fd_storage_{-1};
-    std::string bridge_clock_name_{};
     std::unique_ptr<GptpSlavePort> port_;
     GptpTimeBridge bridge_{};
     std::array<uint8_t, 1500> payload_buf_{};
