@@ -14,9 +14,12 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <pthread.h>
+
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -25,6 +28,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 
 #include <sys/resource.h>
@@ -202,6 +206,25 @@ TEST(ptp_bridge_sleep, a_wake_that_never_slept_tells_no_headroom)
 
     EXPECT_TRUE(result.has_value());
     EXPECT_TRUE(headroom == untouched);
+}
+
+// A sleep that wakes ahead of its deadline tells what was left of the spin
+// window: never as much as the whole sleep, whatever the load.
+TEST(ptp_bridge_sleep, sleep_reports_spin_headroom)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 200'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc const phc = tell_history_ending_now(bridge, state);
+
+    constexpr Nanoseconds untouched{Nanoseconds::min()};
+    Nanoseconds headroom = untouched;
+    auto const result = bridge.sleep_until_ptp(ptp(phc.phc_ns + 5'000'000LL), nullptr, &headroom);
+
+    EXPECT_TRUE(result.has_value());
+    EXPECT_TRUE(headroom != untouched);
+    EXPECT_TRUE(headroom < 5ms);
 }
 
 //
@@ -440,6 +463,66 @@ TEST(ptp_timer, a_timer_told_to_lock_memory_locks_what_its_own_thread_brought)
     bridge.stop_sampling();
     (void)statusbar::realtime::unlock_memory();
 #endif
+}
+
+//
+// Tests: PtpTimer - statistics and thread name
+//
+
+// Six wakes of a timer named test-timer, whose first callback reads its
+// thread's name and works 200 us. What is asserted holds however late the
+// host wakes the thread.
+TEST(ptp_timer_stats, headroom_duration_and_thread_name)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    (void)tell_history_ending_now(bridge, state);
+    EXPECT_TRUE(bridge.is_healthy());
+
+    constexpr int WAKES = 6;
+    std::atomic<int> wakes{0};
+    std::array<char, 16> name{};
+    auto timer = make_ptp_timer(
+        bridge,
+        1'000'000,
+        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
+            if (!info) {
+                return;
+            }
+            if (wakes.load() == 0) {
+#if defined(__linux__) || defined(__APPLE__)
+                (void)pthread_getname_np(pthread_self(), name.data(), name.size());
+#endif
+                std::this_thread::sleep_for(std::chrono::microseconds(200));  // measurable work
+            }
+            wakes.fetch_add(1);
+            wakes.notify_all();
+        },
+        0,
+        /*enable_realtime=*/false,
+        /*cpu_affinity=*/-1);
+    timer.set_thread_name("test-timer");
+    EXPECT_TRUE(timer.start().has_value());
+    for (int seen = wakes.load(); seen < WAKES; seen = wakes.load()) {
+        wakes.wait(seen);
+    }
+    timer.stop();
+
+    auto const headroom = timer.wake_headroom();
+    auto const stats = timer.stats();
+    // Headroom is told only for wakes that slept, and never a whole period.
+    EXPECT_TRUE(headroom.count >= 1);
+    EXPECT_TRUE(headroom.count <= stats.error.count);
+    EXPECT_TRUE(headroom.max_ns < 1'000'000);
+    EXPECT_EQ(stats.duration.count, stats.error.count);
+    EXPECT_TRUE(stats.duration.max_ns >= 200'000);
+    EXPECT_EQ(stats.skipped_counts, timer.missed_cycles());
+#if defined(__linux__) || defined(__APPLE__)
+    EXPECT_EQ(std::string_view{name.data()}, std::string_view{"test-timer"});
+#endif
+    bridge.stop_sampling();
 }
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_bridge_functional_test)
