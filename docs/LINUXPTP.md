@@ -95,7 +95,7 @@ Note: at Site A the GPS grandmaster has a 3D GPS lock but is **not** the active 
 (the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 
-## ptpclient: PHC cross-timestamps and the PHC servo
+## ptpclient: PHC cross-timestamps, the PHC servo and the follower
 
 `PhcDevice` opens a `/dev/ptpN` and reads it against CLOCK_MONOTONIC_RAW by the
 best method the device and kernel offer: `PTP_SYS_OFFSET_PRECISE` (a hardware
@@ -129,6 +129,36 @@ until `thaw()`; `reset()` starts over from the frequency in force and allows a
 step again. A known target rate goes in as `feed_forward_ppb`, so the integrator
 learns only the PHC's own oscillator error. The servo is arithmetic only;
 `apply()` sets the frequency (ADJ_FREQUENCY) and steps (ADJ_SETOFFSET).
+
+`PhcFollower` is the loop that steers one PHC to follow another, or a line over
+it, as phc2sys does between two PHCs but over a `PhcCrossTimestamp` pair. Each
+`sample(line)` reads one pair, computes the error `phc_d - line.at(phc0)`, feeds
+it to a `PhcServo` at the pair's own CLOCK_MONOTONIC_RAW instant (`raw_ns`) with
+the line's rate as its feed-forward, and applies the action: the frequency, then
+any step. A `PhcLine` is a target time at a PHC0 anchor and a rate offset in
+ppb (finite, else the sample is refused); `PhcLine::offset_from_phc0(offset_ns)`
+follows PHC0 itself with a constant calibration. A caller whose line is not
+running passes its rate as 0, or freezes the follower. The servo starts from the
+followed PHC's frequency and is clamped to the smaller of its parameters' range
+and the device's. `freeze()` steers nothing (the pair is still measured) until
+`thaw()`, for a line that stopped running; after `thaw()` the servo estimates
+its rate again. An optional restep rule starts the servo over, so it may step
+again, after `restep_count` samples past `restep_threshold_ns` once the servo's
+rate estimate is done (`PhcServo::estimated()`): a timescale change of PHC0,
+before or after a lock, or a line that resumed elsewhere after a freeze. The
+samples it counts are held, not fed to the servo, so a glitch does not wind it
+up, and the follower reports itself unlocked meanwhile. A sample reports what
+failed (`PhcFollowerStage`) and its error, and carries the pair it measured: a
+failed measure or a refused frequency leaves the follower as it was, so a step
+it wanted is still owed; a refused step after the frequency went through starts
+the servo over from that frequency, so device and servo agree and the step is
+owed again; refused twice running (a device without ADJ_SETOFFSET), it slews
+from then on, and the restep rule stays off until the caller's `reset()`. A
+line's rate at or past the servo's clamp (the smaller of its parameters' and the
+device's range) is refused: the servo would have no headroom to follow it. The pair is a `PhcFollowerPort` (measure, frequency, step,
+range): `open_phc_follower_port(phc0, followed)` is the device pair, one
+`PhcCrossTimestamp` opened with PHC_d writable (`PhcCrossAccess::phcd_writable`)
+and adjusted through it; a test gives the loop a fake.
 
 The tests that touch real clocks skip unless the devices open. On a box with
 PHCs, as root:
