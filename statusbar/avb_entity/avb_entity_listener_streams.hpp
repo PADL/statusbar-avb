@@ -288,7 +288,7 @@ struct ListenerStreams
     /// @p gptp_now (the caller's gPTP "now") and each told @p rx_now, the RX
     /// clock, at rx_start. The caller owns the tick: the dedicated SCHED_FIFO
     /// RX timer (stream_rx_rt_timer) passes its wake on both clocks
-    /// (TimerWakeInfo actual_time_ns / actual_raw), so a pass reads no clock at
+    /// (TimerWakeInfo actual_time / actual_raw), so a pass reads no clock at
     /// all and ingress is tallied against a time at most one tick stale.
     /// Returns the number of frames taken off the port this call, frames that
     /// were not AVTP included (for the RX-timer batch-size stat).
