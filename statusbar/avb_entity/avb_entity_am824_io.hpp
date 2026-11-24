@@ -311,12 +311,6 @@ class AvbEntityAm824IO
     /// Register a per-stream RX consumer (decoded floats + PTS, kit phase 2).
     /// Menu/selection: an index the model never declares stays inert.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn) { listener_.set_consume(stream_index, std::move(fn)); }
-    /// set_consume() for a consumer that takes its times as avtp::Nanoseconds;
-    /// kept beside a set_consume() consumer for the same stream.
-    void set_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn)
-    {
-        listener_.set_consume_timed(stream_index, std::move(fn));
-    }
 
     /// Reconfigure DSP filter parameters (applies to all per-channel biquad filters)
     /// @param freq_hz Filter center frequency in Hz

@@ -221,12 +221,6 @@ class AvbEntityAudioIO
     /// Register a per-stream RX consumer (decoded floats + PTS, kit phase 2).
     /// Menu/selection: an index the model never declares stays inert.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn) { kit_.listener()->set_consume(stream_index, std::move(fn)); }
-    /// set_consume() for a consumer that takes its times as avtp::Nanoseconds;
-    /// kept beside a set_consume() consumer for the same stream.
-    void set_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn)
-    {
-        kit_.listener()->set_consume_timed(stream_index, std::move(fn));
-    }
     auto configure_filter(double freq_hz, double gain_db, double q) -> void;
 
     [[nodiscard]] auto components() -> nanoavb::NanoAvbComponents& { return kit_.host().components(); }
