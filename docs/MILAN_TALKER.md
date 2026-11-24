@@ -57,7 +57,9 @@ allocates a new Destination MAC Address, then declares a new Talker attribute"
 (Table 5.3). The hold follows every withdrawal but binds only a re-declaration
 with different parameters: the same stream ID, address and VID come back at
 once (a probe after the 15 s window ran out re-declares without waiting). A parameter change the control plane chose (the
-adopted Class A VID) is re-declared without a hold.
+adopted Class A VID or priority) is held as well, by the MSRP participant: the
+old Talker Advertise leaves at once and the new one is declared two LeaveAll
+periods later (IEEE 802.1Q-2022 Clause 35.2.2.8).
 
 Condition 2's Listener arm is the MSRP registrar's: In, or Lv after a LeaveAll
 until LeaveTime (5 s, Milan v1.3 Table 4.3) runs out, which is what rides out a
@@ -68,9 +70,11 @@ after the next LeaveAll received. The entity's own LeaveAll does not age its
 MSRP registrars, so only a peer's LeaveAll starts that LeaveTime.
 
 A classic (non-Milan) entity skips condition 2 (`interest_required` false):
-every stream declares as soon as its address is valid and is not held (a new
-MAAP address is declared at once). A new VID (the adopted Class A Domain) is not
-held in either profile.
+every stream declares as soon as its address is valid, and `TalkerDeclarations`
+holds nothing. In either profile the MSRP participant holds any changed Talker
+Advertise of a declared stream ID (a new MAAP address, or the adopted Class A
+Domain's VID or priority) two LeaveAll periods (IEEE 802.1Q-2022 Clause
+35.2.2.8).
 
 The control plane must also be up (`set_active`): the host's MSRP talker is
 advertising (Ready), not withdrawn (Degraded / Down). The class is pure state
