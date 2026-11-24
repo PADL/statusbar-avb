@@ -199,7 +199,9 @@ The Class A VID in use is adopted from the bridge's MSRP Domain, or restored
 to the configured VID on link up (Milan v1.2 Section 4.2.7.2.1). The host then
 joins the new VLAN (Milan v1.2 Section 4.3.2), moves every ACMP talker stream's
 stream_vlan_id, lets the entity re-tag its stream frames
-(`TalkerStreams::set_vlan_id`) and re-advertises the talker streams.
+(`TalkerStreams::set_vlan_id`) and re-advertises the talker streams: each old
+Talker Advertise leaves at once and the new one is declared two LeaveAll periods
+later (IEEE 802.1Q-2022 Clause 35.2.2.8).
 
 start() after a stop() declares the Domain again, which resumes MSRP (every
 peer registration flushed, then a LeaveAll): a restart with the link up reports

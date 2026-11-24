@@ -490,7 +490,8 @@ end station that only declares Talker Advertise and Listener attributes (IEEE
    streams, and an attached listener following its talker. A Domain of the
    port's SR class adopted from the bridge (`MsrpHandler::set_adopt_domain`,
    Milan v1.3 Section 4.2.7.2.1: priority and VID) moves the MVRP join and
-   re-advertises the talkers. The Domain and a talker's leaving are reported
+   re-advertises the talkers, each new Talker Advertise two LeaveAll periods
+   after the old one leaves (IEEE 802.1Q-2022 Clause 35.2.2.8). The Domain and a talker's leaving are reported
    once the received PDU is done, with their final state: a peer's Domain
    counts only at the SRclassPriority in use (Clause 35.2.1.4), and a talker
    whose Advertise turns into a Talker Failed has not left.
@@ -531,7 +532,8 @@ talker's attribute is registered).
   4.2.7.2.1), and `on_domain_adopted` moves the MVRP join, the ACMP
   stream_vlan_id and the stream frames. A talker's priority is its SR
   class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5): `talker_advertise()`
-  declares at the Domain's priority. The VID is the same at every position
+  declares at the Domain's priority, two LeaveAll periods after the Talker
+  Advertise at the old priority or VID leaves (Clause 35.2.2.8). The VID is the same at every position
   of a Domain vector (a bridge's default `{5,2,VID},{6,3,VID}`); the
   participant hands over the per-position value.
 - **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
