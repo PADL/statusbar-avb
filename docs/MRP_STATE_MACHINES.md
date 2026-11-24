@@ -450,10 +450,11 @@ A full declare → peer notification → withdraw cycle:
   immediate-leave rule: an explicit withdrawal is still seen at once. Both
   draw LeaveAllTime uniformly from [10 s, 15 s) per period, with JoinTime 200 ms.
 - **Changed values are declared New.** When an attribute we declare is
-  re-declared with a different value (a talker moved to an adopted VID),
-  the participant declares it New (IEEE 802.1Q-2018 10.7.5.1) so the change
-  goes out at the next transmit opportunity rather than at the next periodic
-  or LeaveAll.
+  re-declared with a different value, the participant declares it New (IEEE
+  802.1Q-2018 10.7.5.1) at the next transmit opportunity rather than at the
+  next periodic or LeaveAll. A changed Talker Advertise (a talker moved to an
+  adopted VID or priority) is declared New only after its two LeaveAll
+  periods (35.2.2.8, above).
 - **Reserved table slots.** Without pruning, a bridge propagates every Talker
   Advertise on the network to an end station, and those registrations arrive
   before the station's own declarations (made after gPTP lock and MAAP).
