@@ -235,6 +235,41 @@ TEST(nanoavb_acmp_talker, connect_tx_invalid_stream)
     EXPECT_EQ(captured_response.status(), ACMP_STATUS_TALKER_UNKNOWN_ID);
 }
 
+// Milan v1.3 4.3.3.1 counts the PROBE_TX_COMMAND itself (IEEE 1722.1's
+// CONNECT_TX_COMMAND): on_probe hears of every one that names a stream the
+// talker has, with the time the command was received, whatever the response
+// then says. A command for a stream it does not have, and any other
+// command, is not a probe.
+TEST(nanoavb_acmp_talker, a_probe_is_reported_with_its_time_whatever_the_response)
+{
+    auto const talker_id = make_entity_id(0x01);
+    std::vector<uint8_t> statuses{};
+    AcmpTalkerCallbacks callbacks;
+    callbacks.tx_response = [&](AcmpCommandResponse const& resp) {
+        statuses.push_back(resp.status());
+        return true;
+    };
+    NanoAvbAcmpTalker talker{talker_id, callbacks, 4, 1};  // one listener a stream
+    talker.start();
+    (void)talker.configure_stream(0, make_stream_id(talker_id, 0), Eui48{0x91, 0xE0, 0xF0, 0x00, 0x00, 0x01}, 2);
+
+    std::vector<std::pair<uint16_t, statusbar::sm::TimePoint>> probes{};
+    talker.set_on_probe([&](uint16_t const index, statusbar::sm::TimePoint const at) { probes.emplace_back(index, at); });
+    statusbar::sm::TimePoint const t1{std::chrono::seconds{10}};
+    statusbar::sm::TimePoint const t2{std::chrono::seconds{11}};
+
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, make_entity_id(0x02), 0), t1));
+    // A second listener is refused (the stream's list is full) and is a probe all the same.
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 0, make_entity_id(0x03), 0), t2));
+    EXPECT_TRUE(statuses == (std::vector<uint8_t>{ACMP_STATUS_SUCCESS, ACMP_STATUS_TALKER_NO_STREAM_INDEX}));
+    EXPECT_TRUE(probes == (std::vector<std::pair<uint16_t, statusbar::sm::TimePoint>>{{0, t1}, {0, t2}}));
+
+    EXPECT_TRUE(talker.receive_command(make_connect_tx_command(talker_id, 99, make_entity_id(0x02), 0), t2));
+    EXPECT_TRUE(talker.receive_command(make_disconnect_tx_command(talker_id, 0, make_entity_id(0x02), 0), t2));
+    EXPECT_TRUE(talker.receive_command(make_get_tx_state_command(talker_id, 0), t2));
+    EXPECT_EQ(probes.size(), 2U);
+}
+
 TEST(nanoavb_acmp_talker, disconnect_tx_command)
 {
     auto talker_id = make_entity_id(0x01);

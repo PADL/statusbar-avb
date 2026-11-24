@@ -1072,6 +1072,276 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
 // Sender lifetime: one trampoline to the callbacks in force
 //
 
+//
+// Milan v1.3 4.3.3.1: a talker that declares its attribute only while a
+// listener wants the stream (set_talker_waits_for_listener)
+//
+namespace {
+
+/// A talker's MsrpHandler that waits for a listener, and the bridge port it
+/// is plugged into as an MSRP participant: what each sends reaches the other
+/// on the next run() round. The bridge can declare the stream's Listener
+/// toward the talker, as it does once a listener behind it has declared one.
+struct TalkerLink
+{
+    TimePoint now{std::chrono::seconds{1}};
+    std::vector<std::vector<uint8_t>> talker_out{};
+    std::vector<std::vector<uint8_t>> bridge_out{};
+    statusbar::tsn::StreamId sid{Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, 3};
+    statusbar::srp::msrp::MsrpParticipant bridge{statusbar::srp::msrp::MsrpConfig{}, 0x7a12};
+    MsrpHandler<> talker{statusbar::srp::msrp::MsrpConfig{}, MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+                             talker_out.emplace_back(p.begin(), p.end());
+                             return true;
+                         }}};
+
+    TalkerLink()
+    {
+        bridge.set_send_pdu([this](std::span<uint8_t const> p) {
+            bridge_out.emplace_back(p.begin(), p.end());
+            return true;
+        });
+        bridge.start(now);
+        talker.set_talker_waits_for_listener(true);
+    }
+
+    void run(int const rounds)
+    {
+        for (int i = 0; i < rounds; ++i) {
+            now += std::chrono::milliseconds{125};
+            bridge.tick(now);
+            talker.tick(now);
+            deliver();
+        }
+    }
+
+    void deliver()
+    {
+        for (auto const& p : std::exchange(bridge_out, {})) {
+            talker.receive_packet(p, now);
+        }
+        for (auto const& p : std::exchange(talker_out, {})) {
+            bridge.receive_pdu(p, now);
+        }
+    }
+
+    /// The stream's parameters, with @p dest_last as the last octet of the destination address.
+    [[nodiscard]] auto info(uint8_t const dest_last = 0x34) const -> TalkerStreamSrpInfo
+    {
+        TalkerStreamSrpInfo out{};
+        out.stream_id = sid;
+        out.dest_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, dest_last};
+        out.max_frame_size = 416;
+        out.max_interval_frames = 1;
+        return out;
+    }
+
+    [[nodiscard]] auto state() const -> TalkerReservationState { return talker.get_talker_stream(sid)->state; }
+    /// Whether the bridge holds the talker's attribute registered.
+    [[nodiscard]] auto registered() const -> bool { return bridge.find_registered_talker_advertise(sid) != nullptr; }
+    [[nodiscard]] auto seconds() const -> int64_t
+    {
+        return std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    }
+};
+
+constexpr int ROUNDS_PER_SECOND = 8;
+
+}  // namespace
+
+// Handed a stream's parameters, the talker declares nothing: no listener has
+// asked. The bridge never learns of the stream, however long it waits.
+TEST(nanoavb_srp_msrp, a_talker_that_waits_for_a_listener_declares_nothing_unasked)
+{
+    TalkerLink link{};
+    auto const result = link.talker.talker_advertise(link.info(), link.now);
+    EXPECT_TRUE(result.has_value());
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+    link.run(40 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+    EXPECT_FALSE(link.registered());
+}
+
+// A PROBE_TX_COMMAND makes the stream's destination address valid for 15
+// seconds: the attribute is declared at once, and withdrawn when the 15
+// seconds have passed with no Listener registered.
+TEST(nanoavb_srp_msrp, a_probe_declares_the_talker_for_fifteen_seconds)
+{
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    link.run(2 * ROUNDS_PER_SECOND);
+    auto const probed_at = link.now;
+
+    link.talker.note_talker_probe(link.sid, link.now);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_TRUE(link.registered());
+
+    link.run(14 * ROUNDS_PER_SECOND - 1);  // an eighth of a second short of the fifteen
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    EXPECT_TRUE(link.registered());
+    link.run(1);
+    EXPECT_EQ(link.now - probed_at, std::chrono::seconds{15});
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+    link.run(2 * ROUNDS_PER_SECOND);  // the Lv, and the bridge's LeaveTime
+    EXPECT_FALSE(link.registered());
+}
+
+// A second probe inside the 15 seconds starts them again.
+TEST(nanoavb_srp_msrp, each_probe_gives_the_talker_fifteen_seconds_more)
+{
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(10 * ROUNDS_PER_SECOND);
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(14 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+}
+
+// Once the port registers a Listener attribute for the stream the probe no
+// longer matters: the attribute stays declared for as long as the Listener
+// does, and is withdrawn when the Listener has gone.
+TEST(nanoavb_srp_msrp, a_registered_listener_keeps_the_talker_declared_and_its_leaving_withdraws_it)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::Ready, link.now).has_value());
+
+    link.run(60 * ROUNDS_PER_SECOND);  // four times the probe's life, and LeaveAlls from both ends
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    EXPECT_TRUE(link.registered());
+
+    EXPECT_TRUE(link.bridge.withdraw_listener(link.sid, link.now).has_value());
+    link.run(3 * ROUNDS_PER_SECOND);  // the Lv, the talker's LeaveTime, then its own Lv and the bridge's LeaveTime
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+    EXPECT_FALSE(link.registered());
+}
+
+// A Listener attribute of any Declaration Type counts, and no probe need
+// have come first: a talker back from a restart finds the bridge still
+// declaring the Listener of a stream it was sending, and declares it again.
+TEST(nanoavb_srp_msrp, a_listener_already_registered_declares_the_talker_without_a_probe)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    TalkerLink link{};
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::AskingFailed, link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_TRUE(link.registered());
+}
+
+// A probe that arrives before the entity has handed the stream over (gPTP
+// not yet locked, say) is remembered: the stream is declared when it is
+// handed over inside the 15 seconds, and not when it comes later.
+TEST(nanoavb_srp_msrp, a_probe_ahead_of_the_streams_parameters_counts_for_its_fifteen_seconds)
+{
+    TalkerLink early{};
+    early.talker.note_talker_probe(early.sid, early.now);
+    early.run(5 * ROUNDS_PER_SECOND);
+    (void)early.talker.talker_advertise(early.info(), early.now);
+    EXPECT_EQ(early.state(), TalkerReservationState::Advertising);
+    early.run(10 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(early.state(), TalkerReservationState::Waiting);
+
+    TalkerLink late{};
+    late.talker.note_talker_probe(late.sid, late.now);
+    late.run(16 * ROUNDS_PER_SECOND);
+    (void)late.talker.talker_advertise(late.info(), late.now);
+    EXPECT_EQ(late.state(), TalkerReservationState::Waiting);
+}
+
+// Condition 1 of 4.3.3.1: an address MAAP reports in conflict is not valid.
+// The attribute is withdrawn at the next tick though a Listener is
+// registered, and the address that replaces it is declared two LeaveAll
+// periods after the withdrawal (IEEE 802.1Q 35.2.2.8), as Milan's Table 5.3
+// describes for a talker whose MAAP address is lost.
+TEST(nanoavb_srp_msrp, an_address_in_conflict_withdraws_the_talker_and_its_replacement_waits_two_leaveall_periods)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(0x34), link.now);
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::Ready, link.now).has_value());
+    link.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+
+    link.talker.set_talker_addresses_valid(false);
+    link.run(1);
+    auto const withdrawn_at = link.now;
+    EXPECT_EQ(link.state(), TalkerReservationState::Waiting);
+
+    link.run(2 * ROUNDS_PER_SECOND);  // MAAP has another address
+    link.talker.set_talker_addresses_valid(true);
+    (void)link.talker.talker_advertise(link.info(0x35), link.now);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);  // wanted, and held back by the participant
+    EXPECT_FALSE(link.registered());
+
+    while (link.now - withdrawn_at < std::chrono::milliseconds{29'875}) {
+        link.run(1);
+        EXPECT_FALSE(link.registered());
+    }
+    link.run(16 * ROUNDS_PER_SECOND);  // the first PDU after the thirty seconds carries it
+    EXPECT_TRUE(link.registered());
+    EXPECT_EQ(link.bridge.find_registered_talker_advertise(link.sid)->destination_address.to_uint64() & 0xFFU, 0x35U);
+}
+
+// A stream the entity has withdrawn (a Link Down) is not the handler's to
+// declare: a probe leaves it Idle until the entity advertises it again.
+TEST(nanoavb_srp_msrp, a_probe_does_not_declare_a_stream_the_entity_withdrew)
+{
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    EXPECT_TRUE(link.talker.talker_withdraw(link.sid, link.now).has_value());
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Idle);
+    EXPECT_FALSE(link.registered());
+
+    (void)link.talker.talker_advertise(link.info(), link.now);  // the probe is a second old: still good
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+}
+
+// The loop that drives the handler must wake when a probe runs out, or the
+// attribute it alone held up stays declared until something else wakes it.
+TEST(nanoavb_srp_msrp, the_handlers_deadline_is_no_later_than_a_probes_end)
+{
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    link.talker.note_talker_probe(link.sid, link.now);
+    auto const probe_end =
+        std::chrono::duration_cast<std::chrono::nanoseconds>((link.now + std::chrono::seconds{15}).time_since_epoch());
+    auto const deadline = link.talker.next_deadline_ns();
+    EXPECT_TRUE(deadline.has_value() && *deadline <= probe_end.count());
+
+    // With every probe run out, a deadline is never left standing in the past.
+    link.run(20 * ROUNDS_PER_SECOND);
+    auto const after = link.talker.next_deadline_ns();
+    auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(link.now.time_since_epoch()).count();
+    EXPECT_TRUE(!after.has_value() || *after > now_ns);
+}
+
+// A handler that does not wait (IEEE 1722.1's way, the default) is not
+// moved by a probe or by the address flag: it declares what it is handed.
+TEST(nanoavb_srp_msrp, a_talker_that_does_not_wait_declares_at_once_and_ignores_probes)
+{
+    TalkerLink link{};
+    link.talker.set_talker_waits_for_listener(false);
+    link.talker.set_talker_addresses_valid(false);
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(40 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    EXPECT_TRUE(link.registered());
+}
+
 namespace {
 
 /// A MSRPDU carrying one Domain vector with the LeaveAll flag and no

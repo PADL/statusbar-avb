@@ -404,4 +404,80 @@ TEST(avb_entity_kit_maap, without_a_maap_socket_adp_starts_at_link_up_as_before)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
 }
 
+namespace {
+
+/// A PROBE_TX_COMMAND for talker stream @p index of @p kit, handed to its ACMP talker at @p now.
+void probe_talker_stream(KitUnderTest& kit, uint16_t const index, TimePoint const now)
+{
+    atdecc::AcmpCommandResponse cmd{};
+    cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    cmd.talker_entity_id = kit->host().components().acmp_talker.entity_id();
+    cmd.talker_unique_id = index;
+    cmd.listener_entity_id = Eui64{0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+    cmd.listener_unique_id = 0;
+    (void)kit->host().components().acmp_talker.receive_command(cmd, now);
+}
+
+/// The MSRP state of talker stream @p spec of @p kit, Idle when the handler does not know the stream.
+auto talker_state(KitUnderTest& kit, StreamSpec const& spec) -> nanoavb::TalkerReservationState
+{
+    auto const* stream = kit->host().components().msrp_handler.get_talker_stream(kit->make_talker_srp_info(spec).stream_id);
+    return stream != nullptr ? stream->state : nanoavb::TalkerReservationState::Idle;
+}
+
+/// Start @p kit and take it to Ready: Link Up, then a grandmaster.
+void bring_up(KitUnderTest& kit)
+{
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    kit->on_gptp_announce(TimePoint{std::chrono::seconds{3}}, true);
+    EXPECT_TRUE(kit->host().is_ready());
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_talker, a_milan_kit_declares_a_stream_when_it_is_probed_and_a_classic_kit_at_once)
+{
+    // Milan v1.3 4.3.3.1: no Talker attribute for a stream no listener has
+    // asked for. The probe reaches the SRP handler through ACMP, and only
+    // the stream it names is declared. IEEE 1722.1 as written declares
+    // every stream once the entity is ready.
+    using nanoavb::TalkerReservationState;
+    KitUnderTest milan{make_config(2, "milan13")};
+    bring_up(milan);
+    EXPECT_TRUE(milan.talker_specs().size() >= 2);
+    for (auto const& spec : milan.talker_specs()) {
+        EXPECT_EQ(talker_state(milan, spec), TalkerReservationState::Waiting);
+    }
+    auto const& probed = milan.talker_specs().front();
+    probe_talker_stream(milan, probed.index, TimePoint{std::chrono::seconds{4}});
+    for (auto const& spec : milan.talker_specs()) {
+        EXPECT_EQ(
+            talker_state(milan, spec),
+            spec.index == probed.index ? TalkerReservationState::Advertising : TalkerReservationState::Waiting);
+    }
+    EXPECT_TRUE(milan.stop(TimePoint{std::chrono::seconds{5}}));
+
+    KitUnderTest classic{make_config(2, "classic")};
+    bring_up(classic);
+    for (auto const& spec : classic.talker_specs()) {
+        EXPECT_EQ(talker_state(classic, spec), TalkerReservationState::Advertising);
+    }
+    EXPECT_TRUE(classic.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
+TEST(avb_entity_kit_talker, a_restarted_milan_kit_holds_its_addresses_valid_again)
+{
+    // A stop gives the stream addresses up; the start after it must not
+    // leave the SRP handler believing they are still gone, or a kit on
+    // static addresses would never declare a talker again.
+    KitUnderTest kit{make_config(2, "milan13")};
+    bring_up(kit);
+    kit->host().components().msrp_handler.set_talker_addresses_valid(false);  // what a MAAP stop leaves behind
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{6}}));
+    EXPECT_TRUE(kit->host().components().msrp_handler.talker_addresses_valid());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{7}}));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

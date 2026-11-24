@@ -315,6 +315,7 @@ class MaapAddressAcquirer
                 // per-stream dest MAC, then release the gate so the media
                 // thread's acquire-load sees the new MACs before transmitting.
                 publish_block(components, talker, indices_, block_start);
+                components.msrp_handler.set_talker_addresses_valid(true);
                 ready_.store(true, std::memory_order_release);
                 log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
                 remember(block_start, count);
@@ -324,10 +325,14 @@ class MaapAddressAcquirer
                     on_addresses_ready_(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
                 }
             });
-        handler.set_on_lost([this](ieee::Eui48 const& start, uint16_t /*count*/) {
+        handler.set_on_lost([this, &components](ieee::Eui48 const& start, uint16_t /*count*/) {
             // A conflict, a Link Up re-probing the range, or the stop: the TX
-            // gate closes until a block is defended (on_acquired re-opens it).
+            // gate closes until a block is defended (on_acquired re-opens it),
+            // and a talker that declares on demand withdraws its Talker
+            // attributes at the SRP handler's next tick (Milan v1.3 4.3.3.1:
+            // an address in conflict is not a valid one).
             ready_.store(false, std::memory_order_release);
+            components.msrp_handler.set_talker_addresses_valid(false);
             log_->warning("maap: no longer defending {:012x}; stream TX gated", start.to_uint64());
         });
     }

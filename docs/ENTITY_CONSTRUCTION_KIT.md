@@ -307,6 +307,7 @@ same under both.
 | Changes by non-ATDECC means while locked (front panel, `set_local_identify`) | allowed | refused ENTITY_LOCKED (5.3.4.1, 5.4.2.17) |
 | MSRP Registrar receiving Lv in IN | starts the leavetimer (802.1Q Table 10-4) | goes straight to MT (4.2.7.2.2) |
 | MRP timers (MSRP and MVRP) | 802.1Q Table 10-7: JoinTime 200 ms, LeaveTime 1000 ms, LeaveAll 10 to 15 s, periodic 1 s | Milan Table 4.3: the same with LeaveTime 5000 ms (4.2.7.1.1) |
+| When a stream output's Talker attribute is declared | once the entity is ready and its stream addresses are final | only while a listener wants the stream: a PROBE_TX_COMMAND for it arrived in the last 15 s, or a Listener attribute for its StreamID is registered on the port; withdrawn when neither holds, and while MAAP reports the address lost (4.3.3.1). `MsrpHandler::set_talker_waits_for_listener` |
 | Talker presentation offset when `presentation_offset_ns` is 0 (the default) | 1 ms | 2 ms (5.3.7.6); a value other than 0 is used as given under either |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 

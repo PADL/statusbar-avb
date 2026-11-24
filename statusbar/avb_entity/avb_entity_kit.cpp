@@ -64,15 +64,17 @@ AvbEntityKit::AvbEntityKit(
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
     // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
     // answers, and on the SRP side the MRP timers (Table 4.3), the Class A
-    // Domain adopted from the wire (4.2.7.2.1) and the instant leave
-    // (4.2.7.2.2). A Milan model also has GET_MILAN_INFO to answer, whichever
-    // profile it is held to.
+    // Domain adopted from the wire (4.2.7.2.1), the instant leave
+    // (4.2.7.2.2) and a Talker attribute declared only while a listener
+    // wants the stream (4.3.3.1). A Milan model also has GET_MILAN_INFO to
+    // answer, whichever profile it is held to.
     bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
     install_milan_info();
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
+    host_.components().msrp_handler.set_talker_waits_for_listener(milan);
     apply_mrp_timers(milan);
     host_.components().msrp_handler.set_on_domain_adopted(
         [this](DomainInfo const& domain, TimePoint const now) { follow_domain(domain, now); });
@@ -219,7 +221,14 @@ auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
 }
 
 void AvbEntityKit::wire_stream_callbacks()
-{  // NOLINT(statusbar-block-statements) the stream callback wiring, one install per hook; pre-dates the gate
+{
+    wire_srp_callbacks();
+    wire_acmp_callbacks();
+    wire_aem_stream_callbacks();
+}
+
+void AvbEntityKit::wire_srp_callbacks()
+{
     // MSRP reservations for the talker streams. The host declares the SR class
     // domain before calling these, then advertises/withdraws on the MSRP cycle.
     host_.set_advertise_streams([this](TimePoint time) { advertise_talker_streams(time); });
@@ -231,7 +240,25 @@ void AvbEntityKit::wire_stream_callbacks()
     // The per-stream transmit gate tracks MSRP Listener Ready.
     host_.set_on_listener_ready(
         [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+}
 
+void AvbEntityKit::note_talker_probe(uint16_t const stream_index, TimePoint const now)
+{
+    // Milan v1.3 4.3.3.1: a PROBE_TX_COMMAND for one of the stream outputs.
+    // The SRP handler declares the stream's Talker attribute for the next
+    // 15 seconds, by which time the listener that probed has declared its
+    // own; a handler that does not wait for a listener ignores it.
+    if (auto const* stream = host_.components().acmp_talker.get_stream(stream_index); stream != nullptr) {
+        nanoavb::StreamId stream_id{};
+        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &stream_id);
+        host_.components().msrp_handler.note_talker_probe(stream_id, now);
+    }
+}
+
+void AvbEntityKit::wire_acmp_callbacks()
+{
+    host_.components().acmp_talker.set_on_probe(
+        [this](uint16_t const stream_index, TimePoint const now) { note_talker_probe(stream_index, now); });
     // ACMP: log talker connections + publish the fresh connection count for
     // the media-timer gate; drive the listener (MSRP attach + mcast join) on
     // listener connect/disconnect.
@@ -263,7 +290,10 @@ void AvbEntityKit::wire_stream_callbacks()
             },
             [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
     }
+}
 
+void AvbEntityKit::wire_aem_stream_callbacks()
+{
     // AECP GET_COUNTERS (STREAM_OUTPUT talker rate + STREAM_INPUT listener
     // health) and GET_STREAM_INFO (talker stream identity, queried by a Milan
     // listener to verify the stream before sustaining a connection; listener
@@ -338,6 +368,9 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     // streams, MVRP and GET_AVB_INFO follow (follow_domain). The Link Up
     // that follows a start declares it.
     (void)host_.components().msrp_handler.return_to_configured_domain(now);
+    // The stream addresses are valid until MAAP, where it runs, says they
+    // are not: an earlier run's stop left them marked as given up.
+    host_.components().msrp_handler.set_talker_addresses_valid(true);
     wire_stream_callbacks();
     // The VID in force, registered on every start: stop() withdraws it with
     // the rest, but the Domain adopted from the wire outlives a stop, and
@@ -569,6 +602,8 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
     // acquired asynchronously after gPTP lock (which first triggers this), so
     // advertising a pre-MAAP dest would not match the MAAP address ACMP hands the
     // listener -> AskingFailed. on_acquired re-calls this once the block is defended.
+    // Under the Milan profile the SRP handler takes the parameters here and
+    // declares each stream only while a listener wants it (4.3.3.1).
     if (!maap_.ready()) {
         return;
     }

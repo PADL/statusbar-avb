@@ -68,10 +68,22 @@ auto NanoAvbAcmpTalker::receive_command(AcmpCommandResponse const& cmd, TimePoin
     // Store the command in context
     ctx_.rcvd_cmd_resp = cmd;
 
+    // The probe is told first: a talker that declares its stream on a probe
+    // has the declaration under way when the response reaches the listener.
+    report_probe(cmd, event_time);
+
     // Handle the event with the state machine
     sm_.handle_event(ctx_, *event, event_time);
 
     return true;
+}
+
+void NanoAvbAcmpTalker::report_probe(AcmpCommandResponse const& cmd, TimePoint const event_time)
+{
+    bool const is_probe = cmd.message_type() == ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND;
+    if (is_probe && callbacks_.on_probe && ctx_.get_stream(cmd.talker_unique_id.get()) != nullptr) {
+        callbacks_.on_probe(cmd.talker_unique_id.get(), event_time);
+    }
 }
 
 NanoAvbAcmpListener::NanoAvbAcmpListener(Eui64 entity_id, AcmpListenerCallbacks callbacks, size_t max_streams)

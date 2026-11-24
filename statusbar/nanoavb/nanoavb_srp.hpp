@@ -16,6 +16,7 @@
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -66,6 +67,9 @@ enum class TalkerReservationState : uint8_t
     Advertising,
     Ready,
     Failed,
+    /// Its parameters are known and nothing is declared: no listener has
+    /// asked for the stream (MsrpHandler::set_talker_waits_for_listener).
+    Waiting,
 };
 
 /// Stream reservation state (for listener)
@@ -473,45 +477,68 @@ class MsrpHandler
     /// MsrpParticipant::set_suppress_leaveall.
     void set_suppress_leaveall(bool enabled) noexcept { participant_.set_suppress_leaveall(enabled); }
 
+    /// How long a PROBE_TX_COMMAND keeps a stream's Talker attribute
+    /// declared with no Listener registered (Milan v1.3 4.3.3.1).
+    static constexpr std::chrono::seconds TALKER_PROBE_VALIDITY{15};
+
+    /// Milan v1.3 4.3.3.1: a Talker attribute is declared only while some
+    /// listener wants the stream, "to avoid declaring talker attributes for
+    /// Streams that are not requested by any Listener, saving network
+    /// resources". With this on, talker_advertise() hands the handler the
+    /// stream's parameters and the handler declares them while either
+    /// condition of 4.3.3.1 (2) holds: a PROBE_TX_COMMAND for the stream
+    /// came in the last 15 seconds (note_talker_probe), or this port is
+    /// registering a Listener attribute for its StreamID. It withdraws the
+    /// attribute when neither holds any more, and the stream is then
+    /// TalkerReservationState::Waiting. Off (the default, IEEE 1722.1's
+    /// way) every stream handed to talker_advertise() is declared at once.
+    /// Turning it off does not declare what is waiting: the entity
+    /// advertises again.
+    void set_talker_waits_for_listener(bool const wait) noexcept { talker_waits_for_listener_ = wait; }
+    [[nodiscard]] auto talker_waits_for_listener() const noexcept -> bool { return talker_waits_for_listener_; }
+
+    /// Milan v1.3 4.3.3.1 condition 1: whether the talker streams'
+    /// destination addresses are the entity's to use ("allocated by the MAAP
+    /// protocol and no conflict is being reported"). While they are not, a
+    /// handler that waits for a listener declares no Talker attribute and
+    /// withdraws, at its next tick(), the ones it had declared. True until
+    /// told otherwise; not consulted unless set_talker_waits_for_listener().
+    void set_talker_addresses_valid(bool const valid) noexcept { talker_addresses_valid_ = valid; }
+    [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool { return talker_addresses_valid_; }
+
+    /// A PROBE_TX_COMMAND (IEEE 1722.1's CONNECT_TX_COMMAND) for talker
+    /// stream @p stream_id arrived at @p now. Remembered for
+    /// TALKER_PROBE_VALIDITY whether or not the stream has been handed to
+    /// talker_advertise() yet, and a waiting stream is declared at once: the
+    /// listener that probed starts looking for the attribute as soon as it
+    /// has the response. Nothing unless set_talker_waits_for_listener().
+    void note_talker_probe(StreamId const& stream_id, TimePoint const now)
+    {
+        if (!talker_waits_for_listener_) {
+            return;
+        }
+        remember_talker_probe(stream_id, now);
+        follow_talker_demand(now);
+    }
+
+    /// This talker stream's parameters, to declare as a Talker Advertise: at
+    /// once, or under set_talker_waits_for_listener() while a listener wants
+    /// the stream. Called again with other parameters for a stream already
+    /// declared, the participant leaves the old value first and holds the
+    /// new one for two LeaveAll periods (IEEE 802.1Q 35.2.2.8).
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
-        size_t idx = 0;
-        bool found = false;
-        for (size_t i = 0; i < talker_streams_.size(); ++i) {
-            if (talker_streams_[i].stream_id == info.stream_id) {
-                talker_streams_[i] = info;
-                talker_streams_[i].state = TalkerReservationState::Advertising;
-                idx = i;
-                found = true;
-                break;
-            }
+        auto const idx = remember_talker(info);
+        if (!idx) {
+            return idx;
         }
-        if (!found) {
-            auto copy = info;
-            copy.state = TalkerReservationState::Advertising;
-            // inplace_vector::push_back throws when full; on the MSRP reactor path a
-            // peer advertising more than MaxStreams must be rejected, not terminate.
-            if (talker_streams_.try_push_back(copy) == nullptr) {
-                return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
-            }
-            idx = talker_streams_.size() - 1;
+        ensure_started(now);
+        auto& stream = talker_streams_[*idx];
+        if (talker_wanted(stream.stream_id, now)) {
+            declare_talker(stream, now);
+        } else {
+            stand_talker_down(stream, now);
         }
-
-        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
-        fv.stream_id = info.stream_id;
-        fv.destination_address = info.dest_address;
-        fv.vlan_identifier = info.vlan_id;
-        fv.max_frame_size = info.max_frame_size;
-        fv.max_interval_frames = info.max_interval_frames;
-        fv.set_priority(info.priority);
-        fv.set_rank(statusbar::srp::msrp::RANK_NON_EMERGENCY);
-        fv.accumulated_latency = info.accumulated_latency;
-
-        if (!started_) {
-            participant_.start(now);
-            started_ = true;
-        }
-        (void)participant_.declare_talker_advertise(fv, now);
         return idx;
     }
 
@@ -645,7 +672,9 @@ class MsrpHandler
     /// served late sends its message late.
     [[nodiscard]] auto next_deadline_ns() const noexcept -> std::optional<int64_t>
     {
-        auto const next = participant_.next_deadline();
+        // The MRP timers, or sooner the moment a probe stops holding a
+        // stream's Talker attribute up (set_talker_waits_for_listener).
+        auto const next = std::min(participant_.next_deadline(), next_talker_probe_expiry());
         if (!started_ || next == TimePoint::max()) {
             return std::nullopt;
         }
@@ -751,13 +780,22 @@ class MsrpHandler
         }
         last_event_time_ = now;
         participant_.tick(now);
+        follow_talker_demand(now);
     }
 
     [[nodiscard]] auto talker_streams() const noexcept -> std::span<TalkerStreamSrpInfo const> { return talker_streams_; }
     [[nodiscard]] auto listener_streams() const noexcept -> std::span<ListenerStreamSrpInfo const> { return listener_streams_; }
 
   private:
-    /// Every talker that is advertising, withdrawn (withdraw_all).
+    /// A PROBE_TX_COMMAND remembered for a talker stream (note_talker_probe).
+    struct TalkerProbe
+    {
+        StreamId stream_id{};
+        TimePoint at{};
+    };
+
+    /// Every talker that is advertising or waiting, withdrawn (withdraw_all).
+    /// The probes go with them: the run they asked in is over.
     void withdraw_talkers(TimePoint now)
     {
         for (auto& stream : talker_streams_) {
@@ -766,6 +804,147 @@ class MsrpHandler
                 (void)participant_.withdraw_talker(stream.stream_id, now);
             }
         }
+        talker_probes_.clear();
+    }
+
+    /// @p info into the talker table, its state kept (Idle for a stream new
+    /// to it). The table's index, or a failure when it is full: a model with
+    /// more talker streams than MaxStreams is refused, not a crash.
+    [[nodiscard]] auto remember_talker(TalkerStreamSrpInfo const& info) -> StatusValue<size_t>
+    {
+        for (size_t i = 0; i < talker_streams_.size(); ++i) {
+            if (talker_streams_[i].stream_id == info.stream_id) {
+                auto const state = talker_streams_[i].state;
+                talker_streams_[i] = info;
+                talker_streams_[i].state = state;
+                return i;
+            }
+        }
+        if (talker_streams_.try_push_back(info) == nullptr) {
+            return failure(make_error_code(NanoAvbError::SrpRegistrationFailed));
+        }
+        talker_streams_.back().state = TalkerReservationState::Idle;
+        return talker_streams_.size() - 1;
+    }
+
+    /// Declare @p stream's Talker Advertise with the parameters it holds.
+    void declare_talker(TalkerStreamSrpInfo& stream, TimePoint const now)
+    {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fill_talker_frames_and_tspec(stream, fv);
+        fill_talker_priority_and_latency(stream, fv);
+        stream.state = TalkerReservationState::Advertising;
+        (void)participant_.declare_talker_advertise(fv, now);
+    }
+
+    static void fill_talker_frames_and_tspec(
+        TalkerStreamSrpInfo const& stream, statusbar::srp::msrp::TalkerAdvertiseFirstValue& fv) noexcept
+    {
+        fv.stream_id = stream.stream_id;
+        fv.destination_address = stream.dest_address;
+        fv.vlan_identifier = stream.vlan_id;
+        fv.max_frame_size = stream.max_frame_size;
+        fv.max_interval_frames = stream.max_interval_frames;
+    }
+
+    static void fill_talker_priority_and_latency(
+        TalkerStreamSrpInfo const& stream, statusbar::srp::msrp::TalkerAdvertiseFirstValue& fv) noexcept
+    {
+        fv.set_priority(stream.priority);
+        fv.set_rank(statusbar::srp::msrp::RANK_NON_EMERGENCY);
+        fv.accumulated_latency = stream.accumulated_latency;
+    }
+
+    /// @p stream waits for a listener: what it declared is withdrawn.
+    void stand_talker_down(TalkerStreamSrpInfo& stream, TimePoint const now)
+    {
+        if (stream.state == TalkerReservationState::Advertising) {
+            (void)participant_.withdraw_talker(stream.stream_id, now);
+        }
+        stream.state = TalkerReservationState::Waiting;
+    }
+
+    /// Whether @p stream_id's Talker attribute is to be declared now. Always,
+    /// where the handler does not wait for a listener. Where it does, Milan
+    /// v1.3 4.3.3.1: the addresses are valid (condition 1), and a probe came
+    /// within TALKER_PROBE_VALIDITY or a Listener attribute for the stream
+    /// is registered on this port (condition 2).
+    [[nodiscard]] auto talker_wanted(StreamId const& stream_id, TimePoint const now) const noexcept -> bool
+    {
+        if (!talker_waits_for_listener_) {
+            return true;
+        }
+        return talker_addresses_valid_ && (talker_probed_recently(stream_id, now) || participant_.listener_registered(stream_id));
+    }
+
+    [[nodiscard]] auto talker_probed_recently(StreamId const& stream_id, TimePoint const now) const noexcept -> bool
+    {
+        for (auto const& probe : talker_probes_) {
+            if (probe.stream_id == stream_id && now - probe.at < TALKER_PROBE_VALIDITY) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// The probe for @p stream_id at @p now, over any earlier one for the stream.
+    void remember_talker_probe(StreamId const& stream_id, TimePoint const now)
+    {
+        if (auto* slot = talker_probe_slot(stream_id); slot != nullptr) {
+            *slot = TalkerProbe{.stream_id = stream_id, .at = now};
+        }
+    }
+
+    /// The entry a probe for @p stream_id goes into: the stream's own, else
+    /// a new one, else (the table full of other streams' probes) the oldest.
+    [[nodiscard]] auto talker_probe_slot(StreamId const& stream_id) noexcept -> TalkerProbe*
+    {
+        TalkerProbe* oldest = nullptr;
+        for (auto& probe : talker_probes_) {
+            if (probe.stream_id == stream_id) {
+                return &probe;
+            }
+            oldest = (oldest == nullptr || probe.at < oldest->at) ? &probe : oldest;
+        }
+        auto* fresh = talker_probes_.try_push_back(TalkerProbe{});
+        return fresh != nullptr ? fresh : oldest;
+    }
+
+    /// Declare the waiting streams a listener now wants and withdraw the
+    /// declared ones no listener wants any more, then forget the probes
+    /// that have run out. Nothing unless set_talker_waits_for_listener().
+    void follow_talker_demand(TimePoint const now)
+    {
+        if (!talker_waits_for_listener_) {
+            return;
+        }
+        for (auto& stream : talker_streams_) {
+            follow_talker_demand_for(stream, now);
+        }
+        auto const run_out = [now](TalkerProbe const& probe) { return now - probe.at >= TALKER_PROBE_VALIDITY; };
+        talker_probes_.erase(std::remove_if(talker_probes_.begin(), talker_probes_.end(), run_out), talker_probes_.end());
+    }
+
+    void follow_talker_demand_for(TalkerStreamSrpInfo& stream, TimePoint const now)
+    {
+        bool const wanted = talker_wanted(stream.stream_id, now);
+        if (stream.state == TalkerReservationState::Waiting && wanted) {
+            declare_talker(stream, now);
+        } else if (stream.state == TalkerReservationState::Advertising && !wanted) {
+            stand_talker_down(stream, now);
+        }
+    }
+
+    /// When the earliest remembered probe stops counting: follow_talker_demand()
+    /// must run then, to withdraw what only that probe held up. Never in the
+    /// past of the last tick(), which drops the probes that have run out.
+    [[nodiscard]] auto next_talker_probe_expiry() const noexcept -> TimePoint
+    {
+        auto next = TimePoint::max();
+        for (auto const& probe : talker_probes_) {
+            next = std::min(next, probe.at + TALKER_PROBE_VALIDITY);
+        }
+        return next;
     }
 
     /// Every listener that is attached, withdrawn (withdraw_all), whatever
@@ -971,11 +1150,14 @@ class MsrpHandler
     }
 
     MsrpCallbacks callbacks_;
-    bool listener_waits_for_talker_{true};  ///< see set_listener_waits_for_talker
-    DomainInfo domain_;                     ///< the Domain in force (configured, or adopted from the wire)
-    DomainInfo configured_domain_;          ///< what set_domain() gave; return_to_configured_domain() goes back to it
-    bool adopt_domain_{false};              ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
+    bool listener_waits_for_talker_{true};   ///< see set_listener_waits_for_talker
+    DomainInfo domain_;                      ///< the Domain in force (configured, or adopted from the wire)
+    DomainInfo configured_domain_;           ///< what set_domain() gave; return_to_configured_domain() goes back to it
+    bool adopt_domain_{false};               ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
+    bool talker_waits_for_listener_{false};  ///< Milan v1.3 4.3.3.1 (set_talker_waits_for_listener)
+    bool talker_addresses_valid_{true};      ///< Milan v1.3 4.3.3.1 condition 1 (set_talker_addresses_valid)
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
+    statusbar::sg14::inplace_vector<TalkerProbe, MaxStreams> talker_probes_;
     statusbar::sg14::inplace_vector<ListenerStreamSrpInfo, MaxStreams> listener_streams_;
     statusbar::srp::msrp::MsrpParticipant participant_;
     TimePoint last_event_time_{};  ///< time of the current receive_packet()/tick() (for observer re-declares)

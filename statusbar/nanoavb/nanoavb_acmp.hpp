@@ -59,6 +59,15 @@ struct AcmpTalkerCallbacks
 
     /// Called to deregister a talker stream from SRP (on last listener disconnect)
     statusbar::sg14::inplace_function<void(uint16_t stream_index), 64> srp_deregister_stream;
+
+    /// Called for every CONNECT_TX_COMMAND (Milan's PROBE_TX_COMMAND) that
+    /// names one of this talker's stream outputs, whatever the response's
+    /// status then is, told the time the command was received. Milan v1.3
+    /// 4.3.3.1 counts the command itself: a talker declares a stream's
+    /// Talker attribute while one arrived in the last 15 seconds. A command
+    /// for a stream this talker does not have (TALKER_UNKNOWN_ID) is not
+    /// reported.
+    statusbar::sg14::inplace_function<void(uint16_t stream_index, sm::TimePoint now), 64> on_probe;
 };
 
 /// Callbacks for ACMP listener operations
@@ -132,6 +141,13 @@ class NanoAvbAcmpTalker
         callbacks_.on_disconnect = std::move(on_disconnect);
     }
 
+    /// Set just the probe callback (AcmpTalkerCallbacks::on_probe) without
+    /// disturbing the others.
+    void set_on_probe(statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> on_probe)
+    {
+        callbacks_.on_probe = std::move(on_probe);
+    }
+
     /// Get the maximum number of streams
     [[nodiscard]] auto max_streams() const noexcept -> size_t { return ctx_.max_streams(); }
 
@@ -173,6 +189,8 @@ class NanoAvbAcmpTalker
 
   private:
     void wire_talker_tx_response();
+    /// Tell on_probe about @p cmd when it is a CONNECT_TX_COMMAND for a stream this talker has.
+    void report_probe(AcmpCommandResponse const& cmd, TimePoint event_time);
 
     AcmpTalkerCallbacks callbacks_;
     TalkerContext<> ctx_;

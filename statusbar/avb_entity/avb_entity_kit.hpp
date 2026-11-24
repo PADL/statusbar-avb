@@ -250,6 +250,16 @@ class AvbEntityKit
     /// the ACMP listener connect/disconnect drive, and the AEM
     /// GET_COUNTERS / GET_STREAM_INFO fills.
     void wire_stream_callbacks();
+    /// The MSRP third of wire_stream_callbacks(): advertise, withdraw, and the transmit gate's Listener Ready.
+    void wire_srp_callbacks();
+    /// The ACMP third: probes, the talker connection log and gate, the listener's connect and disconnect.
+    void wire_acmp_callbacks();
+    /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills.
+    void wire_aem_stream_callbacks();
+    /// A PROBE_TX_COMMAND arrived for stream output @p stream_index: tell the
+    /// SRP handler, which under the Milan profile declares the stream's
+    /// Talker attribute on it (Milan v1.3 4.3.3.1).
+    void note_talker_probe(uint16_t stream_index, TimePoint now);
 
     /// The SRP handler's Class A Domain in force changed: adopted from the
     /// wire, or back to the configured one after a startup or Link Up (Milan
