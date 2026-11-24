@@ -332,42 +332,18 @@ void ListenerStreams::set_consume(uint16_t const stream_index, StreamConsumeFn f
     defer_consume(stream_index, std::move(fn));
 }
 
-void ListenerStreams::set_consume_timed(uint16_t const stream_index, StreamTimedConsumeFn fn)
-{
-    if (auto* slot = slot_for(stream_index); slot != nullptr) {
-        slot->consume_timed = std::move(fn);
-        return;
-    }
-    defer_consume_timed(stream_index, std::move(fn));
-}
-
-auto ListenerStreams::pending_consume_for(uint16_t const stream_index) -> PendingConsume*
-{
-    for (auto& pending : pending_consume_) {
-        if (pending.stream_index == stream_index) {
-            return &pending;
-        }
-    }
-    if (pending_consume_.size() >= MAX_ENTITY_STREAMS) {
-        return nullptr;
-    }
-    pending_consume_.push_back(PendingConsume{.stream_index = stream_index});
-    return &pending_consume_.back();
-}
-
 void ListenerStreams::defer_consume(uint16_t const stream_index, StreamConsumeFn fn)
 {
     // No slot (yet): keep it pending. open_stream() binds it when the model
     // declares the index; otherwise it stays here, inert (menu/selection).
-    if (auto* pending = pending_consume_for(stream_index); pending != nullptr) {
-        pending->fn = std::move(fn);
+    for (auto& pending : pending_consume_) {
+        if (pending.stream_index == stream_index) {
+            pending.fn = std::move(fn);
+            return;
+        }
     }
-}
-
-void ListenerStreams::defer_consume_timed(uint16_t const stream_index, StreamTimedConsumeFn fn)
-{
-    if (auto* pending = pending_consume_for(stream_index); pending != nullptr) {
-        pending->timed = std::move(fn);
+    if (pending_consume_.size() < MAX_ENTITY_STREAMS) {
+        pending_consume_.push_back(PendingConsume{.stream_index = stream_index, .fn = std::move(fn)});
     }
 }
 
@@ -400,10 +376,7 @@ void ListenerStreams::bind_pending_consume(ListenerStreamSlot& slot)
         if (pending.stream_index == slot.spec.index && pending.fn) {
             slot.consume = std::move(pending.fn);
             pending.fn = {};  // consumed; entry stays (never erased, slots are stable)
-        }
-        if (pending.stream_index == slot.spec.index && pending.timed) {
-            slot.consume_timed = std::move(pending.timed);
-            pending.timed = {};
+            break;
         }
     }
     for (auto& pending : pending_crf_) {
@@ -482,9 +455,6 @@ void ListenerStreams::close_rx() noexcept
         if (slot.consume) {
             defer_consume(slot.spec.index, std::move(slot.consume));
         }
-        if (slot.consume_timed) {
-            defer_consume_timed(slot.spec.index, std::move(slot.consume_timed));
-        }
         if (slot.on_crf) {
             defer_crf(slot.spec.index, std::move(slot.on_crf));
         }
@@ -546,12 +516,12 @@ auto ListenerStreams::drain_rx(realtime::GptpClock0::time_point const gptp_now, 
     // without the begin the budget is never reset: the first 32 frames
     // arrive and nothing after them.
     begin_port_cycle();
-    size_t const drained = drain_frames(gptp_now.time_since_epoch(), rx_now);
+    size_t const drained = drain_frames(realtime::GptpClock0::to_ns(gptp_now), rx_now);
     end_port_cycle();
     return drained;
 }
 
-auto ListenerStreams::drain_frames(avtp::Nanoseconds const now, net::RxTimePoint const rx_now) -> size_t
+auto ListenerStreams::drain_frames(int64_t const gptp_now_ns, net::RxTimePoint const rx_now) -> size_t
 {
     size_t drained = 0;
     while (drained < MAX_DRAIN_PER_CALL && receive_one(gptp_now_ns, rx_now)) {
@@ -905,32 +875,12 @@ void ListenerStreams::tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const
         pdu.tu(),
         pdu.mr(),
         /*format_ok=*/true,
-        events_per_pdu,
-        /*ts_sparse=*/true,
-        /*gptp_now_ns=*/0);
-}
-
-void ListenerStreams::deliver_crf(
-    ListenerStreamSlot& slot,
-    avtp::CrfStreamInputContext& ctx,
-    avtp::CrfPdu const& pdu,
-    std::span<uint8_t const> const ts_data,
-    int64_t const gptp_now_ns)
-{
-    auto const stream_id = pdu.stream_id().to_uint64();
-    auto const connection = slot.connections.load(std::memory_order_acquire);
-    ctx.process_packet(pdu, ts_data, [&slot, gptp_now_ns, mr = pdu.mr(), stream_id, connection](uint64_t ts_ns, uint16_t index) {
-        if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || connection != slot.crf_connection) {
-            slot.crf_stream_id = stream_id;
-            slot.crf_connection = connection;
-            ++slot.crf_source;
-        }
-        if (slot.on_crf) {
-            slot.on_crf(ts_ns, index, gptp_now_ns, mr, slot.crf_source);
-        }
-    });
-    slot.rx_packets.add(1);
-    slot.rx_samples.add(ctx.last_timestamp_count);
+        uint64_t{format.crf_timestamps_per_pdu} * format.crf_timestamp_interval,
+        /*ts_sparse=*/false,
+        gptp_now_ns,
+        lock_tolerance_ns_,
+        format.crf_base_frequency_hz);
+    drop_lock_of_a_lost_stream(slot);
 }
 
 void ListenerStreams::count_rejected(
@@ -978,10 +928,10 @@ void ListenerStreams::update_stream_input_counters(
     bool const format_ok,
     uint64_t const samples_per_ch,
     bool const ts_sparse,
-    avtp::Nanoseconds const now)
+    int64_t const gptp_now_ns)
 {
     // The bookkeeping itself lives in avb_entity_stream_counters.* (unit-tested); feed
-    // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). now
+    // it the entity-state inputs it can't see (gPTP-now, lock tolerance, Fs). gptp_now_ns
     // is the caller's fresh receive time -- the reactor path passes current_gptp_ns()
     // (the media-timer wake), the RT-timer path passes its own wake time.
     tally_stream_input_packet(
@@ -994,7 +944,7 @@ void ListenerStreams::update_stream_input_counters(
         format_ok,
         samples_per_ch,
         ts_sparse,
-        now.count(),
+        gptp_now_ns,
         lock_tolerance_ns_,
         slot.spec.format.kind == StreamKind::crf ? slot.spec.format.crf_base_frequency_hz : slot.spec.format.sample_rate_hz);
     drop_lock_of_a_lost_stream(slot);
@@ -1193,7 +1143,7 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         stream_index,
         kind_lit(slot_for(stream_index)),
         dest_mac.to_uint64(),
-        ready ? logging::lit("Ready") : logging::lit("not Ready yet (no Talker Advertise registered)"),
+        ready ? logging::lit("Ready") : logging::lit("AskingFailed (talker not advertising yet)"),
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
@@ -1220,7 +1170,7 @@ auto ListenerStreams::attach_ready(
     // registered. Until then (e.g. a fast-connect racing the talker's boot)
     // the handler waits with nothing declared and declares Ready when it
     // appears; a registered Talker Failed gets Asking Failed.
-    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, only);
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, match);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 

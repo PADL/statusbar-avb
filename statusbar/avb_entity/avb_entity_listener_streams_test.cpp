@@ -49,7 +49,6 @@ namespace {
 
 constexpr uint64_t AAF_96K_INT32_8CH = 0x020702200200C000ULL;
 constexpr uint64_t CRF_MILAN_48K = 0x041060010000BB80ULL;
-constexpr uint64_t AM824_48K_8CH = 0x00A0020840000800ULL;
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -72,8 +71,6 @@ auto make_donor() -> std::unique_ptr<AvbEntityToneGenerator>
     AvbEntityAudioIOConfig config{};
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
     config.descriptor_storage_blob = std::move(blob);
-    // The interface's address is told, so creating the entity asks the system for nothing.
-    config.interface_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     return std::move(*result);

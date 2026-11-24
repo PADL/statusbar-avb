@@ -108,10 +108,6 @@ struct ListenerStreamSlot
     /// decode for counters only (and the raw-byte StreamRxAudioSink, if any).
     StreamConsumeFn consume{};
 
-    /// The same hand-off with its times as avtp::Nanoseconds
-    /// (set_consume_timed). Either, both or neither may be set.
-    StreamTimedConsumeFn consume_timed{};
-
     /// Per-stream CRF ingest (kit phase 3): receives each CRF timestamp with
     /// the local receive time, the PDU's mr bit and its source generation —
     /// feed for media-clock recovery. CRF slots only.
@@ -249,11 +245,6 @@ struct ListenerStreams
     /// locks the slot, so never call it from a consumer.
     void set_consume(uint16_t stream_index, StreamConsumeFn fn);
 
-    /// set_consume() for a consumer that takes its times as avtp::Nanoseconds.
-    /// It is kept beside a set_consume() consumer for the same stream, not in
-    /// place of it. Same pending and menu/selection semantics.
-    void set_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn);
-
     /// Register a per-stream CRF timestamp consumer for STREAM_INPUT
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
     /// semantics as set_consume (never called from a consumer). RX-thread callback.
@@ -310,7 +301,7 @@ struct ListenerStreams
     /// @p gptp_now (the caller's gPTP "now") and each told @p rx_now, the RX
     /// clock, at rx_start. The caller owns the tick: the dedicated SCHED_FIFO
     /// RX timer (stream_rx_rt_timer) passes its wake on both clocks
-    /// (TimerWakeInfo actual_time / actual_raw), so a pass reads no clock at
+    /// (TimerWakeInfo actual_time_ns / actual_raw), so a pass reads no clock at
     /// all and ingress is tallied against a time at most one tick stale.
     /// Returns the number of frames taken off the port this call, frames that
     /// were not AVTP included (for the RX-timer batch-size stat).
@@ -603,7 +594,6 @@ struct ListenerStreams
     /// Keep a registration for a slot that does not exist (yet, or any more)
     /// under its stream index, replacing one already kept for that index.
     void defer_consume(uint16_t stream_index, StreamConsumeFn fn);
-    void defer_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn);
     void defer_crf(uint16_t stream_index, StreamCrfFn fn);
     /// Build @p slot's deserializer for @p spec: what open_stream and
     /// reformat_stream share. Errors as open_stream's.
@@ -625,8 +615,8 @@ struct ListenerStreams
     /// decode happens outside it. @p rx_now is the RX clock drain_rx was told.
     [[nodiscard]] auto take_rx_frame(net::RxTimePoint rx_now) -> std::optional<size_t>;
     /// The frames of one pass, up to MAX_DRAIN_PER_CALL, each told @p rx_now
-    /// and stamped @p now: how many the port gave.
-    [[nodiscard]] auto drain_frames(avtp::Nanoseconds now, net::RxTimePoint rx_now) -> size_t;
+    /// and stamped @p gptp_now_ns: how many the port gave.
+    [[nodiscard]] auto drain_frames(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> size_t;
     /// One drain_rx pass is one port cycle: begin resets the XDP backend's
     /// per-cycle receive budget, end refills its ring. Each under the guard.
     void begin_port_cycle();
@@ -669,10 +659,7 @@ struct ListenerStreams
     {
         uint16_t stream_index{0};
         StreamConsumeFn fn{};
-        StreamTimedConsumeFn timed{};
     };
-    /// The entry kept for @p stream_index, made if there is room; nullptr when there is none.
-    [[nodiscard]] auto pending_consume_for(uint16_t stream_index) -> PendingConsume*;
     sg14::inplace_vector<PendingConsume, MAX_ENTITY_STREAMS> pending_consume_{};
     struct PendingCrf
     {
