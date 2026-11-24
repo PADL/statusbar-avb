@@ -71,6 +71,8 @@ auto make_donor() -> std::unique_ptr<AvbEntityToneGenerator>
     AvbEntityAudioIOConfig config{};
     config.entity_id = ieee::Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
     config.descriptor_storage_blob = std::move(blob);
+    // The interface's address is told, so creating the entity asks the system for nothing.
+    config.interface_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
     auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     return std::move(*result);
