@@ -100,6 +100,11 @@ What 2.9.0 changed, MAAP as IEEE 1722-2025 Annex B has it (unicast DEFEND,
 Release! on stop, PortOperational! on Link Up), timers that need not lock
 the whole process, a mapped file with page-range locking and a BW64 reader:
 **[`docs/RELEASE_2_9_0.md`](docs/RELEASE_2_9_0.md)**.
+What 3.0.0 changed, typed clocks through the bridges and the timer, clock
+quality with the `tu` bit and a fixed error per source, MSRP as the AVnu end
+station tests and Milan v1.3 have it, timer threads that lock their own
+memory, the PHC cross-timestamp, servo and follower, and the unit and
+functional test split: **[`docs/RELEASE_3_0_0.md`](docs/RELEASE_3_0_0.md)**.
 
 - **AVB endpoints** (Linux): `statusbar-avb-audio-io` (dual-format
   AM824 + AAF + CRF; the `statusbar-avb-entity` service),
