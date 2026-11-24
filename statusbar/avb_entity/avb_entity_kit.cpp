@@ -151,7 +151,7 @@ AvbEntityKit::AvbEntityKit(
 {  // NOLINT(statusbar-block-statements) the kit's construction phases, in order
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns, audio_sink);
-        listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
+        listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
     }
 
     configure_milan();
@@ -243,7 +243,7 @@ void AvbEntityKit::notify_talker_interface(uint16_t const index)
 }
 
 void AvbEntityKit::configure_profile()
-{
+{  // NOLINT(statusbar-block-statements) one setting per difference between the profiles
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
     // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
@@ -257,6 +257,7 @@ void AvbEntityKit::configure_profile()
     install_milan_info();
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
+    apply_mrp_timers(milan);
 }
 
 void AvbEntityKit::configure_class_a_domain()
@@ -2597,7 +2598,8 @@ void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 
 auto AvbEntityKit::default_presentation_offset_ns() const noexcept -> uint32_t
 {
-    return static_cast<uint32_t>(std::min<uint64_t>(config_.presentation_offset_ns, atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS));
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(effective_presentation_offset_ns(config_), atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS));
 }
 
 auto AvbEntityKit::served_entity_model_id() const -> uint64_t
