@@ -9,6 +9,7 @@
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <charconv>
@@ -21,6 +22,27 @@
 #include <vector>
 
 namespace statusbar::avb_entity {
+
+/// The default limit on the system clock's worst-case error for following
+/// its rate: one second. A rate is as good from a clock 30 ms off as from an
+/// exact one, and the operating system's own figure climbs by half a
+/// millisecond every second between its time daemon's updates (32 ms over a
+/// 64 s poll), so the limit sits well above that. It tells a disciplined
+/// clock from one that never synchronized, or that has had no server for
+/// most of a day.
+inline constexpr int64_t DEFAULT_MAX_UTC_ERROR_NS = 1'000'000'000;
+
+/// The default limit on the system clock's worst-case error for vouching for
+/// a TAI timestamp made from it: three milliseconds. Between two sites across
+/// the internet the relative phase does not need the accuracy a gPTP network
+/// keeps; what the tunnel needs is an accurate rate at both ends, and a phase
+/// error well under its worst-case latency (tens of milliseconds). A clock
+/// disciplined by a GPS receiver on the local network is rated between one
+/// and a half and two and a half milliseconds, so it sits inside this with
+/// little to spare: one that has lost its server coasts at the default 15 ppm
+/// for a minute or so before it passes it. A deployment that knows its
+/// oscillator sets utc_holdover_drift_ppb lower and coasts for longer.
+inline constexpr int64_t DEFAULT_MAX_TAI_ERROR_NS = 3'000'000;
 
 /// Configuration for the dual-format AVB Audio I/O Entity
 struct AvbEntityAudioIOConfig
@@ -37,6 +59,12 @@ struct AvbEntityAudioIOConfig
 
     /// Network interface name (e.g., "en0" on macOS, "eth0" on Linux)
     std::string interface_name{"eth0"};
+
+    /// The interface's MAC address, told by a caller that already knows it.
+    /// Left empty, the entity asks the operating system for the address of
+    /// interface_name when it is created. Telling it keeps the entity's
+    /// construction free of any call to the system (a test does this).
+    std::optional<ieee::Eui48> interface_mac{};
 
     /// How the stream frames reach the wire (net::ETHERNET_BACKEND_CHOICES):
     /// "rawnet" (default) is a transmit socket and a receive socket, plain
@@ -328,10 +356,19 @@ struct AvbEntityAudioIOConfig
     /// into the right SR class / credit-based shaper. Default 3 = SR Class A.
     uint8_t stream_pcp{3};
 
-    /// Presentation-time offset (ns) added to gPTP time for transmitted AVTP
-    /// timestamps; must exceed talker + network transit. Default 2 ms (Milan v1.2
-    /// Section 5.3.7.6); a controller may change it per output.
-    uint64_t presentation_offset_ns{2'000'000};
+    /// Presentation-time offset in nanoseconds added to the gPTP time to form the
+    /// AVTP timestamp of transmitted stream packets (how far in the future the
+    /// listener should present the samples). Must exceed the worst-case talker +
+    /// network transit time or the listener flags LATE_TIMESTAMP, and it is all
+    /// the room a late media-timer wake has: a wake later than this puts frames
+    /// on the wire past their presentation time, and a listener that takes its
+    /// media clock from the stream may stop to lock again. 0 (the default)
+    /// takes the profile's: 2 ms under the Milan profile (Milan v1.3 5.3.7.6,
+    /// "By default, the PAAD-AE shall use a 2ms Presentation time offset"),
+    /// 1 ms otherwise. Any other value is used as given under either profile;
+    /// see effective_presentation_offset_ns(). (The deterministic GPS-rate
+    /// media clock owns this lead; see ptpclient::MediaClockGenerator.)
+    uint64_t presentation_offset_ns{0};
 
     /// Number of stream packets emitted per stream per media-timer wake. Default 1
     /// = strict SR Class A (one 12-sample/125 us packet per 125 us wake, evenly
@@ -394,9 +431,34 @@ struct AvbEntityAudioIOConfig
     /// gPTP grandmaster IS the reference the listener recovers against (e.g. the
     /// listener is itself the GM, or the GM and listener share one timebase) and
     /// CLOCK_REALTIME is NOT GPS-disciplined (NTP), so r would otherwise wander and
-    /// wobble the recovered clock. Skips the CLOCK_REALTIME sampling entirely.
+    /// wobble the recovered clock. The system clock is still read and judged (its
+    /// error figure decides the tunnel's tu bit); only its rate is not followed.
     /// Default false (GPS-rate-pinned, for multi-site agreement). Diagnostic/test.
     bool media_lock_to_gptp{false};
+
+    /// The largest worst-case error of the system clock (the operating
+    /// system's own figure, set by the time daemon and coasted here through a
+    /// loss of its server) at which the entity still follows that clock's
+    /// rate. Inside it the media-clock ratio and the tunnel's TAI mapping are
+    /// trained from the clock; outside it they hold what they had. Negative
+    /// takes any bounded clock.
+    int64_t max_utc_error_ns{DEFAULT_MAX_UTC_ERROR_NS};
+
+    /// The largest worst-case error of the system clock at which the tunnel's
+    /// talker vouches for the TAI timestamps it makes from that clock. Outside
+    /// it the packets carry the tu (timestamp uncertain) bit; the audio and
+    /// the timestamps are sent as before. Negative takes any bounded clock.
+    int64_t udptun_max_tai_error_ns{DEFAULT_MAX_TAI_ERROR_NS};
+
+    /// How fast the system clock's error may grow while its time daemon has
+    /// no server: the deployment's oscillator and temperature figure.
+    uint32_t utc_holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+
+    /// An error of the system clock that its own report does not show, in
+    /// nanoseconds, added to its bound at every update: what lies between
+    /// the time source and this clock that the time daemon does not measure
+    /// (a receiver's pulse offset and cable, a path taken as symmetric).
+    int64_t utc_fixed_error_ns{0};
 
     /// MEDIA_LOCKED detector tolerance (ns). A received stream locks when 8
     /// consecutive avtp_timestamp deltas fall within +/- this of the expected
@@ -445,6 +507,30 @@ struct AvbEntityAudioIOConfig
         priorities.push_back(value);
     }
     return priorities;
+}
+
+/// The presentation offset of a talker that is given none, by profile: Milan
+/// v1.3 5.3.7.6 has 2 ms as the default of a PAAD; an entity held to 1722.1
+/// alone keeps 1 ms.
+inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
+inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
+
+/// Whether @p config holds the entity to Milan v1.3: said outright by
+/// atdecc_profile ("milan13"), or, when that is empty, by the model being a
+/// Milan one.
+[[nodiscard]] inline auto is_milan_profile(AvbEntityAudioIOConfig const& config) noexcept -> bool
+{
+    return config.atdecc_profile.empty() ? config.milan : config.atdecc_profile == "milan13";
+}
+
+/// The presentation offset the entity's talkers use: what the configuration
+/// gives, or the profile's default when it gives none (0).
+[[nodiscard]] inline auto effective_presentation_offset_ns(AvbEntityAudioIOConfig const& config) noexcept -> uint64_t
+{
+    if (config.presentation_offset_ns != 0) {
+        return config.presentation_offset_ns;
+    }
+    return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
 }
 
 }  // namespace statusbar::avb_entity

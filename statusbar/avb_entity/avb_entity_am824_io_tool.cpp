@@ -298,13 +298,13 @@ MainLoopResult run_main_loop(
                 return;
             }
 
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
+            auto const now = TimePoint{wake_info->actual_time.time_since_epoch()};
 
             // Process audio (DSP and packet handling)
             entity.process_audio(now, wake_info->actual_raw);
 
             last_wake_count.publish(wake_info->wake_count);
-            last_wake_error_ns.publish(wake_info->error_ns);
+            last_wake_error_ns.publish(wake_info->error_ns());
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
@@ -336,11 +336,10 @@ MainLoopResult run_main_loop(
                 rx_timer_error_count.add(1);
                 return;
             }
-            size_t const n =
-                entity.drain_stream_rx(realtime::GptpClock0::from_ns(wake_info->actual_time_ns), wake_info->actual_raw);
+            size_t const n = entity.drain_stream_rx(wake_info->actual_time, wake_info->actual_raw);
             rx_frames_drained.add(n);
             rx_last_batch.publish(static_cast<int64_t>(n));
-            rx_last_wake_error_ns.publish(wake_info->error_ns);
+            rx_last_wake_error_ns.publish(wake_info->error_ns());
         },
         ctx.compensation_ns,
         ctx.enable_realtime,

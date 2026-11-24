@@ -122,6 +122,36 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "r would otherwise wander and wobble the listener's recovered clock. Default false (GPS-rate-pinned)",
         config.entity.media_lock_to_gptp,
         [&](auto v) { config.entity.media_lock_to_gptp = v; });
+    specs.add<int64_t>(
+        "media.max_utc_error_us",
+        "Largest worst-case error of the system clock, in microseconds, at which the entity still follows its "
+        "rate for the media-clock ratio and the tunnel's TAI mapping. The figure is the operating system's own "
+        "(what chrony last told it), coasted through a loss of the time server. Outside the limit the ratio "
+        "holds. The default is loose (one second): a rate is as good from a clock tens of milliseconds off. "
+        "Negative takes any bounded clock; 0 is met by no clock, so the ratio never follows",
+        config.entity.max_utc_error_ns / 1'000,
+        [&](auto v) { config.entity.max_utc_error_ns = v < 0 ? -1 : v * 1'000; });
+    specs.add<int64_t>(
+        "udptun.max_tai_error_us",
+        "Largest worst-case error of the system clock, in microseconds, at which the tunnel's talker vouches "
+        "for its TAI timestamps. Outside it tunnel packets carry the tu (timestamp uncertain) bit; audio and "
+        "timestamps are sent as before. The error judged is the system clock's with that of the media timer's "
+        "PHC link added. Negative takes any bounded clock; 0 is met by no clock, so every packet carries tu",
+        config.entity.udptun_max_tai_error_ns / 1'000,
+        [&](auto v) { config.entity.udptun_max_tai_error_ns = v < 0 ? -1 : v * 1'000; });
+    specs.add<uint64_t>(
+        "media.utc_holdover_drift_ppb",
+        "How fast the system clock's worst-case error grows while its time daemon has no server, in parts per "
+        "billion (default 15000, the tolerance NTP assumes of any clock)",
+        static_cast<uint64_t>(config.entity.utc_holdover_drift_ppb),
+        [&](auto v) { config.entity.utc_holdover_drift_ppb = static_cast<uint32_t>((v > 0xFFFFFFFFULL) ? 0xFFFFFFFFULL : v); });
+    specs.add<int64_t>(
+        "media.utc_fixed_error_ns",
+        "An error of the system clock that its own report does not show, in nanoseconds, added to its worst-case "
+        "error: what lies between the time source and this clock (a receiver's pulse offset, a path the time "
+        "daemon takes as symmetric; default 0)",
+        config.entity.utc_fixed_error_ns,
+        [&](auto v) { config.entity.utc_fixed_error_ns = v < 0 ? 0 : v; });
     specs.add<bool>(
         "stream_rx.rt_timer",
         "Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the "
@@ -311,19 +341,20 @@ void print_usage(char const* program_name, args::ArgumentSpecs const& specs)
     std::print(stderr, "\nPress Ctrl-C to stop.\n");
 }
 
-void print_entity_config(Config const& config, Entity const& entity)
+/// The banner's first part: what the tool is and which entity it runs.
+void print_entity_identity(Config const& config, auto const& ecfg)
 {
-    // Read entity fields from the entity's OWN config: the tool's config.entity
-    // has been std::move()d into create() by the time this runs, so its
-    // std::string members (entity_name, interface_name) are emptied. The
-    // entity holds the live copy (incl. the MAC-derived id / hostname name).
-    auto const& ecfg = entity.config();
     std::print("AVB Entity Audio I/O Tool (dual-format)\n");
     std::print("=======================================\n");
     std::print("Descriptor Storage: {}\n", config.tool.descriptor_storage_path);
     std::print("Entity ID:        {}\n", ieee::to_string(ecfg.entity_id).view());
     std::print("Entity Name:      {}\n", ecfg.entity_name);
     std::print("Interface:        {}\n", ecfg.interface_name);
+}
+
+/// The banner's streams: where each talker sends, and the test tone.
+void print_entity_streams(auto const& ecfg, size_t const channels)
+{
     std::print("VLAN ID:          {}\n", ecfg.vlan_id);
     std::print("Stream 0 (AM824): dest {}\n", ieee::to_string(ecfg.am824_talker_dest_mac).view());
     std::print("Stream 1 (AAF):   dest {}  (int32 PCM)\n", ieee::to_string(ecfg.aaf_talker_dest_mac).view());
@@ -332,26 +363,44 @@ void print_entity_config(Config const& config, Entity const& entity)
         ieee::to_string(ecfg.crf_talker_dest_mac).view(),
         ecfg.crf_timestamps_per_packet,
         ecfg.crf_timestamp_interval);
-    std::print("Channels:         {}\n", entity.channels());
+    std::print("Channels:         {}\n", channels);
     std::print(
         "Test Tone:        {:.1f} Hz, amplitude {:.3f} ({:+.1f} dBFS)\n",
         ecfg.tone_freq_hz,
         ecfg.tone_amplitude,
         ecfg.tone_amplitude > 0.0F ? 20.0 * std::log10(static_cast<double>(ecfg.tone_amplitude)) : -120.0);
+}
+
+/// The banner's timing: the packet cadence and what the media clock follows.
+void print_entity_clocking(auto const& ecfg)
+{
+    auto const base_ns = static_cast<uint64_t>(Entity::SAMPLES_PER_PACKET) * 1'000'000'000ULL / Entity::SAMPLE_RATE;
     std::print("Sample Rate:      {} Hz, Samples/Packet: {}\n", Entity::SAMPLE_RATE, Entity::SAMPLES_PER_PACKET);
-    {
-        auto const base_ns = static_cast<uint64_t>(Entity::SAMPLES_PER_PACKET) * 1'000'000'000ULL / Entity::SAMPLE_RATE;
-        std::print(
-            "Packets/Wake:     {} (wake every {} us, {} pkt/s/stream{})\n",
-            ecfg.packets_per_wake,
-            (base_ns * ecfg.packets_per_wake) / 1000,
-            Entity::SAMPLE_RATE / Entity::SAMPLES_PER_PACKET,
-            ecfg.packets_per_wake > 1 ? " -- NON-strict Class A shaping" : "");
-        std::print("Lock Tolerance:   {} ns\n", ecfg.lock_tolerance_ns);
-        std::print(
-            "Media clock rate: {}\n",
-            ecfg.media_lock_to_gptp ? "r=1.0 PINNED to gPTP (CLOCK_REALTIME ignored)" : "r=gPTP/CLOCK_REALTIME (GPS-rate-pinned)");
-    }
+    std::print(
+        "Packets/Wake:     {} (wake every {} us, {} pkt/s/stream{})\n",
+        ecfg.packets_per_wake,
+        (base_ns * ecfg.packets_per_wake) / 1000,
+        Entity::SAMPLE_RATE / Entity::SAMPLES_PER_PACKET,
+        ecfg.packets_per_wake > 1 ? " -- NON-strict Class A shaping" : "");
+    std::print("Lock Tolerance:   {} ns\n", ecfg.lock_tolerance_ns);
+    // Pinned to gPTP the system clock is not followed, but it is still read
+    // and judged: the tunnel's TAI timestamps are made from it either way.
+    std::print(
+        "Media clock rate: {}\n",
+        ecfg.media_lock_to_gptp ? "r=1.0 PINNED to gPTP (system clock not followed, still judged for the tunnel)"
+                                : "r=gPTP/CLOCK_REALTIME (GPS-rate-pinned)");
+}
+
+void print_entity_config(Config const& config, Entity const& entity)
+{
+    // Read entity fields from the entity's OWN config: the tool's config.entity
+    // has been std::move()d into create() by the time this runs, so its
+    // std::string members (entity_name, interface_name) are emptied. The
+    // entity holds the live copy (incl. the MAC-derived id / hostname name).
+    auto const& ecfg = entity.config();
+    print_entity_identity(config, ecfg);
+    print_entity_streams(ecfg, entity.channels());
+    print_entity_clocking(ecfg);
 }
 
 /// The shared runner loop plus the audio-io extras: the optional dedicated
@@ -403,18 +452,18 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
                 return;
             }
             auto const cb_t0 = std::chrono::steady_clock::now();
-            size_t const n =
-                entity.drain_stream_rx(realtime::GptpClock0::from_ns(wake_info->actual_time_ns), wake_info->actual_raw);
-            note_rx(cb_t0, n, wake_info->error_ns);
+            size_t const n = entity.drain_stream_rx(wake_info->actual_time, wake_info->actual_raw);
+            note_rx(cb_t0, n, wake_info->error_ns());
             if (kick_in_rx) {  // the drain released the port guard; the kick needs none
                 auto const k0 = std::chrono::steady_clock::now();
                 (void)entity.kick_stream_tx();
-                note_kick(k0, wake_info->error_ns);
+                note_kick(k0, wake_info->error_ns());
             }
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
         entity.config().stream_rx_cpu_affinity);
+    rx_timer.set_lock_memory(ctx.lock_memory);
 
     // ---- Optional dedicated TX kicker timer (stream_tx.kicker) --------------------
     // The ring backends' transmit wake-up is a syscall; on this timer it leaves
@@ -432,11 +481,12 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
             }
             auto const cb_t0 = std::chrono::steady_clock::now();
             (void)entity.kick_stream_tx();
-            note_kick(cb_t0, wake_info->error_ns);
+            note_kick(cb_t0, wake_info->error_ns());
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
         entity.config().stream_tx_cpu_affinity);
+    tx_kicker.set_lock_memory(ctx.lock_memory);
 
     bool const tx_kick = entity.config().stream_tx_kicker && !kick_in_rx;
     if (tx_kick) {

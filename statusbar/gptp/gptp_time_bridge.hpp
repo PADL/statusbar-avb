@@ -5,25 +5,25 @@
 
 //
 // GptpTimeBridge — bidirectional conversion between gPTP master time
-// and any application-side POSIX clock.
+// and CLOCK_MONOTONIC_RAW, the application's one timing reference.
 //
 // Usage:
 //
 //   // Setup: bind the two clocks and take one cross-timestamp.
-//   GptpTimeBridge bridge{
-//       .get_gptp_time_ns = [&soft_clock]() { return soft_clock.get_ptp_time_ns(realtime_ns()); },
-//       .get_app_time_ns  = []() { return read_monotonic_raw_ns(); },
-//   };
+//   GptpTimeBridge bridge{};
+//   bridge.get_gptp_time_ns = [&soft_clock]() { return soft_clock.get_ptp_time_ns(realtime_ns()); };
+//   bridge.get_app_time_ns  = []() { return realtime::read_monotonic_raw_ns(); };
 //   bridge.update();
 //
-//   // On every Sync+FollowUp pairing, TOLD the pair: the app-clock instant
-//   // of the Sync's arrival and the master time it carried. The bridge
-//   // reads no clock here (gptp_slave_session wires this).
-//   bridge.update_from_anchor(sync_rx_app_ns, tx_master_ns);
+//   // On every Sync+FollowUp pairing, TOLD the pair: the RAW instant of
+//   // the Sync's arrival and the master time it carried, each on its own
+//   // clock type. The bridge reads no clock here (gptp_slave_session wires this).
+//   bridge.update_from_anchor(sync_rx_raw, tx_master);
 //
-//   // Conversions are told an instant and read nothing:
-//   int64_t play_at_app = bridge.from_gptp(avtp_header.get_timestamp());
-//   int64_t play_at_app = bridge.from_gptp_rated(avtp_header.get_timestamp());
+//   // Conversions are told an instant and read nothing. A gPTP instant in,
+//   // a RAW instant out:
+//   realtime::MonotonicRawClock::time_point play_at = bridge.from_gptp(presentation);
+//   realtime::MonotonicRawClock::time_point play_at = bridge.from_gptp_rated(presentation);
 //
 // The bridge keeps a cached offset between the two clocks plus a rate
 // measurement. The rated conversions extrapolate from the last anchor
@@ -32,10 +32,10 @@
 // anchors. update() reads both clocks itself and is the setup path;
 // refresh_offset() likewise, for exit-time diagnostics.
 //
-// Time domains: the app clock is whichever clock the owner binds, by
-// policy CLOCK_MONOTONIC_RAW (the timing reference, see
-// realtime::MonotonicRawClock) so that a RAW instant goes straight
-// through to_gptp(). The master side is gPTP TAI nanoseconds.
+// Time domains: the app side is CLOCK_MONOTONIC_RAW and nothing else (the
+// timing reference, see realtime::MonotonicRawClock): the conversions take
+// and return RAW instants. The master side is gPTP time, a GptpClock0
+// instant.
 //
 // Rate representation — int64 picoseconds-per-second:
 //
@@ -49,23 +49,43 @@
 //     - self-documenting: 1 ppt = 1 picosecond per second = 10⁻¹²
 //     - range ±9.2 million ppm (way more than oscillator stability)
 //
-// Thread safety: the four cached fields (offset, rate_offset, prev_app,
-// prev_gptp) are published together under a single-writer seqlock
-// (`rated_seq_`). Readers that need a consistent snapshot of the rated
-// regression line (e.g. `to_gptp_rated` / `from_gptp_rated`) load all
-// four under the seqlock; readers that only need the unrated offset
-// (e.g. `to_gptp` / `from_gptp`) read `offset_ns_` directly with a
-// single atomic load and are unaffected. The seqlock guards against
-// the failure mode where a writer's update is observed mid-publish —
-// in the worst case (a phase-jump update that bumps offset by the step
-// size while leaving rate untouched), a torn read of OLD offset paired
-// with NEW prev_a yields an error of exactly `−step`, i.e. potentially
+// Quality and coasting: quality() says how well the bridge's line is known,
+// as a realtime::ClockQuality. While Syncs arrive it is refreshed at every
+// anchor: the bound is the furthest any recent anchor landed from the line
+// that was predicting it. When Syncs stop nothing changes state: the rated
+// conversions keep extrapolating with the offset and rate they have, and
+// the quality's uncertainty grows from the last anchor at the drift bound,
+// so whoever uses the time can see how long it stays good enough for them.
+// A master step or restart_timeline() is a different matter: the epoch
+// changes and the bound starts again, from a rate fitted on the new
+// timeline.
+//
+// Two lines, two qualities. quality() is the rated line's (to_gptp_rated /
+// from_gptp_rated). The offset-only line (to_gptp / from_gptp) does not
+// follow the rate between anchors: it is off by the rate offset times the
+// time since the last anchor, a few microseconds while Syncs arrive and
+// without limit once they stop. offset_quality() is that line's: whoever
+// converts with the offset alone judges that one.
+//
+// Thread safety: one writer (the thread that calls update(),
+// update_from_anchor() and refresh_offset()). The four fields of the rated
+// line (offset, rate_offset, prev_app, prev_gptp) are published together
+// through `rated_buffer_`, a triple buffer with ONE consumer: to_gptp_rated()
+// and from_gptp_rated() may be called from one reader thread only. A reader
+// that needs only the unrated offset (to_gptp() / from_gptp()) reads
+// `offset_ns_` with a single atomic load and may be any thread; so may
+// quality() and offset_quality(). Publishing the four together guards against a rated reader
+// pairing an OLD offset with a NEW anchor across a phase jump, an error of
+// the whole step,
 // 100 ms+ for a real servo step.
 //
 
 #include "statusbar/itc/itc_atomic_triple_buffer.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_function.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -83,14 +103,32 @@ struct GptpTimeBridge
     ///   ops.get_local_time_ns  (the PHC IS the gPTP clock)
     statusbar::sg14::inplace_function<int64_t(), 64> get_gptp_time_ns;
 
-    /// Function returning the current application-side clock in ns.
-    /// Typically CLOCK_MONOTONIC or CLOCK_MONOTONIC_RAW:
-    ///   []() {
-    ///       struct timespec ts{};
-    ///       clock_gettime(CLOCK_MONOTONIC, &ts);
-    ///       return ts.tv_sec * 1'000'000'000LL + ts.tv_nsec;
-    ///   }
+    /// Function returning the application-side clock in ns. That clock is
+    /// CLOCK_MONOTONIC_RAW and nothing else: the one reference every timer,
+    /// stamp and deadline in the application uses, and the clock the
+    /// bridge's typed conversions and its quality name.
+    ///   []() { return realtime::read_monotonic_raw_ns(); }
     statusbar::sg14::inplace_function<int64_t(), 64> get_app_time_ns;
+
+    /// How fast the line may go wrong while no Sync arrives, in parts per
+    /// billion, unless the anchors themselves showed the rate moving more:
+    /// the deployment's oscillator and temperature figure.
+    uint32_t holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+
+    /// An error of the link to the master that no anchor shows, in
+    /// nanoseconds, added to the bound at every anchor: what lies between
+    /// the master's time and a receive stamp that the bridge cannot measure
+    /// (PHY latency asymmetry, the granularity of the timestamps, a path
+    /// delay taken as symmetric). The figure of this machine's hardware and
+    /// its link; 0 claims there is none, and a negative value is taken as 0.
+    int64_t fixed_error_ns{0};
+
+    /// Where the domain's time comes from, as its grandmaster announces it.
+    /// The owner sets it from the Announce; until then, a PTP grandmaster.
+    realtime::TimeSource time_source{realtime::TimeSource::ptp};
+
+    using RawTimePoint = realtime::MonotonicRawClock::time_point;
+    using GptpTimePoint = realtime::GptpClock0::time_point;
 
     /// Refresh the cached offset and rate. Call this from the event loop
     /// after each servo pass (every sync interval), or at least once
@@ -142,10 +180,10 @@ struct GptpTimeBridge
     }
 
     /// Refresh the cached anchor + rate from one Sync+FollowUp pairing,
-    /// TOLD both sides of the pair: @p sync_rx_app_ns is the app-clock
+    /// TOLD both sides of the pair: @p sync_rx_raw is the CLOCK_MONOTONIC_RAW
     /// instant of the Sync's arrival (read once by the receive path, as
     /// early as user space can, and carried with the Sync until its
-    /// FollowUp pairs it); @p tx_master_ns is the grandmaster TAI time
+    /// FollowUp pairs it); @p tx_master is the grandmaster TAI time
     /// the FollowUp carried for that Sync (correctionField and
     /// rate-corrected link delay applied, i.e. master TAI at arrival).
     /// The bridge reads no clock here. Reading the app clock at this
@@ -171,23 +209,61 @@ struct GptpTimeBridge
     /// (0 from construction). A skew past the step threshold, or a
     /// master time that went backwards, is a master step: the window
     /// restarts at this anchor and the rate is held.
-    void update_from_anchor(int64_t sync_rx_app_ns, int64_t tx_master_ns) noexcept
+    void update_from_anchor(RawTimePoint const sync_rx_raw, GptpTimePoint const tx_master) noexcept
+    {
+        anchor_at(realtime::MonotonicRawClock::to_ns(sync_rx_raw), realtime::GptpClock0::to_ns(tx_master));
+    }
+
+    /// update_from_anchor() in the bare nanoseconds the line is kept in.
+    void anchor_at(int64_t sync_rx_app_ns, int64_t tx_master_ns) noexcept
     {
         int64_t ppt = rate_offset_ppt_.load(std::memory_order_relaxed);
+        Misses misses{};
         if (anchor_count_ > 0) {
             Anchor const& oldest = anchors_[(anchor_head_ + ANCHOR_WINDOW - anchor_count_) % ANCHOR_WINDOW];
             int64_t const app_delta = sync_rx_app_ns - oldest.app_ns;
             int64_t const skew_ns = (tx_master_ns - oldest.gptp_ns) - app_delta;
             bool const looks_like_step = (app_delta <= 0) || (skew_ns < -STEP_THRESHOLD_NS) || (skew_ns > STEP_THRESHOLD_NS);
             if (looks_like_step) {
-                anchor_count_ = 0;
-            } else if (app_delta >= MIN_RATE_BASELINE_NS) {
-                ppt = static_cast<int64_t>((static_cast<double>(skew_ns) * 1e12) / static_cast<double>(app_delta));
+                begin_new_timeline();
+            } else {
+                misses = misses_against_lines(sync_rx_app_ns, tx_master_ns);
+                ppt = fitted_rate(skew_ns, app_delta, ppt);
             }
         }
-        remember_anchor(sync_rx_app_ns, tx_master_ns);
+        remember_anchor(
+            {.app_ns = sync_rx_app_ns,
+             .gptp_ns = tx_master_ns,
+             .ppt = ppt,
+             .miss_ns = misses.rated_ns,
+             .offset_miss_ns = misses.offset_ns});
         publish_anchor(sync_rx_app_ns, tx_master_ns, ppt);
+        publish_quality(sync_rx_app_ns);
     }
+
+    /// The owner's word that the timeline has changed (a new grandmaster):
+    /// the epoch changes, the anchor window restarts and no bound is
+    /// claimed until the rate has been fitted to Syncs of the new timeline
+    /// and they have been compared with the line. The conversions go on
+    /// with the rate they had, as they do for a step the anchors show.
+    void restart_timeline() noexcept
+    {
+        begin_new_timeline();
+        publish_quality(prev_app_ns_.load(std::memory_order_relaxed));
+    }
+
+    /// How well the bridge's rated line is known (see the note at the top).
+    /// Any thread. Unbounded until the rate has been fitted over its
+    /// baseline on this timeline and an anchor has been compared with the
+    /// line.
+    [[nodiscard]] auto quality() const noexcept -> realtime::ClockQuality { return quality_.load(); }
+
+    /// How well the offset-only line (to_gptp / from_gptp) is known. Any
+    /// thread. Its bound is the furthest any recent anchor landed from the
+    /// offset the anchor before it had left, and it grows after the last
+    /// anchor at the rated line's drift bound plus the whole rate offset,
+    /// because this line does not follow the rate. Bounded when quality() is.
+    [[nodiscard]] auto offset_quality() const noexcept -> realtime::ClockQuality { return offset_quality_.load(); }
 
     /// Refresh only the cached offset, NOT the rate or anchor
     /// timestamps. Useful when you want a current offset reading
@@ -202,7 +278,7 @@ struct GptpTimeBridge
         }
         int64_t const app = get_app_time_ns();
         int64_t const gptp = get_gptp_time_ns();
-        // Bump the seqlock around the offset write so a concurrent
+        // Publish the rated fields with the offset write so a concurrent
         // rated reader sees a consistent (NEW offset, OLD prev_a/g,
         // OLD ppt) snapshot rather than risking a torn pair. The
         // resulting snapshot is intentionally NOT internally
@@ -223,22 +299,22 @@ struct GptpTimeBridge
         offset_ns_.store(gptp - app, std::memory_order_relaxed);
     }
 
-    /// Convert an application-clock timestamp to gPTP master time using
+    /// Convert a CLOCK_MONOTONIC_RAW instant to gPTP master time using
     /// only the cached offset (no rate compensation). Drift between
     /// updates is at most rate × interval-since-last-update.
-    [[nodiscard]] auto to_gptp(int64_t app_ns) const noexcept -> int64_t
+    [[nodiscard]] auto to_gptp(RawTimePoint const raw) const noexcept -> GptpTimePoint
     {
-        return app_ns + offset_ns_.load(std::memory_order_relaxed);
+        return GptpTimePoint{raw.time_since_epoch() + realtime::Nanoseconds{offset_ns_.load(std::memory_order_relaxed)}};
     }
 
-    /// Convert a gPTP master timestamp to the application clock domain
-    /// using only the cached offset (no rate compensation).
-    [[nodiscard]] auto from_gptp(int64_t gptp_ns) const noexcept -> int64_t
+    /// Convert a gPTP master instant to CLOCK_MONOTONIC_RAW using only the
+    /// cached offset (no rate compensation).
+    [[nodiscard]] auto from_gptp(GptpTimePoint const gptp) const noexcept -> RawTimePoint
     {
-        return gptp_ns - offset_ns_.load(std::memory_order_relaxed);
+        return RawTimePoint{gptp.time_since_epoch() - realtime::Nanoseconds{offset_ns_.load(std::memory_order_relaxed)}};
     }
 
-    /// Convert app→gptp using the cached rate offset to extrapolate
+    /// Convert RAW→gptp using the cached rate offset to extrapolate
     /// from the most recent update's anchor point. Accurate to a few
     /// ns at any time within ~1 second of the last update for typical
     /// drift rates.
@@ -251,16 +327,17 @@ struct GptpTimeBridge
     /// The correction multiply uses double — overflow-safe for any
     /// realistic anchor age, and double precision is plenty because
     /// the correction value itself is small (µs–ms range, far from
-    /// the value-near-1.0 wart that motivated int64 ppt STORAGE).
-    [[nodiscard]] auto to_gptp_rated(int64_t app_ns) const noexcept -> int64_t
+    /// the value-near-1.0 wart that motivated int64 ppt STORAGE). Only
+    /// the delta from the anchor goes through it, never the instant.
+    [[nodiscard]] auto to_gptp_rated(RawTimePoint const raw) const noexcept -> GptpTimePoint
     {
         auto const snap = rated_buffer_.consume();
-        int64_t const app_delta = app_ns - snap.prev_app_ns;
-        double const correction_d = static_cast<double>(app_delta) * (static_cast<double>(snap.ppt) * 1e-12);
-        return app_ns + snap.offset_ns + static_cast<int64_t>(correction_d);
+        int64_t const app_ns = realtime::MonotonicRawClock::to_ns(raw);
+        double const correction_d = static_cast<double>(app_ns - snap.prev_app_ns) * (static_cast<double>(snap.ppt) * 1e-12);
+        return realtime::GptpClock0::from_ns(app_ns + snap.offset_ns + static_cast<int64_t>(correction_d));
     }
 
-    /// Convert gptp→app using the cached rate offset. Linear
+    /// Convert gptp→RAW using the cached rate offset. Linear
     /// approximation of the inverse rate; error ≤ 1 ns for ±1000 ppm
     /// drift over ≤ 1 s.
     ///
@@ -268,19 +345,25 @@ struct GptpTimeBridge
     ///   gptp_delta_from_anchor = gptp_ns - prev_gptp_ns
     ///   correction_ns = gptp_delta * rate_offset_ppt / 10¹²
     ///   app = gptp_ns - offset - correction_ns
-    [[nodiscard]] auto from_gptp_rated(int64_t gptp_ns) const noexcept -> int64_t
+    [[nodiscard]] auto from_gptp_rated(GptpTimePoint const gptp) const noexcept -> RawTimePoint
     {
         auto const snap = rated_buffer_.consume();
-        int64_t const gptp_delta = gptp_ns - snap.prev_gptp_ns;
-        double const correction_d = static_cast<double>(gptp_delta) * (static_cast<double>(snap.ppt) * 1e-12);
-        return gptp_ns - snap.offset_ns - static_cast<int64_t>(correction_d);
+        int64_t const gptp_ns = realtime::GptpClock0::to_ns(gptp);
+        double const correction_d = static_cast<double>(gptp_ns - snap.prev_gptp_ns) * (static_cast<double>(snap.ppt) * 1e-12);
+        return realtime::MonotonicRawClock::from_ns(gptp_ns - snap.offset_ns - static_cast<int64_t>(correction_d));
     }
 
     /// Get the current gPTP time (reads the gPTP source directly).
-    [[nodiscard]] auto gptp_now() const noexcept -> int64_t { return get_gptp_time_ns ? get_gptp_time_ns() : 0; }
+    [[nodiscard]] auto gptp_now() const noexcept -> GptpTimePoint
+    {
+        return realtime::GptpClock0::from_ns(get_gptp_time_ns ? get_gptp_time_ns() : 0);
+    }
 
-    /// Get the current application clock time.
-    [[nodiscard]] auto app_now() const noexcept -> int64_t { return get_app_time_ns ? get_app_time_ns() : 0; }
+    /// Get the current CLOCK_MONOTONIC_RAW time through the bridge's hook.
+    [[nodiscard]] auto raw_now() const noexcept -> RawTimePoint
+    {
+        return realtime::MonotonicRawClock::from_ns(get_app_time_ns ? get_app_time_ns() : 0);
+    }
 
     /// Current cached offset (gptp - app) in ns.
     [[nodiscard]] auto offset() const noexcept -> int64_t { return offset_ns_.load(std::memory_order_relaxed); }
@@ -291,8 +374,8 @@ struct GptpTimeBridge
     /// been taken.
     [[nodiscard]] auto rate_offset_ppt() const noexcept -> int64_t { return rate_offset_ppt_.load(std::memory_order_relaxed); }
 
-    /// Last anchor point's app-clock timestamp (the value of
-    /// get_app_time_ns() at the most recent update() call). Used by
+    /// Last anchor point's RAW timestamp, as a bare count: the Sync arrival
+    /// told to update_from_anchor(), or the read update() made. Used by
     /// to_gptp_rated / from_gptp_rated and exposed for diagnostics.
     [[nodiscard]] auto last_anchor_app_ns() const noexcept -> int64_t { return prev_app_ns_.load(std::memory_order_relaxed); }
 
@@ -328,21 +411,147 @@ struct GptpTimeBridge
     };
 
   private:
-    /// One Sync+FollowUp pairing as told to update_from_anchor.
+    /// One Sync+FollowUp pairing as told to update_from_anchor, with the
+    /// rate that was in force once it was taken in and how far each line
+    /// had been from it.
     struct Anchor
     {
         int64_t app_ns;
         int64_t gptp_ns;
+        int64_t ppt;
+        int64_t miss_ns;         ///< the rated line's
+        int64_t offset_miss_ns;  ///< the offset-only line's
+    };
+
+    /// How far each line as it stands is from a new anchor.
+    struct Misses
+    {
+        int64_t rated_ns{0};
+        int64_t offset_ns{0};
     };
 
     /// Append an anchor to the window, dropping the oldest when full.
-    void remember_anchor(int64_t const app, int64_t const gptp) noexcept
+    void remember_anchor(Anchor const& anchor) noexcept
     {
-        anchors_[anchor_head_] = Anchor{.app_ns = app, .gptp_ns = gptp};
+        anchors_[anchor_head_] = anchor;
         anchor_head_ = (anchor_head_ + 1) % ANCHOR_WINDOW;
         if (anchor_count_ < ANCHOR_WINDOW) {
             ++anchor_count_;
         }
+    }
+
+    /// The rate for the window ending at this anchor: fitted once the
+    /// baseline is long enough, else @p held. The first fit also gives its
+    /// rate to the anchors taken in before there was one, so that they do
+    /// not read as a rate that moved.
+    [[nodiscard]] auto fitted_rate(int64_t const skew_ns, int64_t const app_delta, int64_t const held) noexcept -> int64_t
+    {
+        if (app_delta < MIN_RATE_BASELINE_NS) {
+            return held;
+        }
+        auto const ppt = static_cast<int64_t>((static_cast<double>(skew_ns) * 1e12) / static_cast<double>(app_delta));
+        if (!rate_fitted_) {
+            rate_fitted_ = true;
+            for (auto& anchor : anchors_) {
+                anchor.ppt = ppt;
+            }
+        }
+        return ppt;
+    }
+
+    /// How far each line as it stands is from a new anchor, before the
+    /// anchor is taken in: the one direct measurement of a line's error.
+    /// Writer thread; the same arithmetic the readers use.
+    [[nodiscard]] auto misses_against_lines(int64_t const app_ns, int64_t const gptp_ns) const noexcept -> Misses
+    {
+        int64_t const app_delta = app_ns - prev_app_ns_.load(std::memory_order_relaxed);
+        double const correction_d =
+            static_cast<double>(app_delta) * (static_cast<double>(rate_offset_ppt_.load(std::memory_order_relaxed)) * 1e-12);
+        int64_t const by_offset = app_ns + offset_ns_.load(std::memory_order_relaxed);
+        int64_t const by_rate = by_offset + static_cast<int64_t>(correction_d);
+        return {.rated_ns = distance(by_rate, gptp_ns), .offset_ns = distance(by_offset, gptp_ns)};
+    }
+
+    [[nodiscard]] static constexpr auto distance(int64_t const a, int64_t const b) noexcept -> int64_t
+    {
+        return a > b ? a - b : b - a;
+    }
+
+    /// A step, or the owner's word: what the anchors said of the old
+    /// timeline says nothing of the new one, its rate included. The
+    /// conversions go on with the rate they had; no bound is claimed
+    /// until one has been fitted to the new timeline's own anchors.
+    void begin_new_timeline() noexcept
+    {
+        anchor_count_ = 0;
+        rate_fitted_ = false;
+        ++epoch_;
+    }
+
+    /// The furthest any anchor of the window landed from a line.
+    /// @param miss Which line: &Anchor::miss_ns or &Anchor::offset_miss_ns
+    [[nodiscard]] auto worst_miss_ns(int64_t Anchor::* const miss) const noexcept -> int64_t
+    {
+        int64_t worst = 0;
+        for (size_t i = 0; i < anchor_count_; ++i) {
+            worst = std::max(worst, anchors_[(anchor_head_ + ANCHOR_WINDOW - 1 - i) % ANCHOR_WINDOW].*miss);
+        }
+        return worst;
+    }
+
+    /// How far the fitted rate moved across the window, in parts per
+    /// billion rounded up: the rate now held may be that far from the next.
+    [[nodiscard]] auto rate_spread_ppb() const noexcept -> uint32_t
+    {
+        int64_t lowest = rate_offset_ppt_.load(std::memory_order_relaxed);
+        int64_t highest = lowest;
+        for (size_t i = 0; i < anchor_count_; ++i) {
+            int64_t const ppt = anchors_[(anchor_head_ + ANCHOR_WINDOW - 1 - i) % ANCHOR_WINDOW].ppt;
+            lowest = std::min(lowest, ppt);
+            highest = std::max(highest, ppt);
+        }
+        int64_t const spread_ppb = ((highest - lowest) + 999) / 1000;
+        return spread_ppb > int64_t{UINT32_MAX} ? UINT32_MAX : static_cast<uint32_t>(spread_ppb);
+    }
+
+    /// Publish how well each line is known as of the anchor at
+    /// @p anchor_app_ns. No bound is claimed before the rate has been
+    /// fitted on this timeline, or before a second anchor of it has been
+    /// compared with the lines.
+    void publish_quality(int64_t const anchor_app_ns) noexcept
+    {
+        realtime::ClockQuality const unknown{.epoch = epoch_, .time_source = time_source};
+        bool const known = rate_fitted_ && anchor_count_ >= 2;
+        realtime::ClockQuality const rated = known ? rated_quality(anchor_app_ns) : unknown;
+        quality_.store(rated);
+        offset_quality_.store(known ? offset_only(rated) : unknown);
+    }
+
+    /// The configured fixed error, never negative.
+    [[nodiscard]] auto fixed_error() const noexcept -> int64_t { return fixed_error_ns > 0 ? fixed_error_ns : 0; }
+
+    /// The rated line's quality as of the anchor at @p anchor_app_ns.
+    [[nodiscard]] auto rated_quality(int64_t const anchor_app_ns) const noexcept -> realtime::ClockQuality
+    {
+        return {
+            .synced_at = realtime::MonotonicRawClock::from_ns(anchor_app_ns),
+            .bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::miss_ns) + fixed_error()},
+            .epoch = epoch_,
+            .drift_bound_ppb = std::max(holdover_drift_ppb, rate_spread_ppb()),
+            .time_source = time_source};
+    }
+
+    /// The offset-only line's quality, from the rated line's: its own
+    /// misses, and a drift bound with the whole rate offset added, since
+    /// this line runs at rate one whatever the master's rate is.
+    [[nodiscard]] auto offset_only(realtime::ClockQuality const& rated) const noexcept -> realtime::ClockQuality
+    {
+        int64_t const ppt = rate_offset_ppt_.load(std::memory_order_relaxed);
+        int64_t const drift_ppb = int64_t{rated.drift_bound_ppb} + (((ppt < 0 ? -ppt : ppt) + 999) / 1000);
+        realtime::ClockQuality quality = rated;
+        quality.bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::offset_miss_ns) + fixed_error()};
+        quality.drift_bound_ppb = drift_ppb > int64_t{UINT32_MAX} ? UINT32_MAX : static_cast<uint32_t>(drift_ppb);
+        return quality;
     }
 
     /// Publish one (app, gptp) anchor and rate as the four-field rated
@@ -384,6 +593,11 @@ struct GptpTimeBridge
     size_t anchor_head_{0};
     size_t anchor_count_{0};
     bool have_previous_{false};
+    // Quality (writer thread builds it, any thread reads it through the seqlock).
+    bool rate_fitted_{false};
+    uint64_t epoch_{0};
+    statusbar::itc::SeqlockValue<realtime::ClockQuality> quality_{realtime::ClockQuality{}};
+    statusbar::itc::SeqlockValue<realtime::ClockQuality> offset_quality_{realtime::ClockQuality{}};
 };
 
 }  // namespace statusbar::gptp

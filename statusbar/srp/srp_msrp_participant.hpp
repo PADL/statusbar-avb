@@ -48,8 +48,10 @@
 #include "statusbar/tsn/tsn_error.hpp"
 #include "statusbar/tsn/tsn_stream_id.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <span>
 
 namespace statusbar::srp::msrp {
@@ -135,10 +137,18 @@ struct ListenerRecord
         return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
     }
 
+    /// Whether the Registrar holds nothing: Mt, or Start, the state before
+    /// its first event. No peer may ever declare the Listener this port
+    /// declares, so its Registrar can stay in Start for the record's life.
+    [[nodiscard]] auto registrar_is_empty() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::Mt || s == registrar_sm::Def::State::Start;
+    }
+
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
-        return applicant_sm.current_state() == applicant_sm::Def::State::Vo &&
-            registrar_sm.current_state() == registrar_sm::Def::State::Mt;
+        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty();
     }
 };
 
@@ -208,7 +218,8 @@ struct MsrpConfig
     size_t reserved_talker_failed = 0;
     size_t reserved_listeners = 0;
 
-    /// The MRP timers (IEEE 802.1Q-2018 Table 10-7 by default; Milan sets its own).
+    /// The MRP timer durations of this port (IEEE 802.1Q Table 10-7 by
+    /// default; see also MsrpParticipant::set_mrp_timers).
     mrp::TimerConfig timers{};
 
     /// Check invariants. Returns Success if the config is
@@ -326,9 +337,12 @@ class MsrpParticipantT
     /// changed DataFrameParameters, TSpec or PriorityAndRank is a different
     /// attribute (IEEE 802.1Q-2022 Clause 10.7; a bridge refuses a changed
     /// FirstValue under a registered StreamID, Table 35-6 code 16): the old
-    /// value is left (Lv!) first and the new one declared New! once that Lv
-    /// has been encoded, so for one JoinTime find_talker_advertise() still
-    /// answers the old value and talker_change_pending() is true. A change
+    /// value is left (Lv!) first and the new one declared New! two LeaveAll
+    /// periods after that Lv has been encoded (35.2.2.8: "at least two
+    /// LeaveAllTime ... time periods between when the Talker removes the
+    /// existing Stream registration and declares the new"). Until then
+    /// find_talker_advertise() answers the old value, which is no longer
+    /// declared, and talker_change_pending() is true. A change
     /// to AccumulatedLatency alone stays in place when it is a decrease; an
     /// increase turns the Advertise into a Talker Failed with Failure Code 7
     /// (35.2.2.8.6: the reported latency is not to increase during the life
@@ -336,7 +350,8 @@ class MsrpParticipantT
     auto declare_talker_advertise(TalkerAdvertiseFirstValue const& fv, TimePoint now) -> Status;
 
     /// Whether a re-declared Talker Advertise for @p stream_id is still
-    /// waiting for the Lv of its previous value to go out.
+    /// waiting: for the Lv of its previous value to go out, then for the two
+    /// LeaveAll periods before its new value may be declared.
     [[nodiscard]] auto talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool;
 
     /// Declare a Talker Failed attribute (used when a previously
@@ -348,12 +363,32 @@ class MsrpParticipantT
     /// 802.1Q-2022 Table 10-4 as written).
     void set_instant_leave(bool const on) noexcept { instant_leave_ = on; }
 
+    /// Other MRP timer durations from here on (a profile's, such as Milan
+    /// v1.3 Table 4.3): each timer takes its new duration when it is next
+    /// armed. An invalid @p timers is refused.
+    auto set_mrp_timers(mrp::TimerConfig const& timers) noexcept -> Status
+    {
+        if (!port_.timers().set_config(timers)) {
+            return failure(make_error_code(tsn::TsnError::invalid_configuration));
+        }
+        return success();
+    }
+
+    /// The MRP timer durations in force.
+    [[nodiscard]] auto mrp_timers() const noexcept -> mrp::TimerConfig const& { return port_.timers().config(); }
+
     /// Withdraw any Talker attribute (Advertise or Failed) matching
     /// `stream_id`. Fires Applicant Lv! event which drives the state
     /// through LA -> VO and reclaim.
     auto withdraw_talker(tsn::StreamId const& stream_id, TimePoint now) -> Status;
 
-    /// Declare local Listener interest in a stream.
+    /// Declare local Listener interest in a stream. A first declaration is
+    /// told New!. A change of Declaration Type under a StreamID this port
+    /// already declares (Asking Failed to Ready when the Talker Advertise
+    /// arrives, and back) is a Join that carries the new FourPackedEvent,
+    /// with no Leave before it: IEEE 802.1Q 35.2.6 has the receiver treat a
+    /// JoinIn or JoinMt whose FourPackedEvent changed as the old registration
+    /// leaving and the new one joining.
     auto declare_listener(tsn::StreamId const& stream_id, ListenerDeclaration decl, TimePoint now) -> Status;
 
     /// Withdraw local Listener interest.
@@ -391,11 +426,16 @@ class MsrpParticipantT
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
-    /// The Talker Advertise for @p id while a peer's declaration is registered (In, or Leaving until
-    /// its LeaveTime), or nullptr: never a record the peer's leave has timed out or one only we declare.
+    /// The Talker Advertise for @p id while a peer's declaration of it is
+    /// registered on this port (Registrar In, or Lv until its leavetimer
+    /// expires), or nullptr. find_talker_advertise() also answers a record
+    /// this port declares itself and one whose registration has lapsed and
+    /// waits for the reclaim sweep, which is what an observer told of a
+    /// Leave still finds.
     [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
 
-    /// The Talker Failed for @p id while registered, or nullptr.
+    /// The Talker Failed for @p id while a peer's declaration of it is
+    /// registered on this port, or nullptr.
     [[nodiscard]] auto find_registered_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
     /// Whether a peer's Talker Advertise or Talker Failed for @p id is registered In, not Leaving:
@@ -671,10 +711,14 @@ class MsrpParticipantT
     static void declare_new_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
     template <class FirstValue>
     static void adopt_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
+    /// The Listener record takes @p decl as this port's Declaration Type.
+    static void declare_listener_type(ListenerRecord& rec, ListenerDeclaration decl, TimePoint now);
     template <class FirstValue>
     static void change_declared_value(AttributeRecord<FirstValue>& rec, FirstValue const& fv, TimePoint now);
     template <class Table>
-    [[nodiscard]] static auto complete_value_changes(Table& table, TimePoint now) -> bool;
+    [[nodiscard]] static auto complete_value_changes(Table& table, std::chrono::milliseconds hold, TimePoint now) -> bool;
+    template <class Record>
+    [[nodiscard]] static auto change_may_complete(Record& rec, std::chrono::milliseconds hold, TimePoint now) -> bool;
     void complete_pending_changes(TimePoint now);
 
     //
@@ -691,15 +735,63 @@ class MsrpParticipantT
     /// Our applicants' TxLeaveAll and the PDU carrying the LeaveAll flag, the LeaveAll FSM Active.
     void send_leave_all(TimePoint now);
     void on_periodic_timer(TimePoint now);
+    /// The timers that expired in one tick(), each given its turn.
+    void run_expired_timers(mrp::TimerScheduler::Expired const& expired, TimePoint now);
+    /// IEEE 802.1Q Table 10-3: an Applicant that still has a message to send
+    /// has asked for a transmit opportunity, so the jointimer runs again. It
+    /// is what puts the second New of a declaration, and the second Join
+    /// after a LeaveAll, one JoinTime after the first.
+    void request_transmit_if_owed(TimePoint now);
 
     //
-    // PDU decode
+    // PDU decode. Each step answers false for an invalid field, which ends
+    // the decoding of the PDU (Milan v1.3 4.2.7.1.2).
     //
-    void decode_attribute_list(
-        AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now);
+    /// One Message's header: its type, AttributeLength and where its
+    /// AttributeList begins and ends in the PDU.
+    struct RxMessage
+    {
+        AttributeType type{};
+        uint8_t attr_length{0};
+        size_t list_begin{0};
+        size_t list_end{0};
+    };
+    /// One vector's FirstValue and packed events, as spans of the PDU.
+    struct RxVector
+    {
+        std::span<uint8_t const> first_value{};
+        std::span<uint8_t const> events{};
+        std::span<uint8_t const> declarations{};
+    };
+    void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
+    [[nodiscard]] static auto parse_message_header(std::span<uint8_t const> pdu, size_t pos) -> std::optional<RxMessage>;
+    [[nodiscard]] auto decode_message(std::span<uint8_t const> pdu, size_t& pos, TimePoint now) -> bool;
+    [[nodiscard]] auto decode_attribute_list(RxMessage const& message, std::span<uint8_t const> payload, TimePoint now) -> bool;
+    [[nodiscard]] auto decode_vector_attribute(
+        RxMessage const& message, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool;
+    void receive_leaveall(AttributeType type, uint16_t num_values, TimePoint now);
+    [[nodiscard]] auto decode_vector_values(
+        RxMessage const& message, uint16_t num_values, std::span<uint8_t const> payload, size_t& pos, TimePoint now) -> bool;
+    [[nodiscard]] auto deliver_vector_values(RxMessage const& message, uint16_t num_values, RxVector const& vector, TimePoint now)
+        -> bool;
+    /// What follows the decoding of a PDU: the re-declaration a received
+    /// LeaveAll asks for, and a transmit opportunity.
+    void finish_receive(TimePoint now);
 
-    void decode_vector_attribute(
-        AttributeType attr_type, uint8_t attr_length, std::span<uint8_t const> payload, size_t& pos, TimePoint now);
+    /// @p fn on every record of one attribute type.
+    template <class Fn>
+    void for_each_record_of(AttributeType const type, Fn fn)
+    {
+        if (type == AttributeType::TalkerAdvertise) {
+            std::ranges::for_each(talker_adv_, fn);
+        } else if (type == AttributeType::TalkerFailed) {
+            std::ranges::for_each(talker_failed_, fn);
+        } else if (type == AttributeType::Listener) {
+            std::ranges::for_each(listeners_, fn);
+        } else if (type == AttributeType::Domain) {
+            std::ranges::for_each(domains_, fn);
+        }
+    }
 
     void handle_rx_event(
         AttributeType attr_type,
@@ -753,6 +845,13 @@ class MsrpParticipantT
         settle_peer_rx(*rec_ptr, fv, applicant_event, registrar_event, now, notify_register, notify_leave);
     }
 
+    /// What settle_peer_rx saw of a record before the machines ran.
+    struct PeerRxBefore
+    {
+        bool was_registered{false};  ///< the Registrar was In or Lv
+        bool value_changed{false};   ///< a peer's registered value differs from the one received
+    };
+
     /// The second half of handle_peer_attr_rx: the record takes the received
     /// value or counts the conflict, both state machines run, and observers
     /// are told what registered or left.
@@ -766,41 +865,81 @@ class MsrpParticipantT
         NotifyRegister notify_register,
         NotifyLeave notify_leave)
     {
-        bool const was_registered = (rec.registrar_sm.current_state() == registrar_sm::Def::State::In);
-        // Adopt the received payload ONLY for a pure peer registration. If WE are
-        // locally declaring this key, a peer declaring the same one is a conflict
-        // (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
-        // own params, not the peer's.
-        if (rec.operation == Operation::Register) {
-            rec.first_value = fv;
-        } else if (!(rec.first_value == fv)) {
-            ++foreign_declaration_conflict_count_;
-        }
+        PeerRxBefore const before = adopt_peer_rx(rec, fv);
         mrp::dispatch_applicant(rec, applicant_event, now);
         if (registrar_event == registrar_sm::Def::Event::Count) {
             return;
         }
         drive_registrar(rec, registrar_event, now);
-        notify_peer_rx(rec, fv, was_registered, notify_register, notify_leave);
+        notify_peer_rx(rec, fv, before, notify_register, notify_leave);
     }
 
-    /// Observers hear what the wire said: the received value, which is the
-    /// record's own for a pure peer registration and the peer's conflicting
-    /// one otherwise (a Domain adopter needs the peer's); a Leave names the
-    /// value that was registered.
+    /// Adopt the received payload ONLY for a pure peer registration. If WE are
+    /// locally declaring this key, a peer declaring the same one is a conflict
+    /// (802.1Q-2018 35.2.4): keep OUR value so our next JoinIn re-advertises our
+    /// own params, not the peer's.
+    template <class Record, class FirstValue>
+    auto adopt_peer_rx(Record& rec, FirstValue const& fv) -> PeerRxBefore
+    {
+        bool const differs = !(rec.first_value == fv);
+        PeerRxBefore const before{
+            .was_registered = rec.registrar_is_registered(), .value_changed = rec.operation == Operation::Register && differs};
+        if (rec.operation == Operation::Register) {
+            rec.first_value = fv;
+        } else if (differs) {
+            ++foreign_declaration_conflict_count_;
+        }
+        return before;
+    }
+
+    /// Observers hear of a registration once: when the attribute becomes
+    /// registered, and again only when a registered peer value changes. A
+    /// repeated New, and the Join that follows a LeaveAll while the Registrar
+    /// is in LV, change nothing an application acts on (the AVnu end station
+    /// tests want each indication shown one time). They hear of a Leave once
+    /// too, when the registration ends: the leavetimer expiring (see
+    /// on_leave_timer) or, with instant leave, the Lv itself. A value this
+    /// port declares itself is reported whenever a registration event brings
+    /// a peer's differing one, which a Domain adopter needs. Observers are
+    /// given the received value; a Leave names the value that was registered.
     template <class Record, class FirstValue, class NotifyRegister, class NotifyLeave>
     static void notify_peer_rx(
         Record const& rec,
         FirstValue const& fv,
-        bool const was_registered,
+        PeerRxBefore const& before,
         NotifyRegister notify_register,
         NotifyLeave notify_leave)
     {
-        auto const n = rec.registrar_ctx.notify;
-        if (n == registrar_sm::Notify::New || n == registrar_sm::Notify::Join) {
+        bool const registered = rec.registrar_is_registered();
+        bool const conflict = rec.operation == Operation::Declare && rec.registrar_ctx.notify != registrar_sm::Notify::None &&
+            !(rec.first_value == fv);
+        if (registered && (!before.was_registered || before.value_changed || conflict)) {
             notify_register(fv);
-        } else if (mrp::registrar_rx_ended(rec, was_registered)) {
+        } else if (!registered && before.was_registered) {
             notify_leave(rec.first_value);
+        }
+    }
+
+    /// IEEE 802.1Q 35.2.6: a registration event for a Talker attribute of one
+    /// type (Advertise or Failed) replaces a registration of the other type
+    /// under the same StreamID, as though that one had left with its
+    /// leavetimer expired at once. The application is not told of a Leave:
+    /// the stream is still declared, under its new type. @p stream_of reads
+    /// the StreamID of a record of @p other.
+    template <class Table, class StreamOf>
+    void supersede_talker_registration(
+        Table& other, tsn::StreamId const& stream_id, registrar_sm::Def::Event const event, StreamOf stream_of)
+    {
+        using E = registrar_sm::Def::Event;
+        if (event != E::RNew && event != E::RJoinIn && event != E::RJoinMt) {
+            return;
+        }
+        for (auto& rec : other) {
+            if (stream_of(rec) == stream_id && rec.registrar_is_registered()) {
+                rec.registrar_sm.reset();
+                rec.registrar_ctx.clear_outputs();
+                rec.leave_deadline.reset();
+            }
         }
     }
 
@@ -980,16 +1119,27 @@ class MsrpParticipantT
         return &table.back();
     }
 
-    /// The applicant event for a local (re)declaration: New when the attribute is not
-    /// yet actively declared (operation Register AND applicant idle in Start/Vo), else
-    /// Join. Shared by every declare_* handler so this rule lives in one place.
+    /// The applicant event for a local declaration: New! when the port is not
+    /// making this declaration (its Applicant is idle in Start or Vo: never
+    /// declared, or withdrawn with its Leave sent), Join! when the declaration
+    /// stands or its Leave has not gone out yet. IEEE 802.1Q Table 10-3 starts
+    /// a new declaration in VN, which sends New.
     template <class Record>
     [[nodiscard]] static auto first_declare_event(Record const& rec) noexcept -> applicant_sm::Def::Event
     {
-        bool const is_new = (rec.operation == Operation::Register) &&
-            (rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
-             rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo);
-        return is_new ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+        bool const idle = rec.applicant_sm.current_state() == applicant_sm::Def::State::Start ||
+            rec.applicant_sm.current_state() == applicant_sm::Def::State::Vo;
+        return idle ? applicant_sm::Def::Event::New : applicant_sm::Def::Event::Join;
+    }
+
+    /// Marks the record as one this port declares and answers the applicant
+    /// event that goes with it. Every declare_* handler takes its event from
+    /// here.
+    template <class Record>
+    [[nodiscard]] static auto mark_declared(Record& rec) noexcept -> applicant_sm::Def::Event
+    {
+        rec.operation = Operation::Declare;
+        return first_declare_event(rec);
     }
 
     //
@@ -1018,8 +1168,6 @@ class MsrpParticipantT
     void notify_talker_leave(tsn::StreamId const& id);
     /// Read @p pdu's messages, then deliver the Talker leaves it held (deliver_rx_talker_leaves).
     void read_pdu(std::span<uint8_t const> pdu, TimePoint now);
-    /// Each message of @p pdu, decoded.
-    void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
     /// The Talker leaves of the MRPDU just read, one per StreamID; an observer reads what is registered then
     /// (the other Talker attribute, for a Talker Advertise turned Talker Failed, or back).
     void deliver_rx_talker_leaves();

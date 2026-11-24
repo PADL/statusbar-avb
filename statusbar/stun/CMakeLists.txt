@@ -24,11 +24,12 @@ statusbar_add_module(
   statusbar::itc
   TESTS
   stun_client_sm_test.cpp
-  stun_loopback_test.cpp
   stun_message_test.cpp
   stun_register_test.cpp
-  stun_rendezvous_test.cpp
-  stun_server_sm_test.cpp)
+  stun_server_sm_test.cpp
+  FUNCTIONAL_TESTS
+  stun_loopback_functional_test.cpp
+  stun_rendezvous_functional_test.cpp)
 
 # stun_server_tool / stun_client_tool / stun_sm_tool live in ../tools/ — the
 # package's shared tools directory — not next to the library module.

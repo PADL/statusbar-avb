@@ -16,8 +16,10 @@
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/status/status.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <format>
 #include <functional>
 #include <iterator>
@@ -94,18 +96,35 @@ auto format_clock_times_to(OutputIt out, PtpClientBase& client) -> OutputIt
     auto ptp_now = client.get_time_ns();
     if (ptp_now) {
         out = std::format_to(
-            out, "  Current PTP time:       {} ns ({:.3f} seconds)\n", *ptp_now, static_cast<double>(*ptp_now) / 1e9);
+            out,
+            "  Current PTP time:       {} ns ({}.{:03} seconds)\n",
+            *ptp_now,
+            *ptp_now / 1'000'000'000,
+            (*ptp_now % 1'000'000'000) / 1'000'000);
     } else {
         out = std::format_to(out, "  Error reading PTP time: {}\n", ptp_now.error().message());
     }
 
     // The timing reference, the clock the bridge fits the PHC against.
     int64_t const raw_now = realtime::read_monotonic_raw_ns();
-    out = std::format_to(out, "  Current MONOTONIC_RAW:  {} ns ({:.3f} seconds)\n", raw_now, static_cast<double>(raw_now) / 1e9);
+    out = std::format_to(
+        out,
+        "  Current MONOTONIC_RAW:  {} ns ({}.{:03} seconds)\n",
+        raw_now,
+        raw_now / 1'000'000'000,
+        (raw_now % 1'000'000'000) / 1'000'000);
 
     if (ptp_now) {
         int64_t const diff = *ptp_now - raw_now;
-        out = std::format_to(out, "  Difference (PTP-raw):   {} ns ({:.3f} seconds)\n", diff, static_cast<double>(diff) / 1e9);
+        // An epoch-scale count stays in integers, in display code too.
+        int64_t const size = diff < 0 ? -diff : diff;
+        out = std::format_to(
+            out,
+            "  Difference (PTP-raw):   {} ns ({}{}.{:03} seconds)\n",
+            diff,
+            diff < 0 ? "-" : "",
+            size / 1'000'000'000,
+            (size % 1'000'000'000) / 1'000'000);
     }
 
     return out;
@@ -247,6 +266,10 @@ struct PtpAppContext
     int cpu_affinity{3};
     bool enable_realtime{true};
     int64_t threshold{50'000};
+    /// The process locks its memory (realtime, and not ptp.no-mlock): each
+    /// timer made from this context is told to lock again from its own
+    /// thread, which takes in that thread's stack (PtpTimer::set_lock_memory).
+    bool lock_memory{false};
 
     // Move only
     ~PtpAppContext() = default;
@@ -278,20 +301,10 @@ struct GptpContext
         , adapter{*ptp.bridge}
     {}
 
-    // Move only - adapter holds pointer to bridge, so moves must update it
-    GptpContext(GptpContext&& other) noexcept
-        : ptp{std::move(other.ptp)}
-        , adapter{*ptp.bridge}  // Re-bind adapter to our bridge after move
-    {}
-
-    auto operator=(GptpContext&& other) noexcept -> GptpContext&
-    {
-        if (this != &other) {
-            ptp = std::move(other.ptp);
-            adapter = Adapter{*ptp.bridge};  // Re-bind adapter to our bridge
-        }
-        return *this;
-    }
+    // Move only. The adapter points at the bridge, which ptp owns on the
+    // heap: a move hands the bridge on and the adapter still points at it.
+    GptpContext(GptpContext&&) noexcept = default;
+    auto operator=(GptpContext&&) noexcept -> GptpContext& = default;
 
     ~GptpContext() = default;
     GptpContext(GptpContext const&) = delete;
@@ -305,16 +318,10 @@ struct GptpContext
 /// @return Populated PtpAppConfig with values from config or defaults
 [[nodiscard]] auto load_ptp_app_config(config::Config const& toml_config) -> PtpAppConfig;
 
-/// Build argument specifications for PTP CLI options with lambda binding
-/// The Config type must have PtpAppConfig fields (driver_name, device_path, period_ns, etc.)
-/// or be a class that inherits from / embeds PtpAppConfig.
-/// @tparam Config Configuration struct with PTP fields
-/// @param specs The ArgumentSpecs collection to add PTP options to
-/// @param config Reference to configuration struct whose fields are bound to the options
-/// @return Reference to specs for chaining
+/// The PTP options that name the clock: --ptp.driver, --ptp.device.
 template <typename Config>
-auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::ArgumentSpecs&
-{  // NOLINT(statusbar-block-statements) one argument spec per statement
+auto add_ptp_device_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
+{
 #if defined(__linux__)
     specs.add_choice("ptp.driver", "PTP driver", {"linuxptp", "ntpshm", "system"}, "linuxptp", [&](std::string_view v) -> void {
         config.driver_name = std::string{v};
@@ -328,6 +335,12 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
         config.device_path = std::string{v};
     });
 #endif
+}
+
+/// The PTP options of the timer thread: its period and how it is scheduled.
+template <typename Config>
+auto add_ptp_timer_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
+{
     specs.add<int64_t>("ptp.period", "Wake period in nanoseconds", 1'000'000, [&](int64_t v) -> void { config.period_ns = v; });
     specs.add<int64_t>("ptp.compensation", "Compensation offset in ns (negative = wake earlier)", 0, [&](int64_t v) -> void {
         config.compensation_ns = v;
@@ -337,6 +350,12 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
     specs.add_flag("ptp.no-rt", "Disable realtime priority", [&](bool v) -> void { config.enable_realtime = !v; });
     specs.add_flag("ptp.no-mlock", "Disable memory locking", [&](bool v) -> void { config.lock_memory = !v; });
     specs.add_flag("ptp.quiet", "Suppress verbose output", [&](bool v) -> void { config.verbose = !v; });
+}
+
+/// The PTP options of the bridge between the PHC and CLOCK_MONOTONIC_RAW.
+template <typename Config>
+auto add_ptp_bridge_arg_specs(args::ArgumentSpecs& specs, Config& config) -> void
+{
     specs.add<int64_t>("ptp.threshold", "PTP sync threshold ns", 50'000, [&](int64_t v) -> void { config.threshold = v; });
     // Busy-spin window before each wake. The timer clock_nanosleep()s to ~this far
     // before the deadline then busy-polls the rest for sub-us precision. Spinning
@@ -348,15 +367,40 @@ auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::Argu
         "Busy-spin refinement window before each wake in ns (0 = no busy-wait)",
         config.sampling.wake_refine_spin_ns,
         [&](int64_t v) -> void { config.sampling.wake_refine_spin_ns = v; });
+    specs.add<uint64_t>(
+        "ptp.holdover_drift_ppb",
+        "How fast the worst-case error of the PHC link grows while the PHC cannot be read, in parts per "
+        "billion: the oscillator and temperature figure of this machine (default 15000)",
+        static_cast<uint64_t>(config.sampling.holdover_drift_ppb),
+        [&](uint64_t v) -> void { config.sampling.holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(v, UINT32_MAX)); });
+    specs.add<int64_t>(
+        "ptp.fixed_error_ns",
+        "An error of the PHC link that no measurement here shows, in nanoseconds, added to its worst-case error: "
+        "this machine's hardware figure (the PHC's offset from its master, PHY asymmetry, timestamp granularity; "
+        "default 0)",
+        config.sampling.fixed_error_ns,
+        [&](int64_t v) -> void { config.sampling.fixed_error_ns = std::max<int64_t>(v, 0); });
+}
+
+/// Build argument specifications for PTP CLI options with lambda binding
+/// The Config type must have PtpAppConfig fields (driver_name, device_path, period_ns, etc.)
+/// or be a class that inherits from / embeds PtpAppConfig.
+/// @tparam Config Configuration struct with PTP fields
+/// @param specs The ArgumentSpecs collection to add PTP options to
+/// @param config Reference to configuration struct whose fields are bound to the options
+/// @return Reference to specs for chaining
+template <typename Config>
+auto add_ptp_arg_specs(args::ArgumentSpecs& specs, Config& config) -> args::ArgumentSpecs&
+{
+    add_ptp_device_arg_specs(specs, config);
+    add_ptp_timer_arg_specs(specs, config);
+    add_ptp_bridge_arg_specs(specs, config);
     return specs;
 }
 
-/// Print standard PTP CLI options help text
-/// @tparam OutputIt Output iterator type
-/// @param out Output iterator to write help text to
-/// @return Updated output iterator
+/// The help lines of --ptp.driver and --ptp.device, under the section's title.
 template <typename OutputIt>
-auto format_ptp_options_help_to(OutputIt out) -> OutputIt
+auto format_ptp_device_help_to(OutputIt out) -> OutputIt
 {
     out = std::format_to(out, "PTP Options:\n");
 #if defined(__linux__)
@@ -366,13 +410,43 @@ auto format_ptp_options_help_to(OutputIt out) -> OutputIt
     out = std::format_to(out, "  --ptp.driver=NAME       PTP driver: system (default: system)\n");
     out = std::format_to(out, "  --ptp.device=PATH       Device name for display (default: system_clock)\n");
 #endif
+    return out;
+}
+
+/// The help lines of the timer thread's options.
+template <typename OutputIt>
+auto format_ptp_timer_help_to(OutputIt out) -> OutputIt
+{
     out = std::format_to(out, "  --ptp.period=NS         Wake period in nanoseconds (default: 1000000 = 1ms)\n");
     out = std::format_to(out, "  --ptp.compensation=NS   Compensation offset in ns (default: 0, negative = wake earlier)\n");
     out = std::format_to(out, "  --ptp.cpu=N             CPU core affinity (default: 3)\n");
     out = std::format_to(out, "  --ptp.no-rt             Disable realtime priority\n");
     out = std::format_to(out, "  --ptp.no-mlock          Disable memory locking\n");
-    out = std::format_to(out, "  --ptp.quiet             Suppress verbose output\n");
-    return out;
+    return std::format_to(out, "  --ptp.quiet             Suppress verbose output\n");
+}
+
+/// The help lines of the bridge's options.
+template <typename OutputIt>
+auto format_ptp_bridge_help_to(OutputIt out) -> OutputIt
+{
+    out = std::format_to(out, "  --ptp.threshold=NS      PTP sync threshold in ns (default: 50000)\n");
+    out = std::format_to(out, "  --ptp.spin_ns=NS        Busy-spin window before each wake in ns (0 = no busy-wait)\n");
+    out = std::format_to(
+        out, "  --ptp.holdover_drift_ppb=N  Growth of the PHC link's worst-case error while unread, in ppb (default: 15000)\n");
+    return std::format_to(
+        out, "  --ptp.fixed_error_ns=NS  Hardware error of the PHC link that no measurement shows, in ns (default: 0)\n");
+}
+
+/// Print standard PTP CLI options help text
+/// @tparam OutputIt Output iterator type
+/// @param out Output iterator to write help text to
+/// @return Updated output iterator
+template <typename OutputIt>
+auto format_ptp_options_help_to(OutputIt out) -> OutputIt
+{
+    out = format_ptp_device_help_to(out);
+    out = format_ptp_timer_help_to(out);
+    return format_ptp_bridge_help_to(out);
 }
 
 /// Print PTP configuration summary
@@ -396,6 +470,130 @@ auto format_ptp_config_to(OutputIt out, PtpAppConfig const& config, std::string_
     return out;
 }
 
+/// Copy the settings a timer is later made from out of the application's
+/// configuration into its context.
+inline void copy_timer_settings(PtpAppConfig const& config, PtpAppContext& ctx)
+{
+    ctx.period_ns = config.period_ns;
+    ctx.compensation_ns = config.compensation_ns;
+    ctx.cpu_affinity = config.cpu_affinity;
+    ctx.enable_realtime = config.enable_realtime;
+    ctx.threshold = config.threshold;
+    ctx.lock_memory = config.enable_realtime && config.lock_memory;
+}
+
+/// What a verbose start says of the opened client: its description, the
+/// times of its clocks, and the warning of a clock that was never set.
+inline void print_client_report(PtpClientBase& client)
+{
+    std::string report{"  PTP client opened successfully\n"};
+    format_client_info_to(std::back_inserter(report), client);
+    format_clock_times_to(std::back_inserter(report), client);
+    format_clock_warning_to(std::back_inserter(report), client);
+    std::print("{}", report);
+}
+
+/// A context around an opened client, with a bridge that is not sampling yet
+/// and the timer settings of the configuration.
+[[nodiscard]] inline auto make_app_context(PtpAppConfig const& config, std::unique_ptr<PtpClientBase> client) -> PtpAppContext
+{
+    PtpAppContext ctx;
+    ctx.client = std::move(client);
+    ctx.bridge = std::make_unique<PtpTimeBridge>();
+    copy_timer_settings(config, ctx);
+    return ctx;
+}
+
+/// Open the application's PTP client and build the context around it; a
+/// verbose start reports the client.
+[[nodiscard]] inline auto open_app_context(PtpAppConfig const& config) -> StatusValue<PtpAppContext>
+{
+    auto client_result = create_client(
+        PtpSetupConfig{.driver_name = config.driver_name, .device_path = config.device_path, .verbose = config.verbose});
+    if (!client_result) {
+        return forward_failure(client_result);
+    }
+    auto ctx = make_app_context(config, std::move(*client_result));
+    if (config.verbose) {
+        print_client_report(*ctx.client);
+    }
+    return success(std::move(ctx));
+}
+
+/// Start the bridge's sampling of the client; the context keeps the guard.
+[[nodiscard]] inline auto start_app_sampling(PtpAppConfig const& config, PtpAppContext& ctx) -> Status
+{
+    auto guard_result = ctx.bridge->start_sampling(*ctx.client, config.sampling);
+    if (!guard_result) {
+        return forward_failure(guard_result);
+    }
+    ctx.guard = std::move(*guard_result);
+    if (config.verbose) {
+        std::print("  Bridge sampling started\n  Waiting for bridge to become healthy...\n");
+    }
+    return success();
+}
+
+/// Wait for the bridge to become healthy, printing its progress when verbose.
+/// A shutdown asked for during the wait ends it with the same error; the
+/// caller tells the two apart with its own shutdown check.
+template <typename ShutdownCheck>
+[[nodiscard]] auto wait_for_app_bridge(PtpAppConfig const& config, PtpAppContext& ctx, ShutdownCheck& is_shutdown) -> Status
+{
+    auto progress = config.verbose
+        ? statusbar::sg14::inplace_function<void(TimeMapping const&), 64>([](TimeMapping const& m) -> void {
+              std::string status;
+              format_mapping_status_to(std::back_inserter(status), m);
+              std::print("{}", status);
+          })
+        : nullptr;
+    if (!wait_for_healthy(*ctx.bridge, is_shutdown, progress)) {
+        return failure(PtpError::bridge_not_healthy);
+    }
+    if (config.verbose) {
+        auto mapping = ctx.bridge->get_mapping();
+        std::print("  Bridge healthy: {} samples, RMS residual {} ns\n", mapping.sample_count, mapping.rms_residual_ns);
+    }
+    return success();
+}
+
+/// Start the bridge's sampling and wait until the bridge is healthy.
+template <typename ShutdownCheck>
+[[nodiscard]] auto bring_app_bridge_up(PtpAppConfig const& config, PtpAppContext& ctx, ShutdownCheck& is_shutdown) -> Status
+{
+    if (auto const started = start_app_sampling(config, ctx); !started) {
+        return forward_failure(started);
+    }
+    return wait_for_app_bridge(config, ctx, is_shutdown);
+}
+
+/// Lock the process's memory when the application runs realtime and has not
+/// turned locking off (ptp.no-mlock), and say how that went when verbose.
+/// This takes in the mappings of the moment only: the timer threads, made
+/// later, lock again for their own (PtpTimer::set_lock_memory).
+inline void lock_app_memory(PtpAppConfig const& config)
+{
+    if (!config.enable_realtime || !config.lock_memory) {
+        return;
+    }
+    bool const locked = realtime::lock_memory();
+    if (config.verbose) {
+        std::print(
+            "{}",
+            locked ? "  Memory locked (mlockall) successfully\n"
+                   : "  Warning: Could not lock memory (run as root or with CAP_IPC_LOCK)\n");
+    }
+}
+
+/// What a verbose start says of the timer thread's priority.
+inline void print_realtime_note(PtpAppConfig const& config)
+{
+    if (config.verbose) {
+        std::print(
+            "{}", config.enable_realtime ? "  Realtime priority will be set on timer thread\n" : "  Realtime priority disabled\n");
+    }
+}
+
 /// Setup complete PTP application context
 /// Creates client, bridge, starts sampling, and waits for bridge to become healthy.
 /// Prints diagnostic output if verbose is enabled.
@@ -407,103 +605,16 @@ template <typename ShutdownCheck>
 // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - is_shutdown is called multiple times, not forwarded
 [[nodiscard]] auto setup_ptp_app(PtpAppConfig const& config, ShutdownCheck&& is_shutdown) -> StatusValue<PtpAppContext>
 {
-    // Create PTP client
-    PtpSetupConfig setup_config;
-    setup_config.driver_name = config.driver_name;
-    setup_config.device_path = config.device_path;
-    setup_config.verbose = config.verbose;
-
-    auto client_result = create_client(setup_config);
-    if (!client_result) {
-        return forward_failure(client_result);
+    auto ctx = open_app_context(config);
+    if (!ctx) {
+        return ctx;
     }
-
-    PtpAppContext ctx;
-    ctx.client = std::move(*client_result);
-    ctx.bridge = std::make_unique<PtpTimeBridge>();
-    ctx.period_ns = config.period_ns;
-    ctx.compensation_ns = config.compensation_ns;
-    ctx.cpu_affinity = config.cpu_affinity;
-    ctx.enable_realtime = config.enable_realtime;
-    ctx.threshold = config.threshold;
-
-    if (config.verbose) {
-        std::print("  PTP client opened successfully\n");
-
-        // Print client info
-        std::string info;
-        format_client_info_to(std::back_inserter(info), *ctx.client);
-        if (!info.empty()) {
-            std::print("{}", info);
-        }
-
-        // Print clock times
-        std::string times;
-        format_clock_times_to(std::back_inserter(times), *ctx.client);
-        std::print("{}", times);
-
-        // Check for uninitialized clock warning
-        std::string warning;
-        format_clock_warning_to(std::back_inserter(warning), *ctx.client);
-        if (!warning.empty()) {
-            std::print("{}", warning);
-        }
+    if (auto const up = bring_app_bridge_up(config, *ctx, is_shutdown); !up) {
+        return forward_failure(up);
     }
-
-    // Start sampling
-    auto guard_result = ctx.bridge->start_sampling(*ctx.client, config.sampling);
-    if (!guard_result) {
-        return forward_failure(guard_result);
-    }
-    ctx.guard = std::move(*guard_result);
-
-    if (config.verbose) {
-        std::print("  Bridge sampling started\n");
-        std::print("  Waiting for bridge to become healthy...\n");
-    }
-
-    // Wait for bridge to become healthy
-    auto progress = config.verbose
-        ? statusbar::sg14::inplace_function<void(TimeMapping const&), 64>([](TimeMapping const& m) -> void {
-              std::string status;
-              format_mapping_status_to(std::back_inserter(status), m);
-              std::print("{}", status);
-          })
-        : nullptr;
-
-    if (!wait_for_healthy(*ctx.bridge, is_shutdown, progress)) {
-        if (is_shutdown()) {
-            // Shutdown requested - not an error, but caller should check
-            return failure(PtpError::bridge_not_healthy);
-        }
-        return failure(PtpError::bridge_not_healthy);
-    }
-
-    if (config.verbose) {
-        auto mapping = ctx.bridge->get_mapping();
-        std::print("  Bridge healthy: {} samples, RMS residual {} ns\n", mapping.sample_count, mapping.rms_residual_ns);
-    }
-
-    // Lock memory if requested
-    if (config.enable_realtime && config.lock_memory) {
-        if (realtime::lock_memory()) {
-            if (config.verbose) {
-                std::print("  Memory locked (mlockall) successfully\n");
-            }
-        } else {
-            if (config.verbose) {
-                std::print("  Warning: Could not lock memory (run as root or with CAP_IPC_LOCK)\n");
-            }
-        }
-    }
-
-    if (config.verbose && config.enable_realtime) {
-        std::print("  Realtime priority will be set on timer thread\n");
-    } else if (config.verbose) {
-        std::print("  Realtime priority disabled\n");
-    }
-
-    return success(std::move(ctx));
+    lock_app_memory(config);
+    print_realtime_note(config);
+    return ctx;
 }
 
 /// Setup PTP application with automatic fallback to system clock

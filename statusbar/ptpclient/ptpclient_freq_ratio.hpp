@@ -152,6 +152,21 @@ class KalmanRatioTracker
         // re-acquires.
         double max_freq_ppm = 1000.0;        // plausible |switch-GPS| freq bound
         double step_floor_ns = 1'000'000.0;  // 1 ms min step (+ max_freq*dt)
+
+        // How many samples in a row may fall outside the gate before the filter
+        // takes ITSELF to be the one that is wrong. One sample far from the
+        // prediction is a bad read and is dropped. A run of them is the clocks
+        // telling the filter something it does not believe: its frequency was
+        // seeded from a pair that held a read error, or the time daemon slewed
+        // its clock by tens of microseconds, too little for a step. Without this
+        // the gate goes on rejecting: after a slew, for the minutes its own
+        // uncertainty takes to grow over the miss; after a bad seed, whose error
+        // grows as fast as the uncertainty does, until the error reaches
+        // step_floor_ns. After this many the filter widens its own uncertainty
+        // to cover the miss and takes the sample, so it follows the clocks again
+        // within a few samples and keeps its frequency as the starting point.
+        // At four samples a second, eight is two seconds.
+        unsigned persistent_outliers = 8;
     };
 
     KalmanRatioTracker()
@@ -164,72 +179,27 @@ class KalmanRatioTracker
         , gate2_{c.gate_sigmas * c.gate_sigmas}
         , max_freq_ns_per_s_{c.max_freq_ppm * 1e3}  // ppm * 1e-6 * 1e9 ns/s
         , step_floor_ns_{c.step_floor_ns}
+        , persistent_outliers_{c.persistent_outliers}
     {}
 
-    // Returns the normalized innovation; NaN if the sample was gated (outlier).
+    // Returns the normalized innovation; NaN if the sample was gated (outlier)
+    // or the filter re-based on a step.
     double add(std::int64_t offset_ns, double dt_s)
     {
         last_offset_ = offset_ns;
         if (!have_base_) {
-            base_ = offset_ns;
-            have_base_ = true;
-            last_z_ = 0.0;
-            n_ = 1;
-            return 0.0;
+            return first_sample(offset_ns);
         }
         double const z = static_cast<double>(offset_ns - base_);
         if (dt_s <= 0) {
             return 0.0;  // can't use a sample without a positive time delta
         }
-        if (n_ == 1) {
-            // Seed the frequency from the first two samples and start with a
-            // CONSERVATIVE covariance. Starting at f=0 with a huge initial P
-            // and letting the 3-state gain slew into place can overshoot and
-            // diverge for some R / sample sequences -- seeding avoids that.
-            double const f0 = (z - last_z_) / dt_s;  // ns/s
-            if (std::abs(f0) > max_freq_ns_per_s_) {
-                // This pair spans a phase STEP (GM reboot / ptp4l|chrony step),
-                // not a real frequency -- seeding f0 here is exactly how the
-                // media clock ran to +83345 ppm. Re-base to this sample and wait
-                // for a clean pair instead of baking a bogus rate.
-                base_ = offset_ns;
-                last_z_ = 0.0;  // stay at n_==1; re-seed on the next sample
-                return std::nan("");
-            }
-            x_ = {z, f0, 0.0};
-            P_ = M3{};
-            P_[0][0] = R_;                        // phase ~ measurement noise
-            P_[1][1] = 2.0 * R_ / (dt_s * dt_s);  // freq from a single difference
-            P_[2][2] = k_drift_init_var_;         // drift small; Q grows it as learned
-            last_z_ = z;
-            n_ = 2;
-            return 0.0;
-        }
-        // Phase-STEP detection BEFORE committing the sample: an innovation far
-        // beyond what any plausible frequency could produce over this interval is
-        // a domain STEP (chrony steps CLOCK_REALTIME to GPS ~5 s after boot; a GM
-        // reboot; a ptp4l step), not drift or noise. The 5-sigma gate would
-        // REJECT it forever (stale estimate); a "snap phase, keep frequency" jump
-        // is also wrong here, because the pre-step rate may be stale OR was
-        // corrupted while CLOCK_REALTIME was still converging at boot. So
-        // RE-ACQUIRE: re-base to this sample and re-seed the frequency from the
-        // clean post-step regime. Smaller outliers (5-sigma .. step_ns) still fall
-        // through to update()'s gate, so a single bad read doesn't drop the lock.
-        double const predicted_phase = x_[0] + (dt_s * x_[1]) + (0.5 * dt_s * dt_s * x_[2]);
-        double const step_ns = step_floor_ns_ + (max_freq_ns_per_s_ * dt_s);
-        if (std::abs(z - predicted_phase) > step_ns) {
-            base_ = offset_ns;  // re-base; relative coordinate restarts at 0
-            last_z_ = 0.0;
-            x_ = {0.0, 0.0, 0.0};
-            P_ = init_P();
-            n_ = 1;               // re-seed the frequency on the next sample
-            return std::nan("");  // signal: re-based on a step (not an update)
-        }
-        last_z_ = z;
-        ++n_;
-        predict(dt_s);
-        return update(z);
+        return n_ == 1 ? seed(offset_ns, z, dt_s) : follow(offset_ns, z, dt_s);
     }
+
+    /// Times the filter found a run of samples outside its gate and widened
+    /// its own uncertainty to follow them (see Config::persistent_outliers).
+    [[nodiscard]] std::uint64_t self_corrections() const noexcept { return self_corrections_; }
 
     [[nodiscard]] RatioEstimate estimate() const
     {
@@ -253,10 +223,148 @@ class KalmanRatioTracker
         P_ = init_P();
         have_base_ = false;
         n_ = 0;
+        forget_rejections();
     }
 
   private:
     using M3 = std::array<std::array<double, 3>, 3>;
+
+    double first_sample(std::int64_t offset_ns)
+    {
+        rebase(offset_ns);
+        have_base_ = true;
+        n_ = 1;
+        return 0.0;
+    }
+
+    /// The relative coordinate restarts at this sample.
+    void rebase(std::int64_t offset_ns)
+    {
+        base_ = offset_ns;
+        last_z_ = 0.0;
+    }
+
+    /// The second sample: seed the frequency from the first two and start
+    /// with a CONSERVATIVE covariance. Starting at f=0 with a huge initial P
+    /// and letting the 3-state gain slew into place can overshoot and diverge
+    /// for some R / sample sequences -- seeding avoids that. The seed is only
+    /// as good as the pair it came from; when a read error put it far off, the
+    /// run of gated samples that follows corrects it (see take()).
+    double seed(std::int64_t offset_ns, double z, double dt_s)
+    {
+        double const f0 = (z - last_z_) / dt_s;  // ns/s
+        if (std::abs(f0) > max_freq_ns_per_s_) {
+            // This pair spans a phase STEP (GM reboot / ptp4l|chrony step),
+            // not a real frequency -- seeding f0 here is exactly how the
+            // media clock ran to +83345 ppm. Re-base to this sample and wait
+            // for a clean pair instead of baking a bogus rate.
+            rebase(offset_ns);  // stay at n_==1; re-seed on the next sample
+            return std::nan("");
+        }
+        start_tracking(z, f0, dt_s);
+        return 0.0;
+    }
+
+    void start_tracking(double z, double f0, double dt_s)
+    {
+        x_ = {z, f0, 0.0};
+        P_ = seed_covariance(dt_s);
+        last_z_ = z;
+        n_ = 2;
+        forget_rejections();
+    }
+
+    [[nodiscard]] M3 seed_covariance(double dt_s) const
+    {
+        M3 P{};
+        P[0][0] = R_;                        // phase ~ measurement noise
+        P[1][1] = 2.0 * R_ / (dt_s * dt_s);  // freq from a single difference
+        P[2][2] = k_drift_init_var_;         // drift small; Q grows it as learned
+        return P;
+    }
+
+    /// Every sample after the seed: a step re-acquires, anything else is
+    /// predicted to and then taken or gated.
+    double follow(std::int64_t offset_ns, double z, double dt_s)
+    {
+        if (is_step(z, dt_s)) {
+            return reacquire(offset_ns);
+        }
+        last_z_ = z;
+        ++n_;
+        predict(dt_s);
+        return take(z, dt_s);
+    }
+
+    // Phase-STEP detection BEFORE committing the sample: an innovation far
+    // beyond what any plausible frequency could produce over this interval is
+    // a domain STEP (chrony steps CLOCK_REALTIME to GPS ~5 s after boot; a GM
+    // reboot; a ptp4l step), not drift or noise. A "snap phase, keep frequency"
+    // jump is wrong here, because the pre-step rate may be stale OR was
+    // corrupted while CLOCK_REALTIME was still converging at boot. So
+    // RE-ACQUIRE: re-base to this sample and re-seed the frequency from the
+    // clean post-step regime.
+    [[nodiscard]] bool is_step(double z, double dt_s) const
+    {
+        double const predicted_phase = x_[0] + (dt_s * x_[1]) + (0.5 * dt_s * dt_s * x_[2]);
+        double const step_ns = step_floor_ns_ + (max_freq_ns_per_s_ * dt_s);
+        return std::abs(z - predicted_phase) > step_ns;
+    }
+
+    double reacquire(std::int64_t offset_ns)
+    {
+        rebase(offset_ns);  // the relative coordinate restarts at 0
+        x_ = {0.0, 0.0, 0.0};
+        P_ = init_P();
+        n_ = 1;  // re-seed the frequency on the next sample
+        forget_rejections();
+        return std::nan("");  // signal: re-based on a step (not an update)
+    }
+
+    /// One predicted-to sample: an update, a gated outlier, or the end of a
+    /// run of gated samples. A sample outside the gate is dropped and the
+    /// prediction kept, so a single bad read does not move the estimate. When
+    /// more than persistent_outliers_ in a row fall outside it, they are not
+    /// outliers: the filter is. It widens its uncertainty to cover the miss
+    /// and takes the sample.
+    double take(double z, double dt_s)
+    {
+        if (!beyond_gate(z)) {
+            forget_rejections();
+            return update(z);
+        }
+        rejected_span_s_ += dt_s;
+        if (++rejected_in_a_row_ <= persistent_outliers_) {
+            return std::nan("");  // reject spike, keep prediction
+        }
+        widen_to_cover(z - x_[0]);
+        return update(z);
+    }
+
+    [[nodiscard]] bool beyond_gate(double z) const
+    {
+        double const y = z - x_[0];
+        return (y * y / (P_[0][0] + R_)) > gate2_;
+    }
+
+    /// The filter was wrong by @p miss_ns, and the miss built up over the run
+    /// of rejected samples: the phase is uncertain by the miss, the frequency
+    /// by the miss over that time. The state itself is kept, so the frequency
+    /// moves from where it was instead of being seeded afresh from one pair.
+    void widen_to_cover(double miss_ns)
+    {
+        double const freq_miss = miss_ns / rejected_span_s_;
+        P_[0][0] += miss_ns * miss_ns;
+        P_[1][1] += freq_miss * freq_miss;
+        ++self_corrections_;
+        forget_rejections();
+    }
+
+    void forget_rejections()
+    {
+        rejected_in_a_row_ = 0;
+        rejected_span_s_ = 0.0;
+    }
 
     // Conservative seed for the drift-state variance [(ns/s^2)^2]; the process
     // noise Q grows it as a real drift is observed, so the filter learns drift
@@ -353,6 +461,10 @@ class KalmanRatioTracker
     double gate2_;
     double max_freq_ns_per_s_;
     double step_floor_ns_;
+    unsigned persistent_outliers_;
+    unsigned rejected_in_a_row_ = 0;
+    double rejected_span_s_ = 0.0;  // time covered by the current run of gated samples
+    std::uint64_t self_corrections_ = 0;
     std::int64_t base_ = 0;
     std::int64_t last_offset_ = 0;
     double last_z_ = 0.0;  // previous relative offset (for the 2-sample seed)

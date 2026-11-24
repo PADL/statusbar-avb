@@ -39,7 +39,8 @@ namespace statusbar::srp::mrp {
 class PortState
 {
   public:
-    /// Construct with @p timers' durations and an optional deterministic RNG seed for tests.
+    /// Construct with optional deterministic RNG seed for tests, and the
+    /// durations its timers run on.
     explicit PortState(uint64_t rng_seed = 0, TimerConfig const& timers = {});
 
     /// Run BEGIN! on the LeaveAll and Periodic FSMs and arm the initial
@@ -165,17 +166,6 @@ void dispatch_registrar(Record& rec, registrar_sm::Def::Event event, TimePoint n
     rec.registrar_ctx.clear_outputs();
     rec.registrar_sm.handle_event(rec.registrar_ctx, event, now);
     note_leave_timer(rec, now, timers);
-}
-
-/// True when a received event ended @p rec's registration: a Leave notified from IN, or from LV to MT
-/// (rLv! under MSRP instant leave). @p was_registered: the Registrar was IN before the event (Clause 10.7.5).
-template <MrpAttributeLike Record>
-[[nodiscard]] auto registrar_rx_ended(Record const& rec, bool const was_registered) noexcept -> bool
-{
-    if (rec.registrar_ctx.notify != registrar_sm::Notify::Leave) {
-        return false;
-    }
-    return was_registered || rec.registrar_sm.current_state() == registrar_sm::Def::State::Mt;
 }
 
 /// Dispatch the tx! event to an attribute's Applicant. Selects the

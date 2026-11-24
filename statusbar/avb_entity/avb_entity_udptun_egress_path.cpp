@@ -78,60 +78,90 @@ void UdptunEgressPath::drain_rx()
     if (frame_bytes == 0) {
         return;
     }
-    for (int guard = 0; guard < 512;
-         ++guard) {  // NOLINT(statusbar-block-statements) the drain, bounded per tick; pre-dates the gate
+    for (int guard = 0; guard < 512; ++guard) {  // bound the drain per tick
         ssize_t const n = ::recv(rx_fd, rxbuf_.data(), rxbuf_.size(), MSG_DONTWAIT);
         if (n <= 0) {
             break;
         }
-        // Count EVERY datagram (decodable audio or a bare keepalive) for the punch
-        // watchdog's tunnel-liveness check -- a keepalive proves the pinhole is open.
-        telemetry_.any_rx().add(1);
-        auto const dec = egress_codec_->decode(std::span<uint8_t const>{rxbuf_.data(), static_cast<size_t>(n)});
-        if (!dec) {
-            continue;
-        }
-        size_t const pcm_bytes = dec->audio.size();
-        if (pcm_bytes < frame_bytes) {
-            continue;
-        }
-        auto const nf = static_cast<uint16_t>(pcm_bytes / frame_bytes);
-        int64_t const pt_ns = egress_codec_->tx_gptp_ns(*dec);
-        (void)egress_->submit(pt_ns, dec->audio.first(static_cast<size_t>(nf) * frame_bytes), nf);
-        telemetry_.rx_packets().add(1);
-
-        // Per-packet timing: latency = local rx TAI - the packet's TAI
-        // presentation time. Same TAI basis (CLOCK_REALTIME + tai_offset) the
-        // ingest stamps with, so both ends share one absolute timeline.
-        if (egress_colbin_) {
-            if (int64_t const rx_tai = realtime_tai_ns(config_.udptun_tai_offset_ns);
-                rx_tai != 0) {  // NOLINT(statusbar-block-statements) the receive time stamped; pre-dates the gate
-                // Classify primary vs redundant by the REDUN_BIT; record the
-                // PRIMARY-form stream_id for both so owlm_analyze groups them as
-                // one logical stream (role distinguishes them for recovery accounting).
-                uint64_t const sid_u64 = dec->pdu.stream_id().to_uint64();
-                bool const is_redun = config_.udptun_redundant && ((sid_u64 & UDPTUN_REDUN_BIT) != 0);
-                ieee::Eui64 sender{};
-                sender.from_uint64(sid_u64 & ~UDPTUN_REDUN_BIT);
-                auto const role = !config_.udptun_redundant
-                    ? udptun::PacketRole::RemoteLegacy
-                    : (is_redun ? udptun::PacketRole::RemoteRedundant : udptun::PacketRole::RemotePrimary);
-                udptun::UdpTunCsvRecord const rec{
-                    .rx_gptp_ns = rx_tai,
-                    .presentation_time_ns = pt_ns,
-                    .latency_ns = rx_tai - pt_ns,
-                    .sender_id = sender,
-                    .sequence = dec->pdu.get_sequence_num(),
-                    .interval_us = static_cast<uint32_t>((static_cast<uint64_t>(nf) * 1'000'000ULL) / ClassA96k::SAMPLE_RATE),
-                    .role = static_cast<uint8_t>(role),
-                    ._pad = {},
-                };
-                std::array<uint8_t, sizeof(udptun::UdpTunCsvRecord)> row{};
-                span_store(row, rec);
-                (void)egress_colbin_->write_row(row);
-            }
-        }
+        take_datagram(static_cast<size_t>(n), frame_bytes);
     }
+}
+
+void UdptunEgressPath::take_datagram(size_t const len, size_t const frame_bytes)
+{
+    // Count EVERY datagram (decodable audio or a bare keepalive) for the punch
+    // watchdog's tunnel-liveness check -- a keepalive proves the pinhole is open.
+    telemetry_.any_rx().add(1);
+    auto const dec = egress_codec_->decode(std::span<uint8_t const>{rxbuf_.data(), len});
+    if (!dec || dec->audio.size() < frame_bytes) {
+        return;
+    }
+    uint16_t const nf = queue_for_playout(*dec, frame_bytes);
+    count_received(*dec);
+    record_timing(*dec, nf);
+}
+
+auto UdptunEgressPath::queue_for_playout(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, size_t const frame_bytes)
+    -> uint16_t
+{
+    auto const nf = static_cast<uint16_t>(dec.audio.size() / frame_bytes);
+    (void)egress_->submit(egress_codec_->tx_gptp_ns(dec), dec.audio.first(static_cast<size_t>(nf) * frame_bytes), nf);
+    return nf;
+}
+
+void UdptunEgressPath::count_received(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec)
+{
+    telemetry_.rx_packets().add(1);
+    // The far talker could not vouch for this timestamp. Counted and
+    // reported; the packet plays as any other.
+    if (dec.pdu.tu()) {
+        telemetry_.rx_uncertain().add(1);
+    }
+}
+
+void UdptunEgressPath::record_timing(udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, uint16_t const nf)
+{
+    // Per-packet timing: latency = local rx TAI - the packet's TAI
+    // presentation time. Same TAI basis (CLOCK_REALTIME + tai_offset) the
+    // ingest stamps with, so both ends share one absolute timeline.
+    int64_t const rx_tai = egress_colbin_ ? realtime_tai_ns(config_.udptun_tai_offset_ns) : 0;
+    if (rx_tai == 0) {
+        return;
+    }
+    std::array<uint8_t, sizeof(udptun::UdpTunCsvRecord)> row{};
+    span_store(row, timing_record(dec, rx_tai, nf));
+    (void)egress_colbin_->write_row(row);
+}
+
+auto UdptunEgressPath::timing_record(
+    udptun::AafV1OverAnnexJCodec::DecodedPacket const& dec, int64_t const rx_tai, uint16_t const nf) const
+    -> udptun::UdpTunCsvRecord
+{
+    // Classify primary vs redundant by the REDUN_BIT; record the
+    // PRIMARY-form stream_id for both so owlm_analyze groups them as
+    // one logical stream (role distinguishes them for recovery accounting).
+    uint64_t const sid_u64 = dec.pdu.stream_id().to_uint64();
+    ieee::Eui64 sender{};
+    sender.from_uint64(sid_u64 & ~UDPTUN_REDUN_BIT);
+    int64_t const pt_ns = egress_codec_->tx_gptp_ns(dec);
+    return {
+        .rx_gptp_ns = rx_tai,
+        .presentation_time_ns = pt_ns,
+        .latency_ns = rx_tai - pt_ns,
+        .sender_id = sender,
+        .sequence = dec.pdu.get_sequence_num(),
+        .interval_us = static_cast<uint32_t>((static_cast<uint64_t>(nf) * 1'000'000ULL) / ClassA96k::SAMPLE_RATE),
+        .role = static_cast<uint8_t>(role_of(sid_u64)),
+        ._pad = {},
+    };
+}
+
+auto UdptunEgressPath::role_of(uint64_t const stream_id) const noexcept -> udptun::PacketRole
+{
+    if (!config_.udptun_redundant) {
+        return udptun::PacketRole::RemoteLegacy;
+    }
+    return (stream_id & UDPTUN_REDUN_BIT) != 0 ? udptun::PacketRole::RemoteRedundant : udptun::PacketRole::RemotePrimary;
 }
 
 void UdptunEgressPath::fill(int64_t const now_tai_ns, size_t const samples)

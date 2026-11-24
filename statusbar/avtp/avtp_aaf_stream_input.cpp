@@ -38,13 +38,18 @@ void AafStreamInputContext::update_sequence_num(uint8_t seq_num) noexcept
 
 void AafStreamInputContext::process_packet_header(AafPdu const& pdu, uint64_t gptp_now_ns) noexcept
 {
+    process_packet_header(pdu, Nanoseconds{static_cast<int64_t>(gptp_now_ns)});
+}
+
+void AafStreamInputContext::process_packet_header(AafPdu const& pdu, Nanoseconds const now) noexcept
+{
     update_sequence_num(pdu.get_sequence_num());
-    last_gptp_time_ns = gptp_now_ns;
+    last_gptp_time_ns = now.count();
 
     if (pdu.tv()) {
         // This packet carries a valid presentation timestamp.
-        // Reset the PTS anchor to the reconstructed full 64-bit timestamp.
-        last_pts_ns = reconstruct_avtp_timestamp(pdu.get_avtp_timestamp(), gptp_now_ns);
+        // Reset the PTS anchor to the reconstructed full timestamp.
+        last_pts_ns = reconstruct_avtp_timestamp(pdu.get_avtp_timestamp(), now).count();
         samples_since_ts = 0;
         has_valid_timestamp = true;
         ++timestamp_updates;
@@ -55,12 +60,18 @@ void AafStreamInputContext::process_packet_header(AafPdu const& pdu, uint64_t gp
 
 auto AafStreamInputContext::compute_pts_ns() const noexcept -> uint64_t
 {
+    return static_cast<uint64_t>(compute_pts().count());
+}
+
+auto AafStreamInputContext::compute_pts() const noexcept -> Nanoseconds
+{
     if (!has_valid_timestamp) {
-        return 0;
+        return Nanoseconds::zero();
     }
     // PTS of the first sample in the current packet.
     // samples_since_ts is the number of samples between the anchor and this packet.
-    return last_pts_ns + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    uint64_t const sum = static_cast<uint64_t>(last_pts_ns) + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    return Nanoseconds{static_cast<int64_t>(sum)};  // summed unsigned: no overflow to undefined behaviour
 }
 
 void AafStreamInputContext::advance_samples(uint16_t sample_count) noexcept

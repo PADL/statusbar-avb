@@ -5,10 +5,9 @@
 // as their silence takes it away. MaapNetHandler: the reactor port that owns
 // the MAAP handler, and how it retires.
 
-#include "statusbar/nanoavb/nanoavb_components.hpp"
-
 #include "statusbar/avtp/avtp_maap_handler.hpp"
 #include "statusbar/gptp/gptp.hpp"
+#include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <cstdint>
@@ -130,4 +129,4 @@ TEST(maap_net_handler, retire_releases_the_range_and_finishes_the_port)
     EXPECT_FALSE(port.next_deadline_ns().has_value());
 }
 
-TEST_MAIN(statusbar_nanoavb, nanoavb_components_test)
+TEST_MAIN(statusbar_nanoavb, nanoavb_components_functional_test)

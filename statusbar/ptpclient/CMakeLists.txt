@@ -38,7 +38,10 @@ statusbar_add_module(
   ptpclient_phc_test.cpp
   ptpclient_pulse_test.cpp
   ptpclient_tai_translator_test.cpp
-  ptpclient_test.cpp)
+  ptpclient_test.cpp
+  FUNCTIONAL_TESTS
+  ptpclient_bridge_functional_test.cpp
+  ptpclient_phc_functional_test.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(ptpclient_wake_example ptpclient_wake_example.cpp)

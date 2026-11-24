@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/dsp/dsp.hpp"
 #include "statusbar/dsp/dsp_biquad.hpp"
@@ -62,6 +63,71 @@ using namespace statusbar::nanoavb;
 // Factory method
 //
 
+namespace {
+
+/// The format this entity gives a stream of @p kind.
+[[nodiscard]] auto fixed_stream_format(AvbEntityAudioIOConfig const& config, size_t channels, StreamKind kind) -> StreamFormatFields
+{
+    StreamFormatFields format{
+        .kind = kind,
+        .sample_rate_hz = AvbEntityAudioIO::SAMPLE_RATE,
+        .channels = static_cast<uint16_t>(channels),
+        .bit_depth = kind == StreamKind::aaf ? AvbEntityAudioIO::AAF_BIT_DEPTH : uint8_t{24},
+        .aaf_format = AvbEntityAudioIO::AAF_FORMAT};
+    if (kind == StreamKind::crf) {
+        // Milan 48 kHz audio-sample reference, pull x1.0: both 48 kHz and
+        // 96 kHz clients lock to it; our 96 kHz audio rides as a 2x multiple.
+        format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
+        format.crf_base_frequency_hz = AvbEntityAudioIO::CRF_BASE_FREQUENCY;
+        format.crf_timestamp_interval = config.crf_timestamp_interval;
+        format.crf_timestamps_per_pdu = static_cast<uint8_t>(config.crf_timestamps_per_packet);
+    }
+    return format;
+}
+
+/// This entity's fixed 3-stream topology (AM824@0, AAF@1, CRF@2) as a
+/// StreamSpec table for the kit. The input side mirrors the output side (the
+/// CRF input is the media-clock input), so one table serves both. (The tone
+/// generator derives its specs from the blob; migrating this entity's whole
+/// topology to the blob is future kit work.)
+[[nodiscard]] auto fixed_stream_specs(AvbEntityAudioIOConfig const& config, size_t channels) -> StreamSpecs
+{
+    StreamSpecs specs{};
+    for (auto const& [index, kind] :
+         {std::pair{AvbEntityAudioIO::AM824_STREAM_INDEX, StreamKind::am824},
+          std::pair{AvbEntityAudioIO::AAF_STREAM_INDEX, StreamKind::aaf},
+          std::pair{AvbEntityAudioIO::CRF_STREAM_INDEX, StreamKind::crf}}) {
+        (void)specs.try_push_back(StreamSpec{.index = index, .format = fixed_stream_format(config, channels, kind)});
+    }
+    return specs;
+}
+
+/// Everything the entity is built from that the descriptor blob decides.
+struct AudioIoPlan
+{
+    EntityIdentityDescriptorHandler handler;
+    StreamSpecs specs;
+    uint16_t initial_clock_source;
+    std::optional<uint16_t> crf_clock_source;
+    size_t channels;
+};
+
+[[nodiscard]] auto plan_audio_io(AvbEntityAudioIOConfig const& config, DescriptorStorage const& storage) -> AudioIoPlan
+{
+    size_t const channels = channels_from_storage(storage, 2);
+    // Kit phase 3c: the clock source backed by the CRF stream input
+    // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
+    // CLOCK_DOMAIN's authored default selection.
+    return AudioIoPlan{
+        .handler = identity_handler(config, storage),
+        .specs = fixed_stream_specs(config, channels),
+        .initial_clock_source = authored_clock_source(storage),
+        .crf_clock_source = find_input_stream_clock_source(storage, AvbEntityAudioIO::CRF_INPUT_STREAM_INDEX),
+        .channels = channels};
+}
+
+}  // namespace
+
 auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityAudioIO>>
 {
@@ -69,71 +135,17 @@ auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_re
     if (!storage_result) {
         return failure(storage_result.error());
     }
-
-    // Symbol-aware: serve descriptors from the blob through a DescriptorStorageHandler
-    // (retains the blob + its symbol table) instead of a parsed EntityModel. The handler
-    // patches the runtime ENTITY identity + AVB_INTERFACE network/gPTP fields.
-    size_t const channels = channels_from_storage(*storage_result, 2);
-    auto const iface_mac = net::read_interface_mac(config.interface_name);
-    EntityIdentityDescriptorHandler handler{
-        *storage_result,
-        config.entity_id,
-        config.entity_model_id,
-        config.firmware_version,
-        config.entity_name,
-        iface_mac,
-        /*patch_avb_interface=*/true};
-
-    // Kit phase 3c: find the clock source backed by the CRF stream input
-    // (INPUT_STREAM located at STREAM_INPUT CRF_INPUT_STREAM_INDEX) and the
-    // CLOCK_DOMAIN's authored default selection.
-    auto const crf_clock_source = find_input_stream_clock_source(*storage_result, CRF_INPUT_STREAM_INDEX);
-    uint16_t const initial_clock_source = authored_clock_source(*storage_result);
-
-    // This entity's fixed 3-stream topology (AM824@0, AAF@1, CRF@2) as
-    // StreamSpec tables for the kit, mirrored on the input side (the CRF input
-    // is the media-clock input). (The tone generator derives its specs from
-    // the blob; migrating this entity's whole shape to the blob is future kit
-    // work.)
-    auto const make_spec = [&](uint16_t index, StreamKind kind) {
-        StreamSpec spec{};
-        spec.index = index;
-        spec.format.kind = kind;
-        spec.format.sample_rate_hz = SAMPLE_RATE;
-        spec.format.channels = static_cast<uint16_t>(channels);
-        spec.format.aaf_format = AAF_FORMAT;
-        spec.format.bit_depth = kind == StreamKind::aaf ? AAF_BIT_DEPTH : uint8_t{24};
-        if (kind == StreamKind::crf) {
-            // Milan 48 kHz audio-sample reference, pull x1.0: both 48 kHz and
-            // 96 kHz clients lock to it; our 96 kHz audio rides as a 2x multiple.
-            spec.format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
-            spec.format.crf_base_frequency_hz = CRF_BASE_FREQUENCY;
-            spec.format.crf_timestamp_interval = config.crf_timestamp_interval;
-            spec.format.crf_timestamps_per_pdu = static_cast<uint8_t>(config.crf_timestamps_per_packet);
-        }
-        return spec;
-    };
-    StreamSpecs talker_specs{};
-    StreamSpecs listener_specs{};
-    for (auto const& [index, kind] :
-         {std::pair{AM824_STREAM_INDEX, StreamKind::am824},
-          std::pair{AAF_STREAM_INDEX, StreamKind::aaf},
-          std::pair{CRF_STREAM_INDEX, StreamKind::crf}}) {
-        (void)talker_specs.try_push_back(make_spec(index, kind));
-        (void)listener_specs.try_push_back(make_spec(index, kind));
-    }
-
-    std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
+    AudioIoPlan plan = plan_audio_io(config, *storage_result);
     auto entity = std::make_unique<AvbEntityAudioIO>(
         AvbEntityAudioIO::CreateKey{},
         std::move(config),
-        std::move(handler),
-        talker_specs,
-        listener_specs,
-        initial_clock_source,
-        crf_clock_source,
-        channels,
-        mr);
+        std::move(plan.handler),
+        plan.specs,
+        plan.specs,
+        plan.initial_clock_source,
+        plan.crf_clock_source,
+        plan.channels,
+        memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource());
 
     entity->configure_filter(entity->config_.filter_freq_hz, entity->config_.filter_gain_db, entity->config_.filter_q);
 
@@ -216,7 +228,7 @@ auto AvbEntityAudioIO::start(net::MessageReactor& reactor, TimePoint const now) 
     // timestamp we pass them is already the final presentation time. Assigned
     // before kit_.start() opens the TX slots (the kit's talker references it).
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
-        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = config_.presentation_offset_ns}};
+        .sample_rate_hz = static_cast<double>(SAMPLE_RATE), .presentation_offset_ns = effective_presentation_offset_ns(config_)}};
     rate_tracker_.configure(ptpclient::KalmanRatioTracker::Config{.meas_noise_ns = 1000.0, .jerk_psd = 1e-3});
 
     // Control plane + the whole stream data plane (TX/RX slots, sockets, MAAP,
@@ -255,7 +267,7 @@ void AvbEntityAudioIO::print_state() const
     std::print(
         "State: supervisor={} gptp={} mvrp={} acmp[am824={} aaf={}] channels={} | "
         "AM824 tx={} rx={} rx_samples={} rx_bad={} | AAF tx={} rx={} rx_samples={} rx_bad={} | "
-        "egress[resets={} repunch={}]\n",
+        "egress[resets={} repunch={}] | tunnel-clock[utc_error_ns={} excursions={} tu_tx={} tu_rx={}]\n",
         state_string(),
         kit_.host().gptp_locked() ? "Locked" : "Unlocked",
         kit_.host().mvrp_joined() ? "Joined" : "NotJoined",
@@ -271,7 +283,11 @@ void AvbEntityAudioIO::print_state() const
         rx_aaf != nullptr ? rx_aaf->rx_samples.load() : 0,
         rx_aaf != nullptr ? rx_aaf->rx_bad.load() : 0,
         udptun_->telemetry().egress_reset_count().load(),
-        udptun_->telemetry().egress_repunch_count().load());
+        udptun_->telemetry().egress_repunch_count().load(),
+        udptun_->telemetry().utc_accuracy_ns().load(),
+        udptun_->telemetry().utc_excursions().load(),
+        udptun_->telemetry().tx_uncertain().load(),
+        udptun_->telemetry().rx_uncertain().load());
     if (auto const* listener = kit_.listener(); listener != nullptr) {
         listener->print_timing();
     }
@@ -296,11 +312,11 @@ void AvbEntityAudioIO::process_audio(TimePoint time, realtime::MonotonicRawClock
     // burst-of-N egress is not strict Class A shaping; presentation_offset_ns
     // (>> N*125 us) absorbs it at the listener. See packets_per_wake doc.
     // Re-estimate the GPS frequency ratio that pins the media-clock rate. When
-    // media_lock_to_gptp is set, r stays 1.0 (media clock == gPTP) and we skip the
-    // CLOCK_REALTIME sampling entirely -- see Config::media_lock_to_gptp.
-    if (!config_.media_lock_to_gptp) {
-        update_gps_ratio(base_now_ns);
-    }
+    // media_lock_to_gptp is set, r stays 1.0 (media clock == gPTP) and no pair
+    // is fed to the ratio filter -- see Config::media_lock_to_gptp.
+    // The system clock is judged either way: the tunnel's timestamps are made
+    // from it even when the media clock does not follow it.
+    update_gps_ratio(base_now_ns);
 
     // Inter-site rendezvous punch-retry (media-thread half): install a freshly
     // hole-punched socket staged by the worker and watchdog the RX. Runs before
@@ -411,41 +427,105 @@ void AvbEntityAudioIO::update_gps_ratio(uint64_t gptp_now_ns)
     // against gPTP a few times per second; the rate tracker turns the offset
     // slope into r = switch/GPS, which pins the media-clock rate, and feeds the
     // same pair to its GPS-TAI translator for the tunnel timeline. Rate-limited
-    // so the CLOCK_REALTIME syscall stays off the per-packet hot path.
+    // so the clock reads stay off the per-packet hot path. A pair is fed only
+    // while the system clock is within the entity's limit for following it:
+    // outside it r holds.
     if (!rate_tracker_.should_sample(gptp_now_ns)) {
         return;
     }
-    timespec ts{};
-    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) {
+    auto const clock = read_system_clock();
+    auto const est = rate_tracker_.observe(gptp_now_ns, clock.utc_ns, clock.verdict, !config_.media_lock_to_gptp);
+    // Publish the updated GPS-TAI mapping and the verdict for the reactor-thread
+    // tunnel ingest, which must never read the single-threaded Kalman directly.
+    tai_snapshot_.publish(rate_tracker_.tai_snapshot());
+    if (est && est->valid && rate_tracker_.should_log(gptp_now_ns)) {
+        log_media_clock(*est, gptp_now_ns);
+    }
+}
+
+auto AvbEntityAudioIO::read_system_clock() -> SystemClockReading
+{
+    auto const raw = realtime::read_monotonic_raw();
+    auto const utc = realtime::read_utc();
+    auto const clock = clock_through_link(raw, utc);
+    auto const tai = tai_limit_.judge(clock, raw);
+    publish_system_clock(tai);
+    return {
+        .utc_ns = static_cast<uint64_t>(realtime::UtcClock::to_ns(utc)),
+        .verdict = {.follow = follow_verdict(clock, raw), .tai_usable = tai.usable}};
+}
+
+auto AvbEntityAudioIO::clock_through_link(
+    realtime::MonotonicRawClock::time_point const raw, realtime::UtcClock::time_point const utc) -> realtime::ClockQuality
+{
+    if (raw >= next_utc_report_) {
+        utc_tracker_.observe(raw, utc, realtime::read_system_clock_error());
+        next_utc_report_ = raw + UTC_REPORT_INTERVAL;
+    }
+    // A pair is one reading of each clock and a TAI timestamp is made from
+    // both: the error of the two together. An unbounded link leaves no bound.
+    return utc_tracker_.quality().widened_by(link_.accuracy(raw));
+}
+
+auto AvbEntityAudioIO::follow_verdict(realtime::ClockQuality const& clock, realtime::MonotonicRawClock::time_point const raw)
+    -> realtime::AccuracyVerdict
+{
+    auto verdict = utc_follow_limit_.judge(clock, raw);
+    // What the filters learned is the offset between the two clocks: a new
+    // timeline of either one makes it void.
+    verdict.timeline_changed = link_.take_timeline_change() || verdict.timeline_changed;
+    return verdict;
+}
+
+void AvbEntityAudioIO::publish_system_clock(realtime::AccuracyVerdict const& tai)
+{
+    auto telemetry = udptun_->telemetry();
+    telemetry.utc_accuracy_ns().publish(tai.accuracy == realtime::UNBOUNDED_ACCURACY ? -1 : tai.accuracy.count());
+    telemetry.utc_excursions().publish(tai_limit_.record().excursions);
+    log_tai_verdict(tai);
+}
+
+void AvbEntityAudioIO::log_tai_verdict(realtime::AccuracyVerdict const& tai)
+{
+    if (tai_verdict_logged_ && tai.usable == tai_vouched_) {
         return;
     }
-    uint64_t const gps_ns = (static_cast<uint64_t>(ts.tv_sec) * 1'000'000'000ULL) + static_cast<uint64_t>(ts.tv_nsec);
-    auto const est = rate_tracker_.add_sample(gptp_now_ns, gps_ns);
-    // Publish the updated GPS-TAI mapping for the reactor-thread tunnel ingest,
-    // which must never read the single-threaded Kalman directly (data race).
-    tai_snapshot_.publish(rate_tracker_.tai_snapshot());
-    if (est.valid && rate_tracker_.should_log(gptp_now_ns)) {
-        // Live media-clock telemetry (rate-limited; runs on the media-timer
-        // thread, so keep it to once every few seconds). Lets an operator SEE the
-        // GPS-vs-switch frequency tracking and catch a clock-coupling mistake:
-        //   - r is switch_rate/GPS_rate; offset-slope = (r-1) in ppm = the
-        //     fractional frequency between the gPTP PHC and GPS CLOCK_REALTIME.
-        //   - PHC-REALTIME is the raw instantaneous phase offset (ns).
-        // A HEALTHY decoupled setup (ptp4l -> /dev/ptp0 <- switch GM; chrony ->
-        // CLOCK_REALTIME <- local GPS; NO phc2sys) shows a small but NON-ZERO,
-        // stable slope -- the switch GM's free-running oscillator drifting against
-        // GPS. A slope pinned at ~0.000 ppm with a flat offset means the PHC and
-        // CLOCK_REALTIME are coupled (e.g. phc2sys is running) and the media clock
-        // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
-        // RT media thread: deferred-formatting logger — never std::print here.
-        kit_.host().media_log().status(
-            "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb",
-            est.r,
-            est.ppm(),
-            static_cast<int64_t>(est.filtered_offset_ns),
-            est.freq_uncertainty_ppb);
-        rate_tracker_.mark_logged(gptp_now_ns);
-    }
+    tai_verdict_logged_ = true;
+    tai_vouched_ = tai.usable;
+    // RT media thread: deferred-formatting logger. -1 ns is an unbounded error.
+    kit_.host().media_log().status(
+        "tunnel-clock: TAI timestamps {}  clock error={} ns  limit={} ns  excursions={}",
+        logging::static_str(tai.usable ? "vouched for (tu=0)" : "NOT vouched for (tu=1)"),
+        tai.accuracy == realtime::UNBOUNDED_ACCURACY ? int64_t{-1} : tai.accuracy.count(),
+        config_.udptun_max_tai_error_ns,
+        tai_limit_.record().excursions);
+}
+
+void AvbEntityAudioIO::log_media_clock(ptpclient::RatioEstimate const& est, uint64_t const gptp_now_ns)
+{
+    // Live media-clock telemetry (rate-limited; runs on the media-timer
+    // thread, so keep it to once every few seconds). Lets an operator SEE the
+    // GPS-vs-switch frequency tracking and catch a clock-coupling mistake:
+    //   - r is switch_rate/GPS_rate; offset-slope = (r-1) in ppm = the
+    //     fractional frequency between the gPTP PHC and GPS CLOCK_REALTIME.
+    //   - PHC-REALTIME is the raw instantaneous phase offset (ns).
+    // A HEALTHY decoupled setup (ptp4l -> /dev/ptp0 <- switch GM; chrony ->
+    // CLOCK_REALTIME <- local GPS; NO phc2sys) shows a small but NON-ZERO,
+    // stable slope -- the switch GM's free-running oscillator drifting against
+    // GPS. A slope pinned at ~0.000 ppm with a flat offset means the PHC and
+    // CLOCK_REALTIME are coupled (e.g. phc2sys is running) and the media clock
+    // is NOT actually GPS-locked -- see umbrella docs/MEDIA_CLOCK_TIMING.md.
+    // RT media thread: deferred-formatting logger — never std::print here.
+    kit_.host().media_log().status(
+        "media-clock r(switch/GPS)={:.9f}  offset-slope={:+.3f} ppm  PHC-REALTIME={} ns  unc=+/-{:.1f} ppb  utc_error={} ns  "
+        "self_corrections={}",
+        est.r,
+        est.ppm(),
+        static_cast<int64_t>(est.filtered_offset_ns),
+        est.freq_uncertainty_ppb,
+        udptun_->telemetry().utc_accuracy_ns().load(),
+        rate_tracker_.self_corrections());
+    rate_tracker_.mark_logged(gptp_now_ns);
 }
 
 void AvbEntityAudioIO::configure_filter(double const freq_hz, double const gain_db, double const q)

@@ -97,18 +97,19 @@ displayed RTT is unaffected by the choice of WCL.
 Pass `--worst-case-latency-ms=0` to recover the original "PT ==
 acquisition wall" semantic (lateness ≡ real one-way transit).
 
-## Running without gPTP (`--no-gptp`)
+## Running without gPTP (`--time-source=realtime`)
 
 When there's no gPTP grand master on the segment (e.g. the RPi is
 plugged straight into a consumer router, or you just want a quick RTT
-sanity check), pass `--no-gptp`. Behaviour:
+sanity check), pass `--time-source=realtime`. Behaviour:
 
 - the gPTP slave session is skipped entirely (no PHC, no raw sockets,
   no `CAP_NET_RAW`);
 - packet PT (the `tx_gptp_ns` field) and `rx_gptp_ns` are read
   directly from `CLOCK_REALTIME`;
-- TX/RX are always considered "synced" (there's no clock-rate bridge
-  to wait for);
+- there is no master clock link to judge, so nothing holds TX/RX back on
+  its account; with `--max-utc-error-us` set, the system clock's own error
+  figure is the limit and the session stops while it is outside;
 - the EUI-64 is built from the MAC of `--owlm-interface` (or
   `--gptp-interface` if the former is empty).
 
@@ -189,16 +190,25 @@ networks.
 | `--peer-port PORT`         | `9991`           | Destination UDP port                                       |
 | `--local-port PORT`        | `9991`           | Local UDP bind port                                        |
 | `--tx-interval-us US`      | `100000` (10 Hz) | µs between transmits; `0` disables sending (RX-only)       |
-| `--report-interval US`     | `1000000` (1 s)  | Live summary cadence                                       |
+| `--report-interval-ms MS`  | `1000` (1 s)     | Live summary cadence                                       |
 | `--id-mid HEX`             | `0xFFFE`         | EUI-64 mid bytes (legacy single-stream; ignored if redundant) |
 | `--no-redundant`           | off              | Disable the default dual-stream redundancy                 |
 | `--temporal-shift-ms MS`   | `10`             | Delay between primary and its redundant copy               |
-| `--no-gptp`                | off              | Skip gPTP; stamp packets with `CLOCK_REALTIME` (no GM needed) |
+| `--worst-case-latency-ms MS` | `60`           | Offset between acquisition time and the presentation time stamped on the wire |
+| `--time-source {gptp-slave,ptp4l,realtime}` | `gptp-slave` | Where wire time comes from: the built-in gPTP slave on `--gptp-interface`, a PHC that ptp4l keeps in sync (`--ptp.*` options), or `CLOCK_REALTIME` with no grandmaster |
+| `--wire-clock {master,gps-tai}` | `master`    | Timeline of the on-wire timestamps: the time source's own, or absolute TAI made from the system clock (needed between sites whose grandmasters are not on TAI) |
+| `--tai-minus-utc-ns NS`    | `37000000000`    | TAI − UTC, applied with `--wire-clock=gps-tai`             |
 | `--payload-bytes N`        | `0`              | Pad bytes after the 32-byte header                         |
 | `--mcast-ttl N`            | `1`              | `IP_MULTICAST_TTL` for multicast peers                     |
 | `--dscp N`                 | `46` (EF)        | DSCP value (0–63); pass `-1` to disable. Wi-Fi maps EF→AC_VO |
 | `--ipv6`                   | off              | Bind IPv6 in RX-only mode (TX mode infers from `--peer`)   |
 | `--max-sources N`          | `32`             | Cap on tracked sources                                     |
+| `--max-clock-error-us US`  | `100`            | Largest worst-case error of the master clock link to measure on; negative takes any bounded link, `0` is met by no link. See Accuracy |
+| `--max-utc-error-us US`    | `0` (report only)| Largest worst-case error of the system clock to measure on, when the wire timeline is made from it. Here `0` means no limit is enforced |
+| `--utc-holdover-drift-ppb N` | `15000`        | How fast the system clock's worst-case error grows from its time daemon's last update |
+| `--ptp.holdover_drift_ppb N` | `15000`        | How fast the master link's worst-case error grows without synchronization, for either time source |
+| `--utc-fixed-error-ns NS`  | `0`              | An error of the system clock that its own report does not show (a receiver's pulse offset, a path taken as symmetric), added to its worst-case error |
+| `--ptp.fixed_error_ns NS`  | `0`              | An error of the master link's hardware that no measurement shows (PHY asymmetry, timestamp granularity), added to its worst-case error, for either time source |
 | `--hist-low-ns NS`         | `0`              | Histogram lower bound                                      |
 | `--hist-high-ns NS`        | `300000000`      | Histogram upper bound (300 ms)                             |
 | `--hist-bucket-ns NS`      | `500000`         | Histogram bucket width (500 µs → 600 bins)                 |
@@ -216,6 +226,80 @@ a quiet wired Linux box: **±100 µs**. Sources of jitter:
 - Kernel scheduling between `recvfrom` return and our timestamp call
 - gPTP bridge offset / rate update granularity (sub-µs typical)
 - Sender-side syscall path before the packet reaches the wire
+
+### How well the clocks are known
+
+Every figure owlm prints rests on its master clock link: the gPTP slave's
+bridge, or the ptp4l PHC bridge. The link reports a worst-case error that is
+refreshed at each synchronization and grows while synchronization is
+interrupted, because the link keeps converting with the rate and offset it
+had. owlm compares that error with `--max-clock-error-us` (default 100) and
+measures and sends only while it is inside. Three missed Syncs add a few
+microseconds and change nothing. A link that coasts at the default holdover
+figure of 15 ppm leaves a 100 µs limit after about six and a half seconds;
+measurement stops there and resumes when synchronization returns. A new
+grandmaster is a new timeline: the link is unbounded until it has been
+fitted again.
+
+What the figure covers depends on the time source. With
+`--time-source=ptp4l` the link is the PHC as ptp4l disciplines it: the bound
+says how well the PHC is read, not whether ptp4l still follows its
+grandmaster, so a ptp4l that has lost its master is not seen here. A PHC
+slewed more than 200 ppm against the local crystal has no bound at all until
+the slew is back inside that range. With the built-in gPTP slave the packet
+stamps use the bridge's offset alone, which is exact at each Sync and then
+moves at the local crystal's rate offset until the next one. The bound
+printed is that line's own: a few microseconds while Syncs arrive, growing
+at the holdover figure plus the whole rate offset once they stop. A crystal
+40 ppm off leaves a 100 µs limit about two seconds after the last Sync. A
+new grandmaster has no bound until a rate has been fitted to its own Syncs,
+which takes a second of them.
+
+How fast either link's error grows without synchronization is
+`--ptp.holdover_drift_ppb` (default 15 ppm, the tolerance NTP assumes of any
+clock); a machine whose oscillator is known to be steadier can be told so
+and coasts for longer.
+
+Both bounds are built from what the tool can measure. An error that is
+constant, such as a PHY's latency asymmetry or a GPS receiver's pulse
+offset, is invisible to a fit, so the bound is too small by that amount
+unless it is told: `--ptp.fixed_error_ns` for the master link and
+`--utc-fixed-error-ns` for the system clock. They are figures of the
+hardware at each site and default to 0.
+
+When the wire timeline is made from the system clock (`--wire-clock=gps-tai`
+or `--time-source=realtime`), a figure compared across two sites also
+depends on how well each site's system clock knows UTC. owlm reads the
+operating system's own worst-case error once a second (what chrony or ntpd
+last told the kernel) and coasts it through a loss of the time server. It is
+shown in the report. It is enforced only when `--max-utc-error-us` is set,
+since a round trip or a self-loopback is measured on one clock and does not
+depend on it. The kernel grows its figure by half a millisecond every second
+between the time daemon's updates, so the first figure owlm sees can be tens
+or hundreds of milliseconds; it tightens to the daemon's own rating at the
+next update and is coasted from there.
+
+Each live report and the final summary end with one line:
+
+```
+  clock: link +/-7.7 us (limit +/-100.0 us, synced 0.3 s ago) excursions=0 outside=0.0 s timeline_changes=0 utc +/-1.5 ms
+```
+
+`excursions` counts the times the link left its limit, `outside` the time
+spent there, `timeline_changes` the grandmaster changes and time steps seen.
+`NOT USABLE` is appended while nothing is being measured or sent. The bounds
+are worst cases, rounded up: a one-way figure between two sites is good to
+the sum of both sites' bounds, and usually far better.
+
+With `--wire-clock=gps-tai` the mapping from the master timeline to TAI is
+learned from pairs of the two clocks, four a second. It is learned only while
+the link is inside its limit, and it starts over when the link moves to a new
+timeline. The filter widens itself when it finds its samples persistently
+outside its gate (a seed taken from a bad reading, a slew of the system
+clock it had not allowed for); the clock line then also shows
+`tai filter self-corrections N`. One or two at the start of a run are
+harmless. A count that keeps climbing means the system clock or the link is
+moving in steps.
 
 Hardware timestamping on the UDP NIC is *not* used — its PHC drifts
 independently of the gPTP NIC's PHC, and bridging across two PHCs
@@ -245,7 +329,8 @@ the canonical validation.
 
 `scripts/owlm/loopback_smoke.sh` runs two `statusbar-owlm-tool` instances on
 `lo` (with separate ports) for a few seconds and asserts packet
-counts. Hand-run with:
+counts. It carries the ctest label `functional` and runs with the
+functional tests. Hand-run with:
 
 ```
 OWLM_TEST_IFACE=eth0 ctest -R owlm_loopback

@@ -16,7 +16,7 @@ gPTP-timestamped UDP framework (`udptun`), one-way latency measurement
 (`owlm`), a STUN client and server (RFC 8489, `stun`), AVB/AVTP-aware packet
 capture and dump (`netdump`), and a real-time AVTP latency tester.
 
-Version 1.3.0.
+Version 3.0.0. The release summaries are listed under [What ships](#what-ships).
 
 > Portions of this repository were developed with assistance from Claude,
 > an AI model by Anthropic. All reference material used in this process
@@ -54,8 +54,11 @@ authors, and gPTP implementers on Linux. It depends on `statusbar-core`,
 ## Quick start
 
 ```bash
-# Local build + unit tests (Clang+libc++ toolchain is mandatory; applied automatically)
-./local-build.sh && ctest --test-dir build
+# Local build, then the unit tests, then the functional tests
+# (Clang+libc++ toolchain is mandatory; applied automatically)
+./local-build.sh
+# Unit tests only, for a host that cannot run the functional ones (real sockets, a real kernel)
+STATUSBAR_SKIP_FUNCTIONAL_TESTS=1 ./local-build.sh
 
 # Reproducible Debian .deb in ../deb-output/ (statusbar-core + statusbar-crypto + statusbar-audio .debs must already be there)
 ./container-build.sh
@@ -250,8 +253,19 @@ cmake -S . -B build -G Ninja --toolchain cmake/toolchain-clang.cmake \
   -Dstatusbar-crypto_DIR=../crypto/build \
   -Dstatusbar-audio_DIR=../audio/build
 cmake --build build
-ctest --test-dir build
+ctest --test-dir build -LE functional   # the unit tests
+ctest --test-dir build -L functional    # the functional tests
 ```
+
+Two kinds of test are kept apart. Unit tests test logic: they open no
+socket and wait for nothing. Functional tests use real sockets and a real
+kernel and build into a binary of their own,
+`statusbar-avb-functional-test` (ctest label `functional`).
+`local-build.sh` runs both, unit tests first;
+`STATUSBAR_SKIP_FUNCTIONAL_TESTS=1` leaves the functional run out. The
+`-dev` package installs the binary and its data, so the tests can be run
+on a target: `statusbar-avb-functional-test -A` for all of them, or one
+ctest name such as `statusbar/stun/stun_loopback_functional_test`.
 
 Each `-Dstatusbar-<dep>_DIR=<path>` points `find_package` at a
 dependency's build directory; the package exports its build tree,

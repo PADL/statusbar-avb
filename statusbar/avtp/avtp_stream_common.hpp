@@ -9,9 +9,29 @@
 /// 32 bits of the gPTP time in nanoseconds. Both AM824 and AAF streams need to
 /// reconstruct the full 64-bit gPTP-domain value using an approximate receive time.
 
+#include <chrono>
 #include <cstdint>
+#include <ratio>
 
 namespace statusbar::avtp {
+
+/// A time on a stream's timeline: a count of nanoseconds since that timeline's
+/// zero. AVTP does not say which clock it is. It is gPTP time on an AVB
+/// network, and it may as well be another gPTP domain's time or a time that
+/// came from somewhere else; the caller knows, and hands the count over.
+///
+/// A time on a stream's timeline is not below zero. It is held in a signed
+/// 64-bit type all the same, so that the difference of two times is a plain
+/// subtraction and a caller holding a signed count does not cast; 63 bits of
+/// nanoseconds are 292 years. A negative time handed to a function here is
+/// the caller's error, and what the function then does is not specified.
+/// The functions do not check what they hand out either: a time worked back
+/// from a timestamp in a timeline's first instants (an AM824 packet whose
+/// stamped block is not its first) and an AAF v1 wire field with its top bit
+/// set both come out as the bits stand, which is a negative count. The type is the one core's
+/// realtime::Nanoseconds names, spelled out here so that avtp needs nothing
+/// from the realtime module.
+using Nanoseconds = std::chrono::duration<int64_t, std::nano>;
 
 /// Reconstruct a full 64-bit gPTP timestamp from a 32-bit AVTP timestamp
 /// and an approximate current gPTP time.
@@ -25,5 +45,26 @@ namespace statusbar::avtp {
 /// @param gptp_now_ns    Approximate gPTP time when the packet was received (full 64-bit)
 /// @return Full 64-bit gPTP-domain presentation timestamp
 [[nodiscard]] auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) noexcept -> uint64_t;
+
+/// The same reconstruction on a Nanoseconds time. It returns what the unsigned
+/// form returns for every field and every time short of the last wrap (4.29 s)
+/// before the signed count's limit: the time nearest to @p now whose low 32
+/// bits are @p avtp_timestamp, and never a time below zero. In
+/// the first seconds of a timeline the result therefore has its upper 32 bits
+/// clear, as the field of a talker that has just started stands for a small
+/// time.
+///
+/// What the caller owes: @p now is not below zero, and is expected to be within
+/// one second of the time the field stands for. A listener's receive time and a
+/// talker's presentation time are a few milliseconds apart, so that is met with
+/// a great deal to spare. The answer is exact for any time less than half a
+/// wrap (2.147 s) from @p now; a time further away than that cannot be told
+/// from a nearer one with the same low bits, and the nearer one is returned
+/// (unless that one is below zero, see above).
+///
+/// @param avtp_timestamp The 32-bit AVTP presentation timestamp from the AVTPDU
+/// @param now            Approximate time on the stream's timeline when the packet was received
+/// @return The full presentation time
+[[nodiscard]] auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, Nanoseconds now) noexcept -> Nanoseconds;
 
 }  // namespace statusbar::avtp

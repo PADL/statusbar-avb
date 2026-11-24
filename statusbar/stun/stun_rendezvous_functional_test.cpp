@@ -5,10 +5,9 @@
 /// background thread on a loopback port, run a client through the
 /// helper, verify it returns a paired result with a valid fd.
 
-#include "statusbar/stun/stun_rendezvous.hpp"
-
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/stun/stun_rendezvous.hpp"
 #include "statusbar/stun/stun_server.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -159,4 +158,4 @@ TEST(stun_rendezvous, timeout_when_no_peer)
     EXPECT_FALSE(result.has_value());
 }
 
-TEST_MAIN(statusbar_stun, stun_rendezvous_test)
+TEST_MAIN(statusbar_stun, stun_rendezvous_functional_test)

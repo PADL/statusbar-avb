@@ -15,6 +15,7 @@
 
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_aaf_v1.hpp"
+#include "statusbar/avtp/avtp_stream_common.hpp"
 
 #include <algorithm>
 #include <array>
@@ -59,6 +60,19 @@ struct AafV1StreamOutputContext
 
     /// Build the V1 packet header for the next packet.
     void build_packet_header(AafV1Pdu& pdu, uint16_t samples_per_channel, uint64_t gptp_now_ns) noexcept;
+
+    /// build_packet_header() told the time as a signed Nanoseconds value.
+    ///
+    /// @p first_sample_time is the time of the first sample of this AVTPDU on
+    /// the stream's timeline. It is "now" only for a talker that packs samples
+    /// as it captures them. The AVTPDU's timestamp is this time plus
+    /// presentation_offset_ns, so a caller that already holds the presentation
+    /// time builds the context with an offset of zero and passes that time.
+    /// The wire field is 64 bits unsigned and takes the count's bits as they are.
+    void build_packet_header(AafV1Pdu& pdu, uint16_t samples_per_channel, Nanoseconds first_sample_time) noexcept
+    {
+        build_packet_header(pdu, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()));
+    }
 };
 
 /// Serialize AAF V1 audio stream — encodes float audio to any PCM format
@@ -114,6 +128,22 @@ auto aaf_v1_stream_serialize(
     }
 
     return required;
+}
+
+/// aaf_v1_stream_serialize() told the time as a signed Nanoseconds value.
+/// @param first_sample_time  Time of the first sample of this AVTPDU on the stream's timeline;
+///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+template <size_t MaxChannels = 64, size_t MaxSamples = 256, typename AudioSource>
+auto aaf_v1_stream_serialize(
+    AafV1StreamOutputContext& ctx,
+    AafV1Pdu& pdu,
+    std::span<uint8_t> payload,
+    uint16_t samples_per_channel,
+    Nanoseconds const first_sample_time,
+    AudioSource const& get_audio) -> size_t
+{
+    return aaf_v1_stream_serialize<MaxChannels, MaxSamples>(
+        ctx, pdu, payload, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()), get_audio);
 }
 
 }  // namespace statusbar::avtp

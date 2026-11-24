@@ -51,14 +51,6 @@ static_assert([]() constexpr {
     return timespec_to_ns(sec, nsec) == original;
 }());
 
-// ptp_to_monotonic() - constexpr verification
-static_assert(ptp_to_monotonic(1'000'000'000LL, 1.0, 0.0) == 1'000'000'000LL);
-static_assert(ptp_to_monotonic(1'000'000'100LL, 1.0, 100.0) == 1'000'000'000LL);
-
-// monotonic_to_ptp() - constexpr verification
-static_assert(monotonic_to_ptp(1'000'000'000LL, 1.0, 0.0) == 1'000'000'000LL);
-static_assert(monotonic_to_ptp(1'000'000'000LL, 1.0, 100.0) == 1'000'000'100LL);
-
 // FixedPointSlope - constexpr verification
 static_assert([]() constexpr {
     auto slope = FixedPointSlope::from_double(1.0);
@@ -136,72 +128,6 @@ TEST(ptpclient_timespec, ns_to_timespec_roundtrip)
     ns_to_timespec(original, sec, nsec);
     int64_t const result = timespec_to_ns(sec, nsec);
     EXPECT_EQ(result, original);
-}
-
-//
-// Time Conversion Tests (ptp <-> monotonic)
-//
-
-TEST(ptpclient_convert, ptp_to_monotonic_unity)
-{
-    // With slope=1.0 and intercept=0.0, ptp == monotonic
-    int64_t const mono = ptp_to_monotonic(1'000'000'000LL, 1.0, 0.0);
-    EXPECT_EQ(mono, 1'000'000'000LL);
-}
-
-TEST(ptpclient_convert, monotonic_to_ptp_unity)
-{
-    // With slope=1.0 and intercept=0.0, monotonic == ptp
-    int64_t const ptp = monotonic_to_ptp(1'000'000'000LL, 1.0, 0.0);
-    EXPECT_EQ(ptp, 1'000'000'000LL);
-}
-
-TEST(ptpclient_convert, ptp_to_monotonic_with_offset)
-{
-    // ptp = 1.0 * mono + 100, so mono = ptp - 100
-    int64_t const mono = ptp_to_monotonic(1'000'000'100LL, 1.0, 100.0);
-    EXPECT_EQ(mono, 1'000'000'000LL);
-}
-
-TEST(ptpclient_convert, monotonic_to_ptp_with_offset)
-{
-    // ptp = 1.0 * mono + 100
-    int64_t const ptp = monotonic_to_ptp(1'000'000'000LL, 1.0, 100.0);
-    EXPECT_EQ(ptp, 1'000'000'100LL);
-}
-
-TEST(ptpclient_convert, ptp_to_monotonic_with_rate)
-{
-    // ptp = 1.001 * mono + 0 (100 ppm fast)
-    // mono = ptp / 1.001
-    double const slope = 1.001;
-    int64_t const ptp_ns = 1'001'000'000LL;
-    int64_t const mono = ptp_to_monotonic(ptp_ns, slope, 0.0);
-    // Expected: 1001000000 / 1.001 ≈ 1000000000
-    EXPECT_TRUE(std::abs(mono - 1'000'000'000LL) < 1000);  // Within 1us
-}
-
-TEST(ptpclient_convert, monotonic_to_ptp_with_rate)
-{
-    // ptp = 1.001 * mono + 0 (100 ppm fast)
-    double const slope = 1.001;
-    int64_t const mono_ns = 1'000'000'000LL;
-    int64_t const ptp = monotonic_to_ptp(mono_ns, slope, 0.0);
-    // Expected: 1000000000 * 1.001 = 1001000000
-    EXPECT_EQ(ptp, 1'001'000'000LL);
-}
-
-TEST(ptpclient_convert, roundtrip_conversion)
-{
-    double const slope = 1.0001;  // 100 ppm
-    double const intercept = 12345.0;
-    int64_t const original_mono = 1'000'000'000'000LL;
-
-    int64_t const ptp = monotonic_to_ptp(original_mono, slope, intercept);
-    int64_t const back_to_mono = ptp_to_monotonic(ptp, slope, intercept);
-
-    // Should be within 1ns due to rounding
-    EXPECT_TRUE(std::abs(back_to_mono - original_mono) <= 1);
 }
 
 //
@@ -470,18 +396,6 @@ TEST(ptpclient_mapping, default_values)
     EXPECT_EQ(mapping.rms_residual_ns, 0);
     EXPECT_EQ(mapping.worst_bracket_ns, 0);
     EXPECT_EQ(mapping.sample_count, 0);
-}
-
-//
-// TimeConvertResult Struct Tests
-//
-
-TEST(ptpclient_result, default_values)
-{
-    TimeConvertResult result;
-    EXPECT_EQ(result.time_ns, 0);
-    EXPECT_EQ(result.epoch, 0U);
-    EXPECT_FALSE(result.healthy);
 }
 
 //

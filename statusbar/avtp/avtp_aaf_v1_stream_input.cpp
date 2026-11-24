@@ -29,40 +29,62 @@ void AafV1StreamInputContext::reset() noexcept
 
 void AafV1StreamInputContext::process_packet_header(AafV1Pdu const& pdu, uint64_t gptp_now_ns) noexcept
 {
-    // 32-bit sequence gap detection
-    if (packets_received > 0) {
-        uint32_t const expected = last_sequence_num + 1U;
-        if (pdu.get_sequence_num() != expected) {
-            ++sequence_gaps;
-        }
-    }
-    last_sequence_num = pdu.get_sequence_num();
-    last_gptp_time_ns = gptp_now_ns;
+    process_packet_header(pdu, Nanoseconds{static_cast<int64_t>(gptp_now_ns)});
+}
 
+void AafV1StreamInputContext::process_packet_header(AafV1Pdu const& pdu, Nanoseconds const now) noexcept
+{
+    update_sequence_num(pdu.get_sequence_num());
+    last_gptp_time_ns = now.count();
     if (pdu.tv()) {
-        // V1: 64-bit timestamp used directly — no reconstruction needed
-        last_pts_ns = pdu.get_avtp_timestamp();
-        samples_since_ts = 0;
-        has_valid_timestamp = true;
-        ++timestamp_updates;
-
-        // Track grandmaster changes
-        auto const gm = pdu.get_ptp_grandmaster_identity();
-        if (packets_received > 0 && gm != last_grandmaster) {
-            grandmaster_changed = true;
-        }
-        last_grandmaster = gm;
+        take_timestamp(pdu);
     }
-
     ++packets_received;
+}
+
+void AafV1StreamInputContext::update_sequence_num(uint32_t const seq_num) noexcept
+{
+    // 32-bit sequence gap detection
+    if (packets_received > 0 && seq_num != last_sequence_num + 1U) {
+        ++sequence_gaps;
+    }
+    last_sequence_num = seq_num;
+}
+
+void AafV1StreamInputContext::take_timestamp(AafV1Pdu const& pdu) noexcept
+{
+    // V1: 64-bit timestamp used directly — no reconstruction needed
+    last_pts_ns = static_cast<int64_t>(pdu.get_avtp_timestamp());
+    samples_since_ts = 0;
+    has_valid_timestamp = true;
+    ++timestamp_updates;
+    note_grandmaster(pdu.get_ptp_grandmaster_identity());
+}
+
+void AafV1StreamInputContext::note_grandmaster(ClockIdentity const& gm) noexcept
+{
+    // Track grandmaster changes
+    if (packets_received > 0 && gm != last_grandmaster) {
+        grandmaster_changed = true;
+    }
+    last_grandmaster = gm;
 }
 
 auto AafV1StreamInputContext::compute_pts_ns() const noexcept -> uint64_t
 {
+    return static_cast<uint64_t>(compute_pts().count());
+}
+
+auto AafV1StreamInputContext::compute_pts() const noexcept -> Nanoseconds
+{
     if (!has_valid_timestamp) {
-        return 0;
+        return Nanoseconds::zero();
     }
-    return last_pts_ns + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    // The stored time is the 64-bit wire field as it came. The sum is made on
+    // unsigned counts, where it cannot overflow into undefined behaviour
+    // whatever a talker sent; for any true time the result is the same.
+    uint64_t const sum = static_cast<uint64_t>(last_pts_ns) + (static_cast<uint64_t>(samples_since_ts) * sample_period_ns);
+    return Nanoseconds{static_cast<int64_t>(sum)};
 }
 
 void AafV1StreamInputContext::advance_samples(uint16_t sample_count) noexcept

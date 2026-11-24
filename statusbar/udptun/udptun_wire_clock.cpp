@@ -10,7 +10,9 @@ namespace statusbar::udptun {
 
 auto make_gptp_slave_translator(gptp::GptpTimeBridge const& bridge) -> WireClock::Translator
 {
-    return [&bridge](int64_t mraw_ns) noexcept -> int64_t { return bridge.to_gptp(mraw_ns); };
+    return [&bridge](int64_t mraw_ns) noexcept -> int64_t {
+        return realtime::GptpClock0::to_ns(bridge.to_gptp(realtime::MonotonicRawClock::from_ns(mraw_ns)));
+    };
 }
 
 auto make_ptp4l_translator(ptpclient::PtpTimeBridge const& bridge) -> WireClock::Translator

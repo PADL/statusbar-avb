@@ -3,7 +3,14 @@
 
 #include "statusbar/avtp/avtp_stream_common.hpp"
 
+#include <cstdint>
+
 namespace statusbar::avtp {
+
+namespace {
+/// The 32-bit timestamp field counts nanoseconds and wraps after this many.
+constexpr int64_t FIELD_WRAP_NS = int64_t{1} << 32;
+}  // namespace
 
 auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) noexcept -> uint64_t
 {
@@ -45,6 +52,25 @@ auto reconstruct_avtp_timestamp(uint32_t avtp_timestamp, uint64_t gptp_now_ns) n
     }
 
     return best;
+}
+
+auto reconstruct_avtp_timestamp(uint32_t const avtp_timestamp, Nanoseconds const now) noexcept -> Nanoseconds
+{
+    // The field is the low 32 bits of the time, so the time nearest to now
+    // that carries it is now plus the signed 32-bit step from now's own low
+    // bits to the field. Exactly half a wrap away two times are as near; the
+    // one that shares now's upper bits is kept, as the unsigned form keeps it.
+    auto const now_bits = static_cast<uint64_t>(now.count());
+    auto const now_low = static_cast<uint32_t>(now_bits);
+    int64_t step = static_cast<int32_t>(avtp_timestamp - now_low);
+    if (step == INT32_MIN && avtp_timestamp > now_low) {
+        step = -step;
+    }
+    // A stream time is never below zero. In the first half wrap of a timeline
+    // the nearest value can be, for a field too far ahead to be a true one;
+    // the answer is then the field as it stands, the same value a wrap later.
+    auto const nearest = static_cast<int64_t>(now_bits + static_cast<uint64_t>(step));
+    return Nanoseconds{nearest < 0 ? nearest + FIELD_WRAP_NS : nearest};
 }
 
 }  // namespace statusbar::avtp

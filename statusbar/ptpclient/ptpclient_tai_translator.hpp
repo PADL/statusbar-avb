@@ -52,6 +52,12 @@ struct GpsTaiSnapshot
     double drift_ppm_per_hr = 0.0;
     std::int64_t last_master_ns = 0;
     std::int64_t tai_minus_utc_ns = 37'000'000'000LL;
+    /// The owner's verdict on the TAI this mapping gives: the system clock
+    /// it is trained from was within the owner's limit for vouching for a
+    /// timestamp when this snapshot was taken. The translator makes no such
+    /// judgement itself and leaves this false; an owner that judges the
+    /// clock sets it.
+    bool tai_usable = false;
 };
 
 /// Pure evaluation of the GPS-TAI mapping from a snapshot. Identical formula to
@@ -149,6 +155,12 @@ class GpsTaiTranslator
 
     /// Filter diagnostics (ratio, uncertainty, drift) for reporting.
     [[nodiscard]] RatioEstimate estimate() const { return kalman_.estimate(); }
+
+    /// Times the filter found its samples persistently outside its gate and
+    /// widened itself to follow them (KalmanRatioTracker::self_corrections).
+    /// Not zero means one of the two clocks moved in a way the filter had
+    /// not allowed for. Counted since construction or the last reset().
+    [[nodiscard]] std::uint64_t self_corrections() const noexcept { return kalman_.self_corrections(); }
 
     void reset()
     {

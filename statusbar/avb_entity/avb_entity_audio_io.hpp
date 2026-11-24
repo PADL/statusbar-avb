@@ -191,6 +191,13 @@ class AvbEntityAudioIO
     /// grace clock), so the tick reads no clock: the media timer tells both.
     auto process_audio(TimePoint time, realtime::MonotonicRawClock::time_point raw_now) -> void;
 
+    /// The quality of the media timer's clock link (the PHC bridge the
+    /// timer waits on), told by the runner before each process_audio. The
+    /// gPTP time process_audio is told comes through that link, so its
+    /// error counts toward every limit on a time made from it. An entity
+    /// never told of a link accounts for none. Media thread.
+    void on_link_quality(realtime::ClockQuality const& link) noexcept { link_.tell(link); }
+
     /// Whether talker stream `idx` (0=AM824, 1=AAF, 2=CRF) should put its AVTP
     /// stream on the wire this tick: true if gating is disabled, or ALL of this
     /// stream's own preconditions hold -- the stream is Started AND an MSRP
@@ -259,6 +266,40 @@ class AvbEntityAudioIO
     /// thread; cheap and rate-limited.
     void update_gps_ratio(uint64_t gptp_now_ns);
 
+    /// The system clock read against the media thread's own counter, with the
+    /// entity's verdict on it.
+    struct SystemClockReading
+    {
+        uint64_t utc_ns;
+        SystemClockVerdict verdict;
+    };
+    /// Read the system clock and judge it against the entity's two limits
+    /// (config_.max_utc_error_ns, config_.udptun_max_tai_error_ns). The
+    /// operating system's report of its error is read once a second (it
+    /// changes no faster); between reports the bound coasts. What is judged
+    /// is the system clock's error with the media timer link's added
+    /// (on_link_quality), since each pair and each TAI timestamp is made
+    /// from both. Media thread.
+    [[nodiscard]] auto read_system_clock() -> SystemClockReading;
+    /// The system clock's quality at @p raw, its report refreshed when one
+    /// is due, widened by the media timer link's error.
+    [[nodiscard]] auto clock_through_link(realtime::MonotonicRawClock::time_point raw, realtime::UtcClock::time_point utc)
+        -> realtime::ClockQuality;
+    /// The verdict for following the clock's rate. A change of either
+    /// clock's timeline restarts the filters.
+    [[nodiscard]] auto follow_verdict(realtime::ClockQuality const& clock, realtime::MonotonicRawClock::time_point raw)
+        -> realtime::AccuracyVerdict;
+    void publish_system_clock(realtime::AccuracyVerdict const& tai);
+    /// One log line each time the verdict on the tunnel's TAI changes, and
+    /// one for the first verdict.
+    void log_tai_verdict(realtime::AccuracyVerdict const& tai);
+    void log_media_clock(ptpclient::RatioEstimate const& est, uint64_t gptp_now_ns);
+    /// A configured limit in nanoseconds as an accuracy: negative takes any bounded clock.
+    [[nodiscard]] static constexpr auto accuracy_limit_of(int64_t const max_error_ns) noexcept -> realtime::Nanoseconds
+    {
+        return max_error_ns < 0 ? realtime::AccuracyLimit::ANY_BOUNDED : realtime::Nanoseconds{max_error_ns};
+    }
+
     AvbEntityAudioIOConfig config_;
     AudioProcessCallback audio_callback_;
 
@@ -292,6 +333,20 @@ class AvbEntityAudioIO
     /// playout all ride this single cross-site-common clock). Fed by
     /// update_gps_ratio on the media thread. See avb_entity_media_rate.hpp.
     MediaClockRateTracker rate_tracker_{};
+
+    /// How well the system clock knows the time, from the operating system's
+    /// own report, and the entity's two limits on it: for following its rate,
+    /// and for vouching for a TAI timestamp made from it. Media thread only.
+    realtime::UtcClockQualityTracker utc_tracker_{realtime::UtcClockQualityTracker::Config{
+        .drift_bound_ppb = config_.utc_holdover_drift_ppb, .fixed_error = realtime::Nanoseconds{config_.utc_fixed_error_ns}}};
+    realtime::AccuracyLimit utc_follow_limit_{accuracy_limit_of(config_.max_utc_error_ns)};
+    realtime::AccuracyLimit tai_limit_{accuracy_limit_of(config_.udptun_max_tai_error_ns)};
+    /// The media timer's clock link as last told (on_link_quality).
+    LinkWatch link_{};
+    realtime::MonotonicRawClock::time_point next_utc_report_{};
+    bool tai_verdict_logged_{false};
+    bool tai_vouched_{false};
+    static constexpr realtime::Nanoseconds UTC_REPORT_INTERVAL{1'000'000'000};
 
     /// Latest GPS-TAI translator snapshot, published by update_gps_ratio on the
     /// media thread and consumed by the tunnel bridge's reactor-thread ingest

@@ -76,6 +76,19 @@ struct AafStreamOutputContext
     /// @param samples_per_channel  Number of samples in this packet
     /// @param gptp_now_ns          Current gPTP time
     void build_packet_header(AafPdu& pdu, uint16_t samples_per_channel, uint64_t gptp_now_ns) noexcept;
+
+    /// build_packet_header() told the time as a signed Nanoseconds value.
+    ///
+    /// @p first_sample_time is the time of the first sample of this AVTPDU on
+    /// the stream's timeline. It is "now" only for a talker that packs samples
+    /// as it captures them. The AVTPDU's timestamp is this time plus
+    /// presentation_offset_ns, so a caller that already holds the presentation
+    /// time builds the context with an offset of zero and passes that time.
+    /// The wire carries the low 32 bits, the same bits whichever way the count is read.
+    void build_packet_header(AafPdu& pdu, uint16_t samples_per_channel, Nanoseconds first_sample_time) noexcept
+    {
+        build_packet_header(pdu, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()));
+    }
 };
 
 /// Serialize AAF audio stream — encodes float audio to any PCM format
@@ -133,6 +146,22 @@ auto aaf_stream_serialize(
     }
 
     return required;
+}
+
+/// aaf_stream_serialize() told the time as a signed Nanoseconds value.
+/// @param first_sample_time  Time of the first sample of this AVTPDU on the stream's timeline;
+///                           the AVTPDU's timestamp is this plus ctx.presentation_offset_ns
+template <size_t MaxChannels = 64, size_t MaxSamples = 256, typename AudioSource>
+auto aaf_stream_serialize(
+    AafStreamOutputContext& ctx,
+    AafPdu& pdu,
+    std::span<uint8_t> payload,
+    uint16_t samples_per_channel,
+    Nanoseconds const first_sample_time,
+    AudioSource const& get_audio) -> size_t
+{
+    return aaf_stream_serialize<MaxChannels, MaxSamples>(
+        ctx, pdu, payload, samples_per_channel, static_cast<uint64_t>(first_sample_time.count()), get_audio);
 }
 
 }  // namespace statusbar::avtp

@@ -17,8 +17,8 @@
 // deadlines it learns from next_deadline(). Expired timers are
 // reported and then cleared; the caller decides whether to rearm.
 //
-// Timer durations come from a TimerConfig: IEEE 802.1Q-2018 Clause 10.7.11
-// (Table 10-7) by default; a profile such as Milan sets its own.
+// Timer durations come from a TimerConfig: IEEE 802.1Q Table 10-7 by
+// default; a profile such as Milan sets its own.
 //
 
 #include "statusbar/sm/sm.hpp"
@@ -33,18 +33,22 @@ namespace statusbar::srp::mrp {
 using sm::Clock;
 using sm::TimePoint;
 
-/// MRP timer durations; the defaults are mrp.c's, within IEEE 802.1Q-2018 Clause 10.7.4.
+/// MRP timer durations. The defaults are IEEE 802.1Q Table 10-7's, which are
+/// also what the AVnu end station tests name: JoinTime 200 ms, LeaveTime
+/// 1000 ms (the top of its 600 to 1000 ms), a leavealltimer drawn from
+/// LeaveAllTime to 1.5 times LeaveAllTime (10 to 15 s), and a 1 s
+/// periodictimer.
 struct TimerConfig
 {
-    /// JoinTime (Clause 10.7.4.1): mrp.c's 100 ms, three join fires in 300 ms.
-    std::chrono::milliseconds join_time{100};
-    /// LeaveTime (Clause 10.7.4.2), 600-1000 ms.
+    /// JoinTime (10.7.4.1): the wait for a transmit opportunity.
+    std::chrono::milliseconds join_time{200};
+    /// LeaveTime (10.7.4.2): how long a Registrar stays in LV for a re-Join.
     std::chrono::milliseconds leave_time{1000};
-    /// The leavealltimer is drawn uniformly from [leave_all_time_min, leave_all_time_max):
-    /// mrp.c's nominal LeaveAllTime (10 s) times [0.5, 1.5).
-    std::chrono::milliseconds leave_all_time_min{5000};
+    /// The leavealltimer (10.7.4.3) is drawn uniformly from
+    /// [leave_all_time_min, leave_all_time_max).
+    std::chrono::milliseconds leave_all_time_min{10000};
     std::chrono::milliseconds leave_all_time_max{15000};
-    /// The periodictimer (Clause 10.7.4.4).
+    /// The periodictimer (10.7.4.4).
     std::chrono::milliseconds periodic_time{1000};
 
     /// Every duration positive and the leavealltimer's range not empty.
@@ -62,12 +66,31 @@ struct TimerConfig
 class TimerScheduler
 {
   public:
-    /// Construct with @p config's durations. Pass a nonzero seed for deterministic tests; the
-    /// default 0 seeds from std::random_device.
+    /// The default durations (TimerConfig{}), under their earlier names.
+    static constexpr auto JOIN_TIME = std::chrono::milliseconds(200);
+    static constexpr auto LEAVE_TIME = std::chrono::milliseconds(1000);
+    /// LeaveAllTime: the leavealltimer runs from this to 1.5 times this.
+    static constexpr auto LEAVE_ALL_TIME_NOMINAL = std::chrono::milliseconds(10000);
+    static constexpr auto PERIODIC_TIME = std::chrono::milliseconds(1000);
+
+    /// Construct with @p config's durations. Pass a nonzero seed for
+    /// deterministic tests; the default 0 seeds from std::random_device.
     explicit TimerScheduler(uint64_t seed = 0, TimerConfig const& config = {});
 
     /// The durations the timers are armed with.
     [[nodiscard]] auto config() const noexcept -> TimerConfig const& { return config_; }
+
+    /// Other durations from here on: a timer already running keeps its
+    /// deadline and takes the new duration when it is next armed. An invalid
+    /// @p config is refused and changes nothing.
+    auto set_config(TimerConfig const& config) noexcept -> bool
+    {
+        if (!config.valid()) {
+            return false;
+        }
+        config_ = config;
+        return true;
+    }
 
     // --- Idempotent starts --------------------------------------------
     // If the timer is already running, these are a no-op (deadline is
@@ -127,9 +150,9 @@ class TimerScheduler
 
   private:
     /// Uniform random interval in [leave_all_time_min, leave_all_time_max).
-    [[nodiscard]] auto randomized_leaveall_duration() -> std::chrono::milliseconds;
+    auto randomized_leaveall_duration() -> std::chrono::milliseconds;
 
-    TimerConfig config_;
+    TimerConfig config_{};
     std::optional<TimePoint> join_{};
     std::optional<TimePoint> leave_{};
     std::optional<TimePoint> leaveall_{};

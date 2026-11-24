@@ -42,7 +42,7 @@ works.
 ## Per-Pi5 clock map
 
 Two intentionally-decoupled clocks on each Pi5 (supersedes the old
-`REALTIME = gPTP` design in [[ptp-bridge-clock-domain-design]]):
+`REALTIME = gPTP` design):
 
 | Clock | Disciplined by | Equals | Jitter | Used for |
 |-------|----------------|--------|--------|----------|
@@ -112,9 +112,66 @@ follows it. Do not cache the delta and walk away.
    median/Huber/step-rejection so a spike doesn't bias the frequency. chronyd already
    does outlier rejection; a custom servo must too.
 3. **Media-clock generator** = produce at GPS rate, stamp avtp/SYT in PHC time. `r`
-   (switch/GPS) is the key state; for AM824 this is the CIP SYT (see
-   [[am824-cip-syt-missing]]), for AAF the per-packet avtp_timestamp.
-4. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
+   (switch/GPS) is the key state; for AM824 this is the CIP SYT, for AAF the per-packet avtp_timestamp.
+4. **The system clock is followed only while it knows the time.** The media
+   thread reads the operating system's worst-case error for CLOCK_REALTIME once
+   a second (what chronyd last told the kernel) and coasts it at
+   `media.utc_holdover_drift_ppb` (default 15 ppm) through a loss of the time
+   server. `media.utc_fixed_error_ns` (default 0) is added to it at every
+   update: the error between the time source and this clock that the time
+   daemon does not measure, such as a receiver's pulse offset. The entity holds that error against two limits:
+   - `media.max_utc_error_us` (default 1 000 000, one second) for following the
+     clock's rate. Inside it the ratio filter and the TAI translator are fed;
+     outside it `r` holds the last value it trusted, so the media clock coasts
+     on the switch's oscillator at the last known ratio. The limit is loose on
+     purpose: a rate is as good from a clock tens of milliseconds off, and the
+     kernel's own figure climbs by half a millisecond every second between
+     chronyd's updates (32 ms over a 64 s poll). It tells a disciplined clock
+     from one that never synchronized or has had no server for most of a day.
+   - `udptun.max_tai_error_us` (default 3 000, three milliseconds) for
+     vouching for a TAI timestamp. Outside it every tunnel packet carries the
+     AVTPDU `tu` (timestamp uncertain) bit; the audio and the timestamps are
+     sent as before. Three milliseconds is enough between sites: the relative
+     phase across the internet does not need the accuracy a gPTP network
+     keeps, only to stay well under the tunnel's worst-case latency, while
+     the rate at both ends has to be accurate. chronyd rates a GPS receiver
+     on the local network between 1.5 and 2.5 ms, and the figure coasts up by
+     about 1 ms over a 64 s poll at the default 15 ppm, so the limit is met
+     with little to spare (five polls on a Pi 5 pair peaked at 2.8 ms with no
+     excursion). A deployment that knows its oscillator sets
+     `media.utc_holdover_drift_ppb` lower: at 2 ppm the same poll adds
+     0.13 ms. For up to one poll interval after the entity starts the only
+     figure it has is the one the kernel has grown since chronyd's last
+     update, so `tu` is set until the next update arrives; a node whose
+     chronyd has lost its server passes the limit after a minute or so at
+     15 ppm.
+
+   Each limit can be set negative, which takes any bounded clock. Zero is a
+   limit no clock meets: `media.max_utc_error_us=0` never follows the system
+   clock, and `udptun.max_tai_error_us=0` sets `tu` on every packet.
+
+   The error held against both limits is the system clock's with the media
+   timer link's added. The gPTP time of each pair comes through that link (the
+   PHC bridge, PHC against `CLOCK_MONOTONIC_RAW`), and a TAI timestamp is made
+   from both clocks. The link's share is a few microseconds while the PHC is
+   being read, with `ptp.fixed_error_ns` (this machine's hardware figure,
+   default 0) on top, and grows at `ptp.holdover_drift_ppb` when it is not; a link
+   that claims no bound (before its first healthy fit, after a step of the
+   PHC, or with the PHC slewed past the bridge's rate window) leaves none, so
+   `r` holds and `tu` is set until it is fitted again.
+
+   A step of the system clock restarts the filters and keeps `r` until they
+   have a new estimate, and so does a new timeline of the link (the PHC was
+   stepped). The receiver counts packets that arrive with `tu` set
+   and plays them as any other. The entity's state line shows the figures:
+   `tunnel-clock[utc_error_ns=… excursions=… tu_tx=… tu_rx=…]`. The media log
+   has one `tunnel-clock:` line for the first verdict and one for each change,
+   and the periodic `media-clock` line ends with the current `utc_error` and
+   `self_corrections`, the times either filter found its samples persistently
+   outside its gate and widened itself to follow them. A count that climbs
+   means one of the two clocks keeps moving in a way the filters do not
+   allow for.
+5. **Verify** the Pi5 NIC HW-timestamps the L2 gPTP fine (it does, ~30 ns); the GPS
    path via chronyd doesn't need NIC HW timestamps.
 
 ## Refinements / future
@@ -144,7 +201,7 @@ by definition — and emit `r`, offset, `freq_uncertainty_ppb`, and (Kalman) dri
 |---|---|---|
 | method | sliding-window OLS slope | recursive clock filter |
 | thermal-ramp lag | window/2 (~7.5 min @ 15 min) | **zero** (drift state absorbs it) |
-| acquisition | needs the full window | **~5 s** (large initial P) |
+| acquisition | needs the full window | **~5 s** (seeded from the first pair) |
 | outlier rejection | none | innovation gate (drops GPS grandmaster ±500 ns spikes) |
 | uncertainty out | slope variance | covariance (both fill `freq_uncertainty_ppb`) |
 | GPS holdover | freezes last window avg | **coasts on freq + drift** |
@@ -164,6 +221,30 @@ soak-tuning knobs; the algebra is fixed. Startup is hardened — the frequency i
 update uses the **Joseph form** — so it can't run away the way an `f=0` +
 huge-initial-P start could (which diverged on a loaded box at R=400). Covered by
 the `robust_noisy_startup` regression test.
+
+### When the ratio filter disagrees with the clocks
+
+`KalmanRatioTracker` drops a sample that falls more than `gate_sigmas` from
+its prediction, so one bad read does not move the estimate, and re-acquires
+on a jump of a millisecond or more, which is a step. Between those two lies
+the case that used to trap it: a run of samples that all disagree with the
+prediction by more than the gate and less than a step. That is the clocks
+being right and the filter wrong. It happens when the frequency was seeded
+from a first pair that held a read error of a microsecond or two (the seed
+is then several ppm off, and each later sample lands further outside the
+gate than the last), and when the time daemon slews its clock by tens of
+microseconds. The filter then coasted on its stale state: across two sites
+this showed as their timelines ramping apart at 8.7 ppm for two minutes,
+until the error passed a millisecond and the step detector re-acquired.
+
+After `persistent_outliers` samples in a row outside the gate (default 8,
+two seconds at four samples a second) the filter takes itself to be the one
+that is wrong. On the next sample it widens its phase uncertainty by the miss
+and its frequency uncertainty by the miss over the time the run lasted, keeps
+its state, and takes that sample. The same bad seed now costs 20 us for two seconds, and a
+33 us slew is followed within two seconds where it used to leave the filter
+33 us behind for two minutes. `self_corrections()` counts the times it did
+so.
 
 ## Status
 
@@ -245,7 +326,16 @@ accumulator: presentation time advances by exactly one `nominal_period_ns * r`
 sample period; the wake time only paces the integer sample count (nominal ±1,
 GPS-rate), never the timestamp. `r = switch/GPS` comes from the ratio Kalman,
 sampled in-entity from `CLOCK_REALTIME`(GPS) vs gPTP (`AvbEntityAudioIO::
-update_gps_ratio`). The presentation offset is 1 ms.
+update_gps_ratio`). The presentation offset is `presentation_offset_ns`: 1 ms by
+default, 2 ms under the Milan profile (Milan v1.3 5.3.7.6), or what the
+configuration gives. It is also all the room a late media-timer wake has. A
+wake later than the offset puts frames on the wire past their presentation
+time, and the generator then makes up the lag one sample a packet, so they
+stay late for several times the length of the stall; a listener that takes
+its media clock from the stream may stop its own talker to lock again
+(measured against an AVB interface clocked from our stream: no effect from
+stalls shorter than the offset, a pause of 5 ms to over a second from longer
+ones).
 
 Why it mattered — diagnosed on a Pi → the audio interface → Pi loopback. The the audio interface recovers its
 entire media clock from `avtp_timestamp` (its CIP SYT is a constant placeholder),

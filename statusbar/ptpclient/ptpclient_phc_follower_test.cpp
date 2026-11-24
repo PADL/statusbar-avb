@@ -467,27 +467,4 @@ TEST(PhcFollower, the_clamp_is_the_devices_max_adj)
     }
 }
 
-TEST(PhcFollower, a_device_pair_measures_while_frozen)
-{
-    // Needs /dev/ptpN read and write access (root); STATUSBAR_PHC0 / STATUSBAR_PHCD choose the devices.
-    char const* const env0 = std::getenv("STATUSBAR_PHC0");
-    char const* const envd = std::getenv("STATUSBAR_PHCD");
-    std::string const phc0 = env0 != nullptr ? env0 : "/dev/ptp0";
-    std::string const phcd = envd != nullptr ? envd : phc0;
-    auto port = open_phc_follower_port(phc0, phcd);
-    if (!port) {
-        SKIP("cannot open the device pair (no PHCs, or not root)");
-    }
-    auto follower = PhcFollower::create({}, std::move(*port));
-    EXPECT_TRUE(follower.has_value());
-    if (!follower) {
-        return;
-    }
-    follower->freeze();  // measure only: a test does not steer a real clock
-    auto const sample = follower->sample(PhcLine::offset_from_phc0(0));
-    EXPECT_TRUE(sample.ok());
-    EXPECT_FALSE(sample.steered);
-    EXPECT_TRUE(sample.pair.raw_ns > 0);
-}
-
 TEST_MAIN(statusbar_ptpclient, ptpclient_phc_follower_test)

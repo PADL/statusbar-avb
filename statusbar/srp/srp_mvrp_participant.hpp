@@ -69,8 +69,8 @@ struct MvrpConfig
     /// Runtime-requested Observer slot count. Must be <= Limits::max_observers.
     size_t max_observers = DefaultMvrpLimits::max_observers;
 
-    /// The MRP timers (IEEE 802.1Q-2018 Table 10-7 by default; Milan sets its own). MVRP keeps
-    /// the standard registrar on rLv! whatever the timers.
+    /// The MRP timer durations of this port (IEEE 802.1Q Table 10-7 by
+    /// default; see also MvrpParticipant::set_mrp_timers).
     mrp::TimerConfig timers{};
 };
 
@@ -196,6 +196,14 @@ class MvrpParticipantT
         vlans_.reserve(config_.max_vlans);
         observers_.resize(config_.max_observers);
     }
+
+    /// Other MRP timer durations from here on (a profile's): each timer takes
+    /// its new duration when it is next armed. Returns false, changing
+    /// nothing, for an invalid @p timers.
+    auto set_mrp_timers(mrp::TimerConfig const& timers) noexcept -> bool { return port_.timers().set_config(timers); }
+
+    /// The MRP timer durations in force.
+    [[nodiscard]] auto mrp_timers() const noexcept -> mrp::TimerConfig const& { return port_.timers().config(); }
 
     /// Set or replace the outbound PDU callback.
     void set_send_pdu(SendPduFn fn) { send_pdu_ = std::move(fn); }
@@ -373,6 +381,23 @@ class MvrpParticipantT
         if (!expired.any()) {
             return;
         }
+        run_expired_timers(expired, now);
+        reclaim();
+        request_transmit_if_owed(now);
+    }
+
+    [[nodiscard]] auto next_deadline() const noexcept -> TimePoint { return port_.timers().next_deadline(); }
+
+  private:
+    struct ObserverSlot
+    {
+        SubscriptionId id{0};
+        Observer obs{};
+    };
+
+    /// The timers that expired in one tick(), each given its turn.
+    void run_expired_timers(mrp::TimerScheduler::Expired const& expired, TimePoint now)
+    {
         if (expired.leaveall) {
             on_leaveall_timer(now);
         }
@@ -385,17 +410,20 @@ class MvrpParticipantT
         if (expired.join) {
             on_join_timer(now);
         }
-        reclaim();
     }
 
-    [[nodiscard]] auto next_deadline() const noexcept -> TimePoint { return port_.timers().next_deadline(); }
-
-  private:
-    struct ObserverSlot
+    /// IEEE 802.1Q Table 10-3: an Applicant that still has a message to send
+    /// has asked for a transmit opportunity, so the jointimer runs again (the
+    /// second New of a declaration follows the first by one JoinTime).
+    void request_transmit_if_owed(TimePoint now)
     {
-        SubscriptionId id{0};
-        Observer obs{};
-    };
+        bool const owed = std::ranges::any_of(vlans_, [](auto const& rec) {
+            return rec.operation == Operation::Declare && applicant_sm::Def::wants_transmit(rec.applicant_sm.current_state());
+        });
+        if (owed) {
+            port_.timers().start_join(now);
+        }
+    }
 
     MvrpConfig config_;
     statusbar::sg14::inplace_vector<AttributeRecord<VlanIdentifierFirstValue>, Limits::max_vlans> vlans_;

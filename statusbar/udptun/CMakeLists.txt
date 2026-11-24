@@ -5,6 +5,7 @@ statusbar_add_module(
   NAME
   udptun
   SOURCES
+  udptun_clock_gate.cpp
   udptun_identity.cpp
   udptun_per_source_tracker.cpp
   udptun_redundant_rx.cpp
@@ -30,6 +31,7 @@ statusbar_add_module(
   statusbar::itc
   statusbar::tsn
   TESTS
+  udptun_clock_gate_test.cpp
   udptun_deadline_timer_test.cpp
   udptun_monotonic_ring_test.cpp
   udptun_per_source_tracker_test.cpp

@@ -22,6 +22,10 @@ interface = "eth0"
 # AEM descriptor (entity model) blob. The package ships the canonical one here.
 descriptor-storage = "/usr/local/share/statusbar-avb/entity_audio.bin"
 
+# Talker presentation time offset in ns. 0 (the default) takes the profile's:
+# 2 ms under Milan, 1 ms otherwise.
+# presentation_offset_ns = 0
+
 # Built-in test-tone frequency (Hz), emitted when no other audio source is
 # connected.
 [tone]
@@ -39,9 +43,12 @@ talker_on_listener = true
 # ----------------------------------------------------------------------------
 
 # Pin the realtime media-timer thread to an isolated CPU core (e.g. with
-# isolcpus=2-3 on the kernel cmdline):
+# isolcpus=2-3 on the kernel cmdline), and tell the PHC link what this
+# machine's hardware adds to its error:
 # [ptp]
 # cpu = 3
+# holdover_drift_ppb = 15000   # how fast the link's error grows while the PHC cannot be read
+# fixed_error_ns = 0           # an error no measurement shows: PHY asymmetry, timestamp granularity
 
 # Inter-site UDP audio tunnel. Peer addresses, rendezvous server and keys are
 # SITE-SPECIFIC and are NOT shipped in this file -- add them per deployment:
@@ -52,3 +59,4 @@ talker_on_listener = true
 # rendezvous_key = "CHANGE-ME"
 # rendezvous_session_id = "CHANGE-ME"
 # rendezvous_role = "ingest"
+# max_tai_error_us = 3000      # packets carry the tu bit while the system clock is not known this well

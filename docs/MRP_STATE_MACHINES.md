@@ -3,7 +3,7 @@
 # MRP / MSRP / MVRP State Machines
 
 This document describes the IEEE 802.1Q-2014 Multiple Registration Protocol
-(MRP) implementation in `statusbar/tsn/` and how it is used by the
+(MRP) implementation in `statusbar/srp/` and how it is used by the
 MSRP (Clause 35) and MVRP (Clause 11.2) participant classes.
 
 ## Scope
@@ -30,18 +30,18 @@ the code point back to `mrpd/mrp.c` for auditability.
 ## Module layout
 
 ```
-statusbar/tsn/
-├── mrp.hpp                     wire-format primitives (pre-existing)
-├── msrp.hpp, mvrp.hpp          FirstValue wire-format structs
-├── mrp_applicant_sm.hpp/.cpp   12-state Applicant FSM (Clause 10.7.7)
-├── mrp_registrar_sm.hpp/.cpp   3-state Registrar FSM (Clause 10.7.8)
-├── mrp_leaveall_sm.hpp/.cpp    2-state LeaveAll FSM (Clause 10.7.5.22)
-├── mrp_periodic_sm.hpp/.cpp    2-state PeriodicTransmission FSM (10.7.5.23)
-├── mrp_attribute.hpp           per-attribute record: FirstValue + both FSMs
-├── mrp_timers.hpp/.cpp         TimerScheduler (monotonic, no OS timers)
-├── mrp_participant.hpp/.cpp    PortState + generic dispatch helpers
-├── msrp_participant.hpp/.cpp   MSRP specialization + Observer API
-└── mvrp_participant.hpp/.cpp   MVRP specialization + Observer API
+statusbar/srp/
+├── srp_mrp.hpp                       wire-format primitives
+├── srp_msrp.hpp, srp_mvrp.hpp        FirstValue wire-format structs
+├── srp_mrp_applicant_sm.hpp/.cpp     12-state Applicant FSM (Clause 10.7.7)
+├── srp_mrp_registrar_sm.hpp/.cpp     3-state Registrar FSM (Clause 10.7.8)
+├── srp_mrp_leaveall_sm.hpp/.cpp      2-state LeaveAll FSM (Clause 10.7.5.22)
+├── srp_mrp_periodic_sm.hpp/.cpp      2-state PeriodicTransmission FSM (10.7.5.23)
+├── srp_mrp_attribute.hpp             per-attribute record: FirstValue + both FSMs
+├── srp_mrp_timers.hpp/.cpp           TimerScheduler and TimerConfig (monotonic, no OS timers)
+├── srp_mrp_participant.hpp/.cpp      PortState + generic dispatch helpers
+├── srp_msrp_participant.hpp/.cpp     MSRP specialization + Observer API
+└── srp_mvrp_participant.hpp          MVRP specialization + Observer API
 ```
 
 ## The four state machines
@@ -52,7 +52,7 @@ using the `statusbar::sm` framework. Each transition is a
 `[State][Event]`. Invalid cells (no table entry) result in a no-op —
 equivalent to the `default: break;` fall-through used by `mrp.c`.
 
-### Applicant FSM — `mrp_applicant_sm.hpp`
+### Applicant FSM — `srp_mrp_applicant_sm.hpp`
 
 - **12 states** (per Clause 10.7.7 Table 10-2): `Vo`, `Vp`, `Vn`, `An`, `Aa`, `Qa`,
   `La`, `Ao`, `Qo`, `Ap`, `Qp`, `Lo`. Plus a `Start` pseudo-state that
@@ -81,10 +81,10 @@ equivalent to the `default: break;` fall-through used by `mrp.c`.
   This preserves `mrp.c`'s two-phase encoding and keeps the two FSMs
   loosely coupled.
 
-See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
+See `srp_mrp_applicant_sm.hpp` for the full table, cross-referenced to
 `mrp.c:551-904` line ranges per event.
 
-### Registrar FSM — `mrp_registrar_sm.hpp`
+### Registrar FSM — `srp_mrp_registrar_sm.hpp`
 
 - **3 states**: `In`, `Lv`, `Mt`. Plus `Start` (UCT → `Mt`).
 - **Events**: `RNew`, `RJoinIn`, `RJoinMt`, `RLeave`, `RLeaveAll`,
@@ -101,17 +101,17 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
   intentionally — the rNew self-loop is encoded in the table with an
   action; the rJoinIn/rJoinMt IN cell is simply absent.
 
-### LeaveAll Timer FSM — `mrp_leaveall_sm.hpp`
+### LeaveAll Timer FSM — `srp_mrp_leaveall_sm.hpp`
 
 - **2 states**: `Passive`, `Active`. Plus `Start` (UCT → `Passive`).
 - One instance per port per protocol. Periodically flips to `Active`,
   at which point the next TX pass sends the PDU with the LeaveAll
   flag set, then flips back to `Passive`.
-- LeaveAll interval is randomized in `[0.5×LAT, 1.5×LAT)` per Clause
-  10.7.4.2, using a `TimerScheduler`-owned `std::mt19937_64` seeded
-  deterministically for tests.
+- The leavealltimer is drawn from LeaveAllTime to 1.5 times LeaveAllTime
+  (10 to 15 s, Clause 10.7.4.3), using a `TimerScheduler`-owned
+  `std::mt19937_64` seeded deterministically for tests.
 
-### Periodic Transmission FSM — `mrp_periodic_sm.hpp`
+### Periodic Transmission FSM — `srp_mrp_periodic_sm.hpp`
 
 - **2 states**: `Passive`, `Active`. Plus `Start` (UCT → `Active`).
 - One instance per port per protocol. Controls whether the 1-second
@@ -120,18 +120,32 @@ See `mrp_applicant_sm.hpp` for the full table, cross-referenced to
   Applicant, which triggers the `Qa → Aa` and `Qp → Ap` transitions
   that keep quiet attributes re-announcing.
 
-## Timer scheduler — `mrp_timers.hpp`
+## Timer scheduler — `srp_mrp_timers.hpp`
 
 `TimerScheduler` tracks four deadline-based timers as `std::optional<TimePoint>`
-fields, with the durations of its `TimerConfig` (`mrp.c`'s by default, within
-IEEE 802.1Q-2018 Clause 10.7.4; `MsrpConfig::timers` sets MSRP's):
+fields, with the durations of its `TimerConfig` (`MsrpConfig::timers` sets
+MSRP's):
 
-| Timer         | Default                  | Clause       |
-|---------------|--------------------------|--------------|
-| JoinTimer     | 100 ms                   | 10.7.4.1     |
-| LeaveTimer    | 1000 ms                  | 10.7.4.2     |
-| LeaveAllTimer | randomized [5 s, 15 s)   | 10.7.4.3     |
-| PeriodicTimer | 1000 ms                  | 10.7.4.4     |
+| Timer | IEEE 802.1Q Table 10-7 (the default) | Milan v1.3 Table 4.3 |
+|---|---|---|
+| JoinTimer | 200 ms | 200 ms |
+| LeaveTimer | 1000 ms | 5000 ms |
+| LeaveAllTimer | drawn from 10 to 15 s | drawn from 10 to 15 s |
+| PeriodicTimer | 1000 ms | 1000 ms |
+
+The durations are a `mrp::TimerConfig`. `MsrpConfig::timers` and
+`MvrpConfig::timers` give them at construction and `set_mrp_timers()` on
+either participant changes them, each timer taking its new duration when
+it is next armed. `nanoavb::MILAN_MRP_TIMERS` holds Milan's, and the
+entity kit applies them to both handlers under the Milan profile, with
+the Registrar's instant leave (Milan 4.2.7.2.2) that the 5 s LeaveTime
+goes with.
+
+The jointimer runs again after a pass while any Applicant this port
+declares still has a message to send (Table 10-3: VN, AN, AA, LA, VP, AP,
+LO). That is what puts the second New of a declaration, and the second
+Join after a LeaveAll, one JoinTime after the first, as the AVnu end
+station tests look for.
 
 ### Operations
 
@@ -140,7 +154,10 @@ IEEE 802.1Q-2018 Clause 10.7.4; `MsrpConfig::timers` sets MSRP's):
 - `stop_*()` — stops if running
 - `next_deadline()` — earliest deadline across all running timers, or
   `TimePoint::max()` if none. Use this to schedule a `poll`/`epoll`
-  wait in the caller's event loop.
+  wait in the caller's event loop. nanoavb's `MsrpHandler` and
+  `MvrpHandler` give the same as `next_deadline_ns()`; a loop that
+  drives them must not sleep past it (a 200 ms jointimer served by a
+  100 ms poll sends late).
 - `tick(now)` — returns an `Expired` struct reporting which timers
   have expired; expired timers are automatically cleared (the caller
   is responsible for rearming based on FSM outputs).
@@ -148,7 +165,7 @@ IEEE 802.1Q-2018 Clause 10.7.4; `MsrpConfig::timers` sets MSRP's):
 The scheduler is not thread-safe; a participant is assumed to run on
 a single event-loop thread.
 
-## Attribute record — `mrp_attribute.hpp`
+## Attribute record — `srp_mrp_attribute.hpp`
 
 ```cpp
 template <typename FirstValue>
@@ -163,8 +180,12 @@ struct AttributeRecord {
 };
 ```
 
-Helpers: `registrar_is_in()` for picking the TX event variant, and
-`is_dead()` (`Applicant == Vo && Registrar == Mt`) for reclaim sweeps.
+Helpers: `registrar_is_in()` for picking the TX event variant,
+`registrar_is_registered()` (`In`, or `Lv` until the leavetimer
+expires), `registrar_is_empty()` (`Mt` or `Start`) and `is_dead()`
+(Applicant in `Vo`, Registrar empty, no new value waiting in
+`pending_first_value`) for reclaim sweeps. `pending_not_before` holds a
+re-declared Talker Advertise back for two LeaveAll periods (35.2.2.8).
 
 MSRP's Listener type needs an extra `ListenerDeclaration substate`
 field and therefore uses a dedicated `ListenerRecord` struct that
@@ -173,7 +194,7 @@ satisfies the same `MrpAttributeLike` concept rather than reusing
 
 ## Participants
 
-### `PortState` (generic, `mrp_participant.hpp`)
+### `PortState` (generic, `srp_mrp_participant.hpp`)
 
 Composes the three per-port pieces that are shared across all
 protocols:
@@ -200,7 +221,7 @@ Per-attribute dispatch helpers (free templates constrained by the
   `TxRegistrarIn` vs `TxRegistrarMt` based on the paired Registrar's
   state (Clause 10.7.7 Note 8)
 
-### `MsrpParticipant` (Clause 35, `msrp_participant.hpp`)
+### `MsrpParticipant` (Clause 35, `srp_msrp_participant.hpp`)
 
 Holds one `PortState` plus four attribute vectors (TalkerAdvertise,
 TalkerFailed, Listener, Domain). All capacities are resolved at
@@ -237,10 +258,53 @@ Exposes:
   `withdraw_listener`, `declare_domain`, `withdraw_domain`. Each
   returns `Status` that will be `TsnError::AttributeTableFull` if the
   backing table is at capacity.
+  A declaration the port is not making is told `New!`: a first one, and
+  one made again after its Leave went out. A Listener whose Declaration
+  Type changes under a StreamID the port already declares (Asking
+  Failed to Ready when a Talker Advertise replaces a Talker Failed, and
+  back) sends a Join carrying the new FourPackedEvent, with no Leave
+  before it: IEEE 802.1Q 35.2.6 has the receiver treat it as the old
+  registration leaving and the new one joining. A changed Talker
+  Advertise or Domain value is a different attribute and leaves the old
+  value first. A Domain's new value follows its Leave at once; a Talker
+  Advertise's waits two LeaveAll periods (35.2.2.8: "at least two
+  LeaveAllTime ... time periods between when the Talker removes the
+  existing Stream registration and declares the new").
+- **Registered talkers**: `find_registered_talker_advertise(stream_id)`
+  and `find_registered_talker_failed(stream_id)` answer only while a
+  peer's declaration is registered (Registrar `In`, or `Lv` until its
+  leavetimer expires). nanoavb's `MsrpHandler::listener_attach` goes by
+  them: Listener Ready for a registered Talker Advertise, Asking Failed
+  for a registered Talker Failed, and nothing declared while neither is
+  there (Milan v1.3 5.3.8.5 allows that, and IEEE 802.1Q 35.1.2.2 sets
+  no order between the two declarations). The Listener is declared when
+  the talker's attribute arrives and withdrawn when it has gone.
+  `MsrpHandler::set_listener_waits_for_talker(false)` makes an attached
+  listener declare Asking Failed while neither is registered, which is
+  the other choice both documents leave open.
+- **Indications** — an observer hears of a registration once, when the
+  attribute becomes registered, and again only when a registered value
+  or a Listener's Declaration Type changes. A repeated New and the Join
+  that follows a LeaveAll are not reported again. It hears of a Leave
+  once, when the leavetimer expires or, with instant leave, on the Lv.
+  A Talker Advertise that arrives for a StreamID registered as Talker
+  Failed (or the other way round) replaces that registration with no
+  Leave reported (35.2.6).
+- **Malformed PDUs** — decoding stops at an invalid field: what came
+  before it has been processed, the rest of that AttributeList and every
+  later Message are discarded (Milan v1.3 4.2.7.1.2). An attribute type
+  MSRP does not define is passed over.
+- **One deliberate departure** — our own LeaveAll does not put our
+  Registrars in LV (Table 10-4, IN / txLA!). An AVB bridge seen in the
+  field re-declares its Listener only at its own LeaveAll, not in answer
+  to ours, so ageing on ours dropped a registration that was being
+  served. A received LeaveAll and a received Leave retire registrations;
+  a peer that falls silent is not aged out by our own LeaveAll.
 - **Talker transmit authorization** — `listener_permits_transmit(stream_id)`
   returns `true` iff a peer listener declaration for this stream has
-  been received with substate `Ready` or `ReadyFailed` *and* the
-  Registrar for that peer record is in `In`. IEEE 802.1Q-2014
+  been received with substate `Ready` or `ReadyFailed` *and* that
+  record is registered (Registrar `In`, or `Lv` until its leavetimer
+  expires). IEEE 802.1Q-2014
   Clause 35 forbids a talker from transmitting media frames until
   this predicate is true; use it to gate the audio pipeline.
 - **Observer subscription** — `subscribe(Observer)` / `unsubscribe(id)`.
@@ -262,11 +326,11 @@ Exposes:
   `set_pruning_enabled(bool)`, `add_interesting_stream_id(StreamId)`,
   `remove_interesting_stream_id(StreamId)`, `clear_interesting_stream_ids()`.
 
-### `MvrpParticipant` (Clause 11.2, `mvrp_participant.hpp`)
+### `MvrpParticipant` (Clause 11.2, `srp_mvrp_participant.hpp`)
 
-Same shape as `MsrpParticipant` but with only a `VlanIdentifier`
-attribute type and a smaller `MvrpConfig` (two fields: `max_vlans`,
-`max_observers`). API surface:
+Built like `MsrpParticipant` but with only a `VlanIdentifier`
+attribute type and a smaller `MvrpConfig` (`max_vlans`,
+`max_observers` and the timers). API surface:
 
 - `declare_vlan(vid, now)` / `withdraw_vlan(vid, now)` — return
   `TsnError::InvalidVlanId` for out-of-range VIDs,
@@ -274,7 +338,7 @@ attribute type and a smaller `MvrpConfig` (two fields: `max_vlans`,
 - `has_vlan(vid)` / `is_vlan_registered(vid)`
 - Observer callbacks: `on_vlan_registered(vid, Operation)` /
   `on_vlan_leave(vid)`
-- Same `receive_pdu` / `set_send_pdu` / `tick` / `next_deadline` shape
+- The same `receive_pdu` / `set_send_pdu` / `tick` / `next_deadline` calls
 - Same zero-allocation steady state: attribute database, observer
   slots, and PDU build buffer are all reserved at construction.
 
@@ -338,11 +402,11 @@ A full declare → peer notification → withdraw cycle:
 
 ## Testing
 
-- **FSM-level tests** in `mrp_applicant_sm_test.cpp` and
-  `mrp_registrar_sm_test.cpp` verify representative cells of each
+- **FSM-level tests** in `srp_mrp_applicant_sm_test.cpp` and
+  `srp_mrp_registrar_sm_test.cpp` verify representative cells of each
   transition table against the ported `mrp.c` reference, including
   the critical `An` split cells and the p2pmac-collapse on `rJoinIn!`.
-- **Integration tests** in `msrp_participant_test.cpp` exercise two
+- **Integration tests** in `srp_msrp_participant_test.cpp` exercise two
   participants back-to-back via a `Fabric` helper, covering
   declare→advertise→notify, withdraw→leave-timer→notify, listener
   declaration, interesting stream ID pruning, and observer
@@ -362,10 +426,11 @@ A full declare → peer notification → withdraw cycle:
   immediate-leave rule: an explicit withdrawal is still seen at once. Both
   draw LeaveAllTime uniformly from [10 s, 15 s) per period, with JoinTime 200 ms.
 - **Changed values are declared New.** When an attribute we declare is
-  re-declared with a different value (a talker moved to an adopted VID),
-  the participant declares it New (IEEE 802.1Q-2018 10.7.5.1) so the change
-  goes out at the next transmit opportunity rather than at the next periodic
-  or LeaveAll.
+  re-declared with a different value, the participant declares it New (IEEE
+  802.1Q-2018 10.7.5.1) at the next transmit opportunity rather than at the
+  next periodic or LeaveAll. A changed Talker Advertise (a talker moved to an
+  adopted VID or priority) is declared New only after its two LeaveAll
+  periods (35.2.2.8, above).
 - **Reserved table slots.** Without pruning, a bridge propagates every Talker
   Advertise on the network to an end station, and those registrations arrive
   before the station's own declarations (made after gPTP lock and MAAP).

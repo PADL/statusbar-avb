@@ -7,6 +7,7 @@
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
 #include "statusbar/gptp/gptp_time_bridge.hpp"
+#include "statusbar/gptp/gptp_time_bridge_test_support.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <array>
@@ -17,6 +18,7 @@
 #include <span>
 
 using namespace statusbar::gptp;
+using namespace statusbar::gptp::test_support;
 
 // gPTP header length constants
 static_assert(HEADER_LENGTH == 34);
@@ -1439,8 +1441,8 @@ TEST(gptp_time_bridge, to_gptp_unrated_uses_offset_only)
     b.update();
 
     // Without rate (only one update), to_gptp(X) = X + 1500
-    EXPECT_EQ(b.to_gptp(2'000'000), int64_t{2'001'500});
-    EXPECT_EQ(b.from_gptp(2'001'500), int64_t{2'000'000});
+    EXPECT_EQ(to_gptp_ns(b, 2'000'000), int64_t{2'001'500});
+    EXPECT_EQ(from_gptp_ns(b, 2'001'500), int64_t{2'000'000});
 }
 
 TEST(gptp_time_bridge, to_gptp_rated_extrapolates_using_rate_offset)
@@ -1471,8 +1473,8 @@ TEST(gptp_time_bridge, to_gptp_rated_extrapolates_using_rate_offset)
     // Without rate compensation: 2e9 + 1000 = 2'000'001'000
     // With rate compensation: 2e9 + 1000 + (2e9 - 1e9) * 1e6 / 1e12
     //                       = 2e9 + 1000 + 1000 = 2'000'002'000
-    int64_t const unrated = b.to_gptp(2'000'000'000);
-    int64_t const rated = b.to_gptp_rated(2'000'000'000);
+    int64_t const unrated = to_gptp_ns(b, 2'000'000'000);
+    int64_t const rated = to_gptp_rated_ns(b, 2'000'000'000);
     EXPECT_EQ(unrated, int64_t{2'000'001'000});
     // Allow a few ns for round-off in the integer math.
     EXPECT_TRUE(rated >= 2'000'001'995);
@@ -1494,7 +1496,7 @@ TEST(gptp_time_bridge, from_gptp_rated_inverts_to_gptp_rated_within_tolerance)
     // be near identity. Linear-approx introduces ≤ 1 ns error for
     // 1 ppm × 1 s deltas.
     int64_t const start_app = 2'000'000'000;
-    int64_t const round_trip = b.from_gptp_rated(b.to_gptp_rated(start_app));
+    int64_t const round_trip = from_gptp_rated_ns(b, to_gptp_rated_ns(b, start_app));
     int64_t const err = round_trip - start_app;
     EXPECT_TRUE(err >= -2 && err <= 2);
 }

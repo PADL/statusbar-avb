@@ -5,7 +5,7 @@
 # the right -Dstatusbar-<dep>_DIR flags through to cmake. Extra args
 # are forwarded to `cmake` configure:
 #
-#   ./local-build.sh                  # configure + build + ctest
+#   ./local-build.sh                  # configure + build + the unit tests, then the functional tests
 #   ./local-build.sh -DENABLE_ASAN=ON # forward cmake args
 #
 # Dependency resolution per dep (first match wins):
@@ -87,4 +87,15 @@ cmake -S . -B build -G Ninja \
     "${dep_flags[@]}" \
     "$@"
 cmake --build build
-ctest --test-dir build
+# Two test runs, kept apart. The unit tests first: they test logic, open no
+# socket and wait for nothing.
+ctest --test-dir build -LE functional
+# Then the functional tests (real sockets, a real kernel). They count the same:
+# one that fails fails the build. STATUSBAR_SKIP_FUNCTIONAL_TESTS=1 leaves them
+# out, for a host that cannot run them; the unit tests above still run.
+if [ "${STATUSBAR_SKIP_FUNCTIONAL_TESTS:-0}" = "1" ]; then
+    set +x
+    echo "local-build: STATUSBAR_SKIP_FUNCTIONAL_TESTS=1, the functional tests are not run" >&2
+else
+    ctest --test-dir build -L functional
+fi

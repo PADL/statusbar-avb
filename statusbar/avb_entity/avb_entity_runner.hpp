@@ -241,7 +241,8 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         [&entity](auto v) { entity.crf_talker_dest_mac = v; });
     specs.add<uint64_t>(
         "presentation_offset_ns",
-        "AVTP presentation-time offset added to gPTP time to form the stream timestamp (ns)",
+        "AVTP presentation-time offset added to gPTP time to form the stream timestamp (ns). 0 = the profile's default: "
+        "2000000 under the Milan profile, 1000000 otherwise",
         entity.presentation_offset_ns,
         [&entity](auto v) { entity.presentation_offset_ns = v; });
     specs.add<uint64_t>(
@@ -420,6 +421,16 @@ template <typename Entity>
     }
 }
 
+/// Tell @p entity how well the media timer's clock link is known, when it
+/// asks to be told (on_link_quality). One seqlock read; media thread.
+template <typename Entity>
+auto tell_link_quality(Entity& entity, ptpclient::PtpTimeBridge const& bridge) -> void
+{
+    if constexpr (requires { entity.on_link_quality(bridge.quality()); }) {
+        entity.on_link_quality(bridge.quality());
+    }
+}
+
 template <typename Entity>
 auto run_entity_main_loop(
     net::MessageReactor& reactor,
@@ -455,7 +466,7 @@ auto run_entity_main_loop(
         media_dur_hist.update(dur_ns);
         media_dur_stats.update(dur_ns);
         last_wake_count.publish(wake_info.wake_count);
-        last_wake_error_ns.publish(wake_info.error_ns);
+        last_wake_error_ns.publish(wake_info.error_ns());
     };
 
     auto timer = ptpclient::make_ptp_timer(
@@ -466,14 +477,16 @@ auto run_entity_main_loop(
                 timer_error_count.add(1);
                 return;
             }
-            auto const now = TimePoint{std::chrono::nanoseconds{wake_info->actual_time_ns}};
+            auto const now = TimePoint{wake_info->actual_time.time_since_epoch()};
             auto const cb_t0 = std::chrono::steady_clock::now();
+            tell_link_quality(entity, *ctx.bridge);
             entity.process_audio(now, wake_info->actual_raw);
             note_wake(cb_t0, *wake_info);
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
         ctx.cpu_affinity);
+    timer.set_lock_memory(ctx.lock_memory);
 
     auto start_result = timer.start();
     if (!start_result) {

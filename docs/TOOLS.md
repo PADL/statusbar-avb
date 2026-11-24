@@ -66,9 +66,11 @@ is required on `avb-am824-io`. Useful flags on the entity tools:
 `--entity.id`/`--entity.name`, `--atdecc.version=2016|2021`,
 `--atdecc.profile=classic|milan13` and `--entity.milan` (a Milan model
 answers GET_MILAN_INFO and takes `milan13` as its default profile; see
-`ENTITY_CONSTRUCTION_KIT.md`), `--net.backend=rawnet|mmap|xdp`
+`ENTITY_CONSTRUCTION_KIT.md`), `--presentation_offset_ns` (0, the default,
+takes the profile's: 2 ms under Milan, 1 ms otherwise),
+`--net.backend=rawnet|mmap|xdp`
 (+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.
-`avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous),
+`avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous/max_tai_error_us),
 `--tx_pcap.path`, `--gate.talker_on_listener`, `--media.*`, `--tone.*`,
 `--srp.*` workarounds and `--stream.address_mode=static|maap` (under `maap`
 the first ENTITY_AVAILABLE after a Link Up waits until the MAAP block is
@@ -156,7 +158,7 @@ statusbar-rttest-send-avtp-tool --interface=eth0 --backend=mmap
 
 | Tool | Purpose | Platform |
 |---|---|---|
-| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔bridge-clock offset and rate. | Linux-only |
+| `statusbar-gptp-slave` | gPTP slave-only follower daemon; disciplines to a grandmaster and reports the gPTP↔CLOCK_MONOTONIC_RAW offset and rate. | Linux-only |
 | `statusbar-gptp-ntpshm` | Read the current PTP time and local offset from linuxptp's NTP SHM segment. One positional argument, the segment number (default 0). | Linux-only |
 | `statusbar-ptpclient-wake` | Demonstrate precision periodic wake timing disciplined to a PTP clock; prints wake-error stats. | Linux-only |
 | `statusbar-gps-ratio-tracker` | Track the frequency ratio r = switch_gPTP_rate / GPS_rate (PHC vs GPS-disciplined REALTIME) for the GPS-rate media clock. Space-separated `--flag value` arguments (`--help` lists them). | Linux-only |
@@ -170,9 +172,23 @@ sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 
 `gptp-slave` options: `--profile=standard|automotive`, `--manual-peer-delay=<ns>`,
 `--phase-jump-threshold=<ns>`, `--servo-kp`/`--servo-ki`, `--software`,
-`--bridge-clock=monotonic_raw|...` (`monotonic_raw` is the policy value: the
-app side of the gPTP time bridge is the timing reference, and `udptun` refuses
-any other; the other values are for comparing clocks, not for running on).
+`--no-bridge` (the gPTP time bridge is kept against CLOCK_MONOTONIC_RAW, the
+application's one timing reference, and its offset and rate are printed; this
+turns it off), `--holdover-drift-ppb=<n>` (how fast the bridge's worst-case
+error grows while no Sync arrives, default 15000), `--fixed-error-ns=<ns>`
+(an error of this port's hardware and link that no measurement shows, added
+to the bridge's worst-case error, default 0).
+
+`ptpclient-wake` takes the `--ptp.*` options every PTP-timed tool takes, among
+them `--ptp.spin_ns` (the busy-spin window before each wake) and
+`--ptp.holdover_drift_ppb` (how fast the PHC link's worst-case error grows
+while the PHC cannot be read) and `--ptp.fixed_error_ns` (an error of this
+machine's hardware that no fit shows, added to that worst case: the PHC's
+offset from its master, PHY asymmetry, timestamp granularity). Both are
+figures of the hardware the tool runs on, so they are set where it is
+deployed. When it stops it prints the wake-error
+statistics and how much of the spin window was left at each wake; see
+[PTP_WAKE_TIMING.md](PTP_WAKE_TIMING.md).
 
 ## SRP / MSRP
 
@@ -276,8 +292,13 @@ The Debian runtime package (`statusbar-avb`) ships, beside the binaries above:
 The postinst grants the capabilities named at the top to every `statusbar-*`
 ELF binary, reloads udev, and across an upgrade restarts each of the two
 services that was running. The `-dev` package installs the headers, the static
-libraries, the CMake package and this `docs/` tree (including `docs/sm/`) under
-`/usr/local/share/doc/statusbar-avb/`. No man pages are shipped; each unit's
+libraries, the CMake package, this `docs/` tree (including `docs/sm/`) under
+`/usr/local/share/doc/statusbar-avb/`, and `statusbar-avb-functional-test`
+with its data under `/usr/local/share/statusbar-avb/functional-test-data/`:
+the package's own tests that need real sockets and a real kernel, to be run on
+a target (`-A` runs all of them; `STATUSBAR_FUNCTIONAL_TEST_DATA_DIR` points
+it at other data). It is a different program from
+`statusbar-msrp-functional-test` above. No man pages are shipped; each unit's
 `Documentation=` line points at its conffile, which names the tool and its
 `--help`.
 

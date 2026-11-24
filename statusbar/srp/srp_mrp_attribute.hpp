@@ -12,6 +12,7 @@
 // type parameter.
 //
 
+#include "statusbar/sm/sm.hpp"
 #include "statusbar/srp/srp_mrp_applicant_sm.hpp"
 #include "statusbar/srp/srp_mrp_registrar_sm.hpp"
 
@@ -64,6 +65,12 @@ struct AttributeRecord
     /// been encoded; nullopt the rest of the time.
     std::optional<FirstValue> pending_first_value{};
 
+    /// The earliest time pending_first_value may be declared, once the Lv of
+    /// the old value has gone out. Set by the participant for an attribute
+    /// whose new value must wait (an MSRP Talker Advertise: two LeaveAll
+    /// periods, IEEE 802.1Q 35.2.2.8); nullopt when there is no wait.
+    std::optional<sm::TimePoint> pending_not_before{};
+
     /// Set by the participant when the attribute has fully decayed
     /// (Applicant in Vo and Registrar in Mt) and can be removed from
     /// the database on the next reclaim sweep. See mrp.c:3220-3242
@@ -78,19 +85,32 @@ struct AttributeRecord
         return registrar_sm.current_state() == registrar_sm::Def::State::In;
     }
 
-    /// Is the peer's declaration registered: Registrar In, or Leaving (a
-    /// LeaveAll or a Leave not yet timed out)?
+    /// Whether a peer's declaration of this attribute is registered: the
+    /// Registrar is In, or Lv until its leavetimer expires (IEEE 802.1Q
+    /// 10.7.7). A LeaveAll takes In to Lv and the peer's next Join takes it
+    /// back, so Lv is not a deregistration; only Mt is.
     [[nodiscard]] auto registrar_is_registered() const noexcept -> bool
     {
         auto const s = registrar_sm.current_state();
         return s == registrar_sm::Def::State::In || s == registrar_sm::Def::State::Lv;
     }
 
-    /// Convenience: has this attribute fully decayed?
+    /// Whether the Registrar holds nothing: Mt, or Start, the state before
+    /// its first event, which that event's UCT takes to Mt. The Registrar of
+    /// an attribute only this port declares may never see an event at all.
+    [[nodiscard]] auto registrar_is_empty() const noexcept -> bool
+    {
+        auto const s = registrar_sm.current_state();
+        return s == registrar_sm::Def::State::Mt || s == registrar_sm::Def::State::Start;
+    }
+
+    /// Convenience: has this attribute fully decayed? Nothing declared
+    /// (Applicant in Vo), nothing registered, and no new value waiting to be
+    /// declared.
     [[nodiscard]] auto is_dead() const noexcept -> bool
     {
-        return applicant_sm.current_state() == applicant_sm::Def::State::Vo &&
-            registrar_sm.current_state() == registrar_sm::Def::State::Mt;
+        return applicant_sm.current_state() == applicant_sm::Def::State::Vo && registrar_is_empty() &&
+            !pending_first_value.has_value();
     }
 };
 

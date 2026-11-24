@@ -471,4 +471,4 @@ TEST(stun_loopback, staggered_start_pairs_within_waiting_poll)
     }
 }
 
-TEST_MAIN(statusbar_stun, stun_loopback_test)
+TEST_MAIN(statusbar_stun, stun_loopback_functional_test)

@@ -6,12 +6,13 @@
 namespace statusbar::srp::mrp {
 
 TimerScheduler::TimerScheduler(uint64_t seed, TimerConfig const& config)
-    : config_{config}
+    : config_{config.valid() ? config : TimerConfig{}}
     , rng_{seed != 0 ? seed : std::random_device{}()}
 {}
 
 auto TimerScheduler::randomized_leaveall_duration() -> std::chrono::milliseconds
 {
+    // IEEE 802.1Q 10.7.4.3: a random value from LeaveAllTime to 1.5 times it.
     std::uniform_int_distribution<int64_t> dist{config_.leave_all_time_min.count(), config_.leave_all_time_max.count() - 1};
     return std::chrono::milliseconds(dist(rng_));
 }

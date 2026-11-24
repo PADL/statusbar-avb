@@ -59,11 +59,11 @@ auto setup_local_identity(LocalIdentityConfig const& cfg, std::optional<gptp::Sl
     if (cfg.no_gptp) {
         return setup_local_identity_no_gptp(cfg);
     }
-    // The wire timeline is CLOCK_MONOTONIC_RAW (monotonic_raw_ns) and the
-    // slave's bridge is read with RAW instants everywhere (the wire-clock
-    // translator, GptpSlaveClockSource), so the bridge must sample RAW.
-    if (cfg.gptp_session_config.bridge_clock != CLOCK_MONOTONIC_RAW) {
-        std::println(stderr, "gptp: the bridge clock must be monotonic_raw: the udptun wire timeline runs on CLOCK_MONOTONIC_RAW");
+    // The wire timeline is CLOCK_MONOTONIC_RAW (monotonic_raw_ns) and is read
+    // through the slave's gPTP <-> RAW bridge everywhere (the wire-clock
+    // translator, GptpSlaveClockSource), so the session must keep one.
+    if (!cfg.gptp_session_config.bridge) {
+        std::println(stderr, "gptp: the slave session must keep its bridge: the udptun wire timeline is read through it");
         return std::nullopt;
     }
     session.emplace(cfg.gptp_session_config);

@@ -74,6 +74,8 @@ auto make_config_with_blob(std::vector<uint8_t> blob) -> AvbEntityAudioIOConfig
     // The ACMP tests below drive the classic 1722.1 listener (CONNECT_RX
     // relayed as CONNECT_TX); the Milan listener has its own tests.
     config.descriptor_storage_blob = nanoavb::with_classic_profile(config.descriptor_storage_blob);
+    // The interface's address is told, so creating the entity asks the system for nothing.
+    config.interface_mac = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
     return config;
 }
 

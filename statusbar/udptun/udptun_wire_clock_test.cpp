@@ -4,12 +4,14 @@
 #include "statusbar/udptun/udptun_wire_clock.hpp"
 
 #include "statusbar/gptp/gptp_time_bridge.hpp"
+#include "statusbar/gptp/gptp_time_bridge_test_support.hpp"
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 #include "statusbar/test/test.hpp"
 
 #include <cstdint>
 
 using namespace statusbar;
+using namespace statusbar::gptp::test_support;
 
 TEST(wire_clock, empty_translator_falls_back_to_realtime)
 {
@@ -30,7 +32,7 @@ TEST(wire_clock, gptp_slave_translator_forwards_to_to_gptp)
     constexpr int64_t app_anchor = 100'000;
     constexpr int64_t master_anchor = 1'000'000;
     bridge.get_app_time_ns = []() noexcept { return app_anchor; };
-    bridge.update_from_anchor(/*sync_rx_app_ns=*/app_anchor, /*tx_master_ns=*/master_anchor);
+    anchor(bridge, /*sync_rx_app_ns=*/app_anchor, /*tx_master_ns=*/master_anchor);
 
     constexpr int64_t expected_offset = master_anchor - app_anchor;  // 900'000
 

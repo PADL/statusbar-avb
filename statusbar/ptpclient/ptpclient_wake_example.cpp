@@ -4,13 +4,14 @@
 //
 // PTP Wake Example - Demonstrates precision wake timing using PTP clock
 //
-// Usage: ptpclient_wake_example --ptp.driver=<name> --ptp.device=<path> --ptp.period=<ns> [options]
+// Usage: statusbar-ptpclient-wake --ptp.driver=<name> --ptp.device=<path> --ptp.period=<ns> [options]
 //
 // Requires CAP_SYS_NICE capability or root for realtime thread priority.
 
 #include "statusbar/config/config.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
 #include "statusbar/realtime/realtime.hpp"
+#include "statusbar/stats/stats_atomic_time_stats.hpp"
 #include "statusbar/status/status.hpp"
 
 #include <array>
@@ -67,12 +68,129 @@ void print_usage(char const* program_name, statusbar::args::ArgumentSpecs const&
     std::print(stderr, "\nPress Ctrl-C to stop and display statistics.\n");
 }
 
+/// Setting up PTP did not finish: a shutdown during it is a clean exit.
+auto setup_failed(std::error_code const& error) -> int
+{
+    if (statusbar::realtime::is_shutdown_requested()) {
+        std::print("Shutdown requested during setup\n");
+        return EXIT_SUCCESS;
+    }
+    std::print(stderr, "Error: Failed to setup PTP: {}\n", error.message());
+    return EXIT_FAILURE;
+}
+
+/// What was left of the spin window at each wake that slept (written by the
+/// timer thread, read for the report).
+statusbar::stats::AtomicTimeStats spin_headroom_stats{};
+
+/// The example's wake: the spin headroom into its statistics, and a line
+/// every 10000 wakes with the wake error.
+void on_wake(statusbar::StatusValue<statusbar::ptpclient::TimerWakeInfo> const& wake_info)
+{
+    if (!wake_info) {
+        std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
+        return;
+    }
+    if (wake_info->spin_headroom) {
+        spin_headroom_stats.update(wake_info->spin_headroom->count());
+    }
+    if (wake_info->wake_count % 10000 == 0) {
+        std::print(
+            "Wakes: {:8}  Error: {:+8} ns ({:+.3f} us)\n",
+            wake_info->wake_count,
+            wake_info->error_ns(),
+            static_cast<double>(wake_info->error_ns()) / 1000.0);
+    }
+}
+
+template <typename StatsT>
+void print_report(StatsT const& stats, int64_t const compensation_ns)
+{
+    std::string report;
+    stats.format_report_to(std::back_inserter(report), compensation_ns);
+    std::print("{}", report);
+}
+
+/// How much of the spin window (--ptp.spin_ns) was left when the kernel
+/// woke the thread, over every wake that slept. The window less the
+/// smallest figure is the latest the kernel woke it; a smallest figure at
+/// or below zero means a sleep overran the window and that wake was late.
+void print_spin_headroom(int64_t const window_ns)
+{
+    auto const headroom = spin_headroom_stats.snapshot();
+    if (headroom.count == 0) {
+        std::print("Spin headroom: no wake slept (window {} ns)\n", window_ns);
+        return;
+    }
+    std::print(
+        "Spin headroom of the {} ns window: avg {:.0f} ns  min {} ns  max {} ns  over {} sleeps\n",
+        window_ns,
+        headroom.average_ns(),
+        headroom.min_ns,
+        headroom.max_ns,
+        headroom.count);
+}
+
+/// Stop the bridge's sampling.
+void stop_sampling(statusbar::ptpclient::PtpAppContext& ctx)
+{
+    std::print("\n\nguard stopping...\n");
+    ctx.guard.stop();
+    std::print("\n\nguard stopped...\n\n");
+}
+
+/// Clean shutdown, then the timer's statistics.
+template <typename TimerT>
+void stop_and_report(TimerT& timer, statusbar::ptpclient::PtpAppContext& ctx, int64_t const spin_window_ns)
+{
+    std::print("\n\nShutting down...\n");
+    timer.stop();
+    stop_sampling(ctx);
+    print_report(timer.stats(), ctx.compensation_ns);
+    print_spin_headroom(spin_window_ns);
+}
+
+/// Run the timer on the PHC until a shutdown signal.
+auto run_wake_loop(statusbar::ptpclient::PtpAppContext& ctx, int64_t const spin_window_ns) -> int
+{
+    std::print("\nStarting wake loop (Ctrl-C to stop)...\n\n");
+    auto timer = statusbar::ptpclient::make_ptp_timer(
+        *ctx.bridge, ctx.period_ns, on_wake, ctx.compensation_ns, ctx.enable_realtime, ctx.cpu_affinity, ctx.threshold);
+    if (auto const started = timer.start(); !started) {
+        std::print(stderr, "Error: Failed to start timer: {}\n", started.error().message());
+        return EXIT_FAILURE;
+    }
+    while (!statusbar::realtime::is_shutdown_requested()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+    stop_and_report(timer, ctx, spin_window_ns);
+    return EXIT_SUCCESS;
+}
+
+void print_config(Config const& config)
+{
+    std::string config_summary;
+    statusbar::ptpclient::format_ptp_config_to(std::back_inserter(config_summary), config.ptp_app, "PTP Wake Example");
+    std::print("{}", config_summary);
+}
+
+/// Set up the PTP application (client, bridge, sampling, wait for healthy)
+/// and run the wake loop on it.
+auto run(Config const& config) -> int
+{
+    print_config(config);
+    statusbar::realtime::setup_shutdown_signal_handlers();
+    auto ctx = statusbar::ptpclient::setup_ptp_app(config.ptp_app, [] { return statusbar::realtime::is_shutdown_requested(); });
+    if (ctx) {
+        return run_wake_loop(*ctx, config.ptp_app.sampling.wake_refine_spin_ns);
+    }
+    return setup_failed(ctx.error());
+}
+
 }  // namespace
 
 auto main(int argc, char** argv) -> int
 {
-    using namespace statusbar::ptpclient;
-
     // Build config and specs with bindings
     Config config;
     auto specs = build_arg_specs(config);
@@ -82,86 +200,9 @@ auto main(int argc, char** argv) -> int
     if (!cli_result) {
         return statusbar::config::handled_builtin_command(cli_result) ? 0 : 1;
     }
-
-    // Validate period
     if (config.ptp_app.period_ns <= 0) {
         std::print(stderr, "Error: --ptp.period must be positive\n");
         return EXIT_FAILURE;
     }
-
-    // Print configuration summary
-    std::string config_summary;
-    format_ptp_config_to(std::back_inserter(config_summary), config.ptp_app, "PTP Wake Example");
-    std::print("{}", config_summary);
-
-    // Set up signal handlers for clean shutdown
-    statusbar::realtime::setup_shutdown_signal_handlers();
-
-    // Setup PTP application (client, bridge, sampling, wait for healthy)
-    auto is_shutdown = [] { return statusbar::realtime::is_shutdown_requested(); };
-    auto ctx_result = setup_ptp_app(config.ptp_app, is_shutdown);
-
-    if (!ctx_result) {
-        if (statusbar::realtime::is_shutdown_requested()) {
-            std::print("Shutdown requested during setup\n");
-            return EXIT_SUCCESS;
-        }
-        std::print(stderr, "Error: Failed to setup PTP: {}\n", ctx_result.error().message());
-        return EXIT_FAILURE;
-    }
-
-    auto& ctx = *ctx_result;
-
-    std::print("\nStarting wake loop (Ctrl-C to stop)...\n\n");
-
-    // Create PTP timer with callback
-    auto timer = make_ptp_timer(
-        *ctx.bridge,
-        ctx.period_ns,
-        [](statusbar::StatusValue<TimerWakeInfo> const& wake_info) {
-            if (!wake_info) {
-                std::print(stderr, "Warning: Timer error: {}\n", wake_info.error().message());
-                return;
-            }
-
-            // Print periodic status (every 10000 wakes)
-            if (wake_info->wake_count % 10000 == 0) {
-                std::print(
-                    "Wakes: {:8}  Error: {:+8} ns ({:+.3f} us)\n",
-                    wake_info->wake_count,
-                    wake_info->error_ns,
-                    static_cast<double>(wake_info->error_ns) / 1000.0);
-            }
-        },
-        ctx.compensation_ns,
-        ctx.enable_realtime,
-        ctx.cpu_affinity,
-        ctx.threshold);
-
-    // Start timer
-    auto start_result = timer.start();
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start timer: {}\n", start_result.error().message());
-        return EXIT_FAILURE;
-    }
-
-    // Wait for shutdown signal
-    while (!statusbar::realtime::is_shutdown_requested()) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    }
-
-    // Clean shutdown
-    std::print("\n\nShutting down...\n");
-    timer.stop();
-    std::print("\n\nguard stopping...\n");
-    ctx.guard.stop();
-    std::print("\n\nguard stopped...\n");
-
-    // Print final statistics
-    std::print("\n");
-    std::string report;
-    timer.stats().format_report_to(std::back_inserter(report), ctx.compensation_ns);
-    std::print("{}", report);
-
-    return EXIT_SUCCESS;
+    return run(config);
 }

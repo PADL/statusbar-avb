@@ -107,19 +107,26 @@ class AafV1OverAnnexJCodec
         int64_t const tx_tai_ns,
         uint32_t const interval_us) const noexcept -> size_t
     {
-        avtp::IpAvtpduHeader encap{};
-        encap.init(sequence);
-        statusbar::span_store(buf, encap);
+        return encode(buf, sender_id, sequence, tx_tai_ns, interval_us, /*timestamp_uncertain=*/false);
+    }
 
-        avtp::AafV1Pdu pdu{};
-        pdu.init(to_stream_id(sender_id), cfg_.format, cfg_.sample_rate, cfg_.channels, cfg_.bit_depth);
-        pdu.set_sequence_num(sequence);
-        pdu.set_dimensions(cfg_.samples_per_packet, cfg_.channels);
-        pdu.set_tv(true);
-        pdu.set_avtp_timestamp(static_cast<uint64_t>(tx_tai_ns));  // TAI presentation time
-        pdu.set_ptp_grandmaster_identity(cfg_.grandmaster);        // GRANDMASTER_TAI_FROM_GPS
+    /// As above, with the header's tu (timestamp uncertain) bit. A talker sets
+    /// it while it cannot vouch for the timeline its timestamps are on: here,
+    /// while the clock the TAI is made from is outside the talker's configured
+    /// accuracy limit. The timestamp is still the talker's best, and the
+    /// grandmaster identity still names the timeline it is meant to be on.
+    auto encode(
+        std::span<uint8_t> buf,
+        ieee::Eui64 const sender_id,
+        uint32_t const sequence,
+        int64_t const tx_tai_ns,
+        uint32_t const interval_us,
+        bool const timestamp_uncertain) const noexcept -> size_t
+    {
+        store_encapsulation(buf, sequence);
+        auto pdu = stream_pdu(sender_id, sequence);
+        stamp(pdu, tx_tai_ns, timestamp_uncertain);
         statusbar::span_store(buf.subspan(avtp::IpAvtpduHeader::LENGTH), pdu);
-
         (void)interval_us;  // AAF carries cadence via avtp_timestamp, not on the wire
         return header_size();
     }
@@ -189,6 +196,34 @@ class AafV1OverAnnexJCodec
     [[nodiscard]] auto announced_interval_us(DecodedPacket const& /*p*/) const noexcept -> uint32_t { return cfg_.interval_us; }
 
   private:
+    /// The Annex J encapsulation header at the front of the datagram.
+    static void store_encapsulation(std::span<uint8_t> buf, uint32_t const sequence) noexcept
+    {
+        avtp::IpAvtpduHeader encap{};
+        encap.init(sequence);
+        statusbar::span_store(buf, encap);
+    }
+
+    /// The stream's header before it is stamped: identity, format and dimensions.
+    [[nodiscard]] auto stream_pdu(ieee::Eui64 const sender_id, uint32_t const sequence) const noexcept -> avtp::AafV1Pdu
+    {
+        avtp::AafV1Pdu pdu{};
+        pdu.init(to_stream_id(sender_id), cfg_.format, cfg_.sample_rate, cfg_.channels, cfg_.bit_depth);
+        pdu.set_sequence_num(sequence);
+        pdu.set_dimensions(cfg_.samples_per_packet, cfg_.channels);
+        return pdu;
+    }
+
+    /// The presentation time, whether the talker vouches for it, and the
+    /// timeline it is on.
+    void stamp(avtp::AafV1Pdu& pdu, int64_t const tx_tai_ns, bool const timestamp_uncertain) const noexcept
+    {
+        pdu.set_tv(true);
+        pdu.set_tu(timestamp_uncertain);
+        pdu.set_avtp_timestamp(static_cast<uint64_t>(tx_tai_ns));  // TAI presentation time
+        pdu.set_ptp_grandmaster_identity(cfg_.grandmaster);        // GRANDMASTER_TAI_FROM_GPS
+    }
+
     [[nodiscard]] auto has_redundancy() const noexcept -> bool { return cfg_.redundant_stream_id != cfg_.stream_id; }
 
     [[nodiscard]] static auto to_stream_id(ieee::Eui64 const& e) noexcept -> tsn::StreamId

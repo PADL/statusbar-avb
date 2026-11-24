@@ -1105,6 +1105,61 @@ TEST(avb_entity_kit_tspec, a_milan_kit_declares_table_4_4_frame_sizes_and_a_clas
     }
 }
 
+TEST(avb_entity_kit_profile, a_milan_kit_runs_mrp_on_table_4_3_and_a_classic_kit_on_table_10_7)
+{
+    // Milan v1.3 Table 4.3: joinTime 200 ms, LeaveTime 5000 ms, a leavealltimer
+    // of 10 to 15 s, a 1000 ms periodictimer, on MSRP and MVRP alike. Any
+    // other profile keeps IEEE 802.1Q Table 10-7, whose LeaveTime is 1000 ms.
+    KitUnderTest milan{make_config(2, "milan13")};
+    KitUnderTest classic{make_config(2, "classic")};
+    EXPECT_TRUE(milan->host().components().msrp_handler.mrp_timers() == nanoavb::MILAN_MRP_TIMERS);
+    EXPECT_TRUE(milan->host().components().mvrp_handler.mrp_timers() == nanoavb::MILAN_MRP_TIMERS);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.join_time.count(), 200);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_time.count(), 5000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_all_time_min.count(), 10000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.leave_all_time_max.count(), 15000);
+    EXPECT_EQ(nanoavb::MILAN_MRP_TIMERS.periodic_time.count(), 1000);
+    EXPECT_TRUE(classic->host().components().msrp_handler.mrp_timers() == srp::mrp::TimerConfig{});
+    EXPECT_TRUE(classic->host().components().mvrp_handler.mrp_timers() == srp::mrp::TimerConfig{});
+}
+
+TEST(avb_entity_kit_profile, the_loop_does_not_sleep_past_an_mrp_timer)
+{
+    // The reactor loop waits at most 100 ms a cycle. An MRP jointimer falls
+    // due 200 ms after a declaration: the wait is cut to what is left of it,
+    // so its message goes out on time and not up to 100 ms late.
+    KitUnderTest kit{make_config(2, "classic")};
+    auto& msrp = kit->host().components().msrp_handler;
+    EXPECT_FALSE(msrp.next_deadline_ns().has_value());  // not running yet
+    statusbar::tsn::StreamId sid{ieee::Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, 1};
+    int64_t const start_ns = 5'000'000'000;
+    EXPECT_TRUE(msrp.listener_ready(sid, TimePoint{std::chrono::nanoseconds{start_ns}}).has_value());
+    EXPECT_EQ(msrp.next_deadline_ns().value_or(0), start_ns + 200'000'000);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns), 100);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 150'000'000), 50);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 199'500'000), 1);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 200'000'000), 0);
+}
+
+TEST(avb_entity_kit_profile, a_talker_given_no_presentation_offset_takes_its_profiles)
+{
+    // Milan v1.3 5.3.7.6: "By default, the PAAD-AE shall use a 2ms Presentation
+    // time offset for all its Stream Outputs." An entity held to 1722.1 alone
+    // keeps 1 ms. A value the configuration gives is used under either profile.
+    auto milan = make_config(2, "milan13");
+    auto classic = make_config(2, "classic");
+    auto milan_model = make_config(2, "", true);
+    EXPECT_EQ(milan.presentation_offset_ns, 0U);
+    EXPECT_EQ(effective_presentation_offset_ns(milan), 2'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(classic), 1'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(milan_model), 2'000'000U);
+
+    milan.presentation_offset_ns = 1'000'000;
+    classic.presentation_offset_ns = 3'000'000;
+    EXPECT_EQ(effective_presentation_offset_ns(milan), 1'000'000U);
+    EXPECT_EQ(effective_presentation_offset_ns(classic), 3'000'000U);
+}
+
 TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)
 {
     // Nothing said: a plain 1722.1 model answers to 1722.1 and has no Milan info.

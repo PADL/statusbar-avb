@@ -3,7 +3,7 @@
 
 # PTP Wake Timing Guide
 
-This document covers the `ptpclient_wake_example` tool and performance tuning recommendations for achieving sub-microsecond precision wake timing using PTP hardware clocks on Linux.
+This document covers the `statusbar-ptpclient-wake` tool (built from `ptpclient_wake_example.cpp`) and performance tuning recommendations for achieving sub-microsecond precision wake timing using PTP hardware clocks on Linux.
 
 ## Overview
 
@@ -11,15 +11,15 @@ The PTP Wake Example demonstrates precision wake timing by:
 1. Reading the PTP hardware clock via `/dev/ptp*` devices
 2. Fitting PTP time against the local timing reference, `CLOCK_MONOTONIC_RAW`, with a continuously sampled linear mapping (`PtpTimeBridge`)
 3. Waking at precise PTP-synchronized times: each PTP deadline becomes a `CLOCK_MONOTONIC_RAW` deadline, the thread sleeps early on `CLOCK_MONOTONIC` through the RAW↔MONOTONIC line (`realtime::MonotonicRawLine`, the only clock `clock_nanosleep()` can target), then spins on RAW to the exact instant
-4. Telling the wake to the callback on both clocks (`TimerWakeInfo`: PTP nanoseconds and the typed RAW instant), so nothing the callback runs reads a clock
+4. Telling the wake to the callback on both clocks (`TimerWakeInfo`: the scheduled and actual wake as typed PTP instants, and the same wake as a typed RAW instant), so nothing the callback runs reads a clock
 
 ## Command Line Usage
 
 ```bash
-Usage: ptpclient_wake_example [options]
+Usage: statusbar-ptpclient-wake [options]
 
 Options:
-  --ptp.driver=CHOICE   PTP driver (linuxptp or system)
+  --ptp.driver=CHOICE   PTP driver: linuxptp, ntpshm or system
                         (default: linuxptp on Linux, system on macOS)
   --ptp.device=FILE     PTP device path (default: /dev/ptp0)
   --ptp.period=INTEGER  Wake period in nanoseconds (default: 1000000 = 1ms)
@@ -29,6 +29,16 @@ Options:
   --ptp.no-rt           Disable realtime priority
   --ptp.no-mlock        Disable memory locking
   --ptp.quiet           Suppress verbose output
+  --ptp.threshold=INTEGER
+                        PTP sync threshold in ns (default: 50000)
+  --ptp.spin_ns=INTEGER Busy-spin window before each wake in ns (default: 50000,
+                        0 = no busy-wait)
+  --ptp.holdover_drift_ppb=INTEGER
+                        How fast the worst-case error of the PHC link grows while
+                        the PHC cannot be read, in parts per billion (default: 15000)
+  --ptp.fixed_error_ns=INTEGER
+                        An error of the PHC link that no measurement here shows,
+                        in nanoseconds, added to its worst-case error (default: 0)
   --help                Show help message
   --config-load=FILE    Load configuration from TOML file
   --config-save=FILE    Save current configuration to TOML file
@@ -38,20 +48,20 @@ Options:
 
 ```bash
 # Basic usage with defaults (1ms period, no compensation, with RT priority)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0
 
 # 1ms period with -3µs compensation to account for wake overhead
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
     --ptp.period=1000000 --ptp.compensation=-3000
 
 # Without realtime priority (for testing without CAP_SYS_NICE)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.period=1000000 --ptp.compensation=-3000 --ptp.no-rt
+sudo statusbar-ptpclient-wake --ptp.period=1000000 --ptp.compensation=-3000 --ptp.no-rt
 
 # 500µs period (2kHz wake rate)
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.period=500000 --ptp.compensation=-3000
+sudo statusbar-ptpclient-wake --ptp.period=500000 --ptp.compensation=-3000
 
 # Using a TOML configuration file
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --config-load=ptp_config.toml
+sudo statusbar-ptpclient-wake --config-load=ptp_config.toml
 ```
 
 ### Configuration File Example
@@ -116,7 +126,7 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 1. Run first without compensation to measure average error:
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=0
    ```
 
@@ -124,7 +134,7 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 3. Apply compensation to subtract this offset:
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=-3000
    ```
 
@@ -132,7 +142,9 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 ### Memory Locking (mlockall)
 
-The program automatically calls `mlockall(MCL_CURRENT | MCL_FUTURE)` to lock all memory pages. This prevents page faults during the realtime wake loop, which can cause multi-millisecond latency spikes under memory pressure (e.g., during heavy builds).
+The program calls `mlockall(MCL_CURRENT)` once the bridge is healthy, unless `--ptp.no-mlock` or `--ptp.no-rt` is given. This prevents page faults during the realtime wake loop, which can cause multi-millisecond latency spikes under memory pressure (e.g., during heavy builds).
+
+`MCL_CURRENT` takes in only what is mapped at that moment, so a timer thread made afterwards has an unlocked stack and, with glibc, an unlocked allocator arena. The kernel may move such pages (memory compaction), and a thread that touches one while it is being moved waits for the move: 0.2 to 2.6 ms was measured on a 1 GB host. `PtpTimer::set_lock_memory(true)` makes the timer thread allocate once and lock again from itself before its loop. The entity tools set it from `PtpAppContext::lock_memory`; a program with its own `PtpTimer` should do the same wherever the process locks its memory. `MCL_FUTURE` is not used.
 
 Without memory locking, running a parallel build caused 5-7ms max latency spikes. With `mlockall()`, the same load produced only 39µs max latency (when combined with `isolcpus`).
 
@@ -153,7 +165,7 @@ Dedicate a CPU core exclusively to the wake timing process by preventing the sch
 
 3. Run the program on the isolated core (use `--ptp.cpu=3` for affinity, taskset optional):
    ```bash
-   sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+   sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
        --ptp.period=1000000 --ptp.compensation=-2900 --ptp.cpu=3
    ```
 
@@ -203,7 +215,7 @@ for irq in /proc/irq/*/smp_affinity; do
 done
 
 # Run on isolated core with RT priority and compensation
-sudo ./build/build-Debug/statusbar/ptpclient/ptpclient_wake_example --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
+sudo statusbar-ptpclient-wake --ptp.driver=linuxptp --ptp.device=/dev/ptp0 \
     --ptp.period=1000000 --ptp.compensation=-2900 --ptp.cpu=3
 ```
 
@@ -242,12 +254,12 @@ PTP Wake Example
 ### Running Statistics
 
 ```
-Wakes:     1000  Avg:    +27.1 ns  Min:   -1536 ns  Max:  +10752 ns  StdDev:   608.5 ns
+Wakes:     1000  Error:      +27 ns (+0.027 us)
 ```
 
-- **Avg**: Average error (positive = late, negative = early)
-- **Min/Max**: Worst-case timing bounds
-- **StdDev**: Standard deviation (lower = more consistent)
+The count of wakes and that wake's error (positive = late, negative =
+early). The averages, the bounds and the standard deviation are in the
+final report.
 
 ### Final Report
 
@@ -276,7 +288,7 @@ sudo phc2sys -s CLOCK_REALTIME -c /dev/ptp0 -O 0
 
 Run with `sudo` or grant `CAP_SYS_NICE`:
 ```bash
-sudo setcap cap_sys_nice+ep ./ptpclient_wake_example
+sudo setcap cap_sys_nice+ep $(command -v statusbar-ptpclient-wake)
 ```
 
 Or use `--ptp.no-rt` to run without realtime priority.
@@ -285,7 +297,7 @@ Or use `--ptp.no-rt` to run without realtime priority.
 
 Run with `sudo` or grant `CAP_IPC_LOCK`:
 ```bash
-sudo setcap cap_ipc_lock+ep ./ptpclient_wake_example
+sudo setcap cap_ipc_lock+ep $(command -v statusbar-ptpclient-wake)
 ```
 
 Memory locking is strongly recommended to prevent page fault latency spikes.
@@ -315,14 +327,43 @@ RAW deadline becomes a coarse `CLOCK_MONOTONIC` target, the thread wakes
 early by a guard sized from the line's rate, then spins on RAW to the
 deadline. `CLOCK_MONOTONIC` is for sleeping, never for timing.
 
+The guard is `wake_refine_spin_ns` (the spin window, 50 us by default) plus
+a slew term for what `CLOCK_MONOTONIC` could gain on RAW over the sleep. The
+spin reads RAW with the CPU's pause hint each turn. It gives the CPU up with
+`sched_yield()` at most once every 20 us and never in the last 10 us, since a
+yield is a system call that may come back late.
+
+`sleep_until_ptp()` can report the **spin headroom** of each wake through its
+third argument: what was left of the spin window when the kernel sleep
+returned. It is the whole window when the kernel woke the thread on time and
+negative when the sleep overran the window, so the kernel's wake latency is
+the window less the headroom. A window that the headroom never comes near the
+bottom of can be made smaller, which spins less; a headroom that goes negative
+means late wakes, and the window wants to be larger. A wake that did not sleep
+reports nothing. `spin_headroom()` is the same figure told its clock readings.
+
+`PtpTimer` passes the figure on with every wake, as
+`TimerWakeInfo::spin_headroom` (empty for a wake that did not sleep), and
+`statusbar-ptpclient-wake` prints its statistics when it stops:
+
+```
+Spin headroom of the 50000 ns window: avg 44512 ns  min 20804 ns  max 49120 ns  over 600000 sleeps
+```
+
+The smallest figure is the one to read: here the kernel never woke the thread
+more than 29 us late, so a 30 us window (`--ptp.spin_ns=30000`) would still
+have been enough.
+
 The startup lines above print one `CLOCK_MONOTONIC_RAW` reading and the
 PTP-minus-RAW difference for orientation; the mapping the timer runs on is
 the continuously sampled RAW fit.
 
 ### The wake is told on both clocks
 
-`TimerWakeInfo` carries `scheduled_time_ns` / `actual_time_ns` / `error_ns`
-in PTP nanoseconds and `actual_raw`, the same wake as a typed
+`TimerWakeInfo` carries `scheduled_time` and `actual_time` as
+`realtime::GptpClock0::time_point`, `error` as `realtime::Nanoseconds`
+(`scheduled_time_ns()` / `actual_time_ns()` / `error_ns()` give the bare
+counts), and `actual_raw`, the same wake as a typed
 `realtime::MonotonicRawClock::time_point`. A callback tells PTP time to what
 stamps on PTP (AVTP presentation) and the RAW instant to what stamps on RAW
 (an RX drain, a transmit gate); it reads no clock of its own. See
@@ -347,6 +388,9 @@ ptp_ns = raw_ns * rate + offset
 ```
 
 The mapping is continuously updated using samples to track clock drift.
-`to_raw_ns()` / `from_raw_ns()` are the primary conversions; the
-`to_monotonic_ns()` / `from_monotonic_ns()` pair goes through the
-RAW↔MONOTONIC line as well and exists for sleeping.
+`to_raw_ns()` / `from_raw_ns()` are the primary conversions, in the bare
+nanoseconds a `realtime::ClockAdapter<GptpClock0, PtpTimeBridge>` gives
+their clocks: hold typed time through the adapter, which also reports the
+bridge's health and the worst-case accuracy of each conversion. The typed
+`to_monotonic()` / `from_monotonic()` pair goes through the RAW↔MONOTONIC
+line as well and exists for sleeping.

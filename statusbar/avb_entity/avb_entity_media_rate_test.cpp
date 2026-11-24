@@ -11,14 +11,30 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <chrono>
 #include <cstdint>
 
+using statusbar::avb_entity::LinkWatch;
 using statusbar::avb_entity::MediaClockRateTracker;
 namespace ptpclient = statusbar::ptpclient;
 
 namespace {
 constexpr uint64_t QUARTER_S = 250'000'000ULL;
 constexpr uint64_t FIVE_S = 5'000'000'000ULL;
+
+using statusbar::avb_entity::SystemClockVerdict;
+/// Disciplined and freshly rated: followed, and its TAI vouched for.
+constexpr SystemClockVerdict USABLE{
+    .follow = {.usable = true, .timeline_changed = false, .accuracy = std::chrono::microseconds{1500}}, .tai_usable = true};
+/// Disciplined, but the system's figure has grown since the last update:
+/// still followed for its rate, its TAI not vouched for.
+constexpr SystemClockVerdict FOLLOWED_ONLY{
+    .follow = {.usable = true, .timeline_changed = false, .accuracy = std::chrono::milliseconds{25}}, .tai_usable = false};
+/// Never synchronized, or left without a server for most of a day.
+constexpr SystemClockVerdict OUTSIDE{
+    .follow = {.usable = false, .timeline_changed = false, .accuracy = std::chrono::seconds{3}}, .tai_usable = false};
+constexpr SystemClockVerdict STEPPED{
+    .follow = {.usable = true, .timeline_changed = true, .accuracy = std::chrono::microseconds{1500}}, .tai_usable = true};
 }  // namespace
 
 TEST(media_rate, defaults_to_unity_and_no_tai)
@@ -85,6 +101,167 @@ TEST(media_rate, configure_resets_running_state)
     EXPECT_TRUE(t.should_sample(1));  // last-sample timestamp cleared
 }
 
+// The verdict on the system clock decides whether a pair is followed. The
+// verdicts here are made up, as the readings are.
+
+TEST(media_rate, a_pair_from_a_usable_system_clock_is_fed)
+{
+    MediaClockRateTracker t;
+    EXPECT_FALSE(t.tai_usable());  // nothing judged yet
+    auto const est = t.observe(1'000'000'000, 1'000'000'000, USABLE);
+    EXPECT_TRUE(est.has_value());
+    EXPECT_TRUE(t.tai_usable());
+    EXPECT_TRUE(t.has_tai_sample());
+    EXPECT_TRUE(t.tai_snapshot().tai_usable);
+}
+
+TEST(media_rate, outside_the_limit_the_ratio_holds_and_the_snapshot_says_so)
+{
+    MediaClockRateTracker t;
+    for (uint64_t i = 0; i < 60; ++i) {
+        (void)t.observe(i * QUARTER_S, (i * QUARTER_S) - (i * 12'500ULL), USABLE);
+    }
+    double const r_followed = t.r();
+    EXPECT_TRUE(r_followed > 1.0);
+
+    // The time server is lost for long enough that the clock leaves the limit.
+    // The system clock now wanders the other way; none of it is followed.
+    for (uint64_t i = 60; i < 120; ++i) {
+        auto const est = t.observe(i * QUARTER_S, (i * QUARTER_S) + (i * 50'000ULL), OUTSIDE);
+        EXPECT_FALSE(est.has_value());
+    }
+    EXPECT_TRUE(t.r() == r_followed);
+    EXPECT_FALSE(t.tai_usable());
+    EXPECT_FALSE(t.tai_snapshot().tai_usable);
+    EXPECT_TRUE(t.has_tai_sample());  // the mapping it had is kept
+}
+
+TEST(media_rate, a_clock_good_enough_for_its_rate_is_followed_though_its_tai_is_not_vouched_for)
+{
+    // What an entity sees for up to a poll interval after it starts: the
+    // system's figure has grown past the tight limit since the daemon's last
+    // update, but the clock is disciplined and its rate is as good as ever.
+    MediaClockRateTracker t;
+    for (uint64_t i = 0; i < 60; ++i) {
+        auto const est = t.observe(i * QUARTER_S, (i * QUARTER_S) - (i * 12'500ULL), FOLLOWED_ONLY);
+        EXPECT_TRUE(est.has_value());
+    }
+    EXPECT_TRUE(t.r() > 1.0);
+    EXPECT_TRUE(t.has_tai_sample());
+    EXPECT_FALSE(t.tai_usable());
+    EXPECT_FALSE(t.tai_snapshot().tai_usable);
+
+    // The daemon updates: the same clock, now vouched for.
+    (void)t.observe(60 * QUARTER_S, (60 * QUARTER_S) - (60 * 12'500ULL), USABLE);
+    EXPECT_TRUE(t.tai_snapshot().tai_usable);
+}
+
+TEST(media_rate, a_pair_not_fed_still_holds_off_the_next_read)
+{
+    MediaClockRateTracker t;
+    (void)t.observe(1000, 900, OUTSIDE);
+    EXPECT_FALSE(t.should_sample(1000 + (QUARTER_S - 1)));
+    EXPECT_TRUE(t.should_sample(1000 + QUARTER_S));
+}
+
+TEST(media_rate, a_media_clock_pinned_to_gptp_judges_the_system_clock_without_following_it)
+{
+    MediaClockRateTracker t;
+    for (uint64_t i = 0; i < 60; ++i) {
+        auto const est = t.observe(i * QUARTER_S, (i * QUARTER_S) - (i * 12'500ULL), USABLE, /*follow=*/false);
+        EXPECT_FALSE(est.has_value());
+    }
+    EXPECT_TRUE(t.r() == 1.0);
+    EXPECT_FALSE(t.has_tai_sample());
+    EXPECT_TRUE(t.tai_usable());  // the tunnel's timestamps may still say so
+}
+
+TEST(media_rate, a_step_of_the_system_clock_restarts_the_filters_and_keeps_the_ratio)
+{
+    MediaClockRateTracker t;
+    for (uint64_t i = 0; i < 60; ++i) {
+        (void)t.observe(i * QUARTER_S, (i * QUARTER_S) - (i * 12'500ULL), USABLE);
+    }
+    double const r_before = t.r();
+    EXPECT_TRUE(r_before > 1.0);
+
+    // The system clock is stepped by 3 s: a new timeline. One pair on it is
+    // not an estimate yet, so r stays where it was instead of returning to 1.
+    constexpr uint64_t STEP_NS = 3'000'000'000ULL;
+    uint64_t const gptp = 60 * QUARTER_S;
+    auto const first = t.observe(gptp, gptp + STEP_NS, STEPPED);
+    EXPECT_TRUE(first.has_value());
+    EXPECT_FALSE(first->valid);
+    EXPECT_TRUE(t.r() == r_before);
+
+    // The mapping follows the new timeline at once: TAI is the stepped clock plus 37 s.
+    EXPECT_EQ(t.tai_ns(static_cast<std::int64_t>(gptp)), static_cast<std::int64_t>(gptp + STEP_NS) + 37'000'000'000LL);
+}
+
 // Test runner
+
+//
+// LinkWatch: the media timer's clock link as the entity is told it
+//
+
+namespace {
+
+using statusbar::realtime::ClockQuality;
+using statusbar::realtime::MonotonicRawClock;
+using statusbar::realtime::Nanoseconds;
+
+/// A link last fitted at RAW @p synced_s seconds, good to 800 ns then and
+/// drifting no faster than 15.5 ppm.
+constexpr auto link_of(uint64_t epoch, int64_t synced_s) -> ClockQuality
+{
+    return {
+        .synced_at = MonotonicRawClock::from_ns(synced_s * 1'000'000'000),
+        .bound_at_sync = Nanoseconds{800},
+        .epoch = epoch,
+        .drift_bound_ppb = 15'500,
+        .time_source = statusbar::realtime::TimeSource::ptp};
+}
+
+}  // namespace
+
+TEST(media_rate_link, an_entity_told_of_no_link_accounts_for_none)
+{
+    LinkWatch link;
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(5'000'000'000)).count(), int64_t{0});
+    EXPECT_FALSE(link.take_timeline_change());
+}
+
+TEST(media_rate_link, the_error_of_the_link_grows_from_its_last_fit)
+{
+    LinkWatch link;
+    link.tell(link_of(3, 10));
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(10'000'000'000)).count(), int64_t{800});
+    // Two seconds without a fit: 31 us more.
+    EXPECT_EQ(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)).count(), int64_t{800 + 31'000});
+    // The first link told is not a change of timeline, whatever its epoch.
+    EXPECT_FALSE(link.take_timeline_change());
+
+    // A link that claims no bound leaves none: added to anything it is unbounded.
+    link.tell(ClockQuality{.epoch = 3});
+    EXPECT_TRUE(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)) == statusbar::realtime::UNBOUNDED_ACCURACY);
+    auto const utc = link_of(0, 10).widened_by(link.accuracy(MonotonicRawClock::from_ns(12'000'000'000)));
+    EXPECT_FALSE(utc.is_bounded());
+}
+
+TEST(media_rate_link, a_new_timeline_of_the_link_is_told_once)
+{
+    LinkWatch link;
+    link.tell(link_of(3, 10));
+    link.tell(link_of(3, 11));
+    EXPECT_FALSE(link.take_timeline_change());
+
+    // The PHC was stepped: epoch 4, nothing known of it, then fitted again.
+    // Told every wake and asked a few times a second, the change is not lost.
+    link.tell(ClockQuality{.epoch = 4});
+    link.tell(link_of(4, 12));
+    link.tell(link_of(4, 13));
+    EXPECT_TRUE(link.take_timeline_change());
+    EXPECT_FALSE(link.take_timeline_change());
+}
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_media_rate_test)

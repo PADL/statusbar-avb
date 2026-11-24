@@ -114,6 +114,32 @@ TEST(aaf_v1_codec_roundtrip, recovers_header_fields)
     EXPECT_EQ(pkt->encap_seq, uint32_t{42});
 }
 
+TEST(aaf_v1_codec_roundtrip, the_timestamp_uncertain_bit_is_set_only_on_request)
+{
+    auto const primary = make_stream_id(0x0001);
+    udptun::AafV1OverAnnexJCodec const codec{base_config(primary, primary)};
+    std::vector<uint8_t> buf(udptun::AafV1OverAnnexJCodec::header_size() + codec.payload_bytes(), 0);
+
+    // The form without the argument vouches for its timestamp.
+    codec.encode(buf, sid_to_eui64(primary), 1, 1'700'000'000'000'000'000LL, 125);
+    auto const sure = codec.decode(buf);
+    EXPECT_TRUE(sure.has_value());
+    EXPECT_FALSE(sure->pdu.tu());
+
+    codec.encode(buf, sid_to_eui64(primary), 2, 1'700'000'000'000'000'000LL, 125, /*timestamp_uncertain=*/true);
+    auto const unsure = codec.decode(buf);
+    EXPECT_TRUE(unsure.has_value());
+    EXPECT_TRUE(unsure->pdu.tu());
+    // Nothing else about the packet changes: the timestamp is still the
+    // talker's best and the grandmaster identity still names its timeline.
+    EXPECT_TRUE(unsure->pdu.tv());
+    EXPECT_EQ(codec.tx_gptp_ns(*unsure), 1'700'000'000'000'000'000LL);
+    EXPECT_TRUE(unsure->pdu.get_ptp_grandmaster_identity() == tsn::GRANDMASTER_TAI_FROM_GPS);
+
+    codec.encode(buf, sid_to_eui64(primary), 3, 1'700'000'000'000'000'000LL, 125, /*timestamp_uncertain=*/false);
+    EXPECT_FALSE(codec.decode(buf)->pdu.tu());
+}
+
 TEST(aaf_v1_codec_roundtrip, recovers_audio_payload)
 {
     auto const sid = make_stream_id(1);

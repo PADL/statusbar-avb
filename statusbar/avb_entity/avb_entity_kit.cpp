@@ -153,7 +153,7 @@ AvbEntityKit::AvbEntityKit(
 {  // NOLINT(statusbar-block-statements) the kit's construction phases, in order
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns, audio_sink);
-        listener_->set_presentation_offset_ns(config_.presentation_offset_ns);
+        listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
     }
 
     configure_milan();
@@ -245,19 +245,21 @@ void AvbEntityKit::notify_talker_interface(uint16_t const index)
 }
 
 void AvbEntityKit::configure_profile()
-{
+{  // NOLINT(statusbar-block-statements) one setting per difference between the profiles
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
     // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
-    // answers, and on the SRP side the Class A Domain adopted from the wire
-    // (4.2.7.2.1) and the instant leave (4.2.7.2.2). A Milan model also has
-    // GET_MILAN_INFO to answer, whichever profile it is held to.
+    // answers, and on the SRP side the MRP timers (Table 4.3), the Class A
+    // Domain adopted from the wire (4.2.7.2.1) and the instant leave
+    // (4.2.7.2.2). A Milan model also has GET_MILAN_INFO to answer, whichever
+    // profile it is held to.
     bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
     install_milan_info();
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
+    apply_mrp_timers(milan);
 }
 
 void AvbEntityKit::configure_class_a_domain()
@@ -1789,7 +1791,7 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
     return maap_.setup(
         reactor,
         config_.interface_name,
-        stream_base_mac_for(config_.interface_name, config_.entity_id),
+        stream_base_mac_for(config_.interface_mac, config_.interface_name, config_.entity_id),
         host_.components(),
         *talker_,
         indices,
@@ -2214,11 +2216,30 @@ void AvbEntityKit::close_streams() noexcept
     stream_port_.close();
 }
 
+auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<int64_t>
+{
+    auto earliest = maap_.next_deadline_ns();
+    auto const& components = host_.components();
+    for (auto const next : {components.msrp_handler.next_deadline_ns(), components.mvrp_handler.next_deadline_ns()}) {
+        if (next && (!earliest || *next < *earliest)) {
+            earliest = next;
+        }
+    }
+    return earliest;
+}
+
+void AvbEntityKit::apply_mrp_timers(bool const milan)
+{
+    auto const timers = milan ? nanoavb::MILAN_MRP_TIMERS : srp::mrp::TimerConfig{};
+    host_.components().msrp_handler.set_mrp_timers(timers);
+    host_.components().mvrp_handler.set_mrp_timers(timers);
+}
+
 auto AvbEntityKit::milan_profile() const noexcept -> bool
 {
     // The configuration decides; left empty, the model does: a Milan model
     // answers to Milan v1.3, any other to IEEE 1722.1-2021 as written.
-    return config_.atdecc_profile.empty() ? config_.milan : config_.atdecc_profile == "milan13";
+    return is_milan_profile(config_);
 }
 
 void AvbEntityKit::install_milan_info()
@@ -2302,7 +2323,8 @@ void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 
 auto AvbEntityKit::default_presentation_offset_ns() const noexcept -> uint32_t
 {
-    return static_cast<uint32_t>(std::min<uint64_t>(config_.presentation_offset_ns, atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS));
+    return static_cast<uint32_t>(
+        std::min<uint64_t>(effective_presentation_offset_ns(config_), atdecc::aem::MILAN_PRESENTATION_OFFSET_MAX_NS));
 }
 
 auto AvbEntityKit::served_entity_model_id() const -> uint64_t

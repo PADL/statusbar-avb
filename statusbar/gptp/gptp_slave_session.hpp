@@ -46,10 +46,22 @@ struct SlaveSessionConfig
     bool software_timestamping{false};
     int64_t manual_peer_delay_ns{-1};
     int64_t phase_jump_threshold_ns{-1};
-    double servo_kp{-1.0};       // <0 → use profile default
-    double servo_ki{-1.0};       // <0 → use profile default
-    clockid_t bridge_clock{-1};  // <0 → bridge disabled
+    double servo_kp{-1.0};  // <0 → use profile default
+    double servo_ki{-1.0};  // <0 → use profile default
+    /// Keep a gPTP <-> CLOCK_MONOTONIC_RAW bridge. RAW is the one clock the
+    /// bridge is kept against: it is the application's only timing reference.
+    bool bridge{false};
     bool verbose{false};
+
+    /// How fast the bridge's line may go wrong while no Sync arrives, in
+    /// parts per billion: the deployment's oscillator and temperature
+    /// figure. See GptpTimeBridge::holdover_drift_ppb.
+    uint32_t holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+
+    /// An error of the link to the master that no anchor shows, in
+    /// nanoseconds: this machine's hardware figure. See
+    /// GptpTimeBridge::fixed_error_ns.
+    int64_t fixed_error_ns{0};
 
     /// When true (and software_timestamping is false), use the
     /// hardware-timestamping passthrough path: PHC is read for time
@@ -110,6 +122,10 @@ class SlaveSession
     [[nodiscard]] auto synced() const noexcept -> bool { return is_synced_.load(std::memory_order_relaxed); }
 
   private:
+    /// A different grandmaster is a different timeline: tell the bridge,
+    /// with the time source the new one announces.
+    void follow_grandmaster();
+
     SlaveSessionConfig cfg_;
     int raw_fd_{-1};
     int phc_fd_{-1};
@@ -118,11 +134,11 @@ class SlaveSession
     ieee::Eui48 mac_{};
     int if_index_{-1};
     std::array<int, 1> poll_fd_storage_{-1};
-    std::string bridge_clock_name_{};
     std::unique_ptr<GptpSlavePort> port_;
     GptpTimeBridge bridge_{};
     std::array<uint8_t, 1500> payload_buf_{};
     std::atomic<bool> is_synced_{false};
+    uint64_t grandmaster_id_{0};
 };
 
 }  // namespace statusbar::gptp

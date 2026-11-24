@@ -49,9 +49,8 @@ auto PtpTimeBridgeBase::regression_buffer_publish(double const rate, int64_t con
 
 auto PtpTimeBridgeBase::regression_buffer_consume() const noexcept -> RateOffset
 {
-    // Non-consuming multi-reader load: safe to call from any thread (the RT timer,
-    // the ClockAdapter, or a status/telemetry caller), unlike the previous SPSC
-    // triple-buffer whose consume() was single-consumer-only.
+    // A seqlock load: nothing is consumed, and any thread may read (the RT
+    // timer, the ClockAdapter, a status or telemetry caller).
     return regression_buffer_.load();
 }
 
@@ -229,17 +228,18 @@ auto PtpTimeBridge::from_raw_ns(int64_t raw_ns) const noexcept -> int64_t
     return monotonic_to_ptp_precise(raw_ns, slope, ro.offset_ns);
 }
 
-auto PtpTimeBridge::to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t
+auto PtpTimeBridge::to_monotonic(realtime::GptpClock0::time_point const ptp) const noexcept -> realtime::MonotonicClock::time_point
 {
-    return raw_line_.to_monotonic_ns(to_raw_ns(ptp_ns));
+    return raw_line_.to_monotonic(realtime::MonotonicRawClock::from_ns(to_raw_ns(realtime::GptpClock0::to_ns(ptp))));
 }
 
-auto PtpTimeBridge::from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t
+auto PtpTimeBridge::from_monotonic(realtime::MonotonicClock::time_point const mono) const noexcept
+    -> realtime::GptpClock0::time_point
 {
-    return from_raw_ns(raw_line_.from_monotonic_ns(mono_ns));
+    return realtime::GptpClock0::from_ns(from_raw_ns(realtime::MonotonicRawClock::to_ns(raw_line_.from_monotonic(mono))));
 }
 
-auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>
+auto PtpTimeBridge::prepare_sleep(realtime::GptpClock0::time_point const ptp_deadline) noexcept -> StatusValue<SleepPlan>
 {
     if (!is_running_atomic()) {
         return failure(PtpError::bridge_not_running);
@@ -252,19 +252,39 @@ auto PtpTimeBridge::prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusVal
 
     // 1. PTP deadline -> RAW deadline via the primary (PHC <-> RAW) mapping
     //    captured in `before`: ptp = rate * raw + offset => raw = (ptp - offset) / rate.
-    int64_t const raw_deadline = ptp_to_monotonic_precise(
-        ptp_deadline_ns, FixedPointSlope::from_double(before.rate), static_cast<int64_t>(before.offset_ns));
+    auto const raw_deadline = realtime::MonotonicRawClock::from_ns(ptp_to_monotonic_precise(
+        realtime::GptpClock0::to_ns(ptp_deadline),
+        FixedPointSlope::from_double(before.rate),
+        static_cast<int64_t>(before.offset_ns)));
 
     // 2. RAW deadline -> coarse CLOCK_MONOTONIC deadline through the
     //    RAW<->MONOTONIC line, for clock_nanosleep; its rate sizes the guard.
     return success(SleepPlan{
-        .raw_deadline_ns = raw_deadline,
-        .mono_deadline_ns = raw_line_.to_monotonic_ns(raw_deadline),
+        .raw_deadline = raw_deadline,
+        .mono_deadline = raw_line_.to_monotonic(raw_deadline),
         .mono_per_raw_slope = raw_line_.consume().rate,
         .before = before});
 }
 
-auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>
+auto PtpTimeBridge::early_wake_monotonic(SleepPlan const& plan, realtime::MonotonicRawClock::time_point const raw_now)
+    const noexcept -> realtime::MonotonicClock::time_point
+{
+    // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
+    // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
+    // slew-immune CLOCK_MONOTONIC_RAW to the exact deadline. The early-wake guard
+    // must cover (a) OS wakeup latency [base] and (b) the MONOTONIC-vs-RAW
+    // divergence accrued over the sleep [slew term] so we never oversleep past
+    // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
+    // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
+    int64_t const sleep_dur = (plan.raw_deadline - raw_now).count();
+    int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
+    int64_t const slew_guard =
+        sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
+    return plan.mono_deadline - realtime::Nanoseconds{base_guard + slew_guard};
+}
+
+auto PtpTimeBridge::finalize_wake(realtime::MonotonicRawClock::time_point const wake_raw, TimeMapping const& before) noexcept
+    -> StatusValue<realtime::GptpClock0::time_point>
 {
     auto const after = get_mapping();
     if (after.epoch != before.epoch) {
@@ -277,14 +297,18 @@ auto PtpTimeBridge::finalize_wake(int64_t wake_raw, TimeMapping const& before) n
     // RAW wake time -> PTP via the primary (PHC <-> RAW) mapping.
     auto const slope = FixedPointSlope::from_double(after.rate);
     int64_t const offset_ns = static_cast<int64_t>(after.offset_ns);
-    return success(monotonic_to_ptp_precise(wake_raw, slope, offset_ns));
+    return success(
+        realtime::GptpClock0::from_ns(monotonic_to_ptp_precise(realtime::MonotonicRawClock::to_ns(wake_raw), slope, offset_ns)));
 }
 
 void PtpTimeBridge::reset_epoch() noexcept
 {
-    increment_epoch();
+    // Health first, so the bound of the old timeline is withdrawn before
+    // the new epoch can be seen. quality() also checks the epoch each fit
+    // was published with, which holds whatever the order.
     set_healthy(false);
     set_ever_healthy(false);
+    increment_epoch();
     set_reset_requested(true);
 }
 
@@ -321,19 +345,30 @@ void PtpTimeBridge::sampler_loop_impl()
     // the media timer no longer hard-exits on a transient unhealthy bridge.)
     // The primary PHC<->RAW window (authoritative) and, over the same span,
     // the tracker that keeps raw_line_ (RAW<->MONOTONIC, for the sleeps).
-    TimingSampleWindow phc_window(static_cast<size_t>(params_.window_size));
-    realtime::MonotonicRawTracker raw_tracker{raw_line_, static_cast<size_t>(params_.window_size)};
-
+    SamplerState state = new_sampler_state();
     auto const period = std::chrono::nanoseconds(1'000'000'000LL / std::max(1, params_.sample_hz));
     auto next = std::chrono::steady_clock::now();
 
-    int64_t worst_bracket = 0;
-
     while (is_running_atomic()) {
         next += period;
-        collect_sample(phc_window, raw_tracker, worst_bracket);
+        (void)observe(state, take_reading());
         std::this_thread::sleep_until(next);
     }
+}
+
+auto PtpTimeBridge::begin_told_sampling(BridgeSamplingParams const& params) -> SamplerState
+{
+    params_ = params;
+    set_reset_requested(false);
+    set_running(true);
+    return new_sampler_state();
+}
+
+auto PtpTimeBridge::new_sampler_state() -> SamplerState
+{
+    SamplerState state{raw_line_, static_cast<size_t>(params_.window_size)};
+    state.epoch = load_epoch();
+    return state;
 }
 
 auto PtpTimeBridge::get_mapping() const noexcept -> TimeMapping
@@ -352,137 +387,133 @@ auto PtpTimeBridge::get_mapping() const noexcept -> TimeMapping
 
 auto PtpTimeBridge::telemetry() const noexcept -> BridgeTelemetry
 {
-    // IMPORTANT: do NOT call get_mapping() here. get_mapping() consumes the
-    // regression_buffer_ triple buffer, which is strictly SPSC — its only
-    // legitimate consumer is the RT timer thread. telemetry() is called from a
-    // different thread (e.g. the tool's main loop, once per second); a second
-    // consumer races the timer's consume side and can hand the timer a torn
-    // (rate, offset) pair, producing a far-future sleep deadline that wedges the
-    // media timer (healthy bridge, zero wakes). telemetry() needs none of the
-    // regression buffer's contents — read the standalone atomics directly.
+    // telemetry() needs none of the regression line: it reads the standalone
+    // atomics. (It once had to keep off get_mapping(), when the line went
+    // through a single-consumer buffer that only the timer thread could
+    // read. The line is a seqlocked value now and any thread may read it.)
     auto const b = bracket_stats_.snapshot();
-    BridgeTelemetry t;
-    t.healthy = is_healthy_atomic();
-    t.epoch = load_epoch();
-    t.sample_count = load_sample_count();
-    t.rms_residual_ns = load_rms_residual_ns();
-    t.worst_bracket_ns = load_worst_bracket_ns();
-    t.bracket_min_ns = b.has_samples() ? b.min_ns : 0;
-    t.bracket_max_ns = b.has_samples() ? b.max_ns : 0;
-    t.bracket_mean_ns = static_cast<int64_t>(b.average_ns());
-    t.bracket_count = static_cast<uint64_t>(b.count);
-    t.reject_count = reject_count_.load(std::memory_order_relaxed);
-    t.step_count = step_count_.load(std::memory_order_relaxed);
-    t.last_step_residual_ns = last_step_residual_ns_.load(std::memory_order_relaxed);
-    t.regression_overruns = regression_buffer_overruns();
-    return t;
-}
-
-auto PtpTimeBridge::convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = to_raw_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = from_raw_ns(raw_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = to_monotonic_ns(ptp_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
-}
-
-auto PtpTimeBridge::convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult
-{
-    return TimeConvertResult{.time_ns = from_monotonic_ns(monotonic_ns), .epoch = load_epoch(), .healthy = is_healthy_atomic()};
+    return {
+        .healthy = is_healthy_atomic(),
+        .epoch = load_epoch(),
+        .sample_count = load_sample_count(),
+        .rms_residual_ns = load_rms_residual_ns(),
+        .worst_bracket_ns = load_worst_bracket_ns(),
+        .bracket_min_ns = b.has_samples() ? b.min_ns : 0,
+        .bracket_max_ns = b.has_samples() ? b.max_ns : 0,
+        .bracket_mean_ns = static_cast<int64_t>(b.average_ns()),
+        .bracket_count = static_cast<uint64_t>(b.count),
+        .reject_count = reject_count_.load(std::memory_order_relaxed),
+        .step_count = step_count_.load(std::memory_order_relaxed),
+        .last_step_residual_ns = last_step_residual_ns_.load(std::memory_order_relaxed),
+        .regression_overruns = regression_buffer_overruns()};
 }
 
 auto PtpTimeBridge::sleep_until_ptp(
-    int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going, int64_t* const spin_headroom_ns) noexcept
-    -> StatusValue<WakeTimes>
-{  // NOLINT(statusbar-block-statements) the sleep, planned then slept then spun, in order; pre-dates the gate
-    auto prep = prepare_sleep(ptp_deadline_ns);
-    if (!prep) {
-        return forward_failure(prep);
+    realtime::GptpClock0::time_point const ptp_deadline,
+    std::atomic<bool> const* keep_going,
+    realtime::Nanoseconds* const spin_headroom) noexcept -> StatusValue<WakeTimes>
+{
+    auto const plan = prepare_sleep(ptp_deadline);
+    if (!plan) {
+        return forward_failure(plan);
     }
-    auto const plan = *prep;
-    int64_t const raw_deadline = plan.raw_deadline_ns;
     // A caller already told to stop does not sleep at all; the spin below
     // reads the flag too, for a stop that arrives during the sleep. Here
     // first because a host whose coarse sleep overshoots the deadline would
     // otherwise hand a stopped caller a wake time it no longer wants.
-    if (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed)) {
+    if (told_to_stop(keep_going)) {
         return failure(PtpError::bridge_not_running);
     }
+    auto const headroom = sleep_early(*plan);
+    if (!headroom) {
+        return forward_failure(headroom);
+    }
+    return finish_sleep(*plan, keep_going, *headroom, spin_headroom);
+}
 
-    // clock_nanosleep can only sleep on CLOCK_MONOTONIC, whose rate is slewed by
-    // phc2sys/NTP. So we wake EARLY on CLOCK_MONOTONIC, then spin on the
-    // slew-immune CLOCK_MONOTONIC_RAW to the exact deadline. The early-wake guard
-    // must cover (a) OS wakeup latency [base] and (b) the MONOTONIC-vs-RAW
-    // divergence accrued over the sleep [slew term] so we never oversleep past
-    // the RAW deadline. When phc2sys is calm the slew term is ~0 (minimal spin);
-    // when it is railed at ±10% the term is ~10% of the sleep (a small spin).
-    int64_t const raw_now = realtime::read_monotonic_raw_ns();
-    int64_t const sleep_dur = raw_deadline - raw_now;
-    int64_t const base_guard = std::max<int64_t>(params_.wake_refine_spin_ns, 0);
-    int64_t const slew_guard =
-        sleep_dur > 0 ? static_cast<int64_t>(std::fabs(plan.mono_per_raw_slope - 1.0) * static_cast<double>(sleep_dur)) : 0;
-    int64_t const mono_wake = plan.mono_deadline_ns - (base_guard + slew_guard);
+auto PtpTimeBridge::told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool
+{
+    return keep_going != nullptr && !keep_going->load(std::memory_order_relaxed);
+}
 
+auto PtpTimeBridge::spin_headroom(
+    SleepPlan const& plan,
+    realtime::MonotonicClock::time_point const mono_wake,
+    realtime::MonotonicRawClock::time_point const raw_after_sleep) const noexcept -> realtime::Nanoseconds
+{
+    // The early wake is the window plus the slew term ahead of the deadline.
+    // What is left to spin, less the slew term, is what is left of the window.
+    realtime::Nanoseconds const window{std::max<int64_t>(params_.wake_refine_spin_ns, 0)};
+    realtime::Nanoseconds const slew_term = (plan.mono_deadline - mono_wake) - window;
+    return (plan.raw_deadline - raw_after_sleep) - slew_term;
+}
+
+auto PtpTimeBridge::sleep_early(SleepPlan const& plan) const noexcept -> StatusValue<std::optional<realtime::Nanoseconds>>
+{
     // One kernel sleep primitive on every platform, on the clock the line
     // maps to. (The macOS branch used to sleep on std::chrono::steady_clock,
     // which is CLOCK_MONOTONIC_RAW there, against a deadline on a different
     // counter: harmless on a desktop, a full-period spin on a laptop that had
     // ever slept.)
-    bool slept = false;
-    if (mono_wake > realtime::read_monotonic_ns()) {
-        slept = true;
-        int const rc = realtime::sleep_until_monotonic_ns(mono_wake);
-        if (rc == EINTR) {
-            // Signal received -- return error so caller can check shutdown flag
-            return failure(std::error_code(EINTR, std::system_category()));
-        }
-        if (rc != 0) {
-            return failure(std::error_code(rc, std::system_category()));
-        }
+    auto const mono_wake = early_wake_monotonic(plan, realtime::read_monotonic_raw());
+    if (mono_wake <= realtime::read_monotonic()) {
+        return success(std::optional<realtime::Nanoseconds>{});
     }
+    // EINTR is a signal received: an error, so the caller can check its
+    // shutdown flag.
+    int const rc = realtime::sleep_until_monotonic(mono_wake);
+    if (rc != 0) {
+        return failure(std::error_code(rc, std::system_category()));
+    }
+    return success(std::optional{spin_headroom(plan, mono_wake, realtime::read_monotonic_raw())});
+}
 
-    // Precise finish: spin on CLOCK_MONOTONIC_RAW (vDSO) to the deadline with a pause hint, bailing
-    // on shutdown; sched_yield only every SPIN_YIELD_INTERVAL_NS and not in the last
-    // SPIN_NO_YIELD_NS (docs/LINUXPTP.md).
-    static constexpr int64_t SPIN_YIELD_INTERVAL_NS = 20'000;
-    static constexpr int64_t SPIN_NO_YIELD_NS = 10'000;
-    int64_t const spin_start = realtime::read_monotonic_raw_ns();
-    // Headroom against the configured window: the slew term is part of the
-    // planned early wake, not of the OS's lateness.
-    int64_t const headroom = raw_deadline - spin_start - slew_guard;
-    int64_t last_yield = spin_start;
-    while (true) {
-        int64_t const now_raw = realtime::read_monotonic_raw_ns();
-        if (now_raw >= raw_deadline) {
-            break;
+auto PtpTimeBridge::spin_to(
+    realtime::MonotonicRawClock::time_point const raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool
+{
+    // Precise finish: spin on CLOCK_MONOTONIC_RAW (a vDSO read) to the exact
+    // RAW deadline, bailing on shutdown. A yield is a system call and may
+    // not come back for a while, so it is rationed and kept away from the
+    // deadline; every other turn is only the CPU's pause hint.
+    auto last_yield = realtime::read_monotonic_raw();
+    for (auto now = last_yield; now < raw_deadline; now = realtime::read_monotonic_raw()) {
+        if (!is_running_atomic() || told_to_stop(keep_going)) {
+            return false;
         }
-        if (!is_running_atomic() || (keep_going != nullptr && !keep_going->load(std::memory_order_relaxed))) {
-            return failure(PtpError::bridge_not_running);
-        }
-        if (now_raw - last_yield > SPIN_YIELD_INTERVAL_NS && raw_deadline - now_raw > SPIN_NO_YIELD_NS) {
+        if (now - last_yield > SPIN_YIELD_INTERVAL && raw_deadline - now > SPIN_NO_YIELD) {
             ::sched_yield();
-            last_yield = now_raw;
+            last_yield = now;
         } else {
             realtime::cpu_relax();
         }
     }
+    return true;
+}
 
-    int64_t const wake_raw = realtime::read_monotonic_raw_ns();
-    auto const wake_ptp = finalize_wake(wake_raw, plan.before);
+auto PtpTimeBridge::finish_sleep(
+    SleepPlan const& plan,
+    std::atomic<bool> const* keep_going,
+    std::optional<realtime::Nanoseconds> const headroom,
+    realtime::Nanoseconds* const spin_headroom) noexcept -> StatusValue<WakeTimes>
+{
+    if (!spin_to(plan.raw_deadline, keep_going)) {
+        return failure(PtpError::bridge_not_running);
+    }
+    auto wake = wake_times(plan.before);
+    if (wake && headroom && spin_headroom != nullptr) {
+        *spin_headroom = *headroom;
+    }
+    return wake;
+}
+
+auto PtpTimeBridge::wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>
+{
+    auto const wake_raw = realtime::read_monotonic_raw();
+    auto const wake_ptp = finalize_wake(wake_raw, before);
     if (!wake_ptp) {
         return forward_failure(wake_ptp);
     }
-    if (slept && spin_headroom_ns != nullptr) {
-        *spin_headroom_ns = headroom;
-    }
-    return success(WakeTimes{.ptp_ns = *wake_ptp, .raw_ns = wake_raw});
+    return success(WakeTimes{.ptp = *wake_ptp, .raw = wake_raw});
 }
 
 auto PtpTimeBridge::take_reading() -> Reading
@@ -523,32 +554,37 @@ auto PtpTimeBridge::accept_phc_sample(TimingSampleWindow& phc_window, Reading co
     return true;
 }
 
-auto PtpTimeBridge::collect_sample(
-    TimingSampleWindow& phc_window, realtime::MonotonicRawTracker& raw_tracker, int64_t& worst_bracket) -> bool
+auto PtpTimeBridge::observe(SamplerState& state, Reading const& reading) -> bool
 {
     if (exchange_reset_requested(false)) {
-        phc_window.clear();
-        raw_tracker.clear();
-        worst_bracket = 0;
+        state.phc_window.clear();
+        state.raw_tracker.clear();
+        state.worst_bracket = 0;
+        // The request is taken before the epoch is read: a reset that
+        // comes after this read asks again, and the window is cleared again.
+        state.epoch = load_epoch();
+        rate_checkpoint_ = {};
     }
-    Reading const reading = take_reading();
     // The RAW<->MONOTONIC line does not depend on the PHC read: the tracker
     // is told the pair at the RAW midpoint of the MONOTONIC bracket whatever
-    // the PHC did, so the sleeps have a fresh line even while unhealthy.
-    (void)raw_tracker.push((reading.raw_after_phc + reading.raw_after_mono) / 2, reading.mono);
+    // the PHC did, so the sleeps have a fresh line even while unhealthy. The
+    // bracket goes with it: half of it is how well the pair is known.
+    (void)state.raw_tracker.push(
+        realtime::MonotonicRawClock::from_ns((reading.raw_after_phc + reading.raw_after_mono) / 2),
+        realtime::MonotonicClock::from_ns(reading.mono),
+        realtime::Nanoseconds{reading.raw_after_mono - reading.raw_after_phc});
     if (!reading.phc) {
         return false;
     }
-    if (accept_phc_sample(phc_window, reading, worst_bracket) && phc_window.size() >= min_samples_for_fit()) {
-        update_mapping(phc_window, worst_bracket);
+    if (accept_phc_sample(state.phc_window, reading, state.worst_bracket) && state.phc_window.size() >= min_samples_for_fit()) {
+        update_mapping(state);
     }
     return true;
 }
 
-void PtpTimeBridge::update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket)
+void PtpTimeBridge::update_mapping(SamplerState const& state)
 {
-    auto fit = fit_time_mapping(phc_window, params_.max_rate_ppm);
-
+    auto const fit = fit_time_mapping(state.phc_window, params_.max_rate_ppm);
     if (!fit.valid) {
         return;
     }
@@ -556,41 +592,84 @@ void PtpTimeBridge::update_mapping(TimingSampleWindow const& phc_window, int64_t
     // Detect step/discontinuity - but only after we've established a healthy mapping
     // During initial convergence, large residuals are expected as the fit stabilizes.
     // Step detection is meant to catch sudden clock jumps after we have a good mapping.
-    if (was_ever_healthy()) {
-        if (fit.max_residual > static_cast<double>(params_.step_threshold_ns)) {
-            // Step detected - reset epoch and clear samples
-            increment_epoch();
-            set_healthy(false);
-            set_ever_healthy(false);  // Must re-establish health
-            set_reset_requested(true);
-            store_rms_residual_ns(static_cast<int64_t>(fit.rms_residual));
-            store_worst_bracket_ns(worst_bracket);
-            // Telemetry: this is the failure mode that hard-stalls the media timer.
-            step_count_.fetch_add(1, std::memory_order_relaxed);
-            last_step_residual_ns_.store(static_cast<int64_t>(fit.max_residual), std::memory_order_relaxed);
-            return;
-        }
+    if (was_ever_healthy() && fit.max_residual > static_cast<double>(params_.step_threshold_ns)) {
+        // Step detected: a new epoch, no bound and no health until both are
+        // re-established on a cleared window.
+        reset_epoch();
+        store_rms_residual_ns(static_cast<int64_t>(fit.rms_residual));
+        store_worst_bracket_ns(state.worst_bracket);
+        // Telemetry: this is the failure mode that hard-stalls the media timer.
+        step_count_.fetch_add(1, std::memory_order_relaxed);
+        last_step_residual_ns_.store(static_cast<int64_t>(fit.max_residual), std::memory_order_relaxed);
+        return;
     }
+    publish_fit(fit, state);
+}
 
-    // Publish the primary (rate, offset_ns) pair atomically via the triple
-    // buffer. The regression line `gptp = rate * raw + offset_ns` must be
-    // observed as a consistent pair: a torn read (new slope with old intercept,
-    // or vice versa) produces an error of Δslope * raw_now, which on a system
-    // that's been up tens of hours (raw_now ≈ 2*10^14 ns) means a 1-ppm slope
-    // wobble would translate to a ~200 ms gptp glitch.
+void PtpTimeBridge::publish_fit(LinearFitResult const& fit, SamplerState const& state)
+{
+    // Publish the primary (rate, offset_ns) pair atomically. The regression
+    // line `gptp = rate * raw + offset_ns` must be observed as a consistent
+    // pair: a torn read (new slope with old intercept, or vice versa)
+    // produces an error of Δslope * raw_now, which on a system that's been
+    // up tens of hours (raw_now ≈ 2*10^14 ns) means a 1-ppm slope wobble
+    // would translate to a ~200 ms gptp glitch.
     regression_buffer_publish(fit.slope, fit.intercept_ns);
+    // The quality goes out before the health: quality() claims a bound
+    // only once the bridge has been healthy, and by then this one is in.
+    publish_fit_quality(fit, state);
     store_rms_residual_ns(static_cast<int64_t>(fit.rms_residual));
-    store_worst_bracket_ns(worst_bracket);
-    store_sample_count(static_cast<int>(phc_window.size()));
+    store_worst_bracket_ns(state.worst_bracket);
+    store_sample_count(static_cast<int>(state.phc_window.size()));
 
     // Health is driven by the PRIMARY (PHC <-> RAW) fit residual. RAW is immune
     // to phc2sys slewing, so this fit's slope is always ~the crystal offset and
     // the residual reflects real PHC-read jitter — not a phc2sys frequency rail.
-    bool const healthy = fit.rms_residual <= static_cast<double>(params_.degrade_threshold_ns);
-    set_healthy(healthy);
-    if (healthy) {
+    if (fit.rms_residual <= static_cast<double>(params_.degrade_threshold_ns)) {
+        set_healthy(true);
         set_ever_healthy(true);
+    } else {
+        set_healthy(false);
     }
+}
+
+void PtpTimeBridge::publish_fit_quality(LinearFitResult const& fit, SamplerState const& state)
+{
+    // A sample is known to half its read bracket, and the published line
+    // to the furthest it lies from any sample, measured the way a reader
+    // converts: together, the worst case over what the line was fitted to.
+    // A line held at the edge of the rate window is not the samples' line
+    // and no bound is claimed for it. On top goes the error of this
+    // machine's hardware that no fit shows (params_.fixed_error_ns).
+    TimingSampleWindow const& phc_window = state.phc_window;
+    int64_t widest_bracket = 0;
+    for (size_t i = 0; i < phc_window.size(); ++i) {
+        widest_bracket = std::max(widest_bracket, phc_window[i].bracket_ns);
+    }
+    realtime::Nanoseconds const bound{
+        fit.published_miss_ns + ((widest_bracket + 1) / 2) + std::max<int64_t>(params_.fixed_error_ns, 0)};
+    fit_quality_.store(
+        {.synced_at = realtime::MonotonicRawClock::from_ns(phc_window[phc_window.size() - 1].monotonic_ns),
+         .bound_at_sync = fit.clamped ? realtime::UNBOUNDED_ACCURACY : bound,
+         .epoch = state.epoch,
+         .drift_bound_ppb = std::max(params_.holdover_drift_ppb, rate_movement_ppb(fit.slope)) + PUBLISHED_RATE_ROUNDING_PPB,
+         .time_source = realtime::TimeSource::ptp});
+}
+
+auto PtpTimeBridge::rate_movement_ppb(double const slope) noexcept -> uint32_t
+{
+    if (!rate_checkpoint_.taken) {
+        rate_checkpoint_ = {.slope = slope, .fits_since = 0, .previous_movement_ppb = 0, .taken = true};
+    }
+    double const moved = std::fabs(slope - rate_checkpoint_.slope) * 1e9;
+    // Capped far above any real clock and far below where the sum in
+    // publish_fit_quality could wrap.
+    uint32_t const since_checkpoint = moved >= 1e9 ? uint32_t{1'000'000'000} : static_cast<uint32_t>(std::ceil(moved));
+    uint32_t const movement = std::max(since_checkpoint, rate_checkpoint_.previous_movement_ppb);
+    if (++rate_checkpoint_.fits_since >= params_.window_size) {
+        rate_checkpoint_ = {.slope = slope, .fits_since = 0, .previous_movement_ppb = since_checkpoint, .taken = true};
+    }
+    return movement;
 }
 
 }  // namespace statusbar::ptpclient

@@ -14,14 +14,17 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/net/net_posix_util.hpp"
 #include "statusbar/status/catch_or_status.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <utility>
@@ -46,90 +49,142 @@ auto white_key_frequency_hz(uint8_t const base_midi_note, size_t const white_ind
 // Factory
 //
 
+namespace {
+
+/// The talker streams the blob declares, or why an entity cannot be made of
+/// them. Stream topology comes from the blob (kit phase 1): kinds, formats and
+/// rates per STREAM_OUTPUT descriptor. The blob and the data plane can no
+/// longer silently disagree: every mismatch is a loud create-time failure.
+[[nodiscard]] auto checked_talker_specs(DescriptorStorage const& storage) -> StatusValue<StreamSpecs>
+{
+    auto specs = talker_stream_specs(storage, 0);
+    if (!specs) {
+        return failure(specs.error());
+    }
+    if (specs->empty()) {
+        return failure(std::errc::invalid_argument);  // a talker with nothing to talk
+    }
+    if (std::ranges::any_of(*specs, [](StreamSpec const& spec) { return spec.format.kind == StreamKind::other; })) {
+        return failure(std::errc::not_supported);  // unrecognized stream format word
+    }
+    return specs;
+}
+
+/// The stream inputs the blob declares. A tone generator has no audio RX
+/// path, but a CRF input is welcome: it lets the media clock slave to a
+/// remote CRF (the code is a menu, the model is the selection). Any AUDIO
+/// input is still a loud create-time rejection.
+[[nodiscard]] auto checked_listener_specs(DescriptorStorage const& storage) -> StatusValue<StreamSpecs>
+{
+    auto specs = listener_stream_specs(storage, 0);
+    if (!specs) {
+        return failure(specs.error());
+    }
+    if (std::ranges::any_of(*specs, [](StreamSpec const& spec) { return spec.format.kind != StreamKind::crf; })) {
+        return failure(std::errc::invalid_argument);  // audio inputs unsupported here
+    }
+    return specs;
+}
+
+/// The streams of a tone generator and what they agree on.
+struct ToneStreams
+{
+    StreamSpecs specs;
+    StreamSpecs listener_specs;
+    uint32_t rate;
+    size_t channels;
+};
+
+/// Whether every audio stream carries the AUDIO_CLUSTER's channel count.
+[[nodiscard]] auto audio_channels_match(StreamSpecs const& specs, size_t channels) -> bool
+{
+    return std::ranges::all_of(specs, [channels](StreamSpec const& spec) {
+        bool const is_audio = is_audio_kind(spec.format.kind);
+        return !is_audio || spec.format.channels == channels;
+    });
+}
+
+[[nodiscard]] auto agreed_streams(DescriptorStorage const& storage, StreamSpecs const& specs, StreamSpecs const& listener_specs)
+    -> StatusValue<ToneStreams>
+{
+    auto const rate = common_audio_sample_rate(specs, AvbEntityToneGenerator::DEFAULT_SAMPLE_RATE);
+    if (!rate) {
+        return failure(rate.error());  // mixed audio rates need per-domain clocks (phase 3)
+    }
+    size_t const channels = channels_from_storage(storage, 8);
+    if (!audio_channels_match(specs, channels)) {
+        return failure(std::errc::invalid_argument);  // stream format vs AUDIO_CLUSTER channel mismatch
+    }
+    return ToneStreams{.specs = specs, .listener_specs = listener_specs, .rate = *rate, .channels = channels};
+}
+
+[[nodiscard]] auto tone_streams(DescriptorStorage const& storage) -> StatusValue<ToneStreams>
+{
+    auto const specs = checked_talker_specs(storage);
+    if (!specs) {
+        return failure(specs.error());
+    }
+    auto const listener_specs = checked_listener_specs(storage);
+    if (!listener_specs) {
+        return failure(listener_specs.error());
+    }
+    return agreed_streams(storage, *specs, *listener_specs);
+}
+
+/// Everything the entity is built from that the descriptor blob decides.
+struct TonePlan
+{
+    EntityIdentityDescriptorHandler handler;
+    ToneStreams streams;
+    uint16_t initial_clock_source;
+    std::optional<uint16_t> crf_clock_source;
+};
+
+[[nodiscard]] auto plan_tone_generator(AvbEntityAudioIOConfig const& config, DescriptorStorage const& storage)
+    -> StatusValue<TonePlan>
+{
+    auto streams = tone_streams(storage);
+    if (!streams) {
+        return failure(streams.error());
+    }
+    // Kit phase 3c pattern: the clock source backed by the (first) CRF
+    // stream input, and the CLOCK_DOMAIN's authored default selection.
+    auto const crf_clock_source = streams->listener_specs.empty()
+        ? std::optional<uint16_t>{}
+        : find_input_stream_clock_source(storage, streams->listener_specs.front().index);
+    return TonePlan{
+        .handler = identity_handler(config, storage),
+        .streams = *streams,
+        .initial_clock_source = authored_clock_source(storage),
+        .crf_clock_source = crf_clock_source};
+}
+
+}  // namespace
+
 auto AvbEntityToneGenerator::create(
     AvbEntityAudioIOConfig config, uint8_t base_midi_note, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityToneGenerator>>
-{  // NOLINT(statusbar-block-statements) the generator's construction, in order; pre-dates the gate
+{
     auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
     if (!storage_result) {
         return failure(storage_result.error());
     }
-
-    // Stream topology from the blob (kit phase 1): kinds/formats/rates per
-    // STREAM_OUTPUT descriptor. The blob and the data plane can no longer
-    // silently disagree — every mismatch below is a loud create-time failure.
-    auto specs_result = talker_stream_specs(*storage_result, 0);
-    if (!specs_result) {
-        return failure(specs_result.error());
+    auto plan = plan_tone_generator(config, *storage_result);
+    if (!plan) {
+        return failure(plan.error());
     }
-    auto const& specs = *specs_result;
-    if (specs.empty()) {
-        return failure(std::errc::invalid_argument);  // a talker with nothing to talk
-    }
-    for (auto const& spec : specs) {
-        if (spec.format.kind == StreamKind::other) {
-            return failure(std::errc::not_supported);  // unrecognized stream format word
-        }
-    }
-    // Stream inputs: a tone generator has no audio RX path, but a CRF input
-    // is welcome — it lets the media clock slave to a remote CRF (the code is
-    // a menu, the model is the selection). Any AUDIO input is still a loud
-    // create-time rejection.
-    auto listener_specs = listener_stream_specs(*storage_result, 0);
-    if (!listener_specs) {
-        return failure(listener_specs.error());
-    }
-    for (auto const& spec : *listener_specs) {
-        if (spec.format.kind != StreamKind::crf) {
-            return failure(std::errc::invalid_argument);  // audio inputs unsupported here
-        }
-    }
-
-    // Kit phase 3c pattern: the clock source backed by the (first) CRF
-    // stream input, and the CLOCK_DOMAIN's authored default selection.
-    std::optional<uint16_t> crf_clock_source{};
-    if (!listener_specs->empty()) {
-        crf_clock_source = find_input_stream_clock_source(*storage_result, listener_specs->front().index);
-    }
-    uint16_t const initial_clock_source = authored_clock_source(*storage_result);
-
-    auto const rate = common_audio_sample_rate(specs, DEFAULT_SAMPLE_RATE);
-    if (!rate) {
-        return failure(rate.error());  // mixed audio rates need per-domain clocks (phase 3)
-    }
-
-    size_t const channels = channels_from_storage(*storage_result, 8);
-    for (auto const& spec : specs) {
-        bool const is_audio = is_audio_kind(spec.format.kind);
-        if (is_audio && spec.format.channels != channels) {
-            return failure(std::errc::invalid_argument);  // stream format vs AUDIO_CLUSTER channel mismatch
-        }
-    }
-
-    auto const iface_mac = net::read_interface_mac(config.interface_name);
-    EntityIdentityDescriptorHandler handler{
-        *storage_result,
-        config.entity_id,
-        config.entity_model_id,
-        config.firmware_version,
-        config.entity_name,
-        iface_mac,
-        /*patch_avb_interface=*/true};
-
-    std::pmr::memory_resource* const mr = memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource();
-    auto entity = std::make_unique<AvbEntityToneGenerator>(
+    return success(std::make_unique<AvbEntityToneGenerator>(
         AvbEntityToneGenerator::CreateKey{},
         std::move(config),
-        std::move(handler),
-        specs,
-        *listener_specs,
-        initial_clock_source,
-        crf_clock_source,
-        *rate,
-        channels,
+        std::move(plan->handler),
+        plan->streams.specs,
+        plan->streams.listener_specs,
+        plan->initial_clock_source,
+        plan->crf_clock_source,
+        plan->streams.rate,
+        plan->streams.channels,
         base_midi_note,
-        mr);
-    return success(std::move(entity));
+        memory_resource != nullptr ? memory_resource : std::pmr::get_default_resource()));
 }
 
 //
@@ -251,7 +306,7 @@ auto AvbEntityToneGenerator::start(net::MessageReactor& reactor, TimePoint const
     // contexts add zero extra offset. Assigned before kit_.start() opens the
     // TX slots (the kit's talker holds a reference to it).
     media_clock_ = ptpclient::MediaClockGenerator{ptpclient::MediaClockGenerator::Config{
-        .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = config_.presentation_offset_ns}};
+        .sample_rate_hz = static_cast<double>(sample_rate_), .presentation_offset_ns = effective_presentation_offset_ns(config_)}};
 
     if (auto status = kit_.start(reactor, now); !status) {
         return status;

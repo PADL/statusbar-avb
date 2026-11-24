@@ -2,69 +2,32 @@
 // SPDX-License-Identifier: MIT
 
 #include "statusbar/ptpclient/ptpclient.hpp"
+#include "statusbar/ptpclient/ptpclient_bridge_test_support.hpp"
 #include "statusbar/realtime/realtime_base.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/test/test.hpp"
 
-#include <array>
 #include <atomic>
 #include <chrono>
-#include <climits>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
-#include <functional>
-#include <string_view>
 #include <system_error>
-#include <thread>
-
-#include <sys/resource.h>
 
 using namespace statusbar::ptpclient;
 
 //
-// Mock PTP Time Reader
+// How these tests tell the time
+//
+// The bridge is told every reading (begin_told_sampling / observe): the
+// times are made up, no thread runs and nothing waits. The sampler thread's
+// own start and stop, the sleep on the real clocks and the PtpTimer thread
+// are tried in ptpclient_bridge_functional_test.cpp.
 //
 
-/// Mock PTP reader that returns monotonic time + offset with optional rate adjustment
-class MockPtpReader
-{
-  public:
-    MockPtpReader() = default;
-
-    /// Set the offset between PTP and monotonic time
-    void set_offset(int64_t offset_ns) { offset_ns_ = offset_ns; }
-
-    /// Set the rate multiplier (1.0 = same rate, 1.0001 = 100 ppm fast)
-    void set_rate(double rate) { rate_ = rate; }
-
-    /// Set whether the reader should fail
-    void set_should_fail(bool fail) { should_fail_ = fail; }
-
-    /// Get the reader function
-    auto get_reader() -> PtpTimeBridge::PtpTimeReader
-    {
-        return [this]() -> statusbar::StatusValue<int64_t> {
-            if (should_fail_) {
-                return statusbar::failure(make_error_code(PtpError::clock_gettime_failed));
-            }
-
-            auto const now = std::chrono::steady_clock::now();
-            auto const mono_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-
-            // PTP = rate * monotonic + offset
-            auto const ptp_ns = static_cast<int64_t>(static_cast<double>(mono_ns) * rate_) + offset_ns_;
-            return statusbar::success(ptp_ns);
-        };
-    }
-
-  private:
-    int64_t offset_ns_{0};
-    double rate_{1.0};
-    bool should_fail_{false};
-};
+using namespace statusbar::ptpclient::test_support;
 
 //
 // Tests: PtpTimeBridge - Construction and initial state
@@ -92,189 +55,93 @@ TEST(ptp_bridge_construct, initial_mapping_has_default_values)
 }
 
 //
-// Tests: PtpTimeBridge - start_sampling with PtpTimeReader
-//
-
-TEST(ptp_bridge_sampling, start_with_reader_succeeds)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    auto result = bridge.start_sampling(mock.get_reader());
-
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(bridge.is_running());
-
-    // Stop via guard destruction
-    result->stop();
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, guard_stops_on_destruction)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    {
-        auto result = bridge.start_sampling(mock.get_reader());
-        EXPECT_TRUE(result.has_value());
-        EXPECT_TRUE(bridge.is_running());
-    }  // Guard goes out of scope
-
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, stop_sampling_is_idempotent)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    auto result = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(result.has_value());
-
-    bridge.stop_sampling();
-    EXPECT_FALSE(bridge.is_running());
-
-    // Second stop should be safe
-    bridge.stop_sampling();
-    EXPECT_FALSE(bridge.is_running());
-}
-
-TEST(ptp_bridge_sampling, cannot_start_twice)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    auto result1 = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(result1.has_value());
-
-    // Second start should fail
-    auto result2 = bridge.start_sampling(mock.get_reader());
-    EXPECT_FALSE(result2.has_value());
-
-    bridge.stop_sampling();
-}
-
-//
 // Tests: PtpTimeBridge - Convergence to healthy state
 //
 
 TEST(ptp_bridge_health, converges_to_healthy_with_good_data)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-    mock.set_offset(100'000'000);  // 100ms offset
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
 
-    BridgeSamplingParams params;
-    params.sample_hz = 100;               // Fast sampling for test
-    params.min_samples_for_healthy = 8;   // Need 8 samples
-    params.degrade_threshold_ns = 10000;  // 10us threshold
-
-    auto result = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(result.has_value());
-
-    // Wait for convergence (enough samples + processing time)
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-    // Should be healthy now
     EXPECT_TRUE(bridge.is_healthy());
-
     auto mapping = bridge.get_mapping();
     EXPECT_TRUE(mapping.healthy);
-    EXPECT_TRUE(mapping.sample_count >= params.min_samples_for_healthy);
-
-    // Rate should be close to 1.0
-    EXPECT_TRUE(std::abs(mapping.rate - 1.0) < 0.001);
-
-    bridge.stop_sampling();
+    EXPECT_EQ(mapping.sample_count, params.window_size);
+    // The readings lie on a line at rate one: the fit is that line.
+    EXPECT_TRUE(std::abs(mapping.rate - 1.0) < 1e-9);
+    EXPECT_EQ(mapping.offset_ns, ToldPhc::PHC_AHEAD_OF_RAW_NS);
+    EXPECT_EQ(mapping.rms_residual_ns, int64_t{0});
+    EXPECT_EQ(mapping.worst_bracket_ns, int64_t{400});
 }
 
 TEST(ptp_bridge_health, unhealthy_when_reader_fails)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-    mock.set_should_fail(true);
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    phc.fails = true;
+    feed(bridge, state, phc, 64);
 
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-
-    auto result = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(result.has_value());
-
-    // Wait a bit
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-
-    // Should not be healthy since all samples fail
+    // Not healthy, since every PHC read failed.
     EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_EQ(bridge.get_mapping().sample_count, 0);
+}
 
-    bridge.stop_sampling();
+TEST(ptp_bridge_health, a_read_that_took_too_long_is_not_a_sample)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc;
+    // Every read preempted for longer than the bracket limit: none is used.
+    phc.bracket_ns = params.max_bracket_ns + 2;
+    feed(bridge, state, phc, 64);
+    EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_EQ(bridge.telemetry().reject_count, uint64_t{64});
+
+    phc.bracket_ns = 400;
+    feed(bridge, state, phc, 8);
+    EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_EQ(bridge.telemetry().reject_count, uint64_t{64});
 }
 
 //
 // Tests: PtpTimeBridge - Time conversion
 //
 
-TEST(ptp_bridge_convert, ptp_to_monotonic_with_unity_mapping)
+TEST(ptp_bridge_convert, before_any_sample_the_lines_are_identity_and_nothing_is_vouched_for)
 {
     PtpTimeBridge bridge;
 
-    // Default mapping: rate=1.0, offset=0
-    auto result = bridge.convert_ptp_to_monotonic(1'000'000'000LL);
-
-    EXPECT_EQ(result.time_ns, 1'000'000'000LL);
-    EXPECT_EQ(result.epoch, 0U);
-    EXPECT_FALSE(result.healthy);  // Not healthy until samples are collected
-}
-
-TEST(ptp_bridge_convert, monotonic_to_ptp_with_unity_mapping)
-{
-    PtpTimeBridge bridge;
-
-    auto result = bridge.convert_monotonic_to_ptp(1'000'000'000LL);
-
-    EXPECT_EQ(result.time_ns, 1'000'000'000LL);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(1'000'000'000LL)) == mono(1'000'000'000LL));
+    EXPECT_TRUE(bridge.from_monotonic(mono(1'000'000'000LL)) == ptp(1'000'000'000LL));
+    EXPECT_EQ(bridge.epoch(), 0U);
+    EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_FALSE(bridge.quality().is_bounded());  // the bound a caller judges a conversion by
 }
 
 TEST(ptp_bridge_convert, conversion_after_convergence)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-    int64_t const offset = 500'000'000LL;  // 500ms offset
-    mock.set_offset(offset);
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-
-    // Wait for convergence
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
     EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_TRUE(bridge.quality().is_bounded());
 
-    // After convergence, time conversions should be accurate
-    // The mapping is: ptp = rate * monotonic + offset
-    // So converting monotonic->ptp and back should give close to the original
-    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
+    // The instant the next reading would start at, on all three clocks.
+    EXPECT_TRUE(bridge.from_monotonic(mono(phc.mono_ns)) == ptp(phc.phc_ns));
+    EXPECT_TRUE(bridge.to_monotonic(ptp(phc.phc_ns)) == mono(phc.mono_ns));
+    EXPECT_EQ(bridge.from_raw_ns(phc.raw_ns), phc.phc_ns);
+    EXPECT_EQ(bridge.to_raw_ns(phc.phc_ns), phc.raw_ns);
 
-    auto ptp_result = bridge.convert_monotonic_to_ptp(mono_ns);
-    auto mono_result = bridge.convert_ptp_to_monotonic(ptp_result.time_ns);
-
-    // Round-trip should preserve monotonic time within tight tolerance
-    EXPECT_TRUE(std::abs(mono_result.time_ns - mono_ns) < 1000);  // Within 1us
-
-    // The PTP time should be offset from monotonic by approximately our set offset
-    // The mock applies: ptp = rate * monotonic + offset, so the difference should be close to offset
-    // But the bridge's linear fit may have a slightly different slope, so allow more tolerance
-    auto mapping = bridge.get_mapping();
-    (void)mapping;  // Suppress warning; we verified health above
-
-    // Just verify that the healthy flag is set and rate is close to 1.0
-    EXPECT_TRUE(std::abs(mapping.rate - 1.0) < 0.001);
-
-    bridge.stop_sampling();
+    // The same through the adapter, which is how a caller holds typed time.
+    statusbar::realtime::ClockAdapter<GptpClock0, PtpTimeBridge> const adapter{bridge};
+    EXPECT_TRUE(adapter.to_raw(ptp(phc.phc_ns)) == raw(phc.raw_ns));
+    EXPECT_TRUE(adapter.from_raw(raw(phc.raw_ns)) == ptp(phc.phc_ns));
 }
 
 //
@@ -299,79 +166,250 @@ TEST(ptp_bridge_epoch, reset_epoch_increments_epoch)
 TEST(ptp_bridge_epoch, reset_epoch_marks_unhealthy)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-
-    // Wait for healthy
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
     EXPECT_TRUE(bridge.is_healthy());
 
-    // Reset epoch
     bridge.reset_epoch();
 
-    // Should be unhealthy after reset
+    EXPECT_FALSE(bridge.is_healthy());
+}
+
+//
+// Tests: PtpTimeBridge - quality(): how well the PHC line is known
+//
+
+static_assert(statusbar::realtime::QualifiedClockSource<PtpTimeBridge>);
+
+TEST(ptp_bridge_quality, no_bound_is_claimed_before_the_first_healthy_fit)
+{
+    PtpTimeBridge bridge;
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    // A PHC that cannot be read teaches nothing.
+    phc.fails = true;
+    feed(bridge, state, phc, 20);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    // Seven readings are one short of a fit; the eighth makes it.
+    phc.fails = false;
+    feed(bridge, state, phc, 7);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_FALSE(bridge.is_healthy());
+    feed(bridge, state, phc, 1);
+    EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_TRUE(bridge.quality().is_bounded());
+}
+
+TEST(ptp_bridge_quality, a_fit_is_bounded_by_its_worst_residual_and_half_its_longest_read)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 30};
+    feed(bridge, state, phc, 64);
+
+    // Readings that lie on a line, each taken in 400 ns: known to 200 ns.
+    auto quality = bridge.quality();
+    EXPECT_TRUE(quality.is_bounded());
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{200} && quality.bound_at_sync <= Nanoseconds{202});
+    // As of the newest sample, on this timeline, from a PTP clock.
+    EXPECT_EQ(MonotonicRawClock::to_ns(quality.synced_at), phc.last_sample_raw_ns());
+    EXPECT_EQ(quality.epoch, bridge.epoch());
+    EXPECT_TRUE(quality.time_source == statusbar::realtime::TimeSource::ptp);
+    // The configured drift, plus the rounding of the rate the line is published with.
+    EXPECT_EQ(quality.drift_bound_ppb, params.holdover_drift_ppb + 500);
+
+    // PHC reads that scatter 3 us either side of the line widen the bound
+    // by that. The pattern (+ - - +) has no slope of its own to tilt the fit.
+    constexpr int64_t SCATTER_NS[4] = {3'000, -3'000, -3'000, 3'000};
+    for (int i = 0; i < 64; ++i) {
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+    }
+    quality = bridge.quality();
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{3'200} && quality.bound_at_sync <= Nanoseconds{3'210});
+
+    // And slower reads by half their length: 2 us brackets, 800 ns more.
+    phc.bracket_ns = 2'000;
+    for (int i = 0; i < 64; ++i) {
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+    }
+    quality = bridge.quality();
+    EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{4'000} && quality.bound_at_sync <= Nanoseconds{4'010});
+}
+
+TEST(ptp_bridge_quality, the_hardwares_own_error_is_added_to_every_bound)
+{
+    // The same readings through two bridges: one told nothing of its
+    // hardware, one told that a PHC reading may be 150 ns from true for
+    // reasons no fit can see.
+    PtpTimeBridge plain;
+    auto plain_state = plain.begin_told_sampling(told_params());
+    ToldPhc plain_phc{.ppm = 30};
+    feed(plain, plain_state, plain_phc, 64);
+
+    PtpTimeBridge told;
+    auto told_state = told.begin_told_sampling(told_params().with_fixed_error_ns(150));
+    ToldPhc told_phc{.ppm = 30};
+    feed(told, told_state, told_phc, 64);
+
+    EXPECT_TRUE(told.quality().is_bounded());
+    EXPECT_EQ((told.quality().bound_at_sync - plain.quality().bound_at_sync).count(), int64_t{150});
+    // Nothing else of the quality moves.
+    EXPECT_EQ(told.quality().drift_bound_ppb, plain.quality().drift_bound_ppb);
+
+    // A negative figure is no figure.
+    PtpTimeBridge negative;
+    auto negative_state = negative.begin_told_sampling(told_params().with_fixed_error_ns(-150));
+    ToldPhc negative_phc{.ppm = 30};
+    feed(negative, negative_state, negative_phc, 64);
+    EXPECT_TRUE(negative.quality().bound_at_sync == plain.quality().bound_at_sync);
+}
+
+TEST(ptp_bridge_quality, when_the_phc_cannot_be_read_the_line_coasts)
+{
+    PtpTimeBridge bridge;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 30};
+    feed(bridge, state, phc, 64);
+    auto const at_loss = bridge.quality();
+    EXPECT_TRUE(at_loss.is_bounded());
+
+    // Thirty seconds in which the PHC does not answer. The sampler keeps
+    // trying; nothing is fitted and nothing is withdrawn.
+    phc.fails = true;
+    feed(bridge, state, phc, 15'000);
+    EXPECT_TRUE(bridge.quality() == at_loss);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+
+    // Only the age has grown, and the uncertainty with it: 30 s at 15.5 ppm.
+    auto const later = at_loss.synced_at + std::chrono::seconds{30};
+    EXPECT_EQ(at_loss.uncertainty(later).count(), at_loss.bound_at_sync.count() + 465'000);
+    // The line still converts with the rate and offset it had: a PHC that
+    // held its rate is where the line says, far inside the bound.
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
+    EXPECT_TRUE(std::abs(bridge.to_raw_ns(phc.phc_ns) - phc.raw_ns) <= 5);
+
+    // The PHC answers again: the anchor moves on to the new readings.
+    phc.fails = false;
+    feed(bridge, state, phc, 4);
+    EXPECT_EQ(MonotonicRawClock::to_ns(bridge.quality().synced_at), phc.last_sample_raw_ns());
+    EXPECT_EQ(bridge.quality().epoch, at_loss.epoch);
+}
+
+TEST(ptp_bridge_quality, a_new_epoch_claims_nothing_until_the_fit_is_healthy_again)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    uint64_t const epoch_before = bridge.epoch();
+
+    bridge.reset_epoch();
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+
+    // The window starts again: seven readings are not enough, eight are.
+    feed(bridge, state, phc, 7);
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    feed(bridge, state, phc, 1);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+}
+
+TEST(ptp_bridge_quality, a_step_of_the_phc_is_a_new_epoch)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+    uint64_t const epoch_before = bridge.epoch();
+
+    // The PHC is stepped a second ahead between two readings.
+    phc.phc_ns += 1'000'000'000;
+    feed(bridge, state, phc, 1);
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_FALSE(bridge.quality().is_bounded());
     EXPECT_FALSE(bridge.is_healthy());
 
-    bridge.stop_sampling();
+    // Fitted afresh on the new timeline, and bounded on it.
+    feed(bridge, state, phc, 8);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch_before + 1);
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
 }
 
-//
-// Tests: SamplingGuard - RAII behavior
-//
-
-TEST(ptp_bridge_guard, guard_active_when_valid)
+TEST(ptp_bridge_quality, a_phc_slewed_past_the_rate_window_is_not_vouched_for)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
+    auto const params = told_params();
+    auto state = bridge.begin_told_sampling(params);
+    // A servo slewing the PHC 300 ppm against RAW, past the 200 ppm the
+    // published rate is held within.
+    EXPECT_TRUE(params.max_rate_ppm < 300.0);
+    ToldPhc phc{.ppm = 300};
+    feed(bridge, state, phc, 64);
 
-    auto result = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(result.has_value());
-    EXPECT_TRUE(result->active());
+    // The readings lie on a clean line, so the fit is healthy and a timer
+    // on the bridge keeps running. The line that is published is not that
+    // line: it is held at the edge of the window and runs away from the
+    // PHC at 100 ppm, microseconds across the window. No bound is claimed.
+    EXPECT_TRUE(bridge.is_healthy());
+    EXPECT_FALSE(bridge.quality().is_bounded());
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) >= 2'000);
 
-    result->stop();
-    EXPECT_FALSE(result->active());
+    // The servo settles inside the window: bounded again, on the same epoch.
+    uint64_t const epoch = bridge.epoch();
+    phc.ppm = 150;
+    feed(bridge, state, phc, 96);
+    EXPECT_TRUE(bridge.quality().is_bounded());
+    EXPECT_EQ(bridge.quality().epoch, epoch);
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(phc.raw_ns) - phc.phc_ns) <= 5);
 }
 
-TEST(ptp_bridge_guard, guard_release_transfers_ownership)
+TEST(ptp_bridge_quality, the_bound_is_measured_against_the_line_the_conversions_use)
 {
+    // What quality() claims must cover what a conversion really does: at
+    // every sample of the window the published line is within the bound.
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    auto result = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(result.has_value());
-
-    // Release ownership
-    auto* released = result->release();
-    EXPECT_EQ(released, &bridge);
-    EXPECT_FALSE(result->active());
-
-    // Bridge should still be running
-    EXPECT_TRUE(bridge.is_running());
-
-    // Manual cleanup
-    bridge.stop_sampling();
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc{.ppm = 97};
+    constexpr int64_t SCATTER_NS[4] = {700, -700, -700, 700};
+    for (int i = 0; i < 64; ++i) {
+        int64_t const truth = phc.phc_ns + (phc.bracket_ns / 2);
+        (void)bridge.observe(state, phc.next(SCATTER_NS[i % 4]));
+        if (i >= 32) {
+            int64_t const converted = bridge.from_raw_ns(phc.last_sample_raw_ns());
+            EXPECT_TRUE(std::abs(converted - truth) <= bridge.quality().bound_at_sync.count());
+        }
+    }
 }
 
-TEST(ptp_bridge_guard, guard_move_transfers_ownership)
+TEST(ptp_bridge_quality, a_rate_seen_moving_raises_the_drift_bound)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
+    auto params = told_params();
+    params.holdover_drift_ppb = 1'000;  // a good oscillator in a steady room
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.ppm = 10};
+    feed(bridge, state, phc, 96);
+    EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000 + 500});
 
-    auto result = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(result.has_value());
+    // The servo pulls the PHC 50 ppm: the rate the line holds was seen to
+    // move by that much within a window, so it may be that far out again.
+    phc.ppm = 60;
+    feed(bridge, state, phc, 48);
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb > uint32_t{40'000});
+    EXPECT_TRUE(bridge.quality().drift_bound_ppb <= uint32_t{51'000});
 
-    SamplingGuard guard2 = std::move(*result);
-    EXPECT_TRUE(guard2.active());
-    EXPECT_FALSE(result->active());
-
-    guard2.stop();
-    EXPECT_FALSE(bridge.is_running());
+    // Steady again for a few windows, the configured figure stands.
+    feed(bridge, state, phc, 160);
+    EXPECT_EQ(bridge.quality().drift_bound_ppb, uint32_t{1'000 + 500});
 }
 
 //
@@ -382,7 +420,7 @@ TEST(ptp_bridge_sleep, sleep_fails_when_not_running)
 {
     PtpTimeBridge bridge;
 
-    auto result = bridge.sleep_until_ptp(1'000'000'000LL);
+    auto result = bridge.sleep_until_ptp(ptp(1'000'000'000LL));
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_running));
@@ -391,198 +429,147 @@ TEST(ptp_bridge_sleep, sleep_fails_when_not_running)
 TEST(ptp_bridge_sleep, sleep_fails_when_unhealthy)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-    mock.set_should_fail(true);  // Force unhealthy
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    phc.fails = true;  // never healthy
+    feed(bridge, state, phc, 16);
 
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-
-    // Wait a bit (but won't become healthy due to failures)
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-
-    // Try to sleep - should fail because unhealthy
-    auto const deadline_ns = statusbar::realtime::read_monotonic_ns() + 1'000'000LL;
-
-    auto result = bridge.sleep_until_ptp(deadline_ns);
+    // Refused in the plan, before any clock is read or anything waits.
+    auto result = bridge.sleep_until_ptp(ptp(phc.phc_ns + 1'000'000LL));
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_healthy));
-
-    bridge.stop_sampling();
+    EXPECT_EQ(bridge.prepare_sleep(ptp(phc.phc_ns + 1'000'000LL)).error().value(), static_cast<int>(PtpError::bridge_not_healthy));
 }
 
 TEST(ptp_bridge_sleep, sleep_bails_when_the_caller_stops)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
     EXPECT_TRUE(bridge.is_healthy());
 
-    // A caller that has already been told to stop: the sleep's final spin
-    // reads the flag and returns bridge_not_running instead of the wake time.
+    // A caller that has already been told to stop does not sleep at all:
+    // bridge_not_running instead of a wake time, whatever the deadline.
     std::atomic<bool> const keep_going{false};
-    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
-    auto deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 10'000'000LL);
-
-    auto result = bridge.sleep_until_ptp(deadline_ptp.time_ns, &keep_going);
+    auto result = bridge.sleep_until_ptp(ptp(phc.phc_ns + 10'000'000LL), &keep_going);
 
     EXPECT_FALSE(result.has_value());
     EXPECT_EQ(result.error().value(), static_cast<int>(PtpError::bridge_not_running));
-
-    bridge.stop_sampling();
 }
 
-TEST(ptp_bridge_sleep, sleep_returns_wake_time)
+TEST(ptp_bridge_sleep, the_plan_is_the_deadline_on_both_local_clocks)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
 
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-
-    // Wait for healthy
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    // Sleep for a short time
-    auto const mono_ns = statusbar::realtime::read_monotonic_ns();
-    auto deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 10'000'000LL);  // 10ms from now
-
-    auto result = bridge.sleep_until_ptp(deadline_ptp.time_ns);
-
-    EXPECT_TRUE(result.has_value());
-    // Wake time should be close to or after the deadline
-    EXPECT_TRUE(result->ptp_ns >= deadline_ptp.time_ns - 1'000'000LL);  // Within 1ms tolerance
-    // The wake is one RAW read, and the PTP time is that read through the
-    // mapping (as it stood then; the sampler may have refitted since).
-    EXPECT_TRUE(std::abs(bridge.from_raw_ns(result->raw_ns) - result->ptp_ns) < 1'000'000);
-    EXPECT_TRUE(std::abs(statusbar::realtime::read_monotonic_raw_ns() - result->raw_ns) < 1'000'000'000LL);
-
-    bridge.stop_sampling();
+    // 10 ms after the instant the next reading would start at.
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    EXPECT_TRUE(plan->raw_deadline == raw(phc.raw_ns + 10'000'000LL));
+    EXPECT_TRUE(plan->mono_deadline == mono(phc.mono_ns + 10'000'000LL));
+    EXPECT_TRUE(plan->mono_deadline == bridge.raw_line().to_monotonic(plan->raw_deadline));
+    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.0) < 1e-9);
+    EXPECT_EQ(plan->before.epoch, bridge.epoch());
 }
 
-TEST(ptp_bridge_sleep, sleep_reports_spin_headroom)
+TEST(ptp_bridge_sleep, the_coarse_sleep_ends_a_guard_before_the_deadline)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-    params.wake_refine_spin_ns = 200'000;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    auto const mono_ns =
-        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
-    auto const deadline_ptp = bridge.convert_monotonic_to_ptp(mono_ns + 5'000'000LL);
-
-    int64_t headroom = INT64_MIN;
-    auto const result = bridge.sleep_until_ptp(deadline_ptp.time_ns, nullptr, &headroom);
-    EXPECT_TRUE(result.has_value());
-    // The sleep woke about the spin window early (plus a slew guard, less the OS wake latency):
-    // never as early as the whole sleep; on a loaded host possibly late.
-    EXPECT_TRUE(headroom != INT64_MIN);
-    EXPECT_TRUE(headroom < 5'000'000);
-    EXPECT_TRUE(headroom > -5'000'000);
-
-    bridge.stop_sampling();
-}
-
-TEST(ptp_timer_stats, headroom_duration_and_thread_name)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
+    auto params = told_params();
     params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
 
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    std::atomic<int> wakes{0};
-    std::array<char, 16> name{};
-    auto timer = make_ptp_timer(
-        bridge,
-        1'000'000,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
-            if (!info) {
-                return;
-            }
-            if (wakes.fetch_add(1) == 0) {
-#if defined(__linux__) || defined(__APPLE__)
-                (void)pthread_getname_np(pthread_self(), name.data(), name.size());
-#endif
-                std::this_thread::sleep_for(std::chrono::microseconds(200));  // measurable work
-            }
-        },
-        0,
-        /*enable_realtime=*/false,
-        /*cpu_affinity=*/-1);
-    timer.set_thread_name("test-timer");
-    EXPECT_TRUE(timer.start().has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    timer.stop();
-
-    EXPECT_TRUE(wakes.load() > 5);
-    auto const headroom = timer.wake_headroom();
-    auto const stats = timer.stats();
-    // Headroom is reported only for wakes that slept: the first aligned wake
-    // can fall inside the spin window and not sleep.
-    EXPECT_TRUE(headroom.count <= stats.error.count);
-    EXPECT_TRUE(headroom.count + 1 >= stats.error.count);
-    EXPECT_TRUE(headroom.max_ns < 1'000'000);  // never a whole period early
-    EXPECT_EQ(stats.duration.count, stats.error.count);
-    EXPECT_TRUE(stats.duration.max_ns >= 200'000);
-    EXPECT_EQ(stats.skipped_counts, timer.missed_cycles());
-#if defined(__linux__) || defined(__APPLE__)
-    EXPECT_EQ(std::string_view{name.data()}, std::string_view{"test-timer"});
-#endif
-
-    bridge.stop_sampling();
+    // CLOCK_MONOTONIC at rate one against RAW: only the wakeup guard.
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    EXPECT_TRUE(bridge.early_wake_monotonic(*plan, raw(phc.raw_ns)) == plan->mono_deadline - 50us);
+    // Told a RAW time already past the deadline, the slew term is nothing.
+    EXPECT_TRUE(bridge.early_wake_monotonic(*plan, plan->raw_deadline + 1ns) == plan->mono_deadline - 50us);
 }
 
-//
-// Tests: PtpTimeBridge - get_mapping() consistency
-//
-
-TEST(ptp_bridge_mapping, get_mapping_returns_consistent_snapshot)
+TEST(ptp_bridge_sleep, a_slewed_monotonic_clock_widens_the_guard_by_what_the_sleep_could_accrue)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.mono_ppm = 1'000};  // CLOCK_MONOTONIC slewed 1000 ppm fast
+    feed(bridge, state, phc, 64);
 
-    auto guard = bridge.start_sampling(mock.get_reader());
-    EXPECT_TRUE(guard.has_value());
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.001) < 1e-6);
+    // 10 ms of sleep at 1000 ppm could diverge by 10 us: that much earlier.
+    int64_t const guard = (plan->mono_deadline - bridge.early_wake_monotonic(*plan, raw(phc.raw_ns))).count();
+    EXPECT_TRUE(guard >= 50'000 + 9'950 && guard <= 50'000 + 10'050);
+}
 
-    // Get multiple mappings and verify they're consistent
-    auto m1 = bridge.get_mapping();
-    auto m2 = bridge.get_mapping();
+TEST(ptp_bridge_sleep, the_wake_is_told_in_ptp_through_the_mapping_it_slept_under)
+{
+    PtpTimeBridge bridge;
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
 
-    // Epoch should be the same (or m2 >= m1)
-    EXPECT_TRUE(m2.epoch >= m1.epoch);
+    // Woken 150 ns after the RAW deadline: 150 ns after the PTP one.
+    auto const wake = bridge.finalize_wake(plan->raw_deadline + 150ns, plan->before);
+    EXPECT_TRUE(wake.has_value());
+    EXPECT_TRUE(*wake == ptp(phc.phc_ns + 10'000'000LL + 150));
 
-    bridge.stop_sampling();
+    // A new epoch while it slept: the wake belongs to no timeline.
+    bridge.reset_epoch();
+    auto const stale = bridge.finalize_wake(plan->raw_deadline + 150ns, plan->before);
+    EXPECT_FALSE(stale.has_value());
+    EXPECT_EQ(stale.error().value(), static_cast<int>(PtpError::bridge_epoch_changed));
+}
+
+TEST(ptp_bridge_sleep, the_headroom_is_the_spin_window_less_how_late_the_kernel_woke_the_thread)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc;
+    feed(bridge, state, phc, 64);
+
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    auto const mono_wake = bridge.early_wake_monotonic(*plan, raw(phc.raw_ns));
+    // CLOCK_MONOTONIC at rate one: the early wake is the window before the deadline.
+    auto const on_time = plan->raw_deadline - 50us;
+
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time) == 50us);          // woken on time: all of it
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 20us) == 30us);   // 20 us late
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 50us) == 0us);    // at the deadline
+    EXPECT_TRUE(bridge.spin_headroom(*plan, mono_wake, on_time + 80us) == -30us);  // overran it
+}
+
+TEST(ptp_bridge_sleep, the_slew_term_of_the_early_wake_is_not_counted_as_headroom)
+{
+    PtpTimeBridge bridge;
+    auto params = told_params();
+    params.wake_refine_spin_ns = 50'000;
+    auto state = bridge.begin_told_sampling(params);
+    ToldPhc phc{.mono_ppm = 1'000};  // CLOCK_MONOTONIC slewed 1000 ppm fast
+    feed(bridge, state, phc, 64);
+
+    auto const plan = bridge.prepare_sleep(ptp(phc.phc_ns + 10'000'000LL));
+    EXPECT_TRUE(plan.has_value());
+    // The early wake is about 60 us ahead: the window and 10 us for the slew.
+    auto const mono_wake = bridge.early_wake_monotonic(*plan, raw(phc.raw_ns));
+    auto const raw_at_wake = bridge.raw_line().from_monotonic(mono_wake);
+
+    // Woken on time, the thread has the window, not the window and the slew term.
+    EXPECT_TRUE(abs_ns(bridge.spin_headroom(*plan, mono_wake, raw_at_wake) - 50us) <= 100);
+    EXPECT_TRUE(abs_ns(bridge.spin_headroom(*plan, mono_wake, raw_at_wake + 20us) - 30us) <= 100);
 }
 
 //
@@ -593,9 +580,9 @@ TEST(ptp_bridge_mapping, get_mapping_returns_consistent_snapshot)
 // Tests: PtpTimeBridge - the reference clock is CLOCK_MONOTONIC_RAW
 //
 
-static_assert(PtpTimeBridge::reference_is_raw);
-static_assert(statusbar::realtime::RawReferenceClockSource<PtpTimeBridge>);
-static_assert(statusbar::realtime::ClockAdapter<statusbar::realtime::GptpClock0, PtpTimeBridge>::reference_is_raw);
+static_assert(statusbar::realtime::ClockSource<PtpTimeBridge>);
+static_assert(
+    statusbar::realtime::ClockAdapterType<statusbar::realtime::ClockAdapter<statusbar::realtime::GptpClock0, PtpTimeBridge>>);
 
 TEST(ptp_bridge_raw, the_raw_conversions_are_the_primary_line_and_the_mono_line_starts_as_identity)
 {
@@ -603,197 +590,32 @@ TEST(ptp_bridge_raw, the_raw_conversions_are_the_primary_line_and_the_mono_line_
 
     EXPECT_EQ(bridge.to_raw_ns(1'000'000'000LL), 1'000'000'000LL);
     EXPECT_EQ(bridge.from_raw_ns(1'000'000'000LL), 1'000'000'000LL);
-    EXPECT_EQ(bridge.to_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
-    EXPECT_EQ(bridge.from_monotonic_ns(1'000'000'000LL), 1'000'000'000LL);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(1'000'000'000LL)) == mono(1'000'000'000LL));
+    EXPECT_TRUE(bridge.from_monotonic(mono(1'000'000'000LL)) == ptp(1'000'000'000LL));
     EXPECT_EQ(bridge.raw_line().consume().rate, 1.0);
     EXPECT_EQ(bridge.raw_line().consume().offset_ns, 0);
-    EXPECT_FALSE(bridge.convert_ptp_to_raw(5).healthy);
-    EXPECT_EQ(bridge.convert_raw_to_ptp(5).time_ns, 5);
+    EXPECT_FALSE(bridge.is_healthy());
+    EXPECT_EQ(bridge.from_raw_ns(5), 5);
 }
 
 TEST(ptp_bridge_raw, after_sampling_each_conversion_names_the_clock_it_returns)
 {
     PtpTimeBridge bridge;
-    MockPtpReader mock;
-    mock.set_offset(500'000'000LL);
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto state = bridge.begin_told_sampling(told_params());
+    ToldPhc phc{.ppm = 30, .mono_ppm = -200};  // three clocks at three rates
+    feed(bridge, state, phc, 64);
     EXPECT_TRUE(bridge.is_healthy());
 
-    // to_raw_ns of "now" in PTP is RAW now; to_monotonic_ns of it is
-    // CLOCK_MONOTONIC now, through the line the sampler keeps.
-    int64_t const ptp_now = bridge.now_ns();
-    int64_t const raw_now = statusbar::realtime::read_monotonic_raw_ns();
-    int64_t const mono_now = statusbar::realtime::read_monotonic_ns();
-    constexpr int64_t slack_ns = 1'000'000;
-    EXPECT_TRUE(std::abs(bridge.to_raw_ns(ptp_now) - raw_now) < slack_ns);
-    EXPECT_TRUE(std::abs(bridge.to_monotonic_ns(ptp_now) - mono_now) < slack_ns);
+    // The same instant on each clock: to_raw_ns gives the RAW one,
+    // to_monotonic the CLOCK_MONOTONIC one, through the line the sampler keeps.
+    EXPECT_TRUE(std::abs(bridge.to_raw_ns(phc.phc_ns) - phc.raw_ns) <= 2);
+    EXPECT_TRUE(abs_ns(bridge.to_monotonic(ptp(phc.phc_ns)) - mono(phc.mono_ns)) <= 2);
+    EXPECT_TRUE(std::abs(bridge.raw_line().to_monotonic_ns(phc.raw_ns) - phc.mono_ns) <= 2);
 
     // Both pairs round-trip, and the two pairs compose the same way.
-    EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(ptp_now)) - ptp_now) < 1'000);
-    EXPECT_TRUE(std::abs(bridge.from_monotonic_ns(bridge.to_monotonic_ns(ptp_now)) - ptp_now) < 1'000);
-    EXPECT_TRUE(std::abs(bridge.to_monotonic_ns(ptp_now) - bridge.raw_line().to_monotonic_ns(bridge.to_raw_ns(ptp_now))) < 1'000);
-
-    bridge.stop_sampling();
-}
-
-TEST(ptp_bridge_raw, the_sleep_plan_takes_its_monotonic_deadline_from_the_line)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    int64_t const ptp_deadline = bridge.now_ns() + 10'000'000LL;
-    auto plan = bridge.prepare_sleep(ptp_deadline);
-    EXPECT_TRUE(plan.has_value());
-    // The sampler may republish either line between the plan and these reads
-    // (a few ns of fit movement), so the checks are tolerances, not equalities.
-    EXPECT_TRUE(std::abs(plan->raw_deadline_ns - bridge.to_raw_ns(ptp_deadline)) < 1'000);
-    EXPECT_TRUE(std::abs(plan->mono_deadline_ns - bridge.raw_line().to_monotonic_ns(plan->raw_deadline_ns)) < 1'000);
-    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - bridge.raw_line().consume().rate) < 1e-3);
-    EXPECT_TRUE(std::abs(plan->mono_per_raw_slope - 1.0) < 0.2);
-
-    bridge.stop_sampling();
-}
-
-//
-// Tests: PtpTimer - each wake tells its RAW instant
-//
-
-TEST(ptp_timer, each_wake_carries_the_raw_instant_its_ptp_time_was_made_from)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    // The callback is told the wake on both clocks; it compares the RAW one
-    // with the clock as it stands on entry and with the PTP one through the
-    // bridge, and reads nothing else.
-    std::atomic<int64_t> raw_skew_ns{INT64_MAX};
-    std::atomic<int64_t> ptp_skew_ns{INT64_MAX};
-    std::atomic<int> wakes{0};
-    auto timer = make_ptp_timer(
-        bridge,
-        1'000'000,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
-            if (!info || wakes.fetch_add(1) != 0) {
-                return;
-            }
-            int64_t const raw_ns = statusbar::realtime::MonotonicRawClock::to_ns(info->actual_raw);
-            raw_skew_ns.store(statusbar::realtime::read_monotonic_raw_ns() - raw_ns);
-            ptp_skew_ns.store(bridge.from_raw_ns(raw_ns) - info->actual_time_ns);
-        },
-        0,
-        /*enable_realtime=*/false,
-        /*cpu_affinity=*/-1);
-    EXPECT_TRUE(timer.start().has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    timer.stop();
-
-    EXPECT_TRUE(wakes.load() > 0);
-    EXPECT_TRUE(raw_skew_ns.load() >= 0);
-    EXPECT_TRUE(raw_skew_ns.load() < 50'000'000);
-    EXPECT_TRUE(std::abs(ptp_skew_ns.load()) < 1'000'000);
-    bridge.stop_sampling();
-}
-
-namespace {
-
-/// Use 64 KiB of stack, one write per page.
-[[gnu::noinline]] auto use_stack() noexcept -> unsigned char
-{
-    constexpr size_t bytes = size_t{64} * 1024;
-    unsigned char volatile buf[bytes];
-    for (size_t i = 0; i < bytes; i += 4096) {
-        buf[i] = static_cast<unsigned char>(i);
-    }
-    asm volatile("" : : "r"(&buf[0]) : "memory");
-    return buf[0];
-}
-
-#if defined(__linux__)
-/// Minor faults this thread has taken so far.
-auto minor_faults() -> long
-{
-    rusage usage{};
-    (void)getrusage(RUSAGE_THREAD, &usage);
-    return usage.ru_minflt;
-}
-#endif
-
-}  // namespace
-
-TEST(ptp_timer, a_stack_prefault_leaves_the_timer_thread_nothing_to_fault_on)
-{
-    PtpTimeBridge bridge;
-    MockPtpReader mock;
-
-    BridgeSamplingParams params;
-    params.sample_hz = 100;
-    params.min_samples_for_healthy = 8;
-
-    auto guard = bridge.start_sampling(mock.get_reader(), params);
-    EXPECT_TRUE(guard.has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    EXPECT_TRUE(bridge.is_healthy());
-
-    // The first wake uses 64 KiB of stack and counts the minor faults that
-    // took: none, once the thread prefaulted 128 KiB before its loop.
-    (void)use_stack();  // its code is resident before anything is counted
-    std::atomic<long> faults{-1};
-    std::atomic<int> wakes{0};
-    auto timer = make_ptp_timer(
-        bridge,
-        1'000'000,
-        [&](statusbar::StatusValue<TimerWakeInfo> const& info) {
-            if (!info || wakes.fetch_add(1) != 0) {
-                return;
-            }
-#if defined(__linux__)
-            (void)minor_faults();  // and so is getrusage's
-            long const before = minor_faults();
-            (void)use_stack();
-            faults.store(minor_faults() - before);
-#else
-            (void)use_stack();
-            faults.store(0);
-#endif
-        },
-        0,
-        /*enable_realtime=*/false,
-        /*cpu_affinity=*/-1);
-    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{0});
-    timer.set_stack_prefault(size_t{128} * 1024);
-    EXPECT_EQ(timer.stack_prefault_bytes(), size_t{128} * 1024);
-    EXPECT_TRUE(timer.start().has_value());
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
-    timer.stop();
-
-    EXPECT_TRUE(wakes.load() > 0);
-    EXPECT_EQ(faults.load(), 0);
-    bridge.stop_sampling();
+    EXPECT_TRUE(std::abs(bridge.from_raw_ns(bridge.to_raw_ns(phc.phc_ns)) - phc.phc_ns) <= 2);
+    EXPECT_TRUE(abs_ns(bridge.from_monotonic(bridge.to_monotonic(ptp(phc.phc_ns))) - ptp(phc.phc_ns)) <= 2);
+    EXPECT_TRUE(bridge.to_monotonic(ptp(phc.phc_ns)) == bridge.raw_line().to_monotonic(raw(bridge.to_raw_ns(phc.phc_ns))));
 }
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_bridge_test)

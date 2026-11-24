@@ -23,6 +23,7 @@
 #    include "statusbar/udptun/udptun_session.hpp"
 #    include "statusbar/udptun/udptun_time_source.hpp"
 
+#    include <algorithm>
 #    include <cstdint>
 #    include <ctime>
 #    include <string>
@@ -44,20 +45,6 @@ enum class Mode
 [[nodiscard]] inline auto parse_profile(std::string_view s) noexcept -> ::statusbar::gptp::Profile
 {
     return (s == "automotive") ? ::statusbar::gptp::Profile::AvnuAutomotive : ::statusbar::gptp::Profile::Standard;
-}
-
-[[nodiscard]] inline auto parse_bridge_clock(std::string_view s) noexcept -> clockid_t
-{
-    if (s == "monotonic") {
-        return CLOCK_MONOTONIC;
-    }
-    if (s == "monotonic_raw") {
-        return CLOCK_MONOTONIC_RAW;
-    }
-    if (s == "realtime") {
-        return CLOCK_REALTIME;
-    }
-    return -1;  // "none"
 }
 
 [[nodiscard]] inline auto parse_time_source(std::string_view s) noexcept -> ::statusbar::udptun::TimeSourceKind
@@ -130,6 +117,19 @@ struct Config
     /// TAI − UTC in ns, applied manually (37 s since 2017-01-01). Only
     /// used with --wire-clock=gps-tai.
     int64_t tai_minus_utc_ns{37'000'000'000LL};
+    /// Largest worst-case error of the master clock link to measure on, in
+    /// microseconds. Negative takes any bounded link.
+    int64_t max_clock_error_us{::statusbar::udptun::DEFAULT_MAX_CLOCK_ERROR_NS / 1'000};
+    /// Largest worst-case error of the system clock to measure on, in
+    /// microseconds, when the wire timeline is made from it. 0 reports the
+    /// bound without enforcing one.
+    int64_t max_utc_error_us{0};
+    /// How fast the system clock's worst-case error grows while its time
+    /// daemon has no server, in parts per billion.
+    uint64_t utc_holdover_drift_ppb{::statusbar::realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+    /// An error of the system clock that its own report does not show, in
+    /// nanoseconds: what lies between the time source and this clock.
+    int64_t utc_fixed_error_ns{0};
     /// Per-packet CSV output path. Empty = disabled (no file opened,
     /// the RX hot path does only a null-pointer check per packet). When
     /// non-empty, Session opens the file in its constructor and runs a
@@ -213,7 +213,6 @@ struct Config
 
     // Derived
     ::statusbar::gptp::Profile profile{::statusbar::gptp::Profile::Standard};
-    clockid_t bridge_clock{CLOCK_MONOTONIC_RAW};
 };
 
 inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
@@ -227,12 +226,6 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     s.add<double>("servo-ki", "Servo PI integral gain", -1.0, [&](auto v) { c.servo_ki = v; });
     s.add<double>("servo-kp", "Servo PI proportional gain", -1.0, [&](auto v) { c.servo_kp = v; });
     s.add_flag("software", "Use software timestamping (no PHC required)", [&](auto v) { c.software_timestamping = v; });
-    s.add_choice(
-        "bridge-clock",
-        "POSIX clock to bridge gPTP against (the wire timeline runs on CLOCK_MONOTONIC_RAW; only monotonic_raw is accepted)",
-        {"none", "monotonic", "monotonic_raw", "realtime"},
-        "monotonic_raw",
-        [&](auto v) { c.bridge_clock = parse_bridge_clock(v); });
     s.add_flag("verbose", "Print every sync update", [&](auto v) { c.verbose = v; });
 
     s.add_choice("mode", "Operating mode", {"normal", "reflect"}, "normal", [&](auto v) { c.mode = parse_mode(v); });
@@ -323,6 +316,41 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
         "force since 2017-01-01). The kernel's TAI offset is never consulted.",
         37'000'000'000LL,
         [&](auto v) { c.tai_minus_utc_ns = v; });
+    s.add<int64_t>(
+        "max-clock-error-us",
+        "Largest worst-case error of the master clock link (gPTP slave or ptp4l PHC bridge) to "
+        "measure and send on, in microseconds. When synchronization is interrupted the link keeps "
+        "its rate and offset and its error grows; measurement runs on until the error passes this "
+        "limit and resumes when synchronization returns. The report shows the current figure. "
+        "Negative takes any bounded link. 0 is met by no link: nothing is measured or sent. How fast "
+        "the error grows without synchronization is --ptp.holdover_drift_ppb. Not used by "
+        "--time-source=realtime.",
+        c.max_clock_error_us,
+        [&](auto v) { c.max_clock_error_us = v; });
+    s.add<int64_t>(
+        "max-utc-error-us",
+        "Largest worst-case error of the system clock to measure and send on, in microseconds, "
+        "when the wire timeline is made from it (--wire-clock=gps-tai or --time-source=realtime). "
+        "The figure is the operating system's own (what chrony or ntpd last told it), coasted at "
+        "--utc-holdover-drift-ppb between updates. 0 (default) shows it in the report without "
+        "enforcing a limit; on this option alone 0 does not mean a limit of zero.",
+        c.max_utc_error_us,
+        [&](auto v) { c.max_utc_error_us = v; });
+    s.add<uint64_t>(
+        "utc-holdover-drift-ppb",
+        "How fast the system clock's worst-case error grows between updates by its time daemon and "
+        "while the daemon has no server, in parts per billion (default 15000, the tolerance NTP "
+        "assumes of any clock).",
+        c.utc_holdover_drift_ppb,
+        [&](auto v) { c.utc_holdover_drift_ppb = v; });
+    s.add<int64_t>(
+        "utc-fixed-error-ns",
+        "An error of the system clock that its own report does not show, in nanoseconds, added to its "
+        "worst-case error: what lies between the time source and this clock (a receiver's pulse offset, "
+        "a path the time daemon takes as symmetric; default 0). The master link's own is "
+        "--ptp.fixed_error_ns.",
+        c.utc_fixed_error_ns,
+        [&](auto v) { c.utc_fixed_error_ns = v; });
     ::statusbar::ptpclient::add_ptp_arg_specs(s, c.ptp4l);
     s.add_flag(
         "gptp-verbose",
@@ -450,7 +478,11 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.identity.gptp_session_config.phase_jump_threshold_ns = cli.phase_jump_threshold_ns;
     cfg.identity.gptp_session_config.servo_kp = cli.servo_kp;
     cfg.identity.gptp_session_config.servo_ki = cli.servo_ki;
-    cfg.identity.gptp_session_config.bridge_clock = cli.bridge_clock;
+    cfg.identity.gptp_session_config.bridge = true;  // the wire timeline is read through it
+    // One figure for the master link, whichever source it is: the gPTP
+    // slave's bridge takes the PHC bridge's (--ptp.holdover_drift_ppb).
+    cfg.identity.gptp_session_config.holdover_drift_ppb = cli.ptp4l.sampling.holdover_drift_ppb;
+    cfg.identity.gptp_session_config.fixed_error_ns = cli.ptp4l.sampling.fixed_error_ns;
     cfg.identity.gptp_session_config.verbose = cli.gptp_verbose;
     // owlm consumes master-time only via the bridge; nothing else on
     // the system needs the PHC disciplined, so keep PHC raw and let
@@ -481,6 +513,10 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.peer_tai_offset_ns = cli.peer_tai_offset_ns;
     cfg.wire_clock_gps_tai = cli.wire_clock_gps_tai;
     cfg.tai_minus_utc_ns = cli.tai_minus_utc_ns;
+    cfg.max_clock_error_ns = cli.max_clock_error_us < 0 ? -1 : cli.max_clock_error_us * 1'000;
+    cfg.max_utc_error_ns = cli.max_utc_error_us > 0 ? cli.max_utc_error_us * 1'000 : 0;
+    cfg.utc_holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(cli.utc_holdover_drift_ppb, UINT32_MAX));
+    cfg.utc_fixed_error_ns = std::max<int64_t>(cli.utc_fixed_error_ns, 0);
     cfg.bridge_stable_samples = cli.bridge_stable_samples;
     cfg.bridge_stable_rate_ppm = cli.bridge_stable_rate_ppm;
     cfg.bridge_stable_offset_ns = cli.bridge_stable_offset_ns;

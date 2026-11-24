@@ -4,8 +4,10 @@
 // SPDX-License-Identifier: MIT
 
 /// PTP Time Bridge module
-/// Provides PtpTimeBridge class for mapping between PTP and monotonic clocks
-/// Uses background sampling thread with linear regression for accurate time conversion
+/// Provides PtpTimeBridge class for mapping between the PTP hardware clock and
+/// CLOCK_MONOTONIC_RAW, the timing reference. A background sampling thread
+/// fits the PHC against RAW by linear regression, and keeps the
+/// RAW<->CLOCK_MONOTONIC line the sleeps go through beside it.
 
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_base.hpp"
@@ -22,6 +24,7 @@
 #include <ctime>
 #include <expected>
 #include <memory>
+#include <optional>
 #include <system_error>
 #include <thread>
 #include <utility>
@@ -85,11 +88,9 @@ class PtpTimeBridgeBase
         int64_t offset_ns;
     };
 
-    /// Diagnostic: publishes that overwrote a still-unconsumed prior
-    /// publish in the regression buffer. Non-zero is normal because
-    /// the sampler thread publishes at ~500 Hz while the RT-timer
-    /// consumer reads at ~8 kHz — the consumer just sees the latest
-    /// value, and "missed" prior samples are counted here.
+    /// Diagnostic kept from when the line was published through a
+    /// single-consumer buffer, which counted publishes that overwrote an
+    /// unread one. A seqlock has no such thing: this is always 0.
     [[nodiscard]] auto regression_buffer_overruns() const noexcept -> uint64_t;
 
   protected:
@@ -103,16 +104,12 @@ class PtpTimeBridgeBase
     auto exchange_reset_requested(bool value) noexcept -> bool;
     auto set_reset_requested(bool value) noexcept -> void;
 
-    /// Wait-free publish of the (rate, offset_ns) pair through the
-    /// regression_buffer_ triple buffer. Single writer (the sampler
-    /// thread); single consumer (the RT thread or main thread during
-    /// setup/shutdown).
+    /// Publish the (rate, offset_ns) pair as one value, through the
+    /// regression_buffer_ seqlock. Single writer: the sampler thread.
     auto regression_buffer_publish(double rate, int64_t offset_ns) noexcept -> void;
 
-    /// Wait-free consume of the latest (rate, offset_ns). SPSC: only
-    /// one consumer thread at a time may call this — the consumer
-    /// position transfers between main (setup/shutdown) and the
-    /// wan_timer / RT thread (steady-state operation).
+    /// The latest (rate, offset_ns) pair, read whole. Any thread, any
+    /// number of readers; nothing is consumed.
     [[nodiscard]] auto regression_buffer_consume() const noexcept -> RateOffset;
 
     // Epoch
@@ -144,14 +141,11 @@ class PtpTimeBridgeBase
     std::atomic<bool> running_;
     std::atomic<bool> reset_requested_;
 
-    // Triple-buffered regression line. Single writer (update_mapping
-    // in the sampler thread); single consumer (the RT timer thread,
-    // plus the main thread during setup before the RT thread starts
-    // and during shutdown after it exits). Initialized with
-    // {rate=1.0, offset_ns=0} via the initial-value constructor so
+    // The regression line `ptp = rate * raw + offset_ns`, raw being
+    // CLOCK_MONOTONIC_RAW. Initialized with {rate=1.0, offset_ns=0} so
     // the first load() before any regression fit returns sensible defaults.
     // Single writer (the sampler thread) via store(); many readers via load() --
-    // now_ns()/get_mapping()/convert_*() are public const and may be called from
+    // now_ns()/get_mapping()/to_raw_ns()/from_raw_ns() are public const and may be called from
     // any thread (RT timer, ClockAdapter, status/telemetry). A seqlock (not the
     // strictly-SPSC AtomicTripleBuffer, whose consume() is single-consumer) is the
     // right primitive: every reader observes a consistent (rate, offset) snapshot.
@@ -270,6 +264,56 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Stop background sampling
     void stop_sampling() noexcept;
 
+    //
+    // The sampler, told its readings
+    //
+    // Everything the sampler thread does with a reading is observe(). The
+    // thread takes each reading from the real clocks and hands it over; a
+    // caller that owns its readings (a test on made-up time, a simulation)
+    // hands over its own, and the bridge then reads no clock at all.
+    //
+
+    /// One sampler reading: the PHC read bracketed by CLOCK_MONOTONIC_RAW,
+    /// then a RAW-bracketed CLOCK_MONOTONIC read for the RAW<->MONOTONIC line.
+    struct Reading
+    {
+        int64_t raw_before_phc;
+        StatusValue<int64_t> phc;
+        int64_t raw_after_phc;
+        int64_t mono;
+        int64_t raw_after_mono;
+    };
+
+    /// What the sampler carries from one reading to the next: the primary
+    /// PHC<->RAW window and, over the same span, the tracker that keeps
+    /// raw_line() for the sleeps.
+    struct SamplerState
+    {
+        SamplerState(realtime::MonotonicRawLine& line, size_t window_size) noexcept
+            : phc_window{window_size}
+            , raw_tracker{line, window_size}
+        {}
+
+        TimingSampleWindow phc_window;
+        realtime::MonotonicRawTracker raw_tracker;
+        int64_t worst_bracket{0};
+        /// The epoch the window's samples belong to: the bridge's when the
+        /// window was started or last cleared. A fit is published as a fit
+        /// of this epoch.
+        uint64_t epoch{0};
+    };
+
+    /// Set the bridge up to be told its readings instead of taking them on
+    /// its own thread. Not while sampling is running. The bridge counts as
+    /// running from here until stop_sampling(): the caller is its sampler.
+    [[nodiscard]] auto begin_told_sampling(BridgeSamplingParams const& params = {}) -> SamplerState;
+
+    /// Told form of one sampler pass: feed the RAW<->MONOTONIC pair of
+    /// @p reading to the tracker, then accept its PHC half into the primary
+    /// window and refit when enough samples are in. One thread at a time.
+    /// @return true if the PHC was read, false if that half was skipped
+    auto observe(SamplerState& state, Reading const& reading) -> bool;
+
     /// Check if sampling is running
     [[nodiscard]] auto is_running() const noexcept -> bool { return is_running_atomic(); }
 
@@ -284,18 +328,44 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Get current epoch (incremented on discontinuities)
     [[nodiscard]] auto epoch() const noexcept -> uint64_t { return load_epoch(); }
 
+    /// How well the PHC is known through this bridge's line, for any thread.
+    ///
+    /// This is the quality of one link only: the PHC as read here against
+    /// CLOCK_MONOTONIC_RAW. Whether the PHC itself follows its grandmaster
+    /// is the PTP daemon's business and is not in this figure.
+    ///
+    /// The bound at each fit is the furthest any sample of the window lies
+    /// from the line as published (the line the conversions use) plus half
+    /// the longest read bracket. When the PHC cannot be read the line
+    /// stands and the uncertainty grows from the last fit. No bound is
+    /// claimed before the first healthy fit, nor after a step until the fit
+    /// is healthy again (a step is a new epoch), nor while the fitted rate
+    /// is outside max_rate_ppm: the published line is then held at the
+    /// edge of that window and runs away from the PHC.
+    [[nodiscard]] auto quality() const noexcept -> realtime::ClockQuality
+    {
+        // Each fit is published with the epoch its samples belong to, and a
+        // bound is claimed only for a fit of the epoch read here: whatever
+        // order a reset and a reader come in, an epoch is never told the
+        // bound of another.
+        uint64_t const timeline = load_epoch();
+        realtime::ClockQuality quality = fit_quality_.load();
+        bool const vouched = was_ever_healthy() && quality.epoch == timeline;
+        quality.epoch = timeline;
+        quality.bound_at_sync = vouched ? quality.bound_at_sync : realtime::UNBOUNDED_ACCURACY;
+        return quality;
+    }
+
     // ClockSource-compatible interface (for use with ClockAdapter)
     //
     // The reference clock is CLOCK_MONOTONIC_RAW: the sampler fits the PHC
     // against RAW, so to_raw_ns()/from_raw_ns() are the primary line and a
     // realtime::Timer on this source sleeps early on CLOCK_MONOTONIC and
-    // spins on RAW to each deadline. to_monotonic_ns()/from_monotonic_ns()
-    // go through raw_line(), the RAW<->MONOTONIC line the sampler keeps
-    // alongside, so each conversion names the clock it returns. All of
-    // them are exact (__int128), so a large offset costs no precision.
-
-    /// A realtime::Timer on this source takes the RAW-authoritative wait.
-    static constexpr bool reference_is_raw = true;
+    // spins on RAW to each deadline. All three are exact (__int128), so a
+    // large offset costs no precision. These are the bare boundary a
+    // realtime::ClockAdapter<GptpClock0, PtpTimeBridge> types: use the
+    // adapter for now(), to_raw() and from_raw() on typed time points, and
+    // for the same conversions with their worst-case accuracy.
 
     /// Current PTP time in nanoseconds: reads CLOCK_MONOTONIC_RAW once and
     /// converts it through the primary mapping.
@@ -307,34 +377,18 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// CLOCK_MONOTONIC_RAW nanoseconds -> PTP nanoseconds (primary mapping).
     [[nodiscard]] auto from_raw_ns(int64_t raw_ns) const noexcept -> int64_t;
 
-    /// PTP nanoseconds -> CLOCK_MONOTONIC nanoseconds: to_raw_ns(), then raw_line().
-    [[nodiscard]] auto to_monotonic_ns(int64_t ptp_ns) const noexcept -> int64_t;
+    /// An instant on the PHC's clock as CLOCK_MONOTONIC: the primary line to
+    /// RAW, then raw_line(). CLOCK_MONOTONIC is the clock the kernel sleeps
+    /// on and is for nothing else, so this is for a sleeper.
+    [[nodiscard]] auto to_monotonic(realtime::GptpClock0::time_point ptp) const noexcept -> realtime::MonotonicClock::time_point;
 
-    /// CLOCK_MONOTONIC nanoseconds -> PTP nanoseconds: raw_line(), then from_raw_ns().
-    [[nodiscard]] auto from_monotonic_ns(int64_t mono_ns) const noexcept -> int64_t;
+    /// A CLOCK_MONOTONIC instant on the PHC's clock: raw_line(), then the primary line.
+    [[nodiscard]] auto from_monotonic(realtime::MonotonicClock::time_point mono) const noexcept -> realtime::GptpClock0::time_point;
 
     /// The RAW<->CLOCK_MONOTONIC line the sampler keeps (seqlocked, read from
     /// any thread; identity until the first sample). A sleeper derives the
     /// CLOCK_MONOTONIC early-wake instant for a RAW deadline from it.
     [[nodiscard]] auto raw_line() const noexcept -> realtime::MonotonicRawLine const& { return raw_line_; }
-
-    // Time Conversion (returning TimeConvertResult with epoch/health info)
-
-    /// PTP time -> CLOCK_MONOTONIC_RAW time, with the epoch and health it was made under
-    /// @param ptp_ns PTP time in nanoseconds to convert
-    [[nodiscard]] auto convert_ptp_to_raw(int64_t ptp_ns) const noexcept -> TimeConvertResult;
-
-    /// CLOCK_MONOTONIC_RAW time -> PTP time, with the epoch and health it was made under
-    /// @param raw_ns CLOCK_MONOTONIC_RAW time in nanoseconds to convert
-    [[nodiscard]] auto convert_raw_to_ptp(int64_t raw_ns) const noexcept -> TimeConvertResult;
-
-    /// PTP time -> CLOCK_MONOTONIC time (through raw_line()), with epoch and health
-    /// @param ptp_ns PTP time in nanoseconds to convert
-    [[nodiscard]] auto convert_ptp_to_monotonic(int64_t ptp_ns) const noexcept -> TimeConvertResult;
-
-    /// CLOCK_MONOTONIC time -> PTP time (through raw_line()), with epoch and health
-    /// @param monotonic_ns CLOCK_MONOTONIC time in nanoseconds to convert
-    [[nodiscard]] auto convert_monotonic_to_ptp(int64_t monotonic_ns) const noexcept -> TimeConvertResult;
 
     /// Plan for one bracketed sleep: the PTP deadline expressed in both clock
     /// domains. raw_deadline (CLOCK_MONOTONIC_RAW) is authoritative — we spin to
@@ -343,21 +397,45 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// rate and sizes the early-wake guard.
     struct SleepPlan
     {
-        int64_t raw_deadline_ns{0};
-        int64_t mono_deadline_ns{0};
+        realtime::MonotonicRawClock::time_point raw_deadline{};
+        realtime::MonotonicClock::time_point mono_deadline{};
         double mono_per_raw_slope{1.0};
         TimeMapping before{};
     };
 
     /// Prepare for sleep: validate state and convert the PTP deadline into the
     /// RAW and (coarse) MONOTONIC domains.
+    /// @param ptp_deadline The instant to wake at, on the PHC's clock
     /// @return SleepPlan, or error if not running / unhealthy
-    [[nodiscard]] auto prepare_sleep(int64_t ptp_deadline_ns) noexcept -> StatusValue<SleepPlan>;
+    [[nodiscard]] auto prepare_sleep(realtime::GptpClock0::time_point ptp_deadline) noexcept -> StatusValue<SleepPlan>;
+
+    /// Told form of the coarse sleep's target: the CLOCK_MONOTONIC instant
+    /// to sleep to for @p plan, told that RAW now reads @p raw_now. It
+    /// is the plan's monotonic deadline less a guard: wake_refine_spin_ns
+    /// for the wakeup latency, plus the divergence CLOCK_MONOTONIC could
+    /// accrue against RAW over the sleep at the line's rate. A target that
+    /// is not ahead of CLOCK_MONOTONIC means no sleep, only the spin.
+    [[nodiscard]] auto early_wake_monotonic(SleepPlan const& plan, realtime::MonotonicRawClock::time_point raw_now) const noexcept
+        -> realtime::MonotonicClock::time_point;
+
+    /// Told form of the spin headroom: what was left of the spin window
+    /// (BridgeSamplingParams::wake_refine_spin_ns) when the coarse sleep to
+    /// @p mono_wake returned, told that RAW then read @p raw_after_sleep.
+    /// The whole window when the kernel woke the thread on time, less as it
+    /// woke it later, negative once the sleep overran the window: the wake
+    /// latency is the window less the headroom. The slew term of the early
+    /// wake is planned earliness and none of the kernel's lateness, so it
+    /// is not counted.
+    [[nodiscard]] auto spin_headroom(
+        SleepPlan const& plan,
+        realtime::MonotonicClock::time_point mono_wake,
+        realtime::MonotonicRawClock::time_point raw_after_sleep) const noexcept -> realtime::Nanoseconds;
 
     /// Finalize after sleep: validate epoch and convert the RAW wake time back to
     /// PTP via the primary (PHC<->RAW) mapping.
     /// @return current PTP time, or error if epoch changed or mapping unhealthy
-    [[nodiscard]] auto finalize_wake(int64_t wake_raw, TimeMapping const& before) noexcept -> StatusValue<int64_t>;
+    [[nodiscard]] auto finalize_wake(realtime::MonotonicRawClock::time_point wake_raw, TimeMapping const& before) noexcept
+        -> StatusValue<realtime::GptpClock0::time_point>;
 
     /// The wake instant on both clocks: one CLOCK_MONOTONIC_RAW read at the
     /// end of the spin, and the PTP time it converts to through the primary
@@ -365,16 +443,27 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// below it reads a clock of its own.
     struct WakeTimes
     {
-        int64_t ptp_ns{0};
-        int64_t raw_ns{0};
+        realtime::GptpClock0::time_point ptp{};
+        realtime::MonotonicRawClock::time_point raw{};
     };
 
-    /// Sleep (CLOCK_MONOTONIC, through raw_line()) to wake_refine_spin_ns before @p ptp_deadline_ns, then spin
-    /// on CLOCK_MONOTONIC_RAW to it; the wake on both clocks, bridge_not_running once @p keep_going reads false.
-    /// @p spin_headroom_ns gets what was left of the spin window (negative on overrun) when it slept.
+    /// Sleep until a PTP deadline: coarse clock_nanosleep on CLOCK_MONOTONIC
+    /// through raw_line(), then a spin on CLOCK_MONOTONIC_RAW to the deadline.
+    /// @param ptp_deadline The instant to wake at, on the PHC's clock
+    /// @param keep_going Optional: the caller's own running flag. Read before
+    ///        the sleep and in the final spin to the deadline: once it is
+    ///        false the call returns bridge_not_running, as it already does
+    ///        when this bridge stops, so a timer being stopped returns to its
+    ///        loop at once instead of sleeping out its period.
+    /// @param spin_headroom Optional: gets spin_headroom() for this wake when
+    ///        the call slept and succeeded. Left alone otherwise, so a
+    ///        caller keeping statistics can tell a wake that never slept.
+    /// @return The wake instant on both clocks (the caller measures its wake
+    ///         accuracy from ptp), or an error
     [[nodiscard]] auto sleep_until_ptp(
-        int64_t ptp_deadline_ns, std::atomic<bool> const* keep_going = nullptr, int64_t* spin_headroom_ns = nullptr) noexcept
-        -> StatusValue<WakeTimes>;
+        realtime::GptpClock0::time_point ptp_deadline,
+        std::atomic<bool> const* keep_going = nullptr,
+        realtime::Nanoseconds* spin_headroom = nullptr) noexcept -> StatusValue<WakeTimes>;
 
     // Manual Epoch Control
 
@@ -389,24 +478,33 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     [[nodiscard]] auto start_sampling_impl(PtpTimeReader ptp_reader, BridgeSamplingParams const& params)
         -> StatusValue<SamplingGuard>;
 
-    /// One sampler reading: the PHC read bracketed by CLOCK_MONOTONIC_RAW,
-    /// then a RAW-bracketed CLOCK_MONOTONIC read for the RAW<->MONOTONIC line.
-    struct Reading
-    {
-        int64_t raw_before_phc;
-        StatusValue<int64_t> phc;
-        int64_t raw_after_phc;
-        int64_t mono;
-        int64_t raw_after_mono;
-    };
-
+    /// Take one reading from the PHC reader and the system clocks.
     [[nodiscard]] auto take_reading() -> Reading;
 
-    /// Take a single sample: feed the RAW<->MONOTONIC pair to @p raw_tracker
-    /// (told form, the sampler owns the bracket), then accept the PHC half
-    /// into the primary window and refit when enough samples are in.
-    /// @return true if a valid sample was collected, false if skipped
-    auto collect_sample(TimingSampleWindow& phc_window, realtime::MonotonicRawTracker& raw_tracker, int64_t& worst_bracket) -> bool;
+    /// The steps of sleep_until_ptp() after the plan.
+    [[nodiscard]] static auto told_to_stop(std::atomic<bool> const* keep_going) noexcept -> bool;
+    /// The coarse sleep on CLOCK_MONOTONIC, to the plan's early wake. No sleep
+    /// at all when that instant is not ahead.
+    /// @return the spin headroom the sleep left, nothing when it did not sleep
+    [[nodiscard]] auto sleep_early(SleepPlan const& plan) const noexcept -> StatusValue<std::optional<realtime::Nanoseconds>>;
+    /// Spin on CLOCK_MONOTONIC_RAW to @p raw_deadline, with a pause hint
+    /// each turn. It gives the CPU up (sched_yield) at most once in
+    /// SPIN_YIELD_INTERVAL, and not at all in the last SPIN_NO_YIELD.
+    /// @return false when the bridge or the caller stopped first
+    [[nodiscard]] auto spin_to(
+        realtime::MonotonicRawClock::time_point raw_deadline, std::atomic<bool> const* keep_going) const noexcept -> bool;
+    /// One RAW read at the end of the spin, and the PTP time it converts to.
+    [[nodiscard]] auto wake_times(TimeMapping const& before) noexcept -> StatusValue<WakeTimes>;
+    /// The spin and the wake after it; a wake that succeeded tells the
+    /// caller the headroom its sleep left.
+    [[nodiscard]] auto finish_sleep(
+        SleepPlan const& plan,
+        std::atomic<bool> const* keep_going,
+        std::optional<realtime::Nanoseconds> headroom,
+        realtime::Nanoseconds* spin_headroom) noexcept -> StatusValue<WakeTimes>;
+
+    static constexpr realtime::Nanoseconds SPIN_YIELD_INTERVAL{20'000};
+    static constexpr realtime::Nanoseconds SPIN_NO_YIELD{10'000};
 
     /// The PHC half of a reading: record its bracket, reject an over-long
     /// one, else push (RAW midpoint, PHC) into the primary window.
@@ -416,11 +514,41 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     /// Samples the primary window needs before its fit is published.
     [[nodiscard]] auto min_samples_for_fit() const noexcept -> size_t;
 
+    /// An empty sampler state of the bridge's present epoch.
+    [[nodiscard]] auto new_sampler_state() -> SamplerState;
+
     void sampler_loop();       ///< Thread entry: exception barrier around sampler_loop_impl()
     void sampler_loop_impl();  ///< Actual sampler work loop
 
-    /// Refit and publish the primary PHC<->RAW mapping from the window.
-    void update_mapping(TimingSampleWindow const& phc_window, int64_t worst_bracket);
+    /// Refit and publish the primary PHC<->RAW mapping from the sampler's window.
+    void update_mapping(SamplerState const& state);
+
+    /// Publish a fit: the line, how well it is known, its telemetry and
+    /// the health it implies.
+    void publish_fit(LinearFitResult const& fit, SamplerState const& state);
+
+    /// Publish how well the line of @p fit is known, as of the newest
+    /// sample of the sampler's window and for the epoch that window is of.
+    void publish_fit_quality(LinearFitResult const& fit, SamplerState const& state);
+
+    /// How far the fitted rate has been seen to move, in parts per billion:
+    /// against the rate one full window of fits ago, and over the window
+    /// before that. Fits a window apart share no samples.
+    [[nodiscard]] auto rate_movement_ppb(double slope) noexcept -> uint32_t;
+
+    /// The published rate is rounded to a whole part per million, so the
+    /// line may run half of one off the rate that was fitted. It is added
+    /// to the drift bound whatever the deployment configures.
+    static constexpr uint32_t PUBLISHED_RATE_ROUNDING_PPB = 500;
+
+    /// The fitted rate one window of fits ago (sampler thread only).
+    struct RateCheckpoint
+    {
+        double slope{1.0};
+        int fits_since{0};
+        uint32_t previous_movement_ppb{0};
+        bool taken{false};
+    };
 
     // Configuration
     BridgeSamplingParams params_{};
@@ -430,8 +558,14 @@ class PtpTimeBridge : public PtpTimeBridgeBase
     std::thread sampler_thread_;
 
     // RAW<->CLOCK_MONOTONIC line: written by the sampler thread's tracker,
-    // read by any sleeper (prepare_sleep, to_monotonic_ns, raw_line()).
+    // read by any sleeper (prepare_sleep, to_monotonic, raw_line()).
     realtime::MonotonicRawLine raw_line_;
+
+    // Quality of the primary line: written by the sampler thread at each
+    // fit with the epoch the fit is of, read by quality() beside the live
+    // epoch and the health flag.
+    statusbar::itc::SeqlockValue<realtime::ClockQuality> fit_quality_{realtime::ClockQuality{}};
+    RateCheckpoint rate_checkpoint_{};
 
     // Telemetry (written by the sampler thread, read by any consumer)
     stats::AtomicTimeStats bracket_stats_;           ///< PHC-read bracket distribution (all samples)
