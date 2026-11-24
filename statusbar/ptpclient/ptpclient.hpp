@@ -41,6 +41,7 @@
 #include "statusbar/ptpclient/ptpclient_phc.hpp"
 #include "statusbar/ptpclient/ptpclient_phc_follower.hpp"
 #include "statusbar/ptpclient/ptpclient_phc_servo.hpp"
+#include "statusbar/ptpclient/ptpclient_pulse.hpp"
 #include "statusbar/ptpclient/ptpclient_setup.hpp"
 #include "statusbar/ptpclient/ptpclient_timer.hpp"
 #include "statusbar/status/status.hpp"
