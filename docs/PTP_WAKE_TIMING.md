@@ -36,6 +36,9 @@ Options:
   --ptp.holdover_drift_ppb=INTEGER
                         How fast the worst-case error of the PHC link grows while
                         the PHC cannot be read, in parts per billion (default: 15000)
+  --ptp.fixed_error_ns=INTEGER
+                        An error of the PHC link that no measurement here shows,
+                        in nanoseconds, added to its worst-case error (default: 0)
   --help                Show help message
   --config-load=FILE    Load configuration from TOML file
   --config-save=FILE    Save current configuration to TOML file

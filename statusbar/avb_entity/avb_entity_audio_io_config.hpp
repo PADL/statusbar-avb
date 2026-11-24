@@ -429,6 +429,12 @@ struct AvbEntityAudioIOConfig
     /// no server: the deployment's oscillator and temperature figure.
     uint32_t utc_holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
+    /// An error of the system clock that its own report does not show, in
+    /// nanoseconds, added to its bound at every update: what lies between
+    /// the time source and this clock that the time daemon does not measure
+    /// (a receiver's pulse offset and cable, a path taken as symmetric).
+    int64_t utc_fixed_error_ns{0};
+
     /// MEDIA_LOCKED detector tolerance (ns). A received stream locks when 8
     /// consecutive avtp_timestamp deltas fall within +/- this of the expected
     /// samples_per_ch/SAMPLE_RATE interval (125 us @ 12 samples). Default 5000

@@ -43,9 +43,12 @@ talker_on_listener = true
 # ----------------------------------------------------------------------------
 
 # Pin the realtime media-timer thread to an isolated CPU core (e.g. with
-# isolcpus=2-3 on the kernel cmdline):
+# isolcpus=2-3 on the kernel cmdline), and tell the PHC link what this
+# machine's hardware adds to its error:
 # [ptp]
 # cpu = 3
+# holdover_drift_ppb = 15000   # how fast the link's error grows while the PHC cannot be read
+# fixed_error_ns = 0           # an error no measurement shows: PHY asymmetry, timestamp granularity
 
 # Inter-site UDP audio tunnel. Peer addresses, rendezvous server and keys are
 # SITE-SPECIFIC and are NOT shipped in this file -- add them per deployment:

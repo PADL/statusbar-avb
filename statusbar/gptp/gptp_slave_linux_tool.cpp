@@ -66,6 +66,7 @@ struct Config
     double servo_kp{-1.0};
     bool no_bridge{false};
     uint64_t holdover_drift_ppb{statusbar::realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+    int64_t fixed_error_ns{0};
 
     // Derived (resolved after parsing)
     Profile profile{Profile::Standard};
@@ -106,6 +107,14 @@ auto build_arg_specs(Config& config) -> statusbar::args::ArgumentSpecs
         "oscillator and temperature figure of this machine (default 15000)",
         config.holdover_drift_ppb,
         [&](auto v) { config.holdover_drift_ppb = v; });
+
+    specs.add<int64_t>(
+        "fixed-error-ns",
+        "An error of the link to the master that no measurement here shows, in nanoseconds, added to the "
+        "bridge's worst-case error: this machine's hardware figure (PHY asymmetry, timestamp granularity, "
+        "path asymmetry; default 0)",
+        config.fixed_error_ns,
+        [&](auto v) { config.fixed_error_ns = v; });
 
     specs.add_flag("verbose", "Print every sync update", [&](auto v) { config.verbose = v; });
 
@@ -161,6 +170,7 @@ int main(int argc, char** argv)
     sc.servo_ki = cli.servo_ki;
     sc.bridge = !cli.no_bridge;
     sc.holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(cli.holdover_drift_ppb, UINT32_MAX));
+    sc.fixed_error_ns = std::max<int64_t>(cli.fixed_error_ns, 0);
     sc.verbose = cli.verbose;
 
     SlaveSession session{sc};

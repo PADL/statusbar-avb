@@ -115,6 +115,14 @@ struct GptpTimeBridge
     /// the deployment's oscillator and temperature figure.
     uint32_t holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
+    /// An error of the link to the master that no anchor shows, in
+    /// nanoseconds, added to the bound at every anchor: what lies between
+    /// the master's time and a receive stamp that the bridge cannot measure
+    /// (PHY latency asymmetry, the granularity of the timestamps, a path
+    /// delay taken as symmetric). The figure of this machine's hardware and
+    /// its link; 0 claims there is none, and a negative value is taken as 0.
+    int64_t fixed_error_ns{0};
+
     /// Where the domain's time comes from, as its grandmaster announces it.
     /// The owner sets it from the Announce; until then, a PTP grandmaster.
     realtime::TimeSource time_source{realtime::TimeSource::ptp};
@@ -519,12 +527,15 @@ struct GptpTimeBridge
         offset_quality_.store(known ? offset_only(rated) : unknown);
     }
 
+    /// The configured fixed error, never negative.
+    [[nodiscard]] auto fixed_error() const noexcept -> int64_t { return fixed_error_ns > 0 ? fixed_error_ns : 0; }
+
     /// The rated line's quality as of the anchor at @p anchor_app_ns.
     [[nodiscard]] auto rated_quality(int64_t const anchor_app_ns) const noexcept -> realtime::ClockQuality
     {
         return {
             .synced_at = realtime::MonotonicRawClock::from_ns(anchor_app_ns),
-            .bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::miss_ns)},
+            .bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::miss_ns) + fixed_error()},
             .epoch = epoch_,
             .drift_bound_ppb = std::max(holdover_drift_ppb, rate_spread_ppb()),
             .time_source = time_source};
@@ -538,7 +549,7 @@ struct GptpTimeBridge
         int64_t const ppt = rate_offset_ppt_.load(std::memory_order_relaxed);
         int64_t const drift_ppb = int64_t{rated.drift_bound_ppb} + (((ppt < 0 ? -ppt : ppt) + 999) / 1000);
         realtime::ClockQuality quality = rated;
-        quality.bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::offset_miss_ns)};
+        quality.bound_at_sync = realtime::Nanoseconds{worst_miss_ns(&Anchor::offset_miss_ns) + fixed_error()};
         quality.drift_bound_ppb = drift_ppb > int64_t{UINT32_MAX} ? UINT32_MAX : static_cast<uint32_t>(drift_ppb);
         return quality;
     }

@@ -58,6 +58,11 @@ struct SlaveSessionConfig
     /// figure. See GptpTimeBridge::holdover_drift_ppb.
     uint32_t holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
+    /// An error of the link to the master that no anchor shows, in
+    /// nanoseconds: this machine's hardware figure. See
+    /// GptpTimeBridge::fixed_error_ns.
+    int64_t fixed_error_ns{0};
+
     /// When true (and software_timestamping is false), use the
     /// hardware-timestamping passthrough path: PHC is read for time
     /// and used for SO_TIMESTAMPING, but the servo's phase / frequency

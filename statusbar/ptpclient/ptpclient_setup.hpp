@@ -373,6 +373,13 @@ auto add_ptp_bridge_arg_specs(args::ArgumentSpecs& specs, Config& config) -> voi
         "billion: the oscillator and temperature figure of this machine (default 15000)",
         static_cast<uint64_t>(config.sampling.holdover_drift_ppb),
         [&](uint64_t v) -> void { config.sampling.holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(v, UINT32_MAX)); });
+    specs.add<int64_t>(
+        "ptp.fixed_error_ns",
+        "An error of the PHC link that no measurement here shows, in nanoseconds, added to its worst-case error: "
+        "this machine's hardware figure (the PHC's offset from its master, PHY asymmetry, timestamp granularity; "
+        "default 0)",
+        config.sampling.fixed_error_ns,
+        [&](int64_t v) -> void { config.sampling.fixed_error_ns = std::max<int64_t>(v, 0); });
 }
 
 /// Build argument specifications for PTP CLI options with lambda binding
@@ -424,8 +431,10 @@ auto format_ptp_bridge_help_to(OutputIt out) -> OutputIt
 {
     out = std::format_to(out, "  --ptp.threshold=NS      PTP sync threshold in ns (default: 50000)\n");
     out = std::format_to(out, "  --ptp.spin_ns=NS        Busy-spin window before each wake in ns (0 = no busy-wait)\n");
-    return std::format_to(
+    out = std::format_to(
         out, "  --ptp.holdover_drift_ppb=N  Growth of the PHC link's worst-case error while unread, in ppb (default: 15000)\n");
+    return std::format_to(
+        out, "  --ptp.fixed_error_ns=NS  Hardware error of the PHC link that no measurement shows, in ns (default: 0)\n");
 }
 
 /// Print standard PTP CLI options help text

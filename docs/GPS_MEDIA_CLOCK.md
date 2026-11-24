@@ -117,7 +117,9 @@ follows it. Do not cache the delta and walk away.
    thread reads the operating system's worst-case error for CLOCK_REALTIME once
    a second (what chronyd last told the kernel) and coasts it at
    `media.utc_holdover_drift_ppb` (default 15 ppm) through a loss of the time
-   server. The entity holds that error against two limits:
+   server. `media.utc_fixed_error_ns` (default 0) is added to it at every
+   update: the error between the time source and this clock that the time
+   daemon does not measure, such as a receiver's pulse offset. The entity holds that error against two limits:
    - `media.max_utc_error_us` (default 1 000 000, one second) for following the
      clock's rate. Inside it the ratio filter and the TAI translator are fed;
      outside it `r` holds the last value it trusted, so the media clock coasts
@@ -152,7 +154,8 @@ follows it. Do not cache the delta and walk away.
    timer link's added. The gPTP time of each pair comes through that link (the
    PHC bridge, PHC against `CLOCK_MONOTONIC_RAW`), and a TAI timestamp is made
    from both clocks. The link's share is a few microseconds while the PHC is
-   being read and grows at `ptp.holdover_drift_ppb` when it is not; a link
+   being read, with `ptp.fixed_error_ns` (this machine's hardware figure,
+   default 0) on top, and grows at `ptp.holdover_drift_ppb` when it is not; a link
    that claims no bound (before its first healthy fit, after a step of the
    PHC, or with the PHC slewed past the bridge's rate window) leaves none, so
    `r` holds and `tu` is set until it is fitted again.

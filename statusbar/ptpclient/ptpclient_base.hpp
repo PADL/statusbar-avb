@@ -107,6 +107,14 @@ struct BridgeSamplingParams
     /// more: the deployment's oscillator and temperature figure.
     uint32_t holdover_drift_ppb = realtime::DEFAULT_HOLDOVER_DRIFT_PPB;
 
+    /// An error of the PHC link that no fit shows, in nanoseconds, added to
+    /// the bound at every fit: what lies between the true time and a PHC
+    /// reading that this bridge cannot measure (the PHC's own offset from
+    /// its master, PHY latency asymmetry, the granularity of the hardware
+    /// timestamp). The figure of this machine's hardware; 0 claims there is
+    /// none, and a negative value is taken as 0.
+    int64_t fixed_error_ns = 0;
+
     /// Builder pattern for configuration
     [[nodiscard]] auto with_sample_hz(int hz) noexcept -> BridgeSamplingParams&
     {
@@ -151,6 +159,11 @@ struct BridgeSamplingParams
     [[nodiscard]] auto with_holdover_drift_ppb(uint32_t ppb) noexcept -> BridgeSamplingParams&
     {
         holdover_drift_ppb = ppb;
+        return *this;
+    }
+    [[nodiscard]] auto with_fixed_error_ns(int64_t ns) noexcept -> BridgeSamplingParams&
+    {
+        fixed_error_ns = ns;
         return *this;
     }
 };

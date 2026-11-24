@@ -241,6 +241,34 @@ TEST(ptp_bridge_quality, a_fit_is_bounded_by_its_worst_residual_and_half_its_lon
     EXPECT_TRUE(quality.bound_at_sync >= Nanoseconds{4'000} && quality.bound_at_sync <= Nanoseconds{4'010});
 }
 
+TEST(ptp_bridge_quality, the_hardwares_own_error_is_added_to_every_bound)
+{
+    // The same readings through two bridges: one told nothing of its
+    // hardware, one told that a PHC reading may be 150 ns from true for
+    // reasons no fit can see.
+    PtpTimeBridge plain;
+    auto plain_state = plain.begin_told_sampling(told_params());
+    ToldPhc plain_phc{.ppm = 30};
+    feed(plain, plain_state, plain_phc, 64);
+
+    PtpTimeBridge told;
+    auto told_state = told.begin_told_sampling(told_params().with_fixed_error_ns(150));
+    ToldPhc told_phc{.ppm = 30};
+    feed(told, told_state, told_phc, 64);
+
+    EXPECT_TRUE(told.quality().is_bounded());
+    EXPECT_EQ((told.quality().bound_at_sync - plain.quality().bound_at_sync).count(), int64_t{150});
+    // Nothing else of the quality moves.
+    EXPECT_EQ(told.quality().drift_bound_ppb, plain.quality().drift_bound_ppb);
+
+    // A negative figure is no figure.
+    PtpTimeBridge negative;
+    auto negative_state = negative.begin_told_sampling(told_params().with_fixed_error_ns(-150));
+    ToldPhc negative_phc{.ppm = 30};
+    feed(negative, negative_state, negative_phc, 64);
+    EXPECT_TRUE(negative.quality().bound_at_sync == plain.quality().bound_at_sync);
+}
+
 TEST(ptp_bridge_quality, when_the_phc_cannot_be_read_the_line_coasts)
 {
     PtpTimeBridge bridge;

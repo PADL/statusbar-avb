@@ -638,13 +638,15 @@ void PtpTimeBridge::publish_fit_quality(LinearFitResult const& fit, SamplerState
     // to the furthest it lies from any sample, measured the way a reader
     // converts: together, the worst case over what the line was fitted to.
     // A line held at the edge of the rate window is not the samples' line
-    // and no bound is claimed for it.
+    // and no bound is claimed for it. On top goes the error of this
+    // machine's hardware that no fit shows (params_.fixed_error_ns).
     TimingSampleWindow const& phc_window = state.phc_window;
     int64_t widest_bracket = 0;
     for (size_t i = 0; i < phc_window.size(); ++i) {
         widest_bracket = std::max(widest_bracket, phc_window[i].bracket_ns);
     }
-    realtime::Nanoseconds const bound{fit.published_miss_ns + ((widest_bracket + 1) / 2)};
+    realtime::Nanoseconds const bound{
+        fit.published_miss_ns + ((widest_bracket + 1) / 2) + std::max<int64_t>(params_.fixed_error_ns, 0)};
     fit_quality_.store(
         {.synced_at = realtime::MonotonicRawClock::from_ns(phc_window[phc_window.size() - 1].monotonic_ns),
          .bound_at_sync = fit.clamped ? realtime::UNBOUNDED_ACCURACY : bound,

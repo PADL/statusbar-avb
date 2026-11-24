@@ -343,8 +343,8 @@ class AvbEntityAudioIO
     /// How well the system clock knows the time, from the operating system's
     /// own report, and the entity's two limits on it: for following its rate,
     /// and for vouching for a TAI timestamp made from it. Media thread only.
-    realtime::UtcClockQualityTracker utc_tracker_{
-        realtime::UtcClockQualityTracker::Config{.drift_bound_ppb = config_.utc_holdover_drift_ppb}};
+    realtime::UtcClockQualityTracker utc_tracker_{realtime::UtcClockQualityTracker::Config{
+        .drift_bound_ppb = config_.utc_holdover_drift_ppb, .fixed_error = realtime::Nanoseconds{config_.utc_fixed_error_ns}}};
     realtime::AccuracyLimit utc_follow_limit_{accuracy_limit_of(config_.max_utc_error_ns)};
     realtime::AccuracyLimit tai_limit_{accuracy_limit_of(config_.udptun_max_tai_error_ns)};
     /// The media timer's clock link as last told (on_link_quality).

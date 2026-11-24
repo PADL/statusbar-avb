@@ -207,6 +207,8 @@ networks.
 | `--max-utc-error-us US`    | `0` (report only)| Largest worst-case error of the system clock to measure on, when the wire timeline is made from it. Here `0` means no limit is enforced |
 | `--utc-holdover-drift-ppb N` | `15000`        | How fast the system clock's worst-case error grows from its time daemon's last update |
 | `--ptp.holdover_drift_ppb N` | `15000`        | How fast the master link's worst-case error grows without synchronization, for either time source |
+| `--utc-fixed-error-ns NS`  | `0`              | An error of the system clock that its own report does not show (a receiver's pulse offset, a path taken as symmetric), added to its worst-case error |
+| `--ptp.fixed_error_ns NS`  | `0`              | An error of the master link's hardware that no measurement shows (PHY asymmetry, timestamp granularity), added to its worst-case error, for either time source |
 | `--hist-low-ns NS`         | `0`              | Histogram lower bound                                      |
 | `--hist-high-ns NS`        | `300000000`      | Histogram upper bound (300 ms)                             |
 | `--hist-bucket-ns NS`      | `500000`         | Histogram bucket width (500 µs → 600 bins)                 |
@@ -257,6 +259,13 @@ How fast either link's error grows without synchronization is
 `--ptp.holdover_drift_ppb` (default 15 ppm, the tolerance NTP assumes of any
 clock); a machine whose oscillator is known to be steadier can be told so
 and coasts for longer.
+
+Both bounds are built from what the tool can measure. An error that is
+constant, such as a PHY's latency asymmetry or a GPS receiver's pulse
+offset, is invisible to a fit, so the bound is too small by that amount
+unless it is told: `--ptp.fixed_error_ns` for the master link and
+`--utc-fixed-error-ns` for the system clock. They are figures of the
+hardware at each site and default to 0.
 
 When the wire timeline is made from the system clock (`--wire-clock=gps-tai`
 or `--time-source=realtime`), a figure compared across two sites also

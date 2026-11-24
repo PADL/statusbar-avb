@@ -167,12 +167,18 @@ sudo statusbar-gps-ratio-tracker --device /dev/ptp0 --filter kalman
 `--no-bridge` (the gPTP time bridge is kept against CLOCK_MONOTONIC_RAW, the
 application's one timing reference, and its offset and rate are printed; this
 turns it off), `--holdover-drift-ppb=<n>` (how fast the bridge's worst-case
-error grows while no Sync arrives, default 15000).
+error grows while no Sync arrives, default 15000), `--fixed-error-ns=<ns>`
+(an error of this port's hardware and link that no measurement shows, added
+to the bridge's worst-case error, default 0).
 
 `ptpclient-wake` takes the `--ptp.*` options every PTP-timed tool takes, among
 them `--ptp.spin_ns` (the busy-spin window before each wake) and
 `--ptp.holdover_drift_ppb` (how fast the PHC link's worst-case error grows
-while the PHC cannot be read). When it stops it prints the wake-error
+while the PHC cannot be read) and `--ptp.fixed_error_ns` (an error of this
+machine's hardware that no fit shows, added to that worst case: the PHC's
+offset from its master, PHY asymmetry, timestamp granularity). Both are
+figures of the hardware the tool runs on, so they are set where it is
+deployed. When it stops it prints the wake-error
 statistics and how much of the spin window was left at each wake; see
 [PTP_WAKE_TIMING.md](PTP_WAKE_TIMING.md).
 

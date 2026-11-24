@@ -201,6 +201,27 @@ TEST(gptp_time_bridge_quality, when_syncs_stop_the_line_coasts_and_the_uncertain
     EXPECT_TRUE(at_loss.within(std::chrono::milliseconds{1}, raw_after(30'000'000'000)));
 }
 
+TEST(gptp_time_bridge_quality, the_hardwares_own_error_is_added_to_both_bounds)
+{
+    auto const no_jitter = [](int) { return int64_t{0}; };
+    GptpTimeBridge plain{};
+    (void)run_syncs(plain, 20 * 8, 30.0, no_jitter);
+
+    GptpTimeBridge told{};
+    told.fixed_error_ns = 80;  // PHY asymmetry and timestamp granularity of this port
+    (void)run_syncs(told, 20 * 8, 30.0, no_jitter);
+
+    EXPECT_EQ((told.quality().bound_at_sync - plain.quality().bound_at_sync).count(), int64_t{80});
+    EXPECT_EQ((told.offset_quality().bound_at_sync - plain.offset_quality().bound_at_sync).count(), int64_t{80});
+    EXPECT_EQ(told.quality().drift_bound_ppb, plain.quality().drift_bound_ppb);
+
+    // A negative figure is no figure.
+    GptpTimeBridge negative{};
+    negative.fixed_error_ns = -80;
+    (void)run_syncs(negative, 20 * 8, 30.0, no_jitter);
+    EXPECT_TRUE(negative.quality().bound_at_sync == plain.quality().bound_at_sync);
+}
+
 TEST(gptp_time_bridge_quality, the_deployment_sets_the_drift_it_coasts_at)
 {
     GptpTimeBridge bridge{};

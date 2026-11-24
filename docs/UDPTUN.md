@@ -240,6 +240,7 @@ how large the worst-case error is and compares that with its configuration
 | `max_clock_error_ns` | 100 000 (100 µs) | the master link: the gPTP slave's bridge or the ptp4l PHC bridge. Negative takes any bounded link; 0 is met by no link |
 | `max_utc_error_ns` | 0 (reported, not enforced) | the system clock, when the wire timeline is made from it (`wire_clock_gps_tai`, or the realtime time source). On this field alone 0 is not a limit of zero |
 | `utc_holdover_drift_ppb` | 15 000 | how fast the system clock's error grows from its time daemon's last update |
+| `utc_fixed_error_ns` | 0 | an error of the system clock that its own report does not show, added to its bound at every update: what lies between the time source and this clock |
 
 Inside its limits the session measures and transmits; outside them it does
 neither, exactly as it used to while unsynchronized. The difference is when

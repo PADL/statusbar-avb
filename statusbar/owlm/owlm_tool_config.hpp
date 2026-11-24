@@ -127,6 +127,9 @@ struct Config
     /// How fast the system clock's worst-case error grows while its time
     /// daemon has no server, in parts per billion.
     uint64_t utc_holdover_drift_ppb{::statusbar::realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
+    /// An error of the system clock that its own report does not show, in
+    /// nanoseconds: what lies between the time source and this clock.
+    int64_t utc_fixed_error_ns{0};
     /// Per-packet CSV output path. Empty = disabled (no file opened,
     /// the RX hot path does only a null-pointer check per packet). When
     /// non-empty, Session opens the file in its constructor and runs a
@@ -340,6 +343,14 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
         "assumes of any clock).",
         c.utc_holdover_drift_ppb,
         [&](auto v) { c.utc_holdover_drift_ppb = v; });
+    s.add<int64_t>(
+        "utc-fixed-error-ns",
+        "An error of the system clock that its own report does not show, in nanoseconds, added to its "
+        "worst-case error: what lies between the time source and this clock (a receiver's pulse offset, "
+        "a path the time daemon takes as symmetric; default 0). The master link's own is "
+        "--ptp.fixed_error_ns.",
+        c.utc_fixed_error_ns,
+        [&](auto v) { c.utc_fixed_error_ns = v; });
     ::statusbar::ptpclient::add_ptp_arg_specs(s, c.ptp4l);
     s.add_flag(
         "gptp-verbose",
@@ -471,6 +482,7 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     // One figure for the master link, whichever source it is: the gPTP
     // slave's bridge takes the PHC bridge's (--ptp.holdover_drift_ppb).
     cfg.identity.gptp_session_config.holdover_drift_ppb = cli.ptp4l.sampling.holdover_drift_ppb;
+    cfg.identity.gptp_session_config.fixed_error_ns = cli.ptp4l.sampling.fixed_error_ns;
     cfg.identity.gptp_session_config.verbose = cli.gptp_verbose;
     // owlm consumes master-time only via the bridge; nothing else on
     // the system needs the PHC disciplined, so keep PHC raw and let
@@ -504,6 +516,7 @@ inline auto build_arg_specs(Config& c) -> ::statusbar::args::ArgumentSpecs
     cfg.max_clock_error_ns = cli.max_clock_error_us < 0 ? -1 : cli.max_clock_error_us * 1'000;
     cfg.max_utc_error_ns = cli.max_utc_error_us > 0 ? cli.max_utc_error_us * 1'000 : 0;
     cfg.utc_holdover_drift_ppb = static_cast<uint32_t>(std::min<uint64_t>(cli.utc_holdover_drift_ppb, UINT32_MAX));
+    cfg.utc_fixed_error_ns = std::max<int64_t>(cli.utc_fixed_error_ns, 0);
     cfg.bridge_stable_samples = cli.bridge_stable_samples;
     cfg.bridge_stable_rate_ppm = cli.bridge_stable_rate_ppm;
     cfg.bridge_stable_offset_ns = cli.bridge_stable_offset_ns;

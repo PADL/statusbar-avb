@@ -78,6 +78,7 @@ SlaveSession::SlaveSession(SlaveSessionConfig cfg)
     // The bridge reports how well its line is known, and coasts on this
     // figure while no Sync arrives. Its bound is anchored on RAW instants.
     bridge_.holdover_drift_ppb = cfg_.holdover_drift_ppb;
+    bridge_.fixed_error_ns = cfg_.fixed_error_ns;
 }
 
 SlaveSession::~SlaveSession()

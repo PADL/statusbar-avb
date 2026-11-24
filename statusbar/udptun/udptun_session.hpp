@@ -525,6 +525,12 @@ struct SessionConfig
     /// update by its time daemon, in parts per billion.
     uint32_t utc_holdover_drift_ppb{realtime::DEFAULT_HOLDOVER_DRIFT_PPB};
 
+    /// An error of the system clock that its own report does not show, in
+    /// nanoseconds, added to its bound at every update: what lies between
+    /// the time source and this clock that the time daemon does not
+    /// measure. See realtime::UtcClockQualityTracker::Config::fixed_error.
+    int64_t utc_fixed_error_ns{0};
+
     // Payload size past the codec header.
     uint32_t payload_bytes{0};
 
@@ -1728,8 +1734,8 @@ class Session
     /// The session's clocks against its limits. Packet thread only; the
     /// reporter reads what it publishes in clock_report_.
     ClockGate clock_gate_{};
-    realtime::UtcClockQualityTracker utc_tracker_{
-        realtime::UtcClockQualityTracker::Config{.drift_bound_ppb = cfg_.utc_holdover_drift_ppb}};
+    realtime::UtcClockQualityTracker utc_tracker_{realtime::UtcClockQualityTracker::Config{
+        .drift_bound_ppb = cfg_.utc_holdover_drift_ppb, .fixed_error = realtime::Nanoseconds{cfg_.utc_fixed_error_ns}}};
     int64_t next_utc_sample_mraw_{0};
     static constexpr int64_t utc_sample_interval_ns_ = 1'000'000'000;  // the system updates its figure once a second
     statusbar::itc::AtomicTripleBuffer<ClockReport> clock_report_{};

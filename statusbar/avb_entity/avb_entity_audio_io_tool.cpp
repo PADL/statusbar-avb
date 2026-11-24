@@ -145,6 +145,13 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "billion (default 15000, the tolerance NTP assumes of any clock)",
         static_cast<uint64_t>(config.entity.utc_holdover_drift_ppb),
         [&](auto v) { config.entity.utc_holdover_drift_ppb = static_cast<uint32_t>((v > 0xFFFFFFFFULL) ? 0xFFFFFFFFULL : v); });
+    specs.add<int64_t>(
+        "media.utc_fixed_error_ns",
+        "An error of the system clock that its own report does not show, in nanoseconds, added to its worst-case "
+        "error: what lies between the time source and this clock (a receiver's pulse offset, a path the time "
+        "daemon takes as symmetric; default 0)",
+        config.entity.utc_fixed_error_ns,
+        [&](auto v) { config.entity.utc_fixed_error_ns = v < 0 ? 0 : v; });
     specs.add<bool>(
         "stream_rx.rt_timer",
         "Drain the AM824/AAF stream RX on a dedicated SCHED_FIFO timer (its own isolated core) instead of the "
