@@ -670,10 +670,10 @@ TEST(mrp_timer_scheduler, defaults_are_generic_and_a_config_overrides_them)
 {
     using namespace std::chrono_literals;
     TimerConfig const defaults{};
-    EXPECT_EQ(defaults.join_time.count(), 100);
+    EXPECT_EQ(defaults.join_time.count(), 200);
     EXPECT_EQ(defaults.leave_time.count(), 1000);
     EXPECT_EQ(defaults.periodic_time.count(), 1000);
-    EXPECT_EQ(defaults.leave_all_time_min.count(), 5000);
+    EXPECT_EQ(defaults.leave_all_time_min.count(), 10000);
     EXPECT_EQ(defaults.leave_all_time_max.count(), 15000);
     TimerScheduler ts{1, TimerConfig{.leave_time = 5000ms}};
     auto const now = TimePoint{} + std::chrono::seconds(1);
@@ -694,13 +694,13 @@ TEST(mrp_timer_scheduler, leaveall_is_randomised_within_the_default_range)
     for (int i = 0; i < 2000; ++i) {
         ts.arm_leaveall(now);
         auto const d = ts.next_deadline();
-        EXPECT_TRUE(d >= now + 5000ms);
+        EXPECT_TRUE(d >= now + 10000ms);
         EXPECT_TRUE(d < now + 15000ms);
         lo = std::min(lo, d);
         hi = std::max(hi, d);
     }
     // Randomised, not a constant: the draws spread over most of the range.
-    EXPECT_TRUE(lo < now + 5500ms);
+    EXPECT_TRUE(lo < now + 10500ms);
     EXPECT_TRUE(hi > now + 14500ms);
 }
 

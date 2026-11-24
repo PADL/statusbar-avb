@@ -1792,7 +1792,7 @@ TEST(nanoavb_srp_msrp, a_talker_advertise_on_another_vlan_declares_no_listener)
     (void)b.talker.withdraw_talker(sid, b.now);
     fv.vlan_identifier = 2;
     (void)b.talker.declare_talker_advertise(fv, b.now);
-    b.run(12);
+    b.run(270);  // the changed Talker Advertise is held two LeaveAll periods (IEEE 802.1Q-2022 Clause 35.2.2.8)
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
 }
 

@@ -238,6 +238,7 @@ TEST(nanoavb_srp_port, an_adopted_vid_moves_the_vlan_and_the_talkers)
     EXPECT_TRUE(b.port.peer_domain_registered());
     EXPECT_TRUE(b.port.mvrp().get_vlan_state(7) != VlanState::Unregistered);
     EXPECT_TRUE(b.port.mvrp().get_vlan_state(2) == VlanState::Unregistered);
+    b.run(124);  // a changed Talker Advertise is held two LeaveAll periods (IEEE 802.1Q-2022 Clause 35.2.2.8)
     auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(3));
     EXPECT_TRUE(fv != nullptr && fv->vlan_identifier.get() == 7);
     using Reports = std::vector<std::pair<uint16_t, bool>>;
@@ -267,6 +268,7 @@ TEST(nanoavb_srp_port, a_peer_domain_at_another_priority_is_adopted)
     EXPECT_EQ(b.port.domain().sr_class_vid, 7);
     using Reports = std::vector<std::pair<uint16_t, bool>>;
     EXPECT_TRUE(reports == Reports({{7, true}}));
+    b.run(124);  // a changed Talker Advertise is held two LeaveAll periods (IEEE 802.1Q-2022 Clause 35.2.2.8)
     auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(3));
     EXPECT_FALSE(fv == nullptr || fv->get_priority() != 2 || fv->vlan_identifier.get() != 7);
 }
@@ -287,6 +289,7 @@ TEST(nanoavb_srp_port, a_class_b_port_follows_the_class_b_domain)
     EXPECT_TRUE(b.port.peer_domain_registered());
     EXPECT_EQ(b.port.domain().sr_class_id, statusbar::srp::msrp::SR_CLASS_B);
     EXPECT_EQ(b.port.domain().sr_class_vid, 7);
+    b.run(124);  // a changed Talker Advertise is held two LeaveAll periods (IEEE 802.1Q-2022 Clause 35.2.2.8)
     auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(4));
     EXPECT_TRUE(fv != nullptr && fv->get_priority() == 2 && fv->vlan_identifier.get() == 7);
 }
@@ -308,6 +311,7 @@ TEST(nanoavb_srp_port, a_priority_only_domain_is_adopted_by_its_class_and_reset)
         EXPECT_EQ(b.port.domain().sr_class_priority, other);
         EXPECT_EQ(b.port.domain().sr_class_vid, configured.sr_class_vid);
         EXPECT_FALSE(reports.empty() || reports.back().first != other || !reports.back().second);
+        b.run(124);  // a changed Talker Advertise is held two LeaveAll periods (IEEE 802.1Q-2022 Clause 35.2.2.8)
         auto const* fv = b.bridge.find_registered_talker_advertise(stream_id(5));
         EXPECT_FALSE(fv == nullptr || fv->get_priority() != other);
         EXPECT_TRUE(b.port.declare_domain(b.now).has_value());  // a link up
@@ -405,7 +409,7 @@ TEST(nanoavb_srp_port, a_talker_with_both_attributes_leaves_once)
     (void)b.bridge.declare_talker_advertise(failed.advertise, b.now);
     (void)b.bridge.declare_talker_failed(failed, b.now);
     b.run(4);
-    EXPECT_NE(b.port.find_registered_talker_advertise(GROUP, 2), nullptr);
+    EXPECT_EQ(b.port.find_registered_talker_advertise(GROUP, 2), nullptr);  // replaced (IEEE 802.1Q-2022 Clause 35.2.6)
     EXPECT_NE(b.port.find_registered_talker_failed(GROUP, 2), nullptr);
     (void)b.bridge.withdraw_talker(failed.advertise.stream_id, b.now);
     b.run(12);
@@ -413,9 +417,9 @@ TEST(nanoavb_srp_port, a_talker_with_both_attributes_leaves_once)
     EXPECT_EQ(leaves, 1);
 }
 
-// A peer's leave (rLv!) is reported on the leave itself, not after LeaveTime, although the
+// A peer's leave (rLv!) is reported when the registration ends, at the leavetimer's expiry: the
 // registrar holds the attribute Leaving until then (IEEE 802.1Q-2022 Clause 10.7.7).
-TEST(nanoavb_srp_port, a_talker_leave_is_reported_when_it_arrives)
+TEST(nanoavb_srp_port, a_talker_leave_is_reported_when_its_registration_ends)
 {
     Bridge b{};
     int leaves = 0;
@@ -431,7 +435,7 @@ TEST(nanoavb_srp_port, a_talker_leave_is_reported_when_it_arrives)
     (void)b.bridge.withdraw_talker(fv.stream_id, b.now);
     b.run(2);
     EXPECT_NE(b.port.find_registered_talker_advertise(GROUP, 2), nullptr);  // still Leaving
-    EXPECT_EQ(leaves, 1);
+    EXPECT_EQ(leaves, 0);
     b.run(12);
     EXPECT_EQ(leaves, 1);
 }
