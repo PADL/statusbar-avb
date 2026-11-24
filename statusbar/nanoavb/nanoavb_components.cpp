@@ -748,7 +748,6 @@ void NanoAvbComponents::wire_profile()
     wire_mvu_binding();
     acmp_talker.set_milan(profile.milan);
     acmp_listener.set_milan(profile.milan);
-    msrp_handler.set_listener_waits_for_talker(profile.milan);
     // Milan v1.3 Section 5.5.3.6.3 step 1: a locked entity accepts bindings
     // only from the locking controller.
     acmp_listener.milan_sinks().set_authorized(
