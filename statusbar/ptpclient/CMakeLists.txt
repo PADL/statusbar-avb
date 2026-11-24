@@ -9,6 +9,7 @@ statusbar_add_module(
   ptpclient_base.cpp
   ptpclient_bridge.cpp
   ptpclient_linuxptp.cpp
+  ptpclient_management.cpp
   ptpclient_phc.cpp
   ptpclient_phc_follower.cpp
   ptpclient_phc_servo.cpp
@@ -24,11 +25,13 @@ statusbar_add_module(
   statusbar::realtime
   statusbar::status
   statusbar::itc
+  statusbar::ieee
   statusbar::net
   TESTS
   ptpclient_base_test.cpp
   ptpclient_bridge_test.cpp
   ptpclient_freq_ratio_test.cpp
+  ptpclient_management_test.cpp
   ptpclient_media_clock_test.cpp
   ptpclient_phc_follower_test.cpp
   ptpclient_phc_servo_test.cpp
@@ -48,3 +51,5 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                       ptpclient_wake_example)
 endif()
+
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/ptpclient_management_fuzzer.cpp)
