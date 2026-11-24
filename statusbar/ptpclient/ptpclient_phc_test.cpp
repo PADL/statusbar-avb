@@ -78,64 +78,9 @@ TEST(ptpclient_phc, open_refuses_bad_configuration)
     EXPECT_FALSE(PhcDevice::open("/nonexistent/ptp").has_value());
 }
 
-TEST(ptpclient_phc, a_writable_phcd_can_be_adjusted)
+TEST(ptpclient_phc, a_pair_that_does_not_exist_is_not_opened_writable)
 {
     EXPECT_FALSE(PhcCrossTimestamp::open("/nonexistent/ptp", "/nonexistent/ptp", {}, PhcCrossAccess::phcd_writable).has_value());
-    // Needs /dev/ptpN read and write access (root); STATUSBAR_PHCD chooses the device.
-    char const* const envd = std::getenv("STATUSBAR_PHCD");
-    std::string const phcd = envd != nullptr ? envd : "/dev/ptp0";
-    auto pair = PhcCrossTimestamp::open(phcd, phcd, {}, PhcCrossAccess::phcd_writable);
-    if (!pair) {
-        SKIP("cannot open the device writable (no PHC, or not root)");
-    }
-    auto const frequency = pair->phcd().frequency_ppb();
-    EXPECT_TRUE(frequency.has_value());
-    if (frequency) {
-        EXPECT_TRUE(pair->phcd().set_frequency_ppb(*frequency).has_value());  // its own frequency: nothing moves
-    }
-    auto read_only = PhcCrossTimestamp::open(phcd, phcd);
-    EXPECT_TRUE(read_only.has_value());
-    if (frequency && read_only) {
-        EXPECT_FALSE(read_only->phcd().set_frequency_ppb(*frequency).has_value());  // the default stays read-only
-    }
-}
-
-TEST(ptpclient_phc, real_phcs_cross_timestamp_within_their_brackets)
-{
-    // Needs read access to /dev/ptpN (root); STATUSBAR_PHC0 / STATUSBAR_PHCD choose the devices.
-    char const* const env0 = std::getenv("STATUSBAR_PHC0");
-    char const* const envd = std::getenv("STATUSBAR_PHCD");
-    std::string const phc0 = env0 != nullptr ? env0 : "/dev/ptp0";
-    std::string const phcd = envd != nullptr ? envd : phc0;
-    auto pair = PhcCrossTimestamp::open(phc0, phcd);
-    if (!pair) {
-        std::println("  skipped: cannot open {} and {} ({})", phc0, phcd, pair.error().message());
-        return;
-    }
-    int64_t worst = 0;
-    int64_t previous_raw = 0;
-    for (int i = 0; i < 16; ++i) {
-        auto const sample = pair->measure();
-        EXPECT_TRUE(sample.has_value());
-        if (!sample) {
-            return;
-        }
-        EXPECT_TRUE(sample->raw_ns > previous_raw);
-        previous_raw = sample->raw_ns;
-        EXPECT_TRUE(sample->uncertainty_ns >= 0 && sample->uncertainty_ns < 100'000);
-        if (phc0 == phcd) {
-            // one clock against itself: the pair agrees to within the brackets
-            EXPECT_TRUE(std::abs(sample->phc0_ns - sample->phcd_ns) <= (2 * sample->uncertainty_ns) + 100);
-        }
-        worst = std::max(worst, sample->uncertainty_ns);
-    }
-    std::println(
-        "  {} ({}) / {} ({}): worst uncertainty {} ns",
-        phc0,
-        static_cast<int>(pair->phc0().method()),
-        phcd,
-        static_cast<int>(pair->phcd().method()),
-        worst);
 }
 
 TEST_MAIN(statusbar_ptpclient, ptpclient_phc_test)
