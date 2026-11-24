@@ -381,6 +381,14 @@ auto MsrpParticipantT<Limits>::listener_permits_transmit(tsn::StreamId const& st
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::listener_registered(tsn::StreamId const& stream_id) const noexcept -> bool
+{
+    // A record this port declares (its own Listener) is no peer's request.
+    auto const* rec = find_listener(stream_id);
+    return rec != nullptr && rec->operation == Operation::Register && rec->registrar_is_registered();
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::listener_permit_debug(tsn::StreamId const& stream_id) const noexcept -> ListenerPermitDebug
 {
     ListenerPermitDebug d;
@@ -469,17 +477,65 @@ auto MsrpParticipantT<Limits>::declare_talker_advertise(TalkerAdvertiseFirstValu
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
     auto& rec = *rec_ptr;
-    if (rec.pending_not_before.has_value()) {
+    if (waits_out_the_old_value(rec, fv, now)) {
         rec.pending_first_value = fv;  // the old value has left: the newest one waits out the same two LeaveAll periods
     } else if (is_actively_declared(rec) && changes_the_attribute(rec.first_value, fv)) {
         change_declared_value(rec, fv, now);
     } else if (is_actively_declared(rec) && fv.accumulated_latency.get() > rec.first_value.accumulated_latency.get()) {
         return fail_talker_latency(rec, fv, now);
     } else {
+        rec.pending_not_before.reset();  // the value that left is back, or its wait is over
         adopt_value(rec, fv, now);
     }
     port_.timers().start_join(now);
     return success();
+}
+
+/// IEEE 802.1Q 35.2.2.8: "there must be at least two LeaveAllTime ... time
+/// periods between when the Talker removes the existing Stream registration
+/// and declares the new". The wait is running (pending_not_before) and
+/// @p fv is another attribute than the one that left: it waits, taking the
+/// place of any value already waiting. The value that left may come back at
+/// any time, a waiting change or not: it is the same registration.
+template <class Limits>
+auto MsrpParticipantT<Limits>::waits_out_the_old_value(
+    AttributeRecord<TalkerAdvertiseFirstValue> const& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now) noexcept -> bool
+{
+    if (!rec.pending_not_before.has_value() || !changes_the_attribute(rec.first_value, fv)) {
+        return false;
+    }
+    return rec.pending_first_value.has_value() || now < *rec.pending_not_before;
+}
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::talker_value_hold() const noexcept -> std::chrono::milliseconds
+{
+    return 2 * port_.timers().config().leave_all_time_max;
+}
+
+/// The wait starts at the withdrawal, not at the Lv that follows it within a
+/// JoinTime: the hold is two of the longest LeaveAll periods (30 s by Table
+/// 10-7) where the standard asks for two LeaveAllTime (20 s), which covers
+/// the difference many times over. A record with nothing of ours on the wire
+/// (a change whose old value has already left, or nothing declared at all)
+/// keeps the wait it has.
+template <class Limits>
+void MsrpParticipantT<Limits>::hold_other_values_after_withdrawal(
+    AttributeRecord<TalkerAdvertiseFirstValue>& rec, TimePoint now) const noexcept
+{
+    if (is_actively_declared(rec)) {
+        rec.pending_not_before = now + talker_value_hold();
+    }
+}
+
+template <class Limits>
+void MsrpParticipantT<Limits>::forget_finished_holds(TimePoint now) noexcept
+{
+    for (auto& rec : talker_adv_) {
+        if (rec.pending_not_before.has_value() && !rec.pending_first_value.has_value() && now >= *rec.pending_not_before) {
+            rec.pending_not_before.reset();
+        }
+    }
 }
 
 /// IEEE 802.1Q 35.2.2.8.6: the latency a Talker Advertise reports "is not
@@ -638,9 +694,9 @@ auto MsrpParticipantT<Limits>::change_may_complete(Record& rec, std::chrono::mil
 template <class Limits>
 void MsrpParticipantT<Limits>::complete_pending_changes(TimePoint now)
 {
-    auto const two_leaveall_periods = 2 * port_.timers().config().leave_all_time_max;
-    bool const talkers = complete_value_changes(talker_adv_, two_leaveall_periods, now);
+    bool const talkers = complete_value_changes(talker_adv_, talker_value_hold(), now);
     bool const domains = complete_value_changes(domains_, std::chrono::milliseconds{0}, now);
+    forget_finished_holds(now);
     if (talkers || domains) {
         port_.timers().start_join(now);
     }
@@ -665,7 +721,7 @@ auto MsrpParticipantT<Limits>::withdraw_talker(tsn::StreamId const& stream_id, T
     for (auto& rec : talker_adv_) {
         if (rec.first_value.stream_id == stream_id) {
             rec.pending_first_value.reset();  // a withdrawal cancels a change in flight
-            rec.pending_not_before.reset();
+            hold_other_values_after_withdrawal(rec, now);
             mrp::dispatch_applicant(rec, applicant_sm::Def::Event::Leave, now);
             found = true;
         }

@@ -183,8 +183,11 @@ Helpers: `registrar_is_in()` for picking the TX event variant,
 `registrar_is_registered()` (`In`, or `Lv` until the leavetimer
 expires), `registrar_is_empty()` (`Mt` or `Start`) and `is_dead()`
 (Applicant in `Vo`, Registrar empty, no new value waiting in
-`pending_first_value`) for reclaim sweeps. `pending_not_before` holds a
-re-declared Talker Advertise back for two LeaveAll periods (35.2.2.8).
+`pending_first_value`, no wait running in `pending_not_before`) for
+reclaim sweeps. `pending_not_before` holds a Talker Advertise with
+another value back for two LeaveAll periods after the old value left
+(35.2.2.8), whether it left for a change of a declared value or for a
+`withdraw_talker()`. The value that left may be declared again at once.
 
 MSRP's Listener type needs an extra `ListenerDeclaration substate`
 field and therefore uses a dedicated `ListenerRecord` struct that
@@ -269,6 +272,10 @@ Exposes:
   Advertise's waits two LeaveAll periods (35.2.2.8: "at least two
   LeaveAllTime ... time periods between when the Talker removes the
   existing Stream registration and declares the new").
+- **Registered listeners**: `listener_registered(stream_id)` is true
+  while a peer's Listener of any Declaration Type is registered for the
+  stream (Registrar `In` or `Lv`); `listener_permits_transmit(stream_id)`
+  also asks for Ready or Ready Failed.
 - **Registered talkers**: `find_registered_talker_advertise(stream_id)`
   and `find_registered_talker_failed(stream_id)` answer only while a
   peer's declaration is registered (Registrar `In`, or `Lv` until its

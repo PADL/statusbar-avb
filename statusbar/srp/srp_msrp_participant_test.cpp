@@ -1495,6 +1495,203 @@ TEST(msrp_participant, a_changed_talker_advertise_leaves_the_old_value_before_de
 
 namespace {
 
+/// Every Talker Advertise value the PDUs in @p pdus carried, in wire order.
+auto all_talkers_carried(std::vector<std::vector<uint8_t>> const& pdus) -> std::vector<CarriedTalker>
+{
+    std::vector<CarriedTalker> out{};
+    for (auto const& pdu : pdus) {
+        auto const carried = talker_advertise_carried(pdu);
+        out.insert(out.end(), carried.begin(), carried.end());
+    }
+    return out;
+}
+
+/// Whether @p event declares its value: New, JoinIn or JoinMt.
+auto declares(AttributeEvent const event) -> bool
+{
+    return event == AttributeEvent::New || event == AttributeEvent::JoinIn || event == AttributeEvent::JoinMt;
+}
+
+/// Participant @p a declares stream 1's Talker Advertise, sends it, withdraws
+/// it and sends the Lv; the PDUs are then dropped from @p fab.
+void declare_then_withdraw_stream_1(MsrpParticipant& a, Fabric& fab, TestClock const& clock)
+{
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    EXPECT_TRUE(is_success(a.withdraw_talker(make_stream_id(1), clock.now)));
+    a.transmit_pending(clock.now);
+    auto const sent = all_talkers_carried(fab.a_to_b);
+    EXPECT_TRUE(sent.size() == 2 && sent.back().event == AttributeEvent::Lv);
+    fab.a_to_b.clear();
+}
+
+/// Tick @p a every 250 ms for @p quarters quarter seconds.
+void run_quarters(MsrpParticipant& a, TestClock& clock, int const quarters)
+{
+    for (int i = 0; i < quarters; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds(250)));
+    }
+}
+
+}  // namespace
+
+// IEEE 802.1Q 35.2.2.8 puts two LeaveAll periods "between when the Talker
+// removes the existing Stream registration and declares the new". A
+// withdrawal removes the registration as a change does: another value
+// declared under the StreamID ten seconds later waits until thirty seconds
+// after the withdrawal, and is then declared New.
+TEST(msrp_participant, another_value_after_a_withdrawal_waits_two_leaveall_periods_from_the_withdrawal)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc011};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    declare_then_withdraw_stream_1(a, fab, clock);
+
+    run_quarters(a, clock, 40);  // ten seconds
+    auto after = make_talker_adv(1);
+    after.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+
+    run_quarters(a, clock, 79);  // to a quarter second short of the thirty
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    for (auto const& carried : all_talkers_carried(fab.a_to_b)) {
+        EXPECT_FALSE(declares(carried.event));
+    }
+    fab.a_to_b.clear();
+
+    // The first PDU after the thirty seconds completes the change (a LeaveAll
+    // of ours comes at least every fifteen), and the value follows as New.
+    run_quarters(a, clock, 64);
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    auto const anew = all_talkers_carried(fab.a_to_b);
+    bool told_new = false;
+    for (auto const& carried : anew) {
+        told_new = told_new || (carried.event == AttributeEvent::New && carried.max_frame_size == 300U);
+        EXPECT_TRUE(carried.max_frame_size == 300U || !declares(carried.event));
+    }
+    EXPECT_TRUE(told_new);
+}
+
+// The value that was withdrawn is the same registration when it comes back:
+// it is declared again at once, however short the time since the withdrawal.
+TEST(msrp_participant, the_withdrawn_value_may_be_declared_again_at_once)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc012};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    declare_then_withdraw_stream_1(a, fab, clock);
+
+    run_quarters(a, clock, 4);
+    fab.a_to_b.clear();
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    a.transmit_pending(clock.now);
+    auto const back = all_talkers_carried(fab.a_to_b);
+    EXPECT_TRUE(back.size() == 1 && declares(back.front().event));
+    EXPECT_TRUE(back.size() == 1 && back.front().max_frame_size == 150U);
+
+    // And with the old value declared again the wait is over: a change from
+    // here is an ordinary change of a declared value.
+    auto after = make_talker_adv(1);
+    after.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+}
+
+// Once the two LeaveAll periods have passed, another value is declared with
+// no further wait, and a stream never declared again gives its record back.
+TEST(msrp_participant, after_the_wait_another_value_is_declared_at_once_and_an_unused_record_is_reclaimed)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc013};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    declare_then_withdraw_stream_1(a, fab, clock);
+    EXPECT_EQ(a.talker_advertise_count(), 1u);  // kept for the wait
+
+    run_quarters(a, clock, 184);  // forty-six seconds: the wait, and a LeaveAll of ours after it
+    EXPECT_EQ(a.talker_advertise_count(), 0u);
+    fab.a_to_b.clear();
+
+    auto after = make_talker_adv(1);
+    after.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    a.transmit_pending(clock.now);
+    auto const sent = all_talkers_carried(fab.a_to_b);
+    EXPECT_TRUE(sent.size() == 1 && sent.front().event == AttributeEvent::New);
+    EXPECT_TRUE(sent.size() == 1 && sent.front().max_frame_size == 300U);
+}
+
+// A change whose old value has already left keeps its wait through a
+// withdrawal: the value declared after it still waits out what remains.
+TEST(msrp_participant, a_withdrawal_during_a_changes_wait_does_not_end_the_wait)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc014};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    auto after = make_talker_adv(1);
+    after.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    a.transmit_pending(clock.now);  // the Lv of the old value: the wait starts
+
+    run_quarters(a, clock, 20);  // five seconds in, the stream is withdrawn
+    EXPECT_TRUE(is_success(a.withdraw_talker(make_stream_id(1), clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    run_quarters(a, clock, 20);  // ten seconds in, the new value is asked for again
+    fab.a_to_b.clear();
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(after, clock.now)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    run_quarters(a, clock, 76);  // to twenty-nine seconds
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    for (auto const& carried : all_talkers_carried(fab.a_to_b)) {
+        EXPECT_FALSE(declares(carried.event));
+    }
+}
+
+// Milan v1.3 4.3.3.1 asks whether "the PAAD is registering a Listener
+// attribute that matches the Stream ID": any Declaration Type counts, Asking
+// Failed included, which permits no transmission. A Listener this port
+// declares itself is not a peer's.
+TEST(msrp_participant, listener_registered_answers_for_a_peers_listener_of_any_declaration_type)
+{
+    MsrpParticipant talker{test_msrp_config(), 0xc015};
+    MsrpParticipant listener{test_msrp_config(), 0xc016};
+    Fabric fab{};
+    talker.set_send_pdu(fab.make_a_sender());
+    listener.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    talker.start(clock.now);
+    listener.start(clock.now);
+    auto const sid = make_stream_id(0x0061);
+    EXPECT_FALSE(talker.listener_registered(sid));
+
+    EXPECT_TRUE(is_success(listener.declare_listener(sid, ListenerDeclaration::AskingFailed, clock.now)));
+    listener.transmit_pending(clock.now);
+    fab.deliver_b_to_a(talker, clock.now);
+    EXPECT_TRUE(talker.listener_registered(sid));
+    EXPECT_FALSE(talker.listener_permits_transmit(sid));
+    EXPECT_FALSE(listener.listener_registered(sid));  // its own declaration
+
+    EXPECT_TRUE(is_success(listener.withdraw_listener(sid, clock.now)));
+    listener.transmit_pending(clock.now);
+    fab.deliver_b_to_a(talker, clock.now);
+    run_quarters(talker, clock, 8);  // the LeaveTime after the Lv
+    EXPECT_FALSE(talker.listener_registered(sid));
+}
+
+namespace {
+
 /// One Domain value as a PDU carried it.
 struct CarriedDomain
 {

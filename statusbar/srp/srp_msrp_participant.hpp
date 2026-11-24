@@ -309,7 +309,11 @@ class MsrpParticipantT
     /// LeaveAllTime ... time periods between when the Talker removes the
     /// existing Stream registration and declares the new"). Until then
     /// find_talker_advertise() answers the old value, which is no longer
-    /// declared, and talker_change_pending() is true. A change
+    /// declared, and talker_change_pending() is true. The same wait holds
+    /// after withdraw_talker(): the registration is as much removed by a
+    /// withdrawal as by a change, so another value declared under the
+    /// StreamID inside two LeaveAll periods of the withdrawal waits them out,
+    /// while the value that was withdrawn may be declared again at once. A change
     /// to AccumulatedLatency alone stays in place when it is a decrease; an
     /// increase turns the Advertise into a Talker Failed with Failure Code 7
     /// (35.2.2.8.6: the reported latency is not to increase during the life
@@ -430,6 +434,14 @@ class MsrpParticipantT
     ///   }
     /// \endcode
     [[nodiscard]] auto listener_permits_transmit(tsn::StreamId const& stream_id) const noexcept -> bool;
+
+    /// Whether this port is registering a peer's Listener attribute for
+    /// @p stream_id, of any Declaration Type (Asking Failed included): the
+    /// Registrar is In or Lv. Milan v1.3 4.3.3.1 asks a talker exactly this
+    /// before it declares the stream ("the PAAD is registering a Listener
+    /// attribute that matches the Stream ID"); whether the listener also
+    /// permits transmit is listener_permits_transmit()'s question.
+    [[nodiscard]] auto listener_registered(tsn::StreamId const& stream_id) const noexcept -> bool;
 
     /// Diagnostic breakdown of listener_permits_transmit for one stream id: the
     /// exact reason the talker gate is open or closed, for logging the
@@ -658,6 +670,16 @@ class MsrpParticipantT
     template <class Record>
     [[nodiscard]] static auto change_may_complete(Record& rec, std::chrono::milliseconds hold, TimePoint now) -> bool;
     void complete_pending_changes(TimePoint now);
+    /// Two LeaveAll periods: what IEEE 802.1Q 35.2.2.8 puts between a Talker
+    /// removing a Stream registration and declaring another under its StreamID.
+    [[nodiscard]] auto talker_value_hold() const noexcept -> std::chrono::milliseconds;
+    /// Whether @p fv has to wait on @p rec for the value that left to be gone long enough.
+    [[nodiscard]] static auto waits_out_the_old_value(
+        AttributeRecord<TalkerAdvertiseFirstValue> const& rec, TalkerAdvertiseFirstValue const& fv, TimePoint now) noexcept -> bool;
+    /// A Talker Advertise is being withdrawn: start, or keep, the wait another value must respect.
+    void hold_other_values_after_withdrawal(AttributeRecord<TalkerAdvertiseFirstValue>& rec, TimePoint now) const noexcept;
+    /// Forget the waits that have run out with no value waiting on them, so their records can decay.
+    void forget_finished_holds(TimePoint now) noexcept;
 
     //
     // Timer expiry handlers
