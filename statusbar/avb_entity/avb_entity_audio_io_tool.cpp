@@ -457,7 +457,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
             if (kick_in_rx) {  // the drain released the port guard; the kick needs none
                 auto const k0 = std::chrono::steady_clock::now();
                 (void)entity.kick_stream_tx();
-                note_kick(k0, wake_info->error_ns);
+                note_kick(k0, wake_info->error_ns());
             }
         },
         ctx.compensation_ns,
@@ -481,7 +481,7 @@ auto run_main_loop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, 
             }
             auto const cb_t0 = std::chrono::steady_clock::now();
             (void)entity.kick_stream_tx();
-            note_kick(cb_t0, wake_info->error_ns);
+            note_kick(cb_t0, wake_info->error_ns());
         },
         ctx.compensation_ns,
         ctx.enable_realtime,
