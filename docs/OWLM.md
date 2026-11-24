@@ -320,7 +320,8 @@ the canonical validation.
 
 `scripts/owlm/loopback_smoke.sh` runs two `statusbar-owlm-tool` instances on
 `lo` (with separate ports) for a few seconds and asserts packet
-counts. Hand-run with:
+counts. It carries the ctest label `functional` and runs with the
+functional tests. Hand-run with:
 
 ```
 OWLM_TEST_IFACE=eth0 ctest -R owlm_loopback

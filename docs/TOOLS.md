@@ -66,7 +66,9 @@ is required on `avb-am824-io`. Useful flags on the entity tools:
 `--entity.id`/`--entity.name`, `--atdecc.version=2016|2021`,
 `--atdecc.profile=classic|milan13` and `--entity.milan` (a Milan model
 answers GET_MILAN_INFO and takes `milan13` as its default profile; see
-`ENTITY_CONSTRUCTION_KIT.md`), `--net.backend=rawnet|mmap|xdp`
+`ENTITY_CONSTRUCTION_KIT.md`), `--presentation_offset_ns` (0, the default,
+takes the profile's: 2 ms under Milan, 1 ms otherwise),
+`--net.backend=rawnet|mmap|xdp`
 (+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.
 `avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous/max_tai_error_us),
 `--tx_pcap.path`, `--gate.talker_on_listener`, `--media.*`, `--tone.*`,
@@ -276,8 +278,13 @@ The Debian runtime package (`statusbar-avb`) ships, beside the binaries above:
 The postinst grants the capabilities named at the top to every `statusbar-*`
 ELF binary, reloads udev, and across an upgrade restarts each of the two
 services that was running. The `-dev` package installs the headers, the static
-libraries, the CMake package and this `docs/` tree (including `docs/sm/`) under
-`/usr/local/share/doc/statusbar-avb/`. No man pages are shipped; each unit's
+libraries, the CMake package, this `docs/` tree (including `docs/sm/`) under
+`/usr/local/share/doc/statusbar-avb/`, and `statusbar-avb-functional-test`
+with its data under `/usr/local/share/statusbar-avb/functional-test-data/`:
+the package's own tests that need real sockets and a real kernel, to be run on
+a target (`-A` runs all of them; `STATUSBAR_FUNCTIONAL_TEST_DATA_DIR` points
+it at other data). It is a different program from
+`statusbar-msrp-functional-test` above. No man pages are shipped; each unit's
 `Documentation=` line points at its conffile, which names the tool and its
 `--help`.
 

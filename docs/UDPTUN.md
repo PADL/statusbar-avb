@@ -12,9 +12,10 @@ sequence, tx_gptp_ns, app_data}, classify primary vs redundant copies,
 and validate received bytes for the reflector.
 
 The OWLM measurement tool (`statusbar/owlm`, `statusbar-owlm-tool`) is the
-reference consumer. A second consumer — IEEE 1722-2025 AAF version 1
-audio carried over IEEE 1722 Annex J UDP encapsulation — lives outside
-this repo (in the AVB tooling that wants to reuse the framework).
+reference consumer. A second consumer, IEEE 1722-2025 AAF version 1
+audio carried over IEEE 1722 Annex J UDP encapsulation, is the entity's
+inter-site tunnel (`udptun_aaf_v1_codec.hpp`, used by
+`statusbar-avb-audio-io`).
 
 ## Module layout
 
@@ -22,10 +23,11 @@ this repo (in the AVB tooling that wants to reuse the framework).
 |---|---|
 | `udptun_codec_concept.hpp` | `concept Codec`, `enum class PacketRole` |
 | `udptun_session.hpp` | `TxContext`, `RxContext`, `LoopState` (non-templated) plus `send_packet<C>`, `drain_rx<C>`, `process_one_rx_datagram<C>`, `route_self_pair_packet<C>`, `send_redundant_replay<C>`, `drain_inflight_after_stop<C>` (templated, header-only) |
-| `udptun_session_helpers.{hpp,cpp}` | Linux helpers — `make_periodic_timerfd`, `bind_to_device`, `is_ipv4_multicast`, `configure_multicast`, `build_pollfds`, `rtt_grace_ns` |
+| `udptun_session_helpers.{hpp,cpp}` | Linux helpers — `bind_to_device`, `is_ipv4_multicast`, `configure_multicast`, `build_pollfds`, `rtt_grace_ns` |
 | `udptun_reflect.hpp` | `ReflectStats`, `ReflectConfig`, `print_reflect_summary`, `drain_reflect_rx<C>`, `run_reflect<C>` |
 | `udptun_report.{hpp,cpp}` | `TxLossStats`, `RedundancyDisplayStats`, `print_live_report`, `print_final_summary` |
 | `udptun_identity.{hpp,cpp}` | `LocalIdentityConfig`, `setup_local_identity`, `TxIdentityPair`, `print_eui64_banner` |
+| `udptun_clock_gate.{hpp,cpp}` | `ClockGate`, `ClockReport`, `print_clock_report`, `DEFAULT_MAX_CLOCK_ERROR_NS`: the session's verdict on its master link and on the system clock |
 | `udptun_wire_clock.hpp` | `WireClock`, `monotonic_raw_ns`, `realtime_ns` |
 | `udptun_stats.{hpp,cpp}` | `LatencyStats`, `percentile_from_histogram` |
 | `udptun_per_source_tracker.{hpp,cpp}` | `SourceState`, `PerSourceTracker` |
@@ -283,7 +285,8 @@ See `docs/OWLM.md` for the OWLM-specific deployment story
   0x0001`); `eui64_pair_id` canonicalizes both to the same logical
   sender.
 
-- **AAF v1 over Annex J** — planned, lives in the AVB tooling. The
+- **AAF v1 over Annex J** — `statusbar/udptun/udptun_aaf_v1_codec.hpp`
+  (`AafV1OverAnnexJCodec`), used by the entity's tunnel. The
   Annex J 32-bit outer sequence drives the framework's transport-level
   loss/redundancy tracking; the AAF v1 inner header carries audio
   metadata (per-stream sequence, 64-bit `avtp_timestamp`, 8-byte

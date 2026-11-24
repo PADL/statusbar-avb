@@ -22,6 +22,10 @@ interface = "eth0"
 # AEM descriptor (entity model) blob. The package ships the canonical one here.
 descriptor-storage = "/usr/local/share/statusbar-avb/entity_audio.bin"
 
+# Talker presentation time offset in ns. 0 (the default) takes the profile's:
+# 2 ms under Milan, 1 ms otherwise.
+# presentation_offset_ns = 0
+
 # Built-in test-tone frequency (Hz), emitted when no other audio source is
 # connected.
 [tone]
@@ -52,3 +56,4 @@ talker_on_listener = true
 # rendezvous_key = "CHANGE-ME"
 # rendezvous_session_id = "CHANGE-ME"
 # rendezvous_role = "ingest"
+# max_tai_error_us = 3000      # packets carry the tu bit while the system clock is not known this well

@@ -19,7 +19,7 @@ The PTP Wake Example demonstrates precision wake timing by:
 Usage: statusbar-ptpclient-wake [options]
 
 Options:
-  --ptp.driver=CHOICE   PTP driver (linuxptp or system)
+  --ptp.driver=CHOICE   PTP driver: linuxptp, ntpshm or system
                         (default: linuxptp on Linux, system on macOS)
   --ptp.device=FILE     PTP device path (default: /dev/ptp0)
   --ptp.period=INTEGER  Wake period in nanoseconds (default: 1000000 = 1ms)
@@ -139,7 +139,9 @@ The compensation parameter accounts for the overhead between the target wake tim
 
 ### Memory Locking (mlockall)
 
-The program automatically calls `mlockall(MCL_CURRENT | MCL_FUTURE)` to lock all memory pages. This prevents page faults during the realtime wake loop, which can cause multi-millisecond latency spikes under memory pressure (e.g., during heavy builds).
+The program calls `mlockall(MCL_CURRENT)` once the bridge is healthy, unless `--ptp.no-mlock` or `--ptp.no-rt` is given. This prevents page faults during the realtime wake loop, which can cause multi-millisecond latency spikes under memory pressure (e.g., during heavy builds).
+
+`MCL_CURRENT` takes in only what is mapped at that moment, so a timer thread made afterwards has an unlocked stack and, with glibc, an unlocked allocator arena. The kernel may move such pages (memory compaction), and a thread that touches one while it is being moved waits for the move: 0.2 to 2.6 ms was measured on a 1 GB host. `PtpTimer::set_lock_memory(true)` makes the timer thread allocate once and lock again from itself before its loop. The entity tools set it from `PtpAppContext::lock_memory`; a program with its own `PtpTimer` should do the same wherever the process locks its memory. `MCL_FUTURE` is not used.
 
 Without memory locking, running a parallel build caused 5-7ms max latency spikes. With `mlockall()`, the same load produced only 39µs max latency (when combined with `isolcpus`).
 
@@ -249,12 +251,12 @@ PTP Wake Example
 ### Running Statistics
 
 ```
-Wakes:     1000  Avg:    +27.1 ns  Min:   -1536 ns  Max:  +10752 ns  StdDev:   608.5 ns
+Wakes:     1000  Error:      +27 ns (+0.027 us)
 ```
 
-- **Avg**: Average error (positive = late, negative = early)
-- **Min/Max**: Worst-case timing bounds
-- **StdDev**: Standard deviation (lower = more consistent)
+The count of wakes and that wake's error (positive = late, negative =
+early). The averages, the bounds and the standard deviation are in the
+final report.
 
 ### Final Report
 

@@ -42,7 +42,7 @@ works.
 ## Per-Pi5 clock map
 
 Two intentionally-decoupled clocks on each Pi5 (supersedes the old
-`REALTIME = gPTP` design in [[ptp-bridge-clock-domain-design]]):
+`REALTIME = gPTP` design):
 
 | Clock | Disciplined by | Equals | Jitter | Used for |
 |-------|----------------|--------|--------|----------|
@@ -112,8 +112,7 @@ follows it. Do not cache the delta and walk away.
    median/Huber/step-rejection so a spike doesn't bias the frequency. chronyd already
    does outlier rejection; a custom servo must too.
 3. **Media-clock generator** = produce at GPS rate, stamp avtp/SYT in PHC time. `r`
-   (switch/GPS) is the key state; for AM824 this is the CIP SYT (see
-   [[am824-cip-syt-missing]]), for AAF the per-packet avtp_timestamp.
+   (switch/GPS) is the key state; for AM824 this is the CIP SYT, for AAF the per-packet avtp_timestamp.
 4. **The system clock is followed only while it knows the time.** The media
    thread reads the operating system's worst-case error for CLOCK_REALTIME once
    a second (what chronyd last told the kernel) and coasts it at

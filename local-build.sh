@@ -5,7 +5,7 @@
 # the right -Dstatusbar-<dep>_DIR flags through to cmake. Extra args
 # are forwarded to `cmake` configure:
 #
-#   ./local-build.sh                  # configure + build + the unit tests
+#   ./local-build.sh                  # configure + build + the unit tests, then the functional tests
 #   ./local-build.sh -DENABLE_ASAN=ON # forward cmake args
 #
 # Dependency resolution per dep (first match wins):
