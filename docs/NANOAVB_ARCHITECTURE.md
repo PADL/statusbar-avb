@@ -536,11 +536,12 @@ talker's attribute is registered).
   Advertise at the old priority or VID leaves (Clause 35.2.2.8). The VID is the same at every position
   of a Domain vector (a bridge's default `{5,2,VID},{6,3,VID}`); the
   participant hands over the per-position value.
-- **Milan listener.** With `set_listener_waits_for_talker` (Milan v1.2
-  Section 5.3.8.5) an attached listener declares Listener Ready while the
-  talker's Advertise is registered, Asking Failed while its Talker Failed is,
-  and nothing otherwise (rather than Asking Failed); never Ready Failed. Only
-  a peer's live registration counts (`peer_talker_advertise`: never one the
+- **Waiting listener.** Under every profile
+  (`set_listener_waits_for_talker`, on by default; Milan v1.2 Section
+  5.3.8.5) an attached listener declares Listener Ready while the talker's
+  Advertise is registered, Asking Failed while its Talker Failed is, and
+  nothing otherwise (rather than Asking Failed); never Ready Failed. Only a
+  peer's live registration counts (`peer_talker_advertise`: never one the
   peer has left, whose record lingers until reclaimed, nor our own
   declaration). The remote-talker hook is the Milan listener's
   EVT_TK_REGISTERED / UNREGISTERED source.
