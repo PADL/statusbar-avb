@@ -218,7 +218,8 @@ struct MsrpConfig
     size_t reserved_talker_failed = 0;
     size_t reserved_listeners = 0;
 
-    /// The MRP timers (IEEE 802.1Q-2018 Table 10-7 by default; Milan sets its own).
+    /// The MRP timer durations of this port (IEEE 802.1Q Table 10-7 by
+    /// default; see also MsrpParticipant::set_mrp_timers).
     mrp::TimerConfig timers{};
 
     /// Check invariants. Returns Success if the config is
@@ -429,8 +430,12 @@ class MsrpParticipantT
     /// Look up a locally known Talker Failed by tsn::StreamId.
     [[nodiscard]] auto find_talker_failed(tsn::StreamId const& id) const noexcept -> TalkerFailedFirstValue const*;
 
-    /// The Talker Advertise for @p id while a peer's declaration is registered (In, or Leaving until
-    /// its LeaveTime), or nullptr: never a record the peer's leave has timed out or one only we declare.
+    /// The Talker Advertise for @p id while a peer's declaration of it is
+    /// registered on this port (Registrar In, or Lv until its leavetimer
+    /// expires), or nullptr. find_talker_advertise() also answers a record
+    /// this port declares itself and one whose registration has lapsed and
+    /// waits for the reclaim sweep, which is what an observer told of a
+    /// Leave still finds.
     [[nodiscard]] auto find_registered_talker_advertise(tsn::StreamId const& id) const noexcept -> TalkerAdvertiseFirstValue const*;
 
     /// The Talker Failed for @p id while a peer's declaration of it is
@@ -932,7 +937,7 @@ class MsrpParticipantT
             !(rec.first_value == fv);
         if (registered && (!before.was_registered || before.value_changed || conflict)) {
             notify_register(fv);
-        } else if (mrp::registrar_rx_ended(rec, was_registered)) {
+        } else if (!registered && before.was_registered) {
             notify_leave(rec.first_value);
         }
     }
@@ -1197,8 +1202,6 @@ class MsrpParticipantT
     void notify_talker_leave(tsn::StreamId const& id);
     /// Read @p pdu's messages, then deliver the Talker leaves it held (deliver_rx_talker_leaves).
     void read_pdu(std::span<uint8_t const> pdu, TimePoint now);
-    /// Each message of @p pdu, decoded.
-    void decode_messages(std::span<uint8_t const> pdu, TimePoint now);
     /// The Talker leaves of the MRPDU just read, one per StreamID; an observer reads what is registered then
     /// (the other Talker attribute, for a Talker Advertise turned Talker Failed, or back).
     void deliver_rx_talker_leaves();
