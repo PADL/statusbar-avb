@@ -180,7 +180,7 @@ void AvbEntityKit::configure_talker_streams()
 {
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).
-    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_name, config_.entity_id);
+    ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_mac, config_.interface_name, config_.entity_id);
     for (auto const& spec : talker_specs_) {
         (void)host_.components().acmp_talker.configure_stream(
             spec.index, stream_id_for(stream_base_mac, spec.index), talker_dest_mac(config_, spec.format.kind), config_.vlan_id);

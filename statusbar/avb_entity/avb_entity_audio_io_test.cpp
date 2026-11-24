@@ -12,6 +12,7 @@
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 
 #include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_input.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
@@ -217,6 +218,21 @@ TEST(audio_io_create, the_configured_serial_number_is_served)
     EXPECT_EQ(served.serial_number.as_string_view(), std::string_view{"SGH733SYJ3"});
     EXPECT_EQ(served.entity_model_id, served_entity(**authored).entity_model_id);
     EXPECT_NE(served_entity(**authored).serial_number.as_string_view(), std::string_view{"SGH733SYJ3"});
+}
+
+// A told interface address names the talker streams, whatever the system has under the interface's name.
+TEST(audio_io_create, talker_stream_ids_follow_the_told_interface_address)
+{
+    auto config = make_config_with_blob(load_file(entity_audio_bin_path()));
+    ieee::Eui48 const told = config.interface_mac.value_or(ieee::Eui48{});
+    auto const result = AvbEntityAudioIO::create(std::move(config));
+    EXPECT_TRUE(result.has_value());
+    if (!result) {
+        return;
+    }
+    auto const* stream = (*result)->components().acmp_talker.get_stream(0);
+    EXPECT_TRUE(stream != nullptr);
+    EXPECT_TRUE(stream != nullptr && stream->stream_id == stream_id_for(told, 0));
 }
 
 TEST(audio_io_create, empty_blob_fails)
