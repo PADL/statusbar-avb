@@ -245,7 +245,7 @@ void SrpPort::on_peer_talker_join(StreamId const& stream_id) noexcept
 
 void SrpPort::report_leave(StreamId const& stream_id)
 {
-    // Still there under its other attribute, or reported at its rLv! already; a Leaving one (Lv) has left.
+    // Still there under its other attribute, or its registration's end reported already.
     if (msrp_.peer_talker_in(stream_id) || std::ranges::contains(reported_leaves_, stream_id)) {
         return;
     }

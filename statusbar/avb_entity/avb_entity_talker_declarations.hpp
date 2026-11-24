@@ -71,8 +71,9 @@ class TalkerDeclarations
     [[nodiscard]] auto wants_declared(uint16_t idx, int64_t now_ns) const noexcept -> bool;
 
     /// What stream @p idx needs at @p now_ns, its Talker Advertise now being @p params. @p refresh
-    /// re-declares changed parameters (the adopted Class A VID) without a hold; otherwise a
-    /// declared stream whose parameters changed is withdrawn first and held.
+    /// re-declares changed parameters (the adopted Class A VID) without this hold, though the MSRP
+    /// participant still holds the new value two LeaveAll periods; otherwise a declared stream
+    /// whose parameters changed is withdrawn first and held.
     [[nodiscard]] auto evaluate(uint16_t idx, int64_t now_ns, Params const& params, bool refresh) const noexcept -> Action;
 
     /// The kit declared stream @p idx with @p params.
