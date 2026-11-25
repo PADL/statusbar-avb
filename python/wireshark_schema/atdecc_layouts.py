@@ -788,6 +788,9 @@ VALUE_TABLES["control_value_type"] = ValueTable(
 VALUE_TABLES["control_unit_code"] = ValueTable("control_unit_code", dict(U.UNIT_CODES))
 VALUE_TABLES["mvu_command"] = ValueTable("mvu_command", dict(STD.MVU_COMMANDS))
 VALUE_TABLES["mvu_status"] = ValueTable("mvu_status", dict(STD.MVU_STATUS))
+VALUE_TABLES["mvu_probing_status"] = ValueTable(
+    "mvu_probing_status", dict(STD.MVU_PROBING_STATUS)
+)
 
 CONTROL_PREFIX = f"{PREFIX}.control"
 CONTROL_VALUE = Layout(
@@ -1017,6 +1020,8 @@ MVU = Layout(
 )
 MVU_HEADER_LENGTH = STD.MVU_HEADER_LENGTH
 MVU_PAYLOAD_LAYOUTS: dict[str, Layout] = {}
+for (_sname, _member), _subfields in STD.MVU_PACKED_MEMBERS.items():
+    _FLAG_WORDS[(f"mvu.{_snake(_sname)}", _member)] = _subfields
 for _sname, _struct in STD.MVU_PAYLOAD_STRUCTS.items():
     _fields = list(
         _fields_for(

@@ -340,9 +340,34 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
             _DI,
             ("talker_entity_id", 8, "u64", "talker_entity_id"),
             ("talker_unique_id", 2, "u16", "bound talker unique id"),
-            ("pbsta", 1, "u8", "probing status"),
-            ("acmpsta", 1, "u8", "ACMP status"),
+            ("pbsta_acmpsta", 1, "u8", "pbsta | acmpsta"),
+            ("reserved_1", 1, "u8", "reserved"),
         ],
+    ),
+}
+#: Probing status (Milan 1.3 Table 5.5)
+MVU_PROBING_STATUS: dict[int, str] = {
+    0: "PROBING_DISABLED",
+    1: "PROBING_PASSIVE",
+    2: "PROBING_ACTIVE",
+    3: "PROBING_COMPLETED",
+}
+#: (struct, member) -> the sub-fields packed into one member of an MVU struct,
+#: ((sub-field, mask, kind, value table, doc), ...). Figure 5.12 puts the
+#: Probing status in the three high bits of one octet and the ACMP status in
+#: its five low bits (5.3.8.6: a 3-bit and a 5-bit integer).
+MVU_PACKED_MEMBERS: dict[
+    tuple[str, str], tuple[tuple[str, int, str, str | None, str], ...]
+] = {
+    ("MvuStreamInputInfoExResponse", "pbsta_acmpsta"): (
+        ("pbsta", 0xE0, "u8", "mvu_probing_status", "Probing status (Table 5.5)"),
+        (
+            "acmpsta",
+            0x1F,
+            "u8",
+            "acmp_status",
+            "ACMP status of the last probe (5.3.8.6)",
+        ),
     ),
 }
 MVU_OPTIONAL_NAME: dict[str, str] = {

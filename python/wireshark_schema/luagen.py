@@ -317,6 +317,7 @@ def generate_atdecc_fields() -> str:
         "control_unit_code",
         "mvu_command",
         "mvu_status",
+        "mvu_probing_status",
         "keychain_id",
         # referenced by the stream-format sub-fields
         "aaf_nsr",

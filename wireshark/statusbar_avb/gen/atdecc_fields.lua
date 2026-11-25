@@ -404,6 +404,13 @@ M.values_mvu_status = {
     [0x07] = "BAD_ARGUMENTS",
 }
 
+M.values_mvu_probing_status = {
+    [0x00] = "PROBING_DISABLED",
+    [0x01] = "PROBING_PASSIVE",
+    [0x02] = "PROBING_ACTIVE",
+    [0x03] = "PROBING_COMPLETED",
+}
+
 M.values_keychain_id = {
     [0x00] = "ENTITY_PUBLIC",
     [0x01] = "ENTITY_PRIVATE",
@@ -1789,8 +1796,8 @@ M.f.atdecc_mvu_descriptor_index = ProtoField.uint16("avb.atdecc.mvu.descriptor_i
 M.f.atdecc_mvu_talker_entity_id = ProtoField.eui64("avb.atdecc.mvu.talker_entity_id", "talker_entity_id", "talker_entity_id")
 M.f.atdecc_mvu_talker_stream_index = ProtoField.uint16("avb.atdecc.mvu.talker_stream_index", "talker_stream_index", base.DEC, nil, nil, "talker STREAM_OUTPUT index")
 M.f.atdecc_mvu_talker_unique_id = ProtoField.uint16("avb.atdecc.mvu.talker_unique_id", "talker_unique_id", base.DEC, nil, nil, "bound talker unique id")
-M.f.atdecc_mvu_pbsta = ProtoField.uint8("avb.atdecc.mvu.pbsta", "pbsta", base.DEC, nil, nil, "probing status")
-M.f.atdecc_mvu_acmpsta = ProtoField.uint8("avb.atdecc.mvu.acmpsta", "acmpsta", base.DEC, nil, nil, "ACMP status")
+M.f.atdecc_mvu_pbsta = ProtoField.uint8("avb.atdecc.mvu.pbsta", "pbsta", base.DEC, M.values_mvu_probing_status, 0xE0, "Probing status (Table 5.5)")
+M.f.atdecc_mvu_acmpsta = ProtoField.uint8("avb.atdecc.mvu.acmpsta", "acmpsta", base.DEC, M.values_acmp_status, 0x1F, "ACMP status of the last probe (5.3.8.6)")
 M.f.atdecc_aem_payload = ProtoField.bytes("avb.atdecc.aem.payload", "payload", base.NONE, "undissected AEM payload octets")
 M.f.atdecc_desc_control_value_details = ProtoField.bytes("avb.atdecc.desc.control.value_details", "value_details", base.NONE, "raw descriptor trailer octets")
 M.f.atdecc_jdks_log_text = ProtoField.string("avb.atdecc.jdks.log.text", "text", base.ASCII, "log text")
@@ -5143,7 +5150,8 @@ function M.add_mvu_mvu_stream_input_info_ex_response(tree, tvb, off)
     tree:add(M.f.atdecc_mvu_talker_entity_id, tvb(off + 36, 8))
     tree:add(M.f.atdecc_mvu_talker_unique_id, tvb(off + 44, 2))
     tree:add(M.f.atdecc_mvu_pbsta, tvb(off + 46, 1))
-    tree:add(M.f.atdecc_mvu_acmpsta, tvb(off + 47, 1))
+    tree:add(M.f.atdecc_mvu_acmpsta, tvb(off + 46, 1))
+    tree:add(M.f.atdecc_mvu_reserved_1, tvb(off + 47, 1))
 end
 
 M.AEM_PAYLOAD_RAW = M.f.atdecc_aem_payload
