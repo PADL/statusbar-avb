@@ -624,6 +624,89 @@ TEST(nanoavb_srp_msrp, a_listener_told_not_to_wait_declares_asking_failed_before
         sent, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
 }
 
+// A listener told which Talker attribute to follow (the destination address
+// and VLAN a Milan sink probed, Milan v1.3 5.3.8.5 and 5.3.8.8) declares
+// nothing for a Talker Advertise of its StreamID on another VLAN: it would
+// be Ready for a stream it does not receive. When the talker declares the
+// stream on the VLAN it named, the listener is Ready.
+TEST(nanoavb_srp_msrp, a_listener_that_follows_one_talker_attribute_is_not_ready_for_another_of_its_stream)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    ListenerLink link{};
+    TalkerMatch const probed{.dest_address = link.advertise().destination_address, .vlan_id = 2};
+    auto const attached = link.listener.listener_attach(link.sid, link.now, probed);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Waiting);
+    EXPECT_TRUE(link.listener.get_listener_stream(link.sid)->follows.has_value());
+
+    // The attribute arrives on VLAN 3: registered, and not the one this listener follows.
+    auto elsewhere = link.advertise();
+    elsewhere.vlan_identifier = 3;
+    EXPECT_TRUE(link.talker.declare_talker_advertise(elsewhere, link.now).has_value());
+    link.run(30);
+    EXPECT_EQ(link.state(), ListenerReservationState::Waiting);
+    EXPECT_TRUE(link.take_sent().empty());
+    EXPECT_TRUE(link.listener.registered_talker(link.sid).has_value());           // it is registered,
+    EXPECT_FALSE(link.listener.registered_talker(link.sid, probed).has_value());  // and it is not the one
+
+    // The talker's new value waits out two LeaveAll periods after the old one left (IEEE 802.1Q 35.2.2.8).
+    EXPECT_TRUE(link.talker.declare_talker_advertise(link.advertise(), link.now).has_value());
+    link.run(300);
+    EXPECT_EQ(link.state(), ListenerReservationState::Ready);
+    EXPECT_TRUE(link.listener.registered_talker(link.sid, probed).has_value());
+    auto const sent = link.take_sent();
+    EXPECT_TRUE(!sent.empty() && sent.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!sent.empty() && sent.front().declaration == ListenerDeclaration::Ready);
+
+    // Another destination address is another stream's too.
+    TalkerMatch const other_address{.dest_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x35}, .vlan_id = 2};
+    EXPECT_FALSE(link.listener.registered_talker(link.sid, other_address).has_value());
+    EXPECT_EQ(link.listener.listener_state_wanted(link.sid, other_address), ListenerReservationState::Waiting);
+}
+
+// A probe answer that names no VLAN (0) follows the attribute on whichever
+// VLAN it is declared, and a listener that names no attribute at all follows
+// any of its StreamID, as IEEE 802.1Q has it: the last attach decides.
+TEST(nanoavb_srp_msrp, a_listener_follows_any_vlan_when_its_match_names_none_and_any_attribute_without_a_match)
+{
+    ListenerLink link{};
+    auto on_vlan_3 = link.advertise();
+    on_vlan_3.vlan_identifier = 3;
+    EXPECT_TRUE(link.talker.declare_talker_advertise(on_vlan_3, link.now).has_value());
+    link.run(8);
+
+    TalkerMatch const no_vlan{.dest_address = on_vlan_3.destination_address, .vlan_id = 0};
+    auto const attached = link.listener.listener_attach(link.sid, link.now, no_vlan);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Ready);
+    EXPECT_TRUE(link.listener.listener_withdraw(link.sid, link.now).has_value());
+    EXPECT_FALSE(link.listener.get_listener_stream(link.sid)->follows.has_value());  // gone with the last input
+
+    TalkerMatch const vlan_2{.dest_address = on_vlan_3.destination_address, .vlan_id = 2};
+    auto const strict = link.listener.listener_attach(link.sid, link.now, vlan_2);
+    EXPECT_TRUE(strict.has_value() && *strict == ListenerReservationState::Waiting);
+    auto const plain = link.listener.listener_attach(link.sid, link.now);
+    EXPECT_TRUE(plain.has_value() && *plain == ListenerReservationState::Ready);
+    EXPECT_FALSE(link.listener.get_listener_stream(link.sid)->follows.has_value());
+    EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 2);
+}
+
+// A Talker Failed is followed by the same match as a Talker Advertise.
+TEST(nanoavb_srp_msrp, a_listener_that_follows_one_talker_attribute_asks_failed_only_for_a_talker_failed_that_is_it)
+{
+    ListenerLink link{};
+    auto failed_on_vlan_3 = link.failed();
+    failed_on_vlan_3.advertise.vlan_identifier = 3;
+    EXPECT_TRUE(link.talker.declare_talker_failed(failed_on_vlan_3, link.now).has_value());
+    link.run(8);
+    TalkerMatch const vlan_2{.dest_address = link.advertise().destination_address, .vlan_id = 2};
+    TalkerMatch const vlan_3{.dest_address = link.advertise().destination_address, .vlan_id = 3};
+    EXPECT_EQ(link.listener.listener_state_wanted(link.sid, vlan_2), ListenerReservationState::Waiting);
+    EXPECT_EQ(link.listener.listener_state_wanted(link.sid, vlan_3), ListenerReservationState::AskingFailed);
+    EXPECT_EQ(link.listener.listener_state_wanted(link.sid), ListenerReservationState::AskingFailed);
+    auto const registered = link.listener.registered_talker(link.sid, vlan_3);
+    EXPECT_TRUE(registered.has_value() && registered->failed);
+}
+
 //
 // MSRP Handler Listener Tests
 //

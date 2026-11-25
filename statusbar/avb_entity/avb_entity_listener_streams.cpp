@@ -762,23 +762,43 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
-auto ListenerStreams::attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint const now) -> bool
+void ListenerStreams::log_settled(
+    uint16_t const stream_index, nanoavb::TalkerMatch const& probed, bool const ready, bool const joined)
+{
+    if (!logger_) {
+        return;
+    }
+    logger_->status(
+        "acmp: listener stream {} ({}) SETTLED on dest={:012x} vlan={} -> MSRP Listener {}, mcast join {}",
+        stream_index,
+        kind_lit(slot_for(stream_index)),
+        probed.dest_address.to_uint64(),
+        probed.vlan_id,
+        ready ? logging::lit("Ready") : logging::lit("waits for that Talker attribute"),
+        joined ? logging::lit("ok") : logging::lit("none"));
+}
+
+auto ListenerStreams::attach_ready(
+    ieee::Eui64 const& stream_id, sm::TimePoint const now, std::optional<nanoavb::TalkerMatch> const& only) -> bool
 {
     // Attach (kit phase 5d): declares Ready when the talker's Advertise is
     // registered. Until then (e.g. a fast-connect racing the talker's boot)
     // the handler waits with nothing declared and declares Ready when it
     // appears; a registered Talker Failed gets Asking Failed.
-    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now);
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, only);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 
-auto ListenerStreams::attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint const now)
-    -> bool
+auto ListenerStreams::attach_or_held_ready(
+    ListenerConnection const& held,
+    ieee::Eui64 const& stream_id,
+    sm::TimePoint const now,
+    std::optional<nanoavb::TalkerMatch> const& only) -> bool
 {
     // One attachment per stream a slot holds: a slot already on this stream
     // re-declares nothing, so attach and withdraw stay one-for-one however
     // many times a controller repeats the CONNECT.
-    return held.stream_id != stream_id ? attach_ready(stream_id, now) : held_ready(stream_id);
+    return held.stream_id != stream_id ? attach_ready(stream_id, now, only) : held_ready(stream_id);
 }
 
 auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
@@ -793,29 +813,54 @@ auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
 }
 
 void ListenerStreams::on_listener_connected(
-    uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 const dest_mac, sm::TimePoint const now)
+    uint16_t const stream_index,
+    ieee::Eui64 const& stream_id,
+    ieee::Eui48 const dest_mac,
+    sm::TimePoint const now,
+    std::optional<nanoavb::TalkerMatch> const& only)
 {
     auto* slot = slot_for(stream_index);
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
-    bool const ready = attach_or_held_ready(slot->connection, stream_id, now);
+    bool const ready = attach_or_held_ready(slot->connection, stream_id, now, only);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
-    slot->rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
-    log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
+    publish_connection(*slot, stream_id, only.has_value());
+    log_attached(stream_index, dest_mac, only, ready);
+}
+
+void ListenerStreams::publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool const settled)
+{
+    slot.connection.settled = settled;
+    slot.rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
+}
+
+void ListenerStreams::log_attached(
+    uint16_t const stream_index, ieee::Eui48 const dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool const ready)
+{
+    auto const* slot = slot_for(stream_index);
+    bool const joined = slot != nullptr && slot->connection.group.has_value();
+    if (only.has_value()) {
+        log_settled(stream_index, *only, ready, joined);
+    } else {
+        log_connected(stream_index, dest_mac, ready, joined);
+    }
 }
 
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
+    bool settled = false;
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
+        settled = slot->connection.settled;
         slot->rx_stream_id.publish(0);  // no frame is this input's any more
         release_connection(slot->connection, now);
     }
     if (logger_) {
         logger_->status(
-            "acmp: listener stream {} ({}) DISCONNECTED from talker -> MSRP Listener withdrawn",
+            "acmp: listener stream {} ({}) {} -> MSRP Listener withdrawn",
             stream_index,
-            kind_lit(slot_for(stream_index)));
+            kind_lit(slot_for(stream_index)),
+            settled ? logging::lit("no longer SETTLED") : logging::lit("DISCONNECTED from talker"));
     }
 }
 

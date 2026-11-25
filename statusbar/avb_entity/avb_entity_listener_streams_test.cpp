@@ -109,6 +109,35 @@ TEST(listener_connection, only_a_multicast_destination_is_a_group_to_join)
     EXPECT_EQ(group->to_uint64(), 0x91E0F0001234ULL);
 }
 
+// A Milan sink's connection names the Talker attribute it probed, and the
+// MSRP handler is told to follow that one; an IEEE 1722.1 connection names
+// none. The slot remembers which it was for the disconnect's log line.
+TEST(listener_connection, a_settled_sink_hands_what_it_probed_to_msrp_and_a_connection_hands_nothing)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto const followed = [&donor](ieee::Eui64 const& stream) {
+        nanoavb::StreamId sid{};
+        sid.from_uint64(stream.to_uint64());
+        return donor->components().msrp_handler.get_listener_stream(sid)->follows;
+    };
+
+    nanoavb::TalkerMatch const probed{.dest_address = GROUP, .vlan_id = 2};
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{}, probed);
+    EXPECT_TRUE(ls.slot_for(0)->connection.settled);
+    EXPECT_TRUE(followed(STREAM_1).has_value());
+    EXPECT_TRUE(followed(STREAM_1).has_value() && followed(STREAM_1)->vlan_id == 2 && followed(STREAM_1)->dest_address == GROUP);
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    EXPECT_FALSE(ls.slot_for(0)->connection.settled);
+
+    ls.on_listener_connected(0, STREAM_2, GROUP, sm::TimePoint{});
+    EXPECT_FALSE(ls.slot_for(0)->connection.settled);
+    EXPECT_FALSE(followed(STREAM_2).has_value());
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+}
+
 // The disconnect works from what the slot recorded at connect time, not from
 // the ACMP state machine's copy of the stream, which it has cleared by the
 // time the hook runs: the declaration withdrawn is the one that was made.

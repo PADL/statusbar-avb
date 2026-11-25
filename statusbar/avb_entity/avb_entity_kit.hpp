@@ -259,9 +259,14 @@ class AvbEntityKit
     /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
     void wire_milan_talker_callbacks();
     void wire_milan_listener_callbacks();
-    /// Either listener's connect and disconnect, onto the stream inputs.
+    /// The IEEE 1722.1 listener's connect and disconnect, onto the stream inputs.
     template <typename Listener>
     void wire_listener_connections(Listener& listener);
+    /// The Milan listener's settle and its giving up of the SRP parameters,
+    /// onto the stream inputs, with the Talker attribute each sink probed.
+    void wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener);
+    /// What a sink with the SRP parameters @p srp follows in SRP.
+    [[nodiscard]] static auto probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch;
     /// The stream outputs have destination addresses that are theirs to use
     /// (Milan v1.3 4.3.3.1, 5.5.4.1 step 3).
     [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool;

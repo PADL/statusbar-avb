@@ -362,14 +362,36 @@ auto AvbEntityKit::own_gptp_state() const noexcept -> atdecc::MilanGptpState
 auto AvbEntityKit::talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration
 {
     // 5.3.8.8: the attribute counts only when its StreamID, destination
-    // address and VLAN are the ones the PROBE_TX_RESPONSE gave.
-    auto const registered = host_.components().msrp_handler.registered_talker(srp_stream_id(srp.stream_id));
-    bool const matches =
-        registered.has_value() && registered->dest_address == srp.stream_dest_mac && registered->vlan_id == srp.stream_vlan_id;
-    if (!matches) {
+    // address and VLAN are the ones the PROBE_TX_RESPONSE gave. The sink's
+    // Listener declaration follows the same match (wire_milan_listener_connections),
+    // so the two cannot disagree.
+    auto const registered = host_.components().msrp_handler.registered_talker(srp_stream_id(srp.stream_id), probed_talker(srp));
+    if (!registered.has_value()) {
         return atdecc::MilanTalkerRegistration::None;
     }
     return registered->failed ? atdecc::MilanTalkerRegistration::Failed : atdecc::MilanTalkerRegistration::Advertise;
+}
+
+auto AvbEntityKit::probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch
+{
+    return nanoavb::TalkerMatch{.dest_address = srp.stream_dest_mac, .vlan_id = srp.stream_vlan_id};
+}
+
+void AvbEntityKit::wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener)
+{
+    // A sink that settles reserves and listens (5.5.3.6.18 step 4); one that
+    // gives its SRP parameters up stops. Its Listener declaration follows the
+    // Talker attribute it probed and no other (5.3.8.5).
+    if (listener_ == nullptr) {
+        return;
+    }
+    listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            auto const* sink = host_.components().milan_acmp_listener->sink(stream_index);
+            auto const only = sink != nullptr ? std::optional{probed_talker(sink->context().srp)} : std::nullopt;
+            listener_->on_listener_connected(stream_index, stream_id, dest_mac, now, only);
+        },
+        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
 }
 
 void AvbEntityKit::wire_milan_listener_callbacks()
@@ -384,14 +406,14 @@ void AvbEntityKit::wire_milan_listener_callbacks()
     host_.components().msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& /*stream_id*/, TimePoint const now) {
         host_.components().milan_acmp_listener->on_srp_changed(now);
     });
-    wire_listener_connections(listener);
+    wire_milan_listener_connections(listener);
 }
 
 template <typename Listener>
 void AvbEntityKit::wire_listener_connections(Listener& listener)
 {
     // Drive the stream input (MSRP attach + mcast join) when its sink
-    // connects (IEEE 1722.1) or settles (Milan), and release it when not.
+    // connects, and release it when it disconnects.
     if (listener_ == nullptr) {
         return;
     }

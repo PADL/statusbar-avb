@@ -66,6 +66,8 @@ struct ListenerConnection
 {
     ieee::Eui64 stream_id{};
     std::optional<ieee::Eui48> group{};
+    /// A Milan sink's connection: it settled on a stream it probed.
+    bool settled{false};
 };
 
 struct ListenerStreamSlot
@@ -275,7 +277,17 @@ struct ListenerStreams
     /// same group keeps the one membership. What was declared and joined is
     /// recorded in the slot's ListenerConnection. Wired as the acmp_listener
     /// connect callback, told that handler's time. Reactor thread.
-    void on_listener_connected(uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, sm::TimePoint now);
+    ///
+    /// @p only is a Milan sink's: the destination address and VLAN it
+    /// probed. Its Listener declaration then follows that Talker attribute
+    /// alone (MsrpHandler::listener_attach). An IEEE 1722.1 connection names
+    /// none and follows any Talker attribute of its StreamID.
+    void on_listener_connected(
+        uint16_t stream_index,
+        ieee::Eui64 const& stream_id,
+        ieee::Eui48 dest_mac,
+        sm::TimePoint now,
+        std::optional<nanoavb::TalkerMatch> const& only = std::nullopt);
 
     /// Our listener disconnected: withdraw the MSRP reservation and leave the
     /// group the slot's ListenerConnection records, not what the ACMP state
@@ -299,17 +311,28 @@ struct ListenerStreams
     void take_connection(
         ListenerConnection& held, ieee::Eui64 const& stream_id, std::optional<ieee::Eui48> group, sm::TimePoint now);
     void release_connection(ListenerConnection& held, sm::TimePoint now);
-    /// Declare @p stream_id to MSRP; true when the reservation is Ready.
-    auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    /// Declare @p stream_id to MSRP, following @p only when it names a
+    /// Talker attribute; true when the reservation is Ready.
+    auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now, std::optional<nanoavb::TalkerMatch> const& only) -> bool;
     /// Whether the declaration already standing for @p stream_id is Ready.
     [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
     /// Declare @p stream_id when @p held is not on it yet, else ask after the
     /// standing declaration: true when the reservation is Ready.
-    auto attach_or_held_ready(ListenerConnection const& held, ieee::Eui64 const& stream_id, sm::TimePoint now) -> bool;
+    auto attach_or_held_ready(
+        ListenerConnection const& held,
+        ieee::Eui64 const& stream_id,
+        sm::TimePoint now,
+        std::optional<nanoavb::TalkerMatch> const& only) -> bool;
     /// Whether @p frame (an AVTPDU) carries the stream @p slot has published
     /// as its connection; false for a frame too short to carry one. RX thread.
     [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;
+    /// The stream the slot now receives, for the RX thread, and whether a Milan sink settled on it.
+    static void publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool settled);
+    /// The status line of a connect: log_settled with a match, log_connected without.
+    void log_attached(uint16_t stream_index, ieee::Eui48 dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool ready);
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
+    /// The same for a Milan sink: it settled on what it probed.
+    void log_settled(uint16_t stream_index, nanoavb::TalkerMatch const& probed, bool ready, bool joined);
 
     /// Move a pending set_consume registration into its newly-opened slot.
     void bind_pending_consume(ListenerStreamSlot& slot);

@@ -766,6 +766,10 @@ TEST(avb_entity_kit_acmp, a_milan_listener_bound_to_a_milan_talker_settles_reser
     EXPECT_EQ(sink.context().probing_status, atdecc::MilanProbingStatus::Completed);
     EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
     EXPECT_TRUE(pair.talker_transmits());  // on the reservation alone: no ACMP connection exists
+    // 5.3.8.5: the Listener declaration follows the Talker attribute that was probed, and no other.
+    auto const followed = pair.listener->host().components().msrp_handler.get_listener_stream(pair.stream_id())->follows;
+    EXPECT_TRUE(followed.has_value());
+    EXPECT_TRUE(followed.has_value() && followed->dest_address == sink.context().srp.stream_dest_mac && followed->vlan_id == 2);
 
     // It holds with no further ACMP: past the probe's 15 seconds and several LeaveAlls.
     size_t const acmp_so_far = pair.wire.size();
@@ -866,6 +870,8 @@ TEST(avb_entity_kit_acmp, a_classic_pair_connects_as_ieee_1722_1_has_it)
     pair.run(2 * ROUNDS_PER_SECOND);
     EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
     EXPECT_TRUE(pair.talker_transmits());
+    // An IEEE 1722.1 connection follows any Talker attribute of its StreamID.
+    EXPECT_FALSE(pair.listener->host().components().msrp_handler.get_listener_stream(pair.stream_id())->follows.has_value());
 
     // The disconnect goes through the talker, which forgets the listener and stops.
     pair.controller_sends(

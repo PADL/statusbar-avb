@@ -109,6 +109,23 @@ struct RegisteredTalker
     bool failed{false};
 };
 
+/// The one Talker attribute a listener stream follows: the destination
+/// address and VLAN a Milan sink was given by its talker's PROBE_TX_RESPONSE
+/// (Milan v1.3 5.3.8.8, 5.3.8.9). A listener stream without one follows any
+/// Talker attribute of its StreamID, as IEEE 802.1Q has it.
+struct TalkerMatch
+{
+    Eui48 dest_address{};
+    /// 0: the answer named no VLAN (a talker older than the field), and a
+    /// Talker attribute on any VLAN is the one.
+    uint16_t vlan_id{0};
+
+    [[nodiscard]] constexpr auto admits(RegisteredTalker const& talker) const noexcept -> bool
+    {
+        return talker.dest_address == dest_address && (vlan_id == 0 || talker.vlan_id == vlan_id);
+    }
+};
+
 /// Listener stream info for MSRP: one record per talker stream this port
 /// listens to, however many of its inputs are bound to that stream.
 struct ListenerStreamSrpInfo
@@ -118,6 +135,9 @@ struct ListenerStreamSrpInfo
     /// Inputs attached to the stream. The Listener declaration stands on the
     /// wire while this is above zero and is withdrawn when the last goes.
     uint16_t attached{0};
+    /// The only Talker attribute the stream follows, when its last attach
+    /// named one (MsrpHandler::listener_attach); none: any of its StreamID.
+    std::optional<TalkerMatch> follows{};
 };
 
 /// Domain info for MSRP
@@ -662,7 +682,8 @@ class MsrpHandler
         if (--listener_streams_[idx].attached > 0) {
             return success();
         }
-        listener_streams_[idx].state = ListenerReservationState::Idle;
+        // Idle, and following nothing: the next attach says what it follows.
+        listener_streams_[idx] = ListenerStreamSrpInfo{.stream_id = stream_id};
         (void)participant_.withdraw_listener(stream_id, now);
         return success();
     }
@@ -720,10 +741,21 @@ class MsrpHandler
     /// 35.2.6), nullopt with neither.
     [[nodiscard]] auto registered_talker(StreamId const& stream_id) const noexcept -> std::optional<RegisteredTalker>
     {
-        if (auto const* failed = participant_.find_registered_talker_failed(stream_id); failed != nullptr) {
+        return registered_talker(stream_id, std::nullopt);
+    }
+
+    /// As above, counting only an attribute @p only admits when it names
+    /// one: an attribute of the StreamID on another destination address or
+    /// VLAN is then as good as none.
+    [[nodiscard]] auto registered_talker(StreamId const& stream_id, std::optional<TalkerMatch> const& only) const noexcept
+        -> std::optional<RegisteredTalker>
+    {
+        auto const* failed = participant_.find_registered_talker_failed(stream_id);
+        if (failed != nullptr && admitted(only, registered_talker_from(failed->advertise, true))) {
             return registered_talker_from(failed->advertise, true);
         }
-        if (auto const* advertise = participant_.find_registered_talker_advertise(stream_id); advertise != nullptr) {
+        auto const* advertise = participant_.find_registered_talker_advertise(stream_id);
+        if (advertise != nullptr && admitted(only, registered_talker_from(*advertise, false))) {
             return registered_talker_from(*advertise, false);
         }
         return std::nullopt;
@@ -765,16 +797,16 @@ class MsrpHandler
     /// allows ("may either be declaring a Listener Asking Failed attribute,
     /// or not be declaring anything") and 802.1Q does too: it sets no order
     /// between the two declarations. set_listener_waits_for_talker(false)
-    /// makes that case Asking Failed.
-    [[nodiscard]] auto listener_state_wanted(StreamId const& stream_id) const noexcept -> ListenerReservationState
+    /// makes that case Asking Failed. With @p only, a Talker attribute it
+    /// does not admit is not registered as far as this listener goes.
+    [[nodiscard]] auto listener_state_wanted(
+        StreamId const& stream_id, std::optional<TalkerMatch> const& only = std::nullopt) const noexcept -> ListenerReservationState
     {
-        if (participant_.find_registered_talker_failed(stream_id) != nullptr) {
-            return ListenerReservationState::AskingFailed;
+        auto const talker = registered_talker(stream_id, only);
+        if (!talker.has_value()) {
+            return listener_waits_for_talker_ ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
         }
-        if (participant_.find_registered_talker_advertise(stream_id) != nullptr) {
-            return ListenerReservationState::Ready;
-        }
-        return listener_waits_for_talker_ ? ListenerReservationState::Waiting : ListenerReservationState::AskingFailed;
+        return talker->failed ? ListenerReservationState::AskingFailed : ListenerReservationState::Ready;
     }
 
     /// One more input attached to @p stream_id with nothing declared: the
@@ -800,12 +832,22 @@ class MsrpHandler
     /// attribute has gone. Returns the state held. Use instead of
     /// listener_ready() when the talker may not be up yet, as with an ACMP
     /// fast-connect at boot.
-    [[nodiscard]] auto listener_attach(StreamId const& stream_id, TimePoint now) -> StatusValue<ListenerReservationState>
+    ///
+    /// With @p only the listener follows that Talker attribute alone, from
+    /// the attach on: one of its StreamID on another destination address or
+    /// VLAN leaves it Waiting. A Milan sink attaches so, with what it probed
+    /// (Milan v1.3 5.3.8.5: Listener Ready goes with a Talker Advertise "with
+    /// matching SRP parameters"). All inputs of a stream share its record,
+    /// and the last attach decides what the record follows.
+    [[nodiscard]] auto listener_attach(
+        StreamId const& stream_id, TimePoint now, std::optional<TalkerMatch> const& only = std::nullopt)
+        -> StatusValue<ListenerReservationState>
     {
-        ListenerReservationState const want = listener_state_wanted(stream_id);
+        ListenerReservationState const want = listener_state_wanted(stream_id, only);
         if (Status const attached = attach_listener_in(stream_id, want, now); !attached) {
             return failure(attached.error());
         }
+        listener_streams_[listener_index(stream_id)].follows = only;
         return success(want);
     }
 
@@ -1140,6 +1182,13 @@ class MsrpHandler
         }
     }
 
+    /// Whether a listener that follows @p only (any attribute, with none) counts @p talker.
+    [[nodiscard]] static constexpr auto admitted(std::optional<TalkerMatch> const& only, RegisteredTalker const& talker) noexcept
+        -> bool
+    {
+        return !only.has_value() || only->admits(talker);
+    }
+
     [[nodiscard]] static auto registered_talker_from(
         statusbar::srp::msrp::TalkerAdvertiseFirstValue const& value, bool const failed) noexcept -> RegisteredTalker
     {
@@ -1206,7 +1255,7 @@ class MsrpHandler
     /// attached (Idle/withdrawn) has nothing to follow.
     void redeclare_attached_listener(ListenerStreamSrpInfo& stream)
     {
-        ListenerReservationState const want = listener_state_wanted(stream.stream_id);
+        ListenerReservationState const want = listener_state_wanted(stream.stream_id, stream.follows);
         if (!listener_is_attached(stream.state) || stream.state == want) {
             return;
         }
