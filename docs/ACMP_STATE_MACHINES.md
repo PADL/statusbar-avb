@@ -6,6 +6,10 @@
 This document describes how to use the ACMP (ATDECC Connection Management Protocol) state machines
 for implementing ATDECC Controllers, Talkers, and Listeners per IEEE 1722.1-2021 Clause 8.
 
+Milan v1.3 changes what the same PDUs mean for a talker and a listener (bind and probe, no
+talker-side connections). That is a second implementation beside this one, described in
+`MILAN_ACMP.md`; nothing here changes under it, and an entity runs one or the other.
+
 ## Overview
 
 The ACMP state machines manage audio/video stream connections in AVB networks:

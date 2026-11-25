@@ -19,8 +19,8 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
     // is the media thread's: should_transmit records when it last saw the flag.
     uint64_t const sid_u64 = stream_id.to_uint64();
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
-        auto const* s = components_.acmp_talker.get_stream(idx);
-        if (s != nullptr && s->stream_id.to_uint64() == sid_u64) {
+        auto const s = components_.talker_stream(idx);
+        if (s.has_value() && s->stream_id.to_uint64() == sid_u64) {
             bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
             if (was != ready && logger_) {
                 logger_->status("srp: talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)", idx, ready);
@@ -52,8 +52,10 @@ auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noe
 auto TalkerGate::connected_and_started(uint16_t const idx) const noexcept -> bool
 {
     // ACMP connection count is published by the reactor thread (note_acmp_connections)
-    // rather than read live from the reactor-mutated connection list here.
-    return acmp_conn_[idx].load() > 0 && stream_started_[idx].load(std::memory_order_relaxed);
+    // rather than read live from the reactor-mutated connection list here. A
+    // Milan talker has no connections to count (set_needs_acmp_connection).
+    bool const connected = !needs_acmp_connection_ || acmp_conn_[idx].load() > 0;
+    return connected && stream_started_[idx].load(std::memory_order_relaxed);
 }
 
 auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool

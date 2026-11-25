@@ -58,6 +58,13 @@ struct TalkerGate
     /// Install the reactor-thread logger for gate-transition status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
+    /// Whether a stream needs an ACMP connection to be admitted (the
+    /// default, IEEE 1722.1). A Milan talker keeps no connections and
+    /// streams "as long as bandwidth is reserved" (Milan v1.3 5.5.4.1): for
+    /// it the gate is Started and MSRP Listener Ready alone. Set before the
+    /// media timer runs.
+    void set_needs_acmp_connection(bool const needed) noexcept { needs_acmp_connection_ = needed; }
+
     /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
     /// data plane's maximum blob-declared stream table (kit phase 1).
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
@@ -102,13 +109,14 @@ struct TalkerGate
     /// Media-timer thread: may talker stream @p idx put its stream on the wire at
     /// this wake, told the wake's CLOCK_MONOTONIC_RAW instant @p now? True if gating
     /// is disabled, or ALL of this stream's own preconditions hold: an ACMP connection
-    /// exists AND the stream is Started AND MSRP Listener Ready is set (or was seen
-    /// set within GRACE of @p now). Independent of every other stream. Records when
+    /// exists (unless set_needs_acmp_connection(false)) AND the stream is Started AND
+    /// MSRP Listener Ready is set (or was seen set within GRACE of @p now). Independent of every other stream. Records when
     /// it last saw Listener Ready, so one thread calls it (the media timer's).
     [[nodiscard]] auto should_transmit(uint16_t idx, RawTimePoint now) noexcept -> bool;
 
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
+    bool needs_acmp_connection_{true};              ///< see set_needs_acmp_connection
     nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
     std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
 

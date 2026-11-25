@@ -15,6 +15,9 @@
 #include "statusbar/tsn/tsn.hpp"
 
 #include <array>
+#include <atomic>
+#include <memory>
+#include <span>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -22,6 +25,18 @@ namespace statusbar::avb_entity {
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
 using statusbar::nanoavb::DomainInfo;
+
+namespace {
+
+/// An ACMP stream_id as the StreamID SRP knows the stream by.
+[[nodiscard]] auto srp_stream_id(ieee::Eui64 const& acmp_stream_id) noexcept -> nanoavb::StreamId
+{
+    nanoavb::StreamId stream_id{};
+    (void)statusbar::tsn::load_unchecked(acmp_stream_id.span(), &stream_id);
+    return stream_id;
+}
+
+}  // namespace
 
 AvbEntityKit::AvbEntityKit(
     AvbEntityAudioIOConfig const& config,
@@ -47,67 +62,112 @@ AvbEntityKit::AvbEntityKit(
           media_clock,
           last_gptp_ns,
           memory_resource)}
-{  // NOLINT(statusbar-block-statements) construction: each collaborator wired in turn; pre-dates the gate
+{
     active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
     crf_clock_source_index_ = crf_clock_source_index;
-    if (!listener_specs_.empty()) {
-        listener_ = std::make_unique<ListenerStreams>(
-            config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns, audio_sink);
-        listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
-    }
+    make_listener_streams(last_gptp_ns, audio_sink);
+    configure_control_plane();
+    seed_talker_streams();
+    install_storage_hooks();
+}
 
+void AvbEntityKit::make_listener_streams(std::atomic<int64_t>& last_gptp_ns, StreamRxAudioSink* const audio_sink)
+{
+    if (listener_specs_.empty()) {
+        return;
+    }
+    listener_ =
+        std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, sample_rate_, host_.components(), last_gptp_ns, audio_sink);
+    listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
+}
+
+void AvbEntityKit::configure_control_plane()
+{
     // ATDECC descriptor wire version. Default "2016": emit descriptors at their
     // 1722.1-2013/2016 lengths so controllers that reject 2021-length descriptors
     // can enumerate the model. "2021" emits the full 2021 forms.
     host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
+    apply_profile();
+    // The VID itself is registered at start() (stop() withdraws it).
+    host_.components().msrp_handler.set_domain(
+        DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
+    host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
+    host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
+}
+
+void AvbEntityKit::apply_profile()
+{
     // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
-    // answers, and on the SRP side the MRP timers (Table 4.3), the Class A
-    // Domain adopted from the wire (4.2.7.2.1), the instant leave
-    // (4.2.7.2.2) and a Talker attribute declared only while a listener
-    // wants the stream (4.3.3.1). A Milan model also has GET_MILAN_INFO to
-    // answer, whichever profile it is held to.
+    // answers, connection management, and the SRP rules (apply_srp_profile).
+    // A Milan model also has GET_MILAN_INFO to answer, whichever profile it
+    // is held to.
     bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
     install_milan_info();
+    apply_acmp_profile(milan);
+    apply_srp_profile(milan);
+}
+
+void AvbEntityKit::apply_acmp_profile(bool const milan)
+{
+    // Connection management is one of two implementations, chosen here once
+    // for the life of the entity: IEEE 1722.1-2021 clause 8 as written, or
+    // Milan v1.3 section 5.5 (bind and probe, no talker-side connections).
+    // Everything after this asks the components for "the ACMP that runs".
+    if (!milan) {
+        return;
+    }
+    host_.components().use_milan_acmp();
+    // 5.5.4.1: a Milan talker streams "as long as bandwidth is reserved for
+    // its stream"; there is no connection for the gate to wait for.
+    gate_.set_needs_acmp_connection(false);
+}
+
+void AvbEntityKit::apply_srp_profile(bool const milan)
+{
+    // On the SRP side the profile decides the MRP timers (Table 4.3), the
+    // Class A Domain adopted from the wire (4.2.7.2.1), the instant leave
+    // (4.2.7.2.2) and a Talker attribute declared only while a listener
+    // wants the stream (4.3.3.1).
     host_.components().msrp_handler.set_adopt_domain(milan);
     host_.components().msrp_handler.set_instant_leave(milan);
     host_.components().msrp_handler.set_talker_waits_for_listener(milan);
     apply_mrp_timers(milan);
     host_.components().msrp_handler.set_on_domain_adopted(
         [this](DomainInfo const& domain, TimePoint const now) { follow_domain(domain, now); });
+}
 
+auto AvbEntityKit::static_dest_mac_for(StreamKind const kind) const noexcept -> ieee::Eui48
+{
+    switch (kind) {
+        case StreamKind::am824:
+            return config_.am824_talker_dest_mac;
+        case StreamKind::aaf:
+            return config_.aaf_talker_dest_mac;
+        case StreamKind::crf:
+            return config_.crf_talker_dest_mac;
+        case StreamKind::other:
+        default:
+            return ieee::Eui48{};
+    }
+}
+
+void AvbEntityKit::seed_talker_streams()
+{
     // Base the talker stream_ids on the NIC MAC (globally unique per box), and
     // seed the static dest MACs by kind (MAAP mode reassigns after acquisition).
     ieee::Eui48 const stream_base_mac = stream_base_mac_for(config_.interface_mac, config_.interface_name, config_.entity_id);
     for (auto const& spec : talker_specs_) {
-        ieee::Eui48 dest{};
-        switch (spec.format.kind) {
-            case StreamKind::am824:
-                dest = config_.am824_talker_dest_mac;
-                break;
-            case StreamKind::aaf:
-                dest = config_.aaf_talker_dest_mac;
-                break;
-            case StreamKind::crf:
-                dest = config_.crf_talker_dest_mac;
-                break;
-            case StreamKind::other:
-            default:
-                break;
-        }
-        (void)host_.components().acmp_talker.configure_stream(
-            spec.index, stream_id_for(stream_base_mac, spec.index), dest, config_.vlan_id);
+        (void)host_.components().configure_talker_stream(
+            spec.index, stream_id_for(stream_base_mac, spec.index), static_dest_mac_for(spec.format.kind), config_.vlan_id);
     }
+}
 
-    // The VID itself is registered at start() (stop() withdraws it).
-    host_.components().msrp_handler.set_domain(
-        DomainInfo{.sr_class_id = 6, .sr_class_priority = 3, .sr_class_vid = config_.vlan_id});
-    host_.components().msrp_handler.set_redeclare_registered_listeners(config_.redeclare_registered_listeners);
-    host_.components().msrp_handler.set_suppress_leaveall(config_.suppress_leaveall);
-
+void AvbEntityKit::install_storage_hooks()
+{
     // Storage-handler built-in hooks (all reactor thread):
     // Per-control dispatch (kit phase 4): the generic CONTROL built-in calls
     // back with each accepted SET_CONTROL; bound symbols get their handler's
@@ -205,8 +265,8 @@ void AvbEntityKit::move_talker_streams_to(DomainInfo const& domain, TimePoint co
     active_vlan_id_ = domain.sr_class_vid == config_.vlan_id ? 0 : domain.sr_class_vid;
     talker_->set_vlan(domain.sr_class_vid, domain.sr_class_priority);
     for (auto const& spec : talker_specs_) {
-        if (auto const* stream = host_.components().acmp_talker.get_stream(spec.index); stream != nullptr) {
-            (void)host_.components().acmp_talker.configure_stream(
+        if (auto const stream = host_.components().talker_stream(spec.index); stream.has_value()) {
+            (void)host_.components().configure_talker_stream(
                 spec.index, stream->stream_id, stream->stream_dest_mac, domain.sr_class_vid);
         }
     }
@@ -248,20 +308,106 @@ void AvbEntityKit::note_talker_probe(uint16_t const stream_index, TimePoint cons
     // The SRP handler declares the stream's Talker attribute for the next
     // 15 seconds, by which time the listener that probed has declared its
     // own; a handler that does not wait for a listener ignores it.
-    if (auto const* stream = host_.components().acmp_talker.get_stream(stream_index); stream != nullptr) {
-        nanoavb::StreamId stream_id{};
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &stream_id);
-        host_.components().msrp_handler.note_talker_probe(stream_id, now);
+    if (auto const stream = host_.components().talker_stream(stream_index); stream.has_value()) {
+        host_.components().msrp_handler.note_talker_probe(srp_stream_id(stream->stream_id), now);
     }
 }
 
 void AvbEntityKit::wire_acmp_callbacks()
 {
+    if (host_.components().acmp_is_milan()) {
+        wire_milan_talker_callbacks();
+        wire_milan_listener_callbacks();
+        return;
+    }
+    wire_ieee_acmp_callbacks();
+}
+
+auto AvbEntityKit::talker_addresses_valid() const noexcept -> bool
+{
+    // Milan v1.3 4.3.3.1 (1): MAAP has the address and has reported no conflict.
+    return maap_.ready() && host_.components().msrp_handler.talker_addresses_valid();
+}
+
+auto AvbEntityKit::talker_registering_failed(uint16_t const stream_index) const -> bool
+{
+    auto const stream = host_.components().talker_stream(stream_index);
+    return stream.has_value() && host_.components().msrp_handler.talker_listener_asking_failed(srp_stream_id(stream->stream_id));
+}
+
+void AvbEntityKit::wire_milan_talker_callbacks()
+{
+    // What the Milan talker asks of the rest of the entity (5.5.4): a probe
+    // is told to SRP, the address comes from MAAP, REGISTERING_FAILED from SRP.
+    auto& talker = *host_.components().milan_acmp_talker;
+    talker.set_on_probe([this](uint16_t const stream_index, TimePoint const now) { note_talker_probe(stream_index, now); });
+    talker.set_dest_mac_valid([this](uint16_t /*stream_index*/) { return talker_addresses_valid(); });
+    talker.set_registering_failed([this](uint16_t const stream_index) { return talker_registering_failed(stream_index); });
+}
+
+auto AvbEntityKit::locked_out(ieee::Eui64 const& controller) const noexcept -> bool
+{
+    auto const& aem = host_.components().aem_handler;
+    return aem.is_locked() && aem.locking_controller() != controller;
+}
+
+auto AvbEntityKit::own_gptp_state() const noexcept -> atdecc::MilanGptpState
+{
+    // What this entity's own ENTITY_AVAILABLE says, kept current by the
+    // gPTP Announce handler (nanoavb::report_grandmaster).
+    auto const& adpdu = host_.components().adp_advertiser.adpdu();
+    return atdecc::MilanGptpState{.grandmaster_id = adpdu.gptp_grandmaster_id, .domain_number = adpdu.gptp_domain_number.get()};
+}
+
+auto AvbEntityKit::talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration
+{
+    // 5.3.8.8: the attribute counts only when its StreamID, destination
+    // address and VLAN are the ones the PROBE_TX_RESPONSE gave.
+    auto const registered = host_.components().msrp_handler.registered_talker(srp_stream_id(srp.stream_id));
+    bool const matches =
+        registered.has_value() && registered->dest_address == srp.stream_dest_mac && registered->vlan_id == srp.stream_vlan_id;
+    if (!matches) {
+        return atdecc::MilanTalkerRegistration::None;
+    }
+    return registered->failed ? atdecc::MilanTalkerRegistration::Failed : atdecc::MilanTalkerRegistration::Advertise;
+}
+
+void AvbEntityKit::wire_milan_listener_callbacks()
+{
+    // What the Milan listener asks of the rest of the entity (5.5.3, 5.6.4):
+    // the lock from AEM, the grandmaster from gPTP, the Talker attribute from
+    // SRP, which also says when to look again.
+    auto& listener = *host_.components().milan_acmp_listener;
+    listener.set_locked_out([this](ieee::Eui64 const& controller) { return locked_out(controller); });
+    listener.set_gptp_state([this]() { return own_gptp_state(); });
+    listener.set_talker_registration([this](atdecc::MilanSrpParameters const& srp) { return talker_registration_for(srp); });
+    host_.components().msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& /*stream_id*/, TimePoint const now) {
+        host_.components().milan_acmp_listener->on_srp_changed(now);
+    });
+    wire_listener_connections(listener);
+}
+
+template <typename Listener>
+void AvbEntityKit::wire_listener_connections(Listener& listener)
+{
+    // Drive the stream input (MSRP attach + mcast join) when its sink
+    // connects (IEEE 1722.1) or settles (Milan), and release it when not.
+    if (listener_ == nullptr) {
+        return;
+    }
+    listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
+        },
+        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
+}
+
+void AvbEntityKit::wire_ieee_acmp_callbacks()
+{
     host_.components().acmp_talker.set_on_probe(
         [this](uint16_t const stream_index, TimePoint const now) { note_talker_probe(stream_index, now); });
     // ACMP: log talker connections + publish the fresh connection count for
-    // the media-timer gate; drive the listener (MSRP attach + mcast join) on
-    // listener connect/disconnect.
+    // the media-timer gate.
     host_.components().acmp_talker.set_connection_callbacks(
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -283,13 +429,7 @@ void AvbEntityKit::wire_acmp_callbacks()
             gate_.note_acmp_connections(
                 stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
         });
-    if (listener_ != nullptr) {
-        host_.components().acmp_listener.set_connection_callbacks(
-            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
-                listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
-            },
-            [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
-    }
+    wire_listener_connections(host_.components().acmp_listener);
 }
 
 void AvbEntityKit::wire_aem_stream_callbacks()
@@ -353,7 +493,23 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
-{  // NOLINT(statusbar-block-statements) the start sequence, one step after another; pre-dates the gate
+{
+    if (auto status = bring_up_control_plane(reactor, now); !status) {
+        return status;
+    }
+    open_stream_port();
+    if (auto status = claim_stream_addresses(reactor, now); !status) {
+        return status;
+    }
+    if (auto status = open_streams(reactor); !status) {
+        return status;
+    }
+    finish_start();
+    return success();
+}
+
+auto AvbEntityKit::bring_up_control_plane(net::MessageReactor& reactor, TimePoint const now) -> Status
+{
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
@@ -363,6 +519,12 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
+    restore_control_state(now);
+    return success();
+}
+
+void AvbEntityKit::restore_control_state(TimePoint const now)
+{
     // Milan v1.3 4.2.7.2.1: after startup the Class A Domain is the
     // configured one again, whatever was adopted before the stop; the
     // streams, MVRP and GET_AVB_INFO follow (follow_domain). The Link Up
@@ -376,7 +538,21 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     // the rest, but the Domain adopted from the wire outlives a stop, and
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
+    restart_milan_sinks(now);
+}
 
+void AvbEntityKit::restart_milan_sinks(TimePoint const now)
+{
+    // A start is a power cycle to a Milan sink (5.5.1.4): what it had
+    // reserved went with the stop, and a bound one begins again by waiting
+    // for its talker's ADP. Nothing to do on a first start.
+    if (host_.components().acmp_is_milan()) {
+        host_.components().milan_acmp_listener->restart(now);
+    }
+}
+
+void AvbEntityKit::open_stream_port()
+{
     // The stream port, backend by name. Not fatal: an entity whose port
     // would not open keeps its control plane and has no streams, which is
     // what it did before when the socket would not open.
@@ -396,66 +572,91 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
             logging::embed<48>(stream_port_.describe()),
             stream_port_.serialized() ? logging::lit(", TX and RX serialised") : logging::lit(""));
     }
+}
 
+auto AvbEntityKit::claim_stream_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
+{
     // In "maap" mode, set up the claim of the talker stream destination
     // addresses via MAAP: the Link Up begins it (B.3.5.9), and the acquired
     // addresses then overwrite the static defaults the data plane reads below.
     // Non-fatal inside: on socket failure the entity keeps the static MACs.
-    if (config_.stream_address_mode == "maap") {
-        if (auto status = setup_maap_addresses(reactor, now); !status) {
-            return status;
-        }
-    }
+    return config_.stream_address_mode == "maap" ? setup_maap_addresses(reactor, now) : success();
+}
 
+auto AvbEntityKit::open_streams(net::MessageReactor& reactor) -> Status
+{
+    if (auto status = open_talker_streams(); !status) {
+        return status;
+    }
+    return open_listener_streams(reactor);
+}
+
+auto AvbEntityKit::open_talker_streams() -> Status
+{
     // One TX slot per blob-declared stream, shaped by its format word, with
     // the stream identity (id + dest MAC) the ACMP model carries.
     for (auto const& spec : talker_specs_) {
-        statusbar::tsn::StreamId sid{};
-        ieee::Eui48 dest{};
-        if (auto const* s = host_.components().acmp_talker.get_stream(spec.index); s != nullptr) {
-            (void)statusbar::tsn::load_unchecked(s->stream_id.span(), &sid);
-            dest = s->stream_dest_mac;
-        }
-        if (auto status = talker_->open_stream(spec, sid, dest); !status) {
+        auto const stream = host_.components().talker_stream(spec.index).value_or(nanoavb::NanoAvbComponents::TalkerStream{});
+        if (auto status = talker_->open_stream(spec, srp_stream_id(stream.stream_id), stream.stream_dest_mac); !status) {
             return status;
         }
     }
+    return success();
+}
 
-    // RX slots per blob-declared stream input. CRF inputs feed the media-clock
-    // recovery (kit phase 3c); the ACMP listener callbacks (wired above) drive
-    // the MSRP attach + the multicast join per connection.
-    if (listener_ != nullptr) {
-        // Static RX groups: an audio input pre-joins the same-kind talker
-        // output's group (the loopback topology listens on its own output
-        // group); everything else joins dynamically on ACMP connect (a zero
-        // MAC just opens the socket).
-        sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_groups{};
-        for (auto const& spec : listener_specs_) {
-            if (auto status = listener_->open_stream(spec); !status) {
-                return status;
-            }
-            if (spec.format.kind == StreamKind::crf) {
-                listener_->set_crf(spec.index, crf_recovery_.make_consumer());
-            }
-            ieee::Eui48 group{};
-            bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
-            if (auto const* slot = is_audio ? talker_->slot_of(spec.format.kind) : nullptr; slot != nullptr) {
-                group = slot->dest_mac;
-            }
-            (void)rx_groups.try_push_back(group);
-        }
-        // In RT-timer mode the returned handler is kept alive here; the tool's
-        // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
-        // time, so RX can't be starved by the control plane. rx_to_reactor()
-        // is the way back should that timer not start.
-        if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
-            rt_rx_handler_ = std::move(*rx);
-        }
-        // Persisted fast-connect bindings (kit phase 5b): a restarted entity
-        // re-connects its inputs without a controller (see AvbEntityHost).
-        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+auto AvbEntityKit::open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>
+{
+    if (auto status = listener_->open_stream(spec); !status) {
+        return failure(status.error());
     }
+    if (spec.format.kind == StreamKind::crf) {
+        listener_->set_crf(spec.index, crf_recovery_.make_consumer());
+    }
+    bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
+    auto const* slot = is_audio ? talker_->slot_of(spec.format.kind) : nullptr;
+    return success(slot != nullptr ? slot->dest_mac : ieee::Eui48{});
+}
 
+auto AvbEntityKit::open_listener_streams(net::MessageReactor& reactor) -> Status
+{
+    // RX slots per blob-declared stream input. CRF inputs feed the media-clock
+    // recovery (kit phase 3c); the ACMP listener callbacks (wired at start)
+    // drive the MSRP attach + the multicast join per connection.
+    if (listener_ == nullptr) {
+        return success();
+    }
+    // Static RX groups: an audio input pre-joins the same-kind talker
+    // output's group (the loopback topology listens on its own output
+    // group); everything else joins dynamically on ACMP connect (a zero
+    // MAC just opens the socket).
+    sg14::inplace_vector<ieee::Eui48, MAX_ENTITY_STREAMS> rx_groups{};
+    for (auto const& spec : listener_specs_) {
+        auto const group = open_listener_stream(spec);
+        if (!group.has_value()) {
+            return failure(group.error());
+        }
+        (void)rx_groups.try_push_back(*group);
+    }
+    attach_listener_rx(rx_groups, reactor);
+    return success();
+}
+
+void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_groups, net::MessageReactor& reactor)
+{
+    // In RT-timer mode the returned handler is kept alive here; the tool's
+    // SCHED_FIFO RX timer drains it via drain_stream_rx() with its wake gPTP
+    // time, so RX can't be starved by the control plane. rx_to_reactor()
+    // is the way back should that timer not start.
+    if (auto rx = listener_->attach_rx(stream_port_, rx_groups, reactor, config_.stream_rx_rt_timer)) {
+        rt_rx_handler_ = std::move(*rx);
+    }
+    // Persisted listener bindings (kit phase 5b): a restarted entity takes
+    // its inputs up again without a controller (see AvbEntityHost).
+    host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+}
+
+void AvbEntityKit::finish_start()
+{
     // TX on the stream port + optional pcap capture.
     (void)talker_->open_tx(
         stream_port_,
@@ -468,7 +669,11 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
     if (!talker_->set_external_kick(kick_elsewhere)) {
         host_.ctl_log().warning("stream_tx.kicker: no stream port to kick; kicking in the media tick");
     }
+    report_inert_controls();
+}
 
+void AvbEntityKit::report_inert_controls()
+{
     // Menu/selection diagnostics: registrations the model left inert. Status
     // level -- typo-finding, never an error.
     for (auto const& binding : control_bindings_) {
@@ -476,8 +681,6 @@ auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> S
             host_.ctl_log().status("control: registered symbol 0x{:08x} not a CONTROL in this model (inert)", binding.symbol);
         }
     }
-
-    return success();
 }
 
 void AvbEntityKit::rx_to_reactor(net::MessageReactor& reactor)
@@ -589,8 +792,8 @@ void AvbEntityKit::fill_talker_srp_identity(uint16_t const index, nanoavb::Talke
     auto const& domain = host_.components().msrp_handler.domain();
     info.vlan_id = domain.sr_class_vid;
     info.priority = domain.sr_class_priority;
-    if (auto const* stream = host_.components().acmp_talker.get_stream(index); stream != nullptr) {
-        (void)statusbar::tsn::load_unchecked(stream->stream_id.span(), &info.stream_id);
+    if (auto const stream = host_.components().talker_stream(index); stream.has_value()) {
+        info.stream_id = srp_stream_id(stream->stream_id);
         info.dest_address = stream->stream_dest_mac;
         info.vlan_id = stream->stream_vlan_id;
     }

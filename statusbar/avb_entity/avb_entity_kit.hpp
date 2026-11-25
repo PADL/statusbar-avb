@@ -252,8 +252,27 @@ class AvbEntityKit
     void wire_stream_callbacks();
     /// The MSRP third of wire_stream_callbacks(): advertise, withdraw, and the transmit gate's Listener Ready.
     void wire_srp_callbacks();
-    /// The ACMP third: probes, the talker connection log and gate, the listener's connect and disconnect.
+    /// The ACMP third, for whichever ACMP the components run.
     void wire_acmp_callbacks();
+    /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
+    void wire_ieee_acmp_callbacks();
+    /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
+    void wire_milan_talker_callbacks();
+    void wire_milan_listener_callbacks();
+    /// Either listener's connect and disconnect, onto the stream inputs.
+    template <typename Listener>
+    void wire_listener_connections(Listener& listener);
+    /// The stream outputs have destination addresses that are theirs to use
+    /// (Milan v1.3 4.3.3.1, 5.5.4.1 step 3).
+    [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool;
+    /// REGISTERING_FAILED for stream output @p stream_index (Milan v1.3 Table 5.23).
+    [[nodiscard]] auto talker_registering_failed(uint16_t stream_index) const -> bool;
+    /// The entity is locked by a controller other than @p controller.
+    [[nodiscard]] auto locked_out(ieee::Eui64 const& controller) const noexcept -> bool;
+    /// This entity's gPTP grandmaster and domain, as its own ADP reports them.
+    [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
+    /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
+    [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
     /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills.
     void wire_aem_stream_callbacks();
     /// A PROBE_TX_COMMAND arrived for stream output @p stream_index: tell the
@@ -273,6 +292,42 @@ class AvbEntityKit
 
     /// The VLAN the streams use now: the adopted one, else the configured one.
     [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
+    // The constructor's steps.
+    void make_listener_streams(std::atomic<int64_t>& last_gptp_ns, StreamRxAudioSink* audio_sink);
+    /// The AEM handler's options, the profile, and the SRP handler's defaults.
+    void configure_control_plane();
+    /// Everything the profile decides (milan_profile()).
+    void apply_profile();
+    /// Which ACMP runs: IEEE 1722.1-2021's, or under the Milan profile
+    /// Milan v1.3's (NanoAvbComponents::use_milan_acmp), with the transmit
+    /// gate to match.
+    void apply_acmp_profile(bool milan);
+    void apply_srp_profile(bool milan);
+    /// Each stream output's stream id and static destination address into ACMP's picture.
+    void seed_talker_streams();
+    [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
+    /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
+    void install_storage_hooks();
+
+    // start()'s steps, in order.
+    [[nodiscard]] auto bring_up_control_plane(net::MessageReactor& reactor, TimePoint now) -> Status;
+    /// What every start puts back: the configured Domain, valid stream
+    /// addresses, the stream callbacks, the VID, and Milan sinks at startup.
+    void restore_control_state(TimePoint now);
+    void restart_milan_sinks(TimePoint now);
+    /// Not fatal when it does not open: the entity keeps its control plane.
+    void open_stream_port();
+    [[nodiscard]] auto claim_stream_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
+    [[nodiscard]] auto open_streams(net::MessageReactor& reactor) -> Status;
+    [[nodiscard]] auto open_talker_streams() -> Status;
+    [[nodiscard]] auto open_listener_streams(net::MessageReactor& reactor) -> Status;
+    /// Open stream input @p spec; the group it joins from the start (zero: none).
+    [[nodiscard]] auto open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>;
+    void attach_listener_rx(std::span<ieee::Eui48 const> rx_groups, net::MessageReactor& reactor);
+    /// The TX path, then the diagnostics.
+    void finish_start();
+    void report_inert_controls();
+
     /// The MRP timers of both SRP handlers: Milan v1.3 Table 4.3's under the
     /// Milan profile, IEEE 802.1Q Table 10-7's otherwise.
     void apply_mrp_timers(bool milan);

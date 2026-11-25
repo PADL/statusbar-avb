@@ -173,9 +173,9 @@ TEST(avb_entity_kit_domain, acmp_and_the_talker_advertise_carry_the_configured_v
     KitUnderTest kit{make_config(7, "classic")};
     EXPECT_FALSE(kit.talker_specs().empty());
     for (auto const& spec : kit.talker_specs()) {
-        auto const* stream = kit->host().components().acmp_talker.get_stream(spec.index);
-        EXPECT_NE(stream, nullptr);
-        if (stream != nullptr) {
+        auto const stream = kit->host().components().talker_stream(spec.index);
+        EXPECT_TRUE(stream.has_value());
+        if (stream.has_value()) {
             EXPECT_EQ(stream->stream_vlan_id, 7U);
         }
         auto const info = kit->make_talker_srp_info(spec);
@@ -200,9 +200,9 @@ TEST(avb_entity_kit_domain, an_adopted_domain_moves_acmp_and_the_talker_advertis
     EXPECT_EQ(kit->talker().vlan_id(), 5U);
     EXPECT_EQ(kit->talker().stream_pcp(), 5U);
     for (auto const& spec : kit.talker_specs()) {
-        auto const* stream = kit->host().components().acmp_talker.get_stream(spec.index);
-        EXPECT_NE(stream, nullptr);
-        if (stream != nullptr) {
+        auto const stream = kit->host().components().talker_stream(spec.index);
+        EXPECT_TRUE(stream.has_value());
+        if (stream.has_value()) {
             EXPECT_EQ(stream->stream_vlan_id, 5U);
         }
         auto const info = kit->make_talker_srp_info(spec);

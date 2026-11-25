@@ -180,13 +180,21 @@ class AvbEntityHost
     [[nodiscard]] auto components() const noexcept -> nanoavb::NanoAvbComponents const& { return components_; }
     [[nodiscard]] auto net_handlers() noexcept -> nanoavb::NanoAvbNetHandlers* { return net_handlers_.get(); }
 
-    /// Kit phase 5b: persist listener fast-connect bindings at @p path.
-    /// Loads any saved bindings as fast-connect goals (the ACMP listener's
-    /// reactor tick then re-connects each remembered talker until it
-    /// answers), turns on sticky bindings (every successful connect is
+    /// Kit phase 5b: persist the listener's bindings at @p path, for
+    /// whichever ACMP listener the components run. One call from any kit
+    /// entity's start path. Reactor thread only.
+    ///
+    /// IEEE 1722.1: loads any saved bindings as fast-connect goals (the ACMP
+    /// listener's reactor tick then re-connects each remembered talker until
+    /// it answers), turns on sticky bindings (every successful connect is
     /// remembered; a controller DISCONNECT forgets it) and mirrors every
-    /// goal change back to the file. One call from any kit entity's start
-    /// path; empty @p path disables. Reactor thread only.
+    /// goal change back to the file. Empty @p path disables.
+    ///
+    /// Milan v1.3: each saved binding starts its sink in PRB_W_AVAIL
+    /// (5.5.3.6.2), and every bind and unbind is written to the file before
+    /// the controller is answered (5.5.2.4). With an empty @p path the
+    /// bindings are still kept, for as long as the process runs: nothing
+    /// is written anywhere the configuration did not name.
     void enable_listener_binding_persistence(std::string path);
 
     // --- Logging -----------------------------------------------------------------
@@ -350,6 +358,11 @@ class AvbEntityHost
     /// Its second: the SRP senders dropped, the net handlers released, the
     /// mirror detached from them.
     void release_net_handlers();
+    /// The IEEE 1722.1 and the Milan halves of enable_listener_binding_persistence().
+    void enable_fast_connect_persistence();
+    void enable_milan_binding_persistence();
+    void load_milan_bindings();
+    void save_milan_bindings();
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();

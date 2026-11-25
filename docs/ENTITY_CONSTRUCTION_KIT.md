@@ -295,9 +295,9 @@ answers to one of them at a time: `atdecc.profile = "classic"` (1722.1 as
 written) or `"milan13"`. Left empty, the default, the model decides: a Milan
 model (`entity.milan = true`) answers to Milan v1.3, any other to 1722.1 as
 written; an explicit value wins either way. The AEM handler
-(`AemCommandHandler::set_profile`) and the MSRP handler take the choice from
-the kit (`AvbEntityKit::milan_profile`). Everything not listed here is the
-same under both.
+(`AemCommandHandler::set_profile`), the MSRP handler and connection
+management take the choice from the kit (`AvbEntityKit::milan_profile`).
+Everything not listed here is the same under both.
 
 | Point | classic (1722.1-2021) | milan13 (Milan v1.3) |
 |---|---|---|
@@ -307,6 +307,10 @@ same under both.
 | Changes by non-ATDECC means while locked (front panel, `set_local_identify`) | allowed | refused ENTITY_LOCKED (5.3.4.1, 5.4.2.17) |
 | MSRP Registrar receiving Lv in IN | starts the leavetimer (802.1Q Table 10-4) | goes straight to MT (4.2.7.2.2) |
 | MRP timers (MSRP and MVRP) | 802.1Q Table 10-7: JoinTime 200 ms, LeaveTime 1000 ms, LeaveAll 10 to 15 s, periodic 1 s | Milan Table 4.3: the same with LeaveTime 5000 ms (4.2.7.1.1) |
+| Connection management | IEEE 1722.1-2021 clause 8: the listener relays a controller's connect to the talker, the talker keeps a list of its listeners. `NanoAvbAcmpListener`, `NanoAvbAcmpTalker` | Milan v1.3 section 5.5, a separate implementation (`MILAN_ACMP.md`): a bind is saved and answered at once, the listener then probes its talker and follows the talker's SRP attribute by itself; the talker answers probes and keeps nothing. `NanoAvbMilanAcmpListener`, `NanoAvbMilanAcmpTalker`, chosen at start-up by `NanoAvbComponents::use_milan_acmp` |
+| A bind or connect from a controller other than the one holding the lock | accepted: ACMP does not ask | refused CONTROLLER_NOT_AUTHORIZED (5.5.2.4, 5.5.2.5) |
+| When a talker stream is put on the wire (`stream.gate_talker_on_listener`) | an ACMP connection, the stream started and MSRP Listener Ready | the stream started and MSRP Listener Ready: a Milan talker has no connections (5.5.4.1) |
+| `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, the bindings last as long as the process |
 | When a stream output's Talker attribute is declared | once the entity is ready and its stream addresses are final | only while a listener wants the stream: a PROBE_TX_COMMAND for it arrived in the last 15 s, or a Listener attribute for its StreamID is registered on the port; withdrawn when neither holds, and while MAAP reports the address lost (4.3.3.1). `MsrpHandler::set_talker_waits_for_listener` |
 | Talker presentation offset when `presentation_offset_ns` is 0 (the default) | 1 ms | 2 ms (5.3.7.6); a value other than 0 is used as given under either |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |

@@ -93,8 +93,8 @@ inline void copy_talker_identity(
     bool const stopped,
     atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
-    auto const* stream = host.components().acmp_talker.get_stream(descriptor_index);
-    if (stream == nullptr) {
+    auto const stream = host.components().talker_stream(descriptor_index);
+    if (!stream.has_value()) {
         return false;
     }
     bool const format_valid = fill_stream_format(host, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, descriptor_index, out);
@@ -129,8 +129,8 @@ template <typename ListenerSink>
 [[nodiscard]] inline auto fill_listener_stream_info(
     AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
-    auto const* sink = host.components().acmp_listener.get_stream(descriptor_index);
-    if (sink == nullptr) {
+    auto const sink = host.components().listener_sink(descriptor_index);
+    if (!sink.has_value()) {
         return false;
     }
     uint32_t flags = fill_stream_format(host, atdecc::aem::DESCRIPTOR_STREAM_INPUT, descriptor_index, out)

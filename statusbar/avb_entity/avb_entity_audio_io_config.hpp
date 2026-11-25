@@ -303,12 +303,15 @@ struct AvbEntityAudioIOConfig
     /// streams for 10 s. The window also stops if this fills.
     size_t tx_pcap_max_bytes{size_t{64} * 1024 * 1024};
 
-    /// Persisted listener fast-connect bindings (kit phase 5b). When set,
-    /// every controller-made stream-input connection is remembered in this
-    /// file, and on start the entity fast-connects (IEEE 1722.1 8.2.2.1.1)
-    /// each remembered talker — retrying until it answers — so connections
-    /// survive an entity or talker restart without a controller. A
-    /// controller DISCONNECT removes the binding. Empty = disabled.
+    /// Persisted listener bindings (kit phase 5b). When set, every
+    /// controller-made stream-input connection is remembered in this file.
+    /// IEEE 1722.1 ACMP: on start the entity fast-connects (8.2.2.1.1) each
+    /// remembered talker — retrying until it answers — so connections
+    /// survive an entity or talker restart without a controller; a
+    /// controller DISCONNECT removes the binding; empty = disabled. Milan
+    /// ACMP: the file is the non-volatile memory of Milan v1.3 5.3.8.3,
+    /// written at every bind and unbind, and each saved stream input starts
+    /// bound; empty, the bindings last only as long as the process.
     std::string listener_bindings_path{};
 
     /// Test-signal generator: a repeating logarithmic sine sweep (chirp) on ONE

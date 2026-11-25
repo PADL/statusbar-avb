@@ -631,10 +631,18 @@ void AvbEntityHost::wire_engine_callbacks()
 
 void AvbEntityHost::enable_listener_binding_persistence(std::string path)
 {
-    if (path.empty()) {
+    listener_bindings_path_ = std::move(path);
+    if (components_.acmp_is_milan()) {
+        enable_milan_binding_persistence();
         return;
     }
-    listener_bindings_path_ = std::move(path);
+    if (!listener_bindings_path_.empty()) {
+        enable_fast_connect_persistence();
+    }
+}
+
+void AvbEntityHost::enable_fast_connect_persistence()
+{
     auto& listener = components_.acmp_listener;
 
     // Reload yesterday's bindings as fast-connect goals: the listener's
@@ -660,6 +668,44 @@ void AvbEntityHost::enable_listener_binding_persistence(std::string path)
             ctl_log().status("acmp: could not persist {} listener binding(s)", goals.size());
         }
     });
+}
+
+void AvbEntityHost::enable_milan_binding_persistence()
+{
+    if (listener_bindings_path_.empty()) {
+        // Milan v1.3 5.3.8.3 wants the binding parameters in non-volatile
+        // memory. Where that is on this machine is the configuration's to say.
+        ctl_log().status("acmp: listener.bindings is not set; Milan bindings are kept until the process ends");
+        return;
+    }
+    load_milan_bindings();
+    components_.milan_acmp_listener->set_on_bindings_changed([this]() { save_milan_bindings(); });
+}
+
+void AvbEntityHost::load_milan_bindings()
+{
+    auto const loaded = load_saved_listener_bindings(listener_bindings_path_);
+    if (!loaded.has_value()) {
+        ctl_log().status("acmp: listener bindings file unreadable; starting with every stream input unbound");
+        return;
+    }
+    // 5.5.3.6.2: each sink with a saved binding waits for its talker's ADP.
+    // Startup has no event of its own to time anything by: nothing is sent
+    // and no timer runs until that ADP arrives.
+    for (auto const& binding : *loaded) {
+        (void)components_.milan_acmp_listener->restore_binding(binding, TimePoint{});
+    }
+    if (!loaded->empty()) {
+        ctl_log().status("acmp: {} persisted Milan binding(s) loaded; waiting for their talkers", loaded->size());
+    }
+}
+
+void AvbEntityHost::save_milan_bindings()
+{
+    auto const bindings = components_.milan_acmp_listener->bindings();
+    if (auto const st = save_milan_listener_bindings(listener_bindings_path_, {bindings.data(), bindings.size()}); !st) {
+        ctl_log().status("acmp: could not persist {} Milan binding(s)", bindings.size());
+    }
 }
 
 }  // namespace statusbar::avb_entity
