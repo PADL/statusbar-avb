@@ -803,6 +803,33 @@ TEST(talker_port, a_single_threaded_port_renders_in_the_slot)
     EXPECT_FALSE(staged_held);
 }
 
+// A frame rendered in the port's slot is tagged as a staged one is: with the VID and the priority in force, which a
+// Domain adopted from the wire moves (set_vlan), not the configured priority.
+TEST(talker_port, a_frame_rendered_in_the_slot_carries_the_priority_in_force)
+{
+    for (bool const single_threaded : {true, false}) {
+        avb_entity::StreamPort port;
+        EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
+        auto& wire = open_test_port(port);
+        ptpclient::MediaClockGenerator const media_clock{};
+        std::atomic<int64_t> const last_gptp_ns{0};
+        avb_entity::TalkerStreams talker{
+            avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+            media_clock,
+            last_gptp_ns,
+            std::pmr::get_default_resource()};
+        EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+        EXPECT_TRUE(talker.open_tx(port).has_value());
+        talker.set_vlan(0x123, 5);
+        avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
+        EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 0x2'0000'1000ULL, 12, render));
+        auto const sent = wire.pop_tx();
+        EXPECT_TRUE(sent.has_value() && sent->frame.size() > VLAN_HEADER_LENGTH);
+        // TCI after the TPID: PCP 5, VID 0x123.
+        EXPECT_TRUE(sent.has_value() && same_bytes(std::span{sent->frame}.subspan(14, 2), std::array<uint8_t, 2>{0xA1, 0x23}));
+    }
+}
+
 // On a timed port one thread drives, a raw frame is still rendered in the slot, and receives its launch
 // time after the render: the time the port records is the frame's, in commit order.
 TEST(talker_port, a_timed_single_threaded_port_renders_in_the_slot_and_times_it_after)
