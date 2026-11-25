@@ -2810,6 +2810,32 @@ TEST(nanoavb_entity_in_progress, a_failed_completion_without_a_body_answers_the_
     EXPECT_EQ(body_of(sends[0])[4], 0x40);
 }
 
+// IEEE 1722.1-2021 Clause 9.2.1.1.7: octets past control_data_length are not the command's, nor echoed or held.
+TEST(nanoavb_entity_in_progress, octets_past_control_data_length_are_ignored)
+{
+    DeferringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    AemDu cmd{};
+    cmd.init_command(AEM_COMMAND_SET_CONTROL, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + kSetControl5.size()));
+    cmd.target_entity_id = kEntity;
+    cmd.controller_entity_id = kControllerA;
+    std::vector<uint8_t> packet(AemDu::LENGTH + kSetControl5.size() + 80, uint8_t{0xEE});  // 80 trailing octets
+    span_copy(std::span<uint8_t>{packet}.first(AemDu::LENGTH), make_const_span(cmd));
+    std::ranges::copy(kSetControl5, packet.begin() + static_cast<std::ptrdiff_t>(AemDu::LENGTH));
+    (void)handler.process_packet(kMacA, packet, kEntity);
+
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(size_t{header_of(sends[0]).control_data_length()}, AemDu::AEM_DATA_LENGTH + kSetControl5.size());
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), kSetControl5));
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 5, AEM_STATUS_SUCCESS));
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), kSetControl5));
+}
+
 //
 // Profiles: 7.5.2 as written notifies every SET answered SUCCESS; Milan v1.3
 // 5.4.5.3 notifies only a SET that modifies the entity, so under milan13 a SET
