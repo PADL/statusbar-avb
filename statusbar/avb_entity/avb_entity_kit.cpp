@@ -122,8 +122,10 @@ void AvbEntityKit::apply_acmp_profile(bool const milan)
     }
     host_.components().use_milan_acmp();
     // 5.5.4.1: a Milan talker streams "as long as bandwidth is reserved for
-    // its stream"; there is no connection for the gate to wait for.
+    // its stream"; there is no connection for the gate to wait for, and no
+    // disconnect to close it, so it closes with the Listener's registration.
     gate_.set_needs_acmp_connection(false);
+    gate_.set_listener_grace(std::chrono::seconds{0});
 }
 
 void AvbEntityKit::apply_srp_profile(bool const milan)

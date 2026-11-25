@@ -23,7 +23,11 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
         if (s.has_value() && s->stream_id.to_uint64() == sid_u64) {
             bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
             if (was != ready && logger_) {
-                logger_->status("srp: talker stream {} MSRP listener-ready -> {} (ACMP-AND-MSRP gate)", idx, ready);
+                logger_->status(
+                    "srp: talker stream {} MSRP listener-ready -> {} ({} gate)",
+                    idx,
+                    ready,
+                    needs_acmp_connection_ ? logging::lit("ACMP-AND-MSRP") : logging::lit("MSRP"));
             }
         }
     }
@@ -71,7 +75,7 @@ auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint co
         return true;
     }
     auto const last_seen = last_seen_ready_[idx];
-    return last_seen != NEVER && (now - last_seen) < GRACE;
+    return last_seen != NEVER && (now - last_seen) < grace_;
 }
 
 }  // namespace statusbar::avb_entity

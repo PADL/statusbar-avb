@@ -65,6 +65,15 @@ struct TalkerGate
     /// media timer runs.
     void set_needs_acmp_connection(bool const needed) noexcept { needs_acmp_connection_ = needed; }
 
+    /// How long a stream stays admitted after its Listener Ready was last
+    /// seen (GRACE by default). A Milan talker sets none: nothing but the
+    /// Listener's registration admits its stream, the registrar keeps that
+    /// registration through a LeaveAll for LeaveTime (5 s under Milan's
+    /// timers), and a grace on top would keep frames going out after the
+    /// last listener left and the Talker attribute was withdrawn. Set before
+    /// the media timer runs.
+    void set_listener_grace(std::chrono::nanoseconds const grace) noexcept { grace_ = grace; }
+
     /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
     /// data plane's maximum blob-declared stream table (kit phase 1).
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
@@ -117,6 +126,7 @@ struct TalkerGate
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                             ///< config.gate_talker_on_listener, destructured at the call site
     bool needs_acmp_connection_{true};              ///< see set_needs_acmp_connection
+    std::chrono::nanoseconds grace_{GRACE};         ///< see set_listener_grace
     nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
     std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
 

@@ -316,6 +316,14 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{10}));
     gate.note_listener_ready(crf_sid, false);
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{14}));
+
+    // A gate given no grace closes at the first wake that finds Listener Ready gone.
+    gate.set_listener_grace(std::chrono::seconds{0});
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{14}));
+    gate.note_listener_ready(crf_sid, true);
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
+    gate.note_listener_ready(crf_sid, false);
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
 }
 

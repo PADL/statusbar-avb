@@ -771,11 +771,16 @@ TEST(avb_entity_kit_acmp, a_milan_listener_bound_to_a_milan_talker_settles_reser
     EXPECT_TRUE(followed.has_value());
     EXPECT_TRUE(followed.has_value() && followed->dest_address == sink.context().srp.stream_dest_mac && followed->vlan_id == 2);
 
-    // It holds with no further ACMP: past the probe's 15 seconds and several LeaveAlls.
+    // It holds with no further ACMP: past the probe's 15 seconds and through
+    // several LeaveAlls, at every round, with no grace to carry it (the
+    // registrar keeps the Listener registered for LeaveTime).
     size_t const acmp_so_far = pair.wire.size();
-    pair.run(40 * ROUNDS_PER_SECOND);
-    EXPECT_EQ(sink.state(), MilanSinkState::SettledRsvOk);
-    EXPECT_TRUE(pair.talker_transmits());
+    bool held = true;
+    for (int round = 0; round < 40 * ROUNDS_PER_SECOND; ++round) {
+        pair.run(1);
+        held = held && pair.talker_transmits() && sink.state() == MilanSinkState::SettledRsvOk;
+    }
+    EXPECT_TRUE(held);
     EXPECT_EQ(pair.wire.size(), acmp_so_far);
 
     // GET_RX_STATE and GET_TX_STATE as Milan has them (Tables 5.44 and 5.52).
@@ -802,7 +807,11 @@ TEST(avb_entity_kit_acmp, a_milan_listener_bound_to_a_milan_talker_settles_reser
     EXPECT_FALSE(pair.last(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND).has_value());
     EXPECT_EQ(sink.state(), MilanSinkState::Unbound);
     EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Idle);
-    pair.run(8 * ROUNDS_PER_SECOND);
+    // The gate has no grace under Milan: the stream stops with the Listener's
+    // registration, a join time after the unbind, not five seconds later.
+    pair.run(ROUNDS_PER_SECOND);
+    EXPECT_FALSE(pair.talker_transmits());
+    pair.run(7 * ROUNDS_PER_SECOND);
     EXPECT_FALSE(pair.talker_transmits());
     EXPECT_EQ(
         pair.talker->host().components().msrp_handler.get_talker_stream(pair.stream_id())->state,
