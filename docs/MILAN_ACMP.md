@@ -211,6 +211,17 @@ destructor takes them back. An entity that answers MVU and runs IEEE
 1722.1 connection management has nothing attached, and answers the three
 commands NOT_IMPLEMENTED.
 
+`statusbar-atdecc-mvu` sends any of the three from a command line, and
+GET_MILAN_INFO, and prints the answer with each field named:
+
+```
+statusbar-atdecc-mvu --interface=eth0 --command=bind \
+    --target-entity-id=<listener> --stream-input=0 \
+    --talker-entity-id=<talker> --talker-stream=0
+statusbar-atdecc-mvu --interface=eth0 --command=stream-input-info \
+    --target-entity-id=<listener> --stream-input=0
+```
+
 The MVU_BINDING flag of GET_MILAN_INFO says that BIND_STREAM and
 UNBIND_STREAM are implemented. The kit sets it under the Milan profile
 and clears it under any other, whatever `milan.features_flags` gives.

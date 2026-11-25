@@ -56,6 +56,22 @@ auto mvu_status_name(uint8_t const status) noexcept -> std::string_view
     }
 }
 
+auto mvu_probing_status_name(uint8_t const pbsta) noexcept -> std::string_view
+{
+    switch (pbsta) {
+        case 0:
+            return "PROBING_DISABLED";
+        case 1:
+            return "PROBING_PASSIVE";
+        case 2:
+            return "PROBING_ACTIVE";
+        case 3:
+            return "PROBING_COMPLETED";
+        default:
+            return "Unknown";
+    }
+}
+
 namespace {
 
 /// One decimal number of at most 255 from the front of @p text, consumed

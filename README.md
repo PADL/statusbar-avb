@@ -117,6 +117,7 @@ functional test split: **[`docs/RELEASE_3_0_0.md`](docs/RELEASE_3_0_0.md)**.
   connect), `statusbar-atdecc-controller` (interactive TUI),
   `statusbar-atdecc-monitor`, `statusbar-aem-control`,
   `statusbar-aem-get-counters`, `statusbar-aem-set-clock-source`,
+  `statusbar-atdecc-mvu` (one Milan vendor-unique command),
   `statusbar-aemxml` and `statusbar-aemxml-cross-check` (Python),
   `statusbar-descriptor-storage`, `statusbar-aecp-aa-analyzer`.
 - **Capture / audio**: `statusbar-pcap-dump`, `statusbar-bpf-dump`,

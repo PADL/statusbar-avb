@@ -26,6 +26,7 @@ statusbar_add_module(
   atdecc_milan_acmp_talker.cpp
   atdecc_milan_adp_discovery_sm.cpp
   atdecc_milan_mvu_stream_input.cpp
+  atdecc_mvu_request.cpp
   atdecc_aecp_aem_controller.cpp
   atdecc_error.cpp
   atdecc_jdks.cpp
@@ -46,6 +47,7 @@ statusbar_add_module(
   atdecc_milan_acmp_talker_test.cpp
   atdecc_milan_adp_discovery_sm_test.cpp
   atdecc_milan_mvu_stream_input_test.cpp
+  atdecc_mvu_request_test.cpp
   atdecc_adp_test.cpp
   atdecc_aecp_test.cpp
   atdecc_aecp_aa_test.cpp
@@ -68,6 +70,12 @@ set_target_properties(acmp_controller_tool PROPERTIES OUTPUT_NAME
                                                       statusbar-acmp-controller)
 set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS
                                     acmp_controller_tool)
+
+add_executable(atdecc_mvu_tool atdecc_mvu_tool.cpp)
+target_link_libraries(atdecc_mvu_tool PRIVATE statusbar)
+set_target_properties(atdecc_mvu_tool PROPERTIES OUTPUT_NAME
+                                                 statusbar-atdecc-mvu)
+set_property(GLOBAL APPEND PROPERTY STATUSBAR_INSTALL_TARGETS atdecc_mvu_tool)
 
 add_executable(aem_set_clock_source_tool atdecc_aem_set_clock_source_tool.cpp)
 target_link_libraries(aem_set_clock_source_tool PRIVATE statusbar)

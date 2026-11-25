@@ -97,6 +97,7 @@ see "Saved state" in `ENTITY_CONSTRUCTION_KIT.md`.
 | `statusbar-aem-control` | GET or SET one CONTROL descriptor's values on a target (`--set=` comma-separated values; omit to GET). | all |
 | `statusbar-aem-get-counters` | Poll a target's descriptor counters (GET_COUNTERS) at an interval, printing values and deltas. | all |
 | `statusbar-aem-set-clock-source` | Discover a target and SET (default) or GET its CLOCK_DOMAIN media-clock source. | all |
+| `statusbar-atdecc-mvu` | Send one Milan vendor-unique command to a target and print its answer: `milan-info` (GET_MILAN_INFO), `bind` (BIND_STREAM), `unbind` (UNBIND_STREAM), `stream-input-info` (GET_STREAM_INPUT_INFO_EX). Exits 0 for SUCCESS, 1 for another status, 2 for no response. | all |
 | `statusbar-aecp-aa-analyzer` | Offline analysis of AECP Address-Access / Memory-Object firmware-upload sessions in a capture. | all |
 | `statusbar-descriptor-storage` | Dump a `.aem` / `.bin` DescriptorStorage blob (configurations, descriptors, string symbols). One positional `<file>`. | all |
 | `statusbar-aemxml` | Compile and convert AEM entity models (Python): `json2bin` builds the descriptor-storage blob the entity tools load from a declarative `examples/*.json` model; `json2xml`, `xml2json`, `xml2bin`, `bin2xml`, `bin2json`, `validate`, `dump`, `upgrade` (2013 → 2021 AEMXML schema) and `downgrade`. | all |

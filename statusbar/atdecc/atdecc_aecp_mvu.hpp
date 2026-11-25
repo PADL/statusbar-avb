@@ -83,6 +83,9 @@ constexpr uint32_t MVU_FEATURE_TALKER_SIGNAL_PRESENCE = 0x00000008;
 /// The name of an MVU status code, "Unknown" for one Table 5.16 lacks.
 [[nodiscard]] auto mvu_status_name(uint8_t status) noexcept -> std::string_view;
 
+/// The name of a Probing status (Table 5.5), "Unknown" for a reserved value.
+[[nodiscard]] auto mvu_probing_status_name(uint8_t pbsta) noexcept -> std::string_view;
+
 /// A certification_version or specification_version word: four 8-bit numbers,
 /// most significant first, read as dot-separated decimals (5.4.4.1).
 [[nodiscard]] constexpr auto mvu_version(uint8_t const a, uint8_t const b, uint8_t const c = 0, uint8_t const d = 0) noexcept
