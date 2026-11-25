@@ -106,6 +106,35 @@ namespace {
     return header;
 }
 
+/// A GET_AS_PATH response (IEEE 1722.1-2021 Clause 7.4.41.2) for @p descriptor_index in
+/// @p out_buffer: the header, then @p path's clock identities; NOT_SUPPORTED when it does not fit.
+[[nodiscard]] auto as_path_response(
+    uint16_t const descriptor_index, AsPath const& path, std::span<uint8_t> const out_buffer) noexcept -> AemCommandResponse
+{
+    size_t const size = AemAsPathResponseHeader::LENGTH + (path.size() * Eui64::LENGTH);
+    if (out_buffer.size() < size) {
+        return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
+    }
+    span_store(
+        out_buffer, AemAsPathResponseHeader{.descriptor_index = descriptor_index, .count = static_cast<uint16_t>(path.size())});
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_store(out_buffer.subspan(AemAsPathResponseHeader::LENGTH + (i * Eui64::LENGTH)), path[i]);
+    }
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
+}
+
+/// The leading T of @p bytes, nullopt when they are too few.
+template <typename T>
+[[nodiscard]] auto load_payload(std::span<uint8_t const> const bytes) noexcept -> std::optional<T>
+{
+    if (bytes.size() < T::LENGTH) {
+        return std::nullopt;
+    }
+    T value{};
+    span_load(value, bytes);
+    return value;
+}
+
 /// The command data of the AEM command @p header in @p payload: as long as its
 /// control_data_length says (IEEE 1722.1-2021 Clause 9.2.1.1.7), not the octets behind it.
 [[nodiscard]] auto aem_command_data(AemDu const& header, std::span<uint8_t const> const payload) noexcept
@@ -319,6 +348,9 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
 
         case AEM_COMMAND_GET_AVB_INFO:
             return handle_get_avb_info(command_data, out_buffer);
+
+        case AEM_COMMAND_GET_AS_PATH:
+            return handle_get_as_path(command_data, out_buffer);
 
         case AEM_COMMAND_GET_STREAM_INFO:
             return handle_get_stream_info(header, command_data, out_buffer);
@@ -872,6 +904,35 @@ auto AemCommandHandler::notify_avb_info_changed(uint16_t const descriptor_index)
     auto const r = handle_get_avb_info(request, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_AVB_INFO, std::span<uint8_t const>{out}.first(r.size));
+    }
+    return r.status;
+}
+
+auto AemCommandHandler::handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (!callbacks_.get_as_path) {
+        return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
+    }
+    auto const cmd = load_payload<AemGetAsPathCommandPayload>(command_data);
+    if (!cmd) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    AsPath path{};
+    if (!callbacks_.get_as_path(cmd->descriptor_index.get(), path)) {
+        return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
+    }
+    return as_path_response(cmd->descriptor_index.get(), path, out_buffer);
+}
+
+auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) -> uint8_t
+{
+    std::array<uint8_t, AemGetAsPathCommandPayload::LENGTH> request{};
+    span_store(request, AemGetAsPathCommandPayload{.descriptor_index = descriptor_index});
+    std::array<uint8_t, AemAsPathResponseHeader::LENGTH + (MAX_AS_PATH_LENGTH * Eui64::LENGTH)> out{};
+    auto const r = handle_get_as_path(request, out);
+    if (r.status == AEM_STATUS_SUCCESS) {
+        emit_unsolicited(AEM_COMMAND_GET_AS_PATH, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
 }
