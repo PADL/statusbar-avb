@@ -13,6 +13,7 @@
 #include "statusbar/nanoavb/nanoavb_adp_adv_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
+#include "statusbar/nanoavb/nanoavb_dynamic_audio_maps.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_gptp_sm.hpp"
