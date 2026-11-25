@@ -85,14 +85,9 @@ struct EntityToolOptions
     std::string stream_input_margin_csv_path{};
 };
 
-/// Register the CLI arguments every entity tool shares: entity identity,
-/// interface, ATDECC wire version, VLAN, stream addressing, SRP
-/// workarounds, the talker gate, stream destination MACs, presentation
-/// offset, media pacing, listener bindings, TX pcap, histogram CSVs and
-/// the verbosity/stats/PTP-strictness flags. Tools add their own specs
-/// (and the PTP specs) around this.
-inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
-{  // NOLINT(statusbar-block-statements) one option after another; pre-dates the gate
+/// Who the entity is: its IDs, its interface, its name.
+inline void add_identity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<ieee::Eui64>("entity.id", "Entity ID (EUI-64)", entity.entity_id, [&entity](auto v) { entity.entity_id = v; });
     specs.add<ieee::Eui64>(
         "entity.model_id", "Entity Model ID (EUI-64)", entity.entity_model_id, [&entity](auto v) { entity.entity_model_id = v; });
@@ -101,6 +96,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
     specs.add<std::string>("entity.name", "Entity name (shown in ATDECC controllers)", entity.entity_name, [&entity](auto v) {
         entity.entity_name = v;
     });
+}
+
+/// The ATDECC wire version and profile.
+inline void add_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<std::string>(
         "atdecc.version",
         "ATDECC wire version: '2016' truncates descriptors to their 1722.1-2013/2016 lengths; '2021' emits full "
@@ -121,6 +121,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "5.4.5.3). Default empty: the model decides, milan13 when entity.milan is set, classic otherwise.",
         entity.atdecc_profile,
         [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
+}
+
+/// What a Milan model reports of itself.
+inline void add_milan_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<bool>(
         "entity.milan",
         "The model is a Milan PAAD-AE: answer GET_MILAN_INFO (Milan v1.3 5.4.4.1) and the other MVU commands, and "
@@ -144,6 +149,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "The Milan specification supported, as dotted numbers. Default 1.3.0.0.",
         entity.milan_specification_version,
         [&entity](auto v) { entity.milan_specification_version = std::string{v}; });
+}
+
+/// The VLAN, the stream packet backend and where the stream addresses come from.
+inline void add_network_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<uint16_t>("vlan_id", "VLAN ID for AVB streams", entity.vlan_id, [&entity](auto v) { entity.vlan_id = v; });
     specs.add<std::string>(
         "net.backend",
@@ -166,6 +176,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "start, so a restart keeps its stream destination addresses. Default empty: every start draws afresh.",
         entity.stream_maap_range_file,
         [&entity](auto v) { entity.stream_maap_range_file = std::string{v}; });
+}
+
+/// The SRP workarounds and the talker gate.
+inline void add_srp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<bool>(
         "srp.redeclare_registered_listeners",
         "Sticky-Listener MSRP workaround: re-declare REGISTERED Listener attributes every periodic/LeaveAll pass. "
@@ -185,6 +200,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "Default true (false = stream unconditionally from link-up; non-spec, bench only).",
         entity.gate_talker_on_listener,
         [&entity](auto v) { entity.gate_talker_on_listener = v; });
+}
+
+/// The stream destination addresses and the media pacing.
+inline void add_stream_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<ieee::Eui48>(
         "am824.dest_mac", "AM824 talker destination multicast MAC (stream 0)", entity.am824_talker_dest_mac, [&entity](auto v) {
             entity.am824_talker_dest_mac = v;
@@ -209,12 +229,22 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "Stream packets per stream per media-timer wake (default 1 = strict Class A shaping).",
         static_cast<uint64_t>(entity.packets_per_wake),
         [&entity](auto v) { entity.packets_per_wake = static_cast<size_t>((v < 1) ? 1 : ((v > 16) ? 16 : v)); });
+}
+
+/// Where what must outlast a restart is saved.
+inline void add_saved_state_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
     specs.add<std::string>(
         "listener.bindings",
         "Persist listener fast-connect bindings to this file (kit phase 5b): controller-made input connections are "
         "remembered and fast-connected (IEEE 1722.1 8.2.2.1.1) after an entity or talker restart. Empty = off.",
         entity.listener_bindings_path,
         [&entity](auto v) { entity.listener_bindings_path = std::string{v}; });
+}
+
+/// The TX capture and the histogram files.
+inline void add_capture_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
+{
     specs.add<std::string>(
         "tx_pcap.path",
         "Diagnostic: record our OWN transmitted stream frames (AAF/AM824/CRF, normally invisible because the TX "
@@ -247,6 +277,11 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "Path to the AEM descriptor storage .bin blob (build with statusbar-aemxml json2bin)",
         tool.descriptor_storage_path,
         [&tool](auto v) { tool.descriptor_storage_path = v; });
+}
+
+/// Verbosity, statistics and PTP strictness.
+inline void add_tool_arg_specs(args::ArgumentSpecs& specs, EntityToolOptions& tool)
+{
     specs.add<bool>("verbose", "Enable verbose output", tool.verbose, [&tool](auto v) { tool.verbose = v; });
     specs.add<bool>("dump_stats_on_exit", "Dump timer statistics on exit", tool.dump_stats_on_exit, [&tool](auto v) {
         tool.dump_stats_on_exit = v;
@@ -256,6 +291,37 @@ inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAud
         "Refuse to run if PTP falls back to the system clock (talker timestamps would not be gPTP)",
         tool.require_ptp,
         [&tool](auto v) { tool.require_ptp = v; });
+}
+
+/// The ATDECC and Milan options together.
+inline void add_profile_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    add_atdecc_arg_specs(specs, entity);
+    add_milan_arg_specs(specs, entity);
+}
+
+/// The network, SRP and stream options together.
+inline void add_streaming_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    add_network_arg_specs(specs, entity);
+    add_srp_arg_specs(specs, entity);
+    add_stream_arg_specs(specs, entity);
+}
+
+/// Register the CLI arguments every entity tool shares: entity identity,
+/// interface, ATDECC wire version, VLAN, stream addressing, SRP
+/// workarounds, the talker gate, stream destination MACs, presentation
+/// offset, media pacing, listener bindings, TX pcap, histogram CSVs and
+/// the verbosity/stats/PTP-strictness flags. Tools add their own specs
+/// (and the PTP specs) around this.
+inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
+{
+    add_identity_arg_specs(specs, entity);
+    add_profile_arg_specs(specs, entity);
+    add_streaming_arg_specs(specs, entity);
+    add_saved_state_arg_specs(specs, entity);
+    add_capture_arg_specs(specs, entity, tool);
+    add_tool_arg_specs(specs, tool);
 }
 
 /// Set up the PTP app with the standard fallback flow: on a silent fall
