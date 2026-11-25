@@ -636,6 +636,19 @@ struct KitPair
         }
     }
 
+    /// Neither kit originates a LeaveAll from here on. A kit's leavealltimer
+    /// is drawn at random, 10 to 15 s, and a LeaveAll that falls in the round
+    /// of a withdrawal carries the departure in place of a Leave: the peer
+    /// then lets go a LeaveTime later, five seconds under Milan's timers,
+    /// and not at once. A test that times a departure takes that case out,
+    /// so that what it sees does not depend on the draw.
+    void no_leave_alls()
+    {
+        for (auto* kit : {&listener, &talker}) {
+            (*kit)->host().components().msrp_handler.set_suppress_leaveall(true);
+        }
+    }
+
     /// The controller sends @p cmd; both kits hear it, as on the ACMP multicast.
     void controller_sends(atdecc::AcmpCommandResponse const& cmd)
     {
@@ -735,6 +748,7 @@ TEST(avb_entity_kit_acmp, a_milan_listener_bound_to_a_milan_talker_settles_reser
 {
     using atdecc::MilanSinkState;
     KitPair pair{"milan13"};
+    pair.no_leave_alls();  // the unbind below is timed
     auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
     EXPECT_EQ(
         pair.talker->host().components().msrp_handler.get_talker_stream(pair.stream_id())->state,
@@ -833,6 +847,7 @@ TEST(avb_entity_kit_acmp, a_milan_sink_whose_talker_withdraws_its_attribute_prob
     // waits for the talker's ADP before it asks again.
     using atdecc::MilanSinkState;
     KitPair pair{"milan13"};
+    pair.no_leave_alls();  // the withdrawal below is timed
     auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
     pair.bind();
     pair.run(2 * ROUNDS_PER_SECOND);
