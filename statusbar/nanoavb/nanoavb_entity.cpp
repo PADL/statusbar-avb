@@ -343,6 +343,15 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
             }
             return handle_set_descriptor_value(AEM_COMMAND_STOP_STREAMING, command_data, out_buffer);
 
+        case AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return refused_set(*blocked, AEM_COMMAND_SET_MAX_TRANSIT_TIME, command_data, out_buffer);
+            }
+            return handle_set_max_transit_time(command_data, out_buffer);
+
+        case AEM_COMMAND_GET_MAX_TRANSIT_TIME:
+            return handle_get_max_transit_time(command_data, out_buffer);
+
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
 
@@ -584,7 +593,7 @@ auto AemCommandHandler::failed_set_body(
 
 auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept -> std::optional<uint16_t>
 {
-    constexpr std::array<std::pair<uint16_t, uint16_t>, 9> twins{
+    constexpr std::array<std::pair<uint16_t, uint16_t>, 10> twins{
         {{AEM_COMMAND_SET_CONFIGURATION, AEM_COMMAND_GET_CONFIGURATION},
          {AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
          {AEM_COMMAND_SET_CONTROL, AEM_COMMAND_GET_CONTROL},
@@ -593,7 +602,8 @@ auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept ->
          {AEM_COMMAND_SET_CLOCK_SOURCE, AEM_COMMAND_GET_CLOCK_SOURCE},
          {AEM_COMMAND_SET_SIGNAL_SELECTOR, AEM_COMMAND_GET_SIGNAL_SELECTOR},
          {AEM_COMMAND_SET_MIXER, AEM_COMMAND_GET_MIXER},
-         {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX}}};
+         {AEM_COMMAND_SET_MATRIX, AEM_COMMAND_GET_MATRIX},
+         {AEM_COMMAND_SET_MAX_TRANSIT_TIME, AEM_COMMAND_GET_MAX_TRANSIT_TIME}}};
     auto const it = std::find_if(twins.begin(), twins.end(), [=](auto const& pair) { return pair.first == set_command_type; });
     return it == twins.end() ? std::nullopt : std::optional<uint16_t>{it->second};
 }
@@ -948,6 +958,90 @@ auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_typ
         emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
     }
     return r.status;
+}
+
+auto AemCommandHandler::handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const cmd = load_payload<AemSetMaxTransitTimePayload>(command_data);
+    if (!cmd) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    auto const body = command_data.first(AemSetMaxTransitTimePayload::LENGTH);
+    if (auto const status = max_transit_time_refusal(*cmd); status != AEM_STATUS_SUCCESS) {
+        return refused_set(status, AEM_COMMAND_SET_MAX_TRANSIT_TIME, body, out_buffer);
+    }
+    // A repeat of one deferred, no slot to defer to, or (Milan v1.3 Section 5.4.5.3) the time in force.
+    if (auto const early = answered_before_hook(AEM_COMMAND_SET_MAX_TRANSIT_TIME, body, out_buffer)) {
+        return *early;
+    }
+    return set_max_transit_time(*cmd, body, out_buffer);
+}
+
+auto AemCommandHandler::max_transit_time_refusal(AemSetMaxTransitTimePayload const& cmd) const -> uint8_t
+{
+    uint32_t current = 0;
+    if (auto const status = max_transit_time_target(cmd.descriptor_type.get(), cmd.descriptor_index.get(), current);
+        status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    return cmd.max_transit_time.get() > MILAN_PRESENTATION_OFFSET_MAX_NS ? AEM_STATUS_BAD_ARGUMENTS : AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::set_max_transit_time(
+    AemSetMaxTransitTimePayload const& cmd, std::span<uint8_t const> const body, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
+    auto const echoed = out_buffer.first(echo_command(body, out_buffer));
+    auto const status =
+        callbacks_.set_presentation_offset(cmd.descriptor_index.get(), static_cast<uint32_t>(cmd.max_transit_time.get()));
+    if (status == AEM_STATUS_IN_PROGRESS) {
+        return defer_command(AEM_COMMAND_SET_MAX_TRANSIT_TIME, echoed);  // finished by complete_pending_command()
+    }
+    // The response echoes the command; a success is notified as it to the others (7.5.2).
+    return settle_set(AEM_COMMAND_SET_MAX_TRANSIT_TIME, status, body, echoed, out_buffer);
+}
+
+auto AemCommandHandler::handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const cmd = load_payload<AemGetMaxTransitTimeCommandPayload>(command_data);
+    if (!cmd) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    return answer_max_transit_time(*cmd, command_data, out_buffer);
+}
+
+auto AemCommandHandler::answer_max_transit_time(
+    AemGetMaxTransitTimeCommandPayload const& cmd, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    uint32_t current = 0;
+    if (auto const status = max_transit_time_target(cmd.descriptor_type.get(), cmd.descriptor_index.get(), current);
+        status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
+    }
+    span_store(
+        out_buffer,
+        AemGetMaxTransitTimeResponsePayload{
+            .descriptor_type = cmd.descriptor_type,
+            .descriptor_index = cmd.descriptor_index,
+            .max_transit_time = uint64_t{current}});
+    return {.status = AEM_STATUS_SUCCESS, .size = AemGetMaxTransitTimeResponsePayload::LENGTH};
+}
+
+auto AemCommandHandler::max_transit_time_target(
+    uint16_t const descriptor_type, uint16_t const descriptor_index, uint32_t& current) const -> uint8_t
+{
+    if (!callbacks_.get_presentation_offset || !callbacks_.set_presentation_offset) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    if (descriptor_type != DESCRIPTOR_STREAM_OUTPUT) {
+        return descriptor_type == DESCRIPTOR_STREAM_INPUT ? AEM_STATUS_NOT_SUPPORTED : AEM_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    auto const offset = callbacks_.get_presentation_offset(descriptor_index);
+    current = offset.value_or(0);
+    return offset ? AEM_STATUS_SUCCESS : AEM_STATUS_NO_SUCH_DESCRIPTOR;
 }
 
 auto AemCommandHandler::handle_reboot(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse

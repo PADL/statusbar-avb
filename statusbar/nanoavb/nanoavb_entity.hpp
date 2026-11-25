@@ -140,6 +140,17 @@ using AsPath = statusbar::sg14::inplace_vector<Eui64, MAX_AS_PATH_LENGTH>;
 /// index that is not one of this entity's interfaces (answered NO_SUCH_DESCRIPTOR).
 using GetAsPathFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AsPath& path), 64>;
 
+/// STREAM_OUTPUT @p stream_output_index's presentation time offset in nanoseconds, the
+/// max_transit_time of IEEE 1722.1-2021 Clause 7.4.77, or nullopt when it is not one of
+/// this entity's talker streams (answered NO_SUCH_DESCRIPTOR).
+using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<uint32_t>(uint16_t stream_output_index), 64>;
+
+/// Put @p offset_ns in force as STREAM_OUTPUT @p stream_output_index's presentation time
+/// offset (Clause 7.4.76) and answer an AEM status: SUCCESS once in force, STREAM_IS_RUNNING
+/// when it cannot change while the stream runs, NOT_SUPPORTED when the entity cannot change it,
+/// or IN_PROGRESS when it needs time, to finish with complete_pending_command() as a deferred SET.
+using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
+
 /// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
 /// applied (see set_identify_control_index). @p active is true when the new
 /// value is non-zero (a controller is identifying this entity), false when
@@ -186,6 +197,11 @@ struct AemCommandHandlerCallbacks
     /// Accept or refuse REBOOT, and schedule it. Optional; if unset, REBOOT
     /// replies NOT_IMPLEMENTED.
     RebootFn on_reboot;
+
+    /// The talkers' presentation time offsets, for SET_MAX_TRANSIT_TIME and
+    /// GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
+    GetPresentationOffsetFn get_presentation_offset;
+    SetPresentationOffsetFn set_presentation_offset;
 };
 
 /// What answers Milan's stream input commands over AECP MVU (Milan v1.3
@@ -360,6 +376,12 @@ class AemCommandHandler
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_get_as_path(GetAsPathFn fn) { callbacks_.get_as_path = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
+    /// Install the presentation time offset hooks (see AemCommandHandlerCallbacks).
+    void set_presentation_offset_hooks(GetPresentationOffsetFn get, SetPresentationOffsetFn set)
+    {
+        callbacks_.get_presentation_offset = std::move(get);
+        callbacks_.set_presentation_offset = std::move(set);
+    }
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -801,6 +823,36 @@ class AemCommandHandler
     /// Handle REBOOT (7.4.43) through the on_reboot callback; echoes the
     /// descriptor reference.
     [[nodiscard]] auto handle_reboot(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// Handle SET_MAX_TRANSIT_TIME (7.4.76) through the presentation offset hooks: a STREAM_OUTPUT's
+    /// offset, refused BAD_ARGUMENTS past MILAN_PRESENTATION_OFFSET_MAX_NS; answered, deferred and
+    /// notified as a value SET is (handle_set_descriptor_value), a failure with the time in force.
+    [[nodiscard]] auto handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// Handle GET_MAX_TRANSIT_TIME (7.4.77): a STREAM_OUTPUT's presentation time offset.
+    [[nodiscard]] auto handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// GET_MAX_TRANSIT_TIME @p cmd's answer, @p command_data echoed when it is refused.
+    [[nodiscard]] auto answer_max_transit_time(
+        AemGetMaxTransitTimeCommandPayload const& cmd, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The presentation offset of MAX_TRANSIT_TIME's target in @p current, and SUCCESS; else
+    /// NOT_IMPLEMENTED without the hooks, NOT_SUPPORTED for a STREAM_INPUT (the time is a
+    /// talker's), NO_SUCH_DESCRIPTOR for any other descriptor or an index the hook declines.
+    [[nodiscard]] auto max_transit_time_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
+        -> uint8_t;
+
+    /// SUCCESS when SET_MAX_TRANSIT_TIME @p cmd names a talker's offset within
+    /// MILAN_PRESENTATION_OFFSET_MAX_NS; else the status it is refused with.
+    [[nodiscard]] auto max_transit_time_refusal(AemSetMaxTransitTimePayload const& cmd) const -> uint8_t;
+
+    /// Put SET_MAX_TRANSIT_TIME @p cmd, whose body is @p body, in force through the set hook:
+    /// answered and notified on SUCCESS, deferred on IN_PROGRESS, else refused with the time in force.
+    [[nodiscard]] auto set_max_transit_time(
+        AemSetMaxTransitTimePayload const& cmd, std::span<uint8_t const> body, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// Handle SET_MEMORY_OBJECT_LENGTH / GET_MEMORY_OBJECT_LENGTH (7.4.72 /
     /// 7.4.73) through the handler's on_set/get_memory_object_length hooks.

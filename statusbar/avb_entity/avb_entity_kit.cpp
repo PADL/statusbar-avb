@@ -15,8 +15,10 @@
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <span>
 #include <utility>
@@ -550,7 +552,7 @@ void AvbEntityKit::wire_aem_stream_callbacks()
                 return fill_talker_stream_info(
                     host_,
                     descriptor_index,
-                    effective_presentation_offset_ns(config_),
+                    presentation_offset_ns(descriptor_index),
                     talker_->stream_stopped(descriptor_index),
                     out);
             }
@@ -559,6 +561,39 @@ void AvbEntityKit::wire_aem_stream_callbacks()
             }
             return false;
         });
+    host_.components().aem_handler.set_presentation_offset_hooks(
+        [this](uint16_t const idx) -> std::optional<uint32_t> {
+            return is_talker_index(idx) ? std::optional<uint32_t>{presentation_offset_ns(idx)} : std::nullopt;
+        },
+        [this](uint16_t const idx, uint32_t const offset_ns) -> uint8_t { return change_presentation_offset(idx, offset_ns); });
+}
+
+auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const offset_ns) -> uint8_t
+{
+    if (!on_presentation_offset_changed_) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;  // the configured offset is fixed
+    }
+    auto const status = on_presentation_offset_changed_(idx, offset_ns);
+    if (status == atdecc::AEM_STATUS_SUCCESS) {
+        presentation_offsets_[idx] = offset_ns;  // the handler asks only for a talker's index
+        host_.ctl_log().status("aem: talker stream {} presentation offset {} ns", idx, offset_ns);
+    }
+    // The kit keeps no deferred offset to finish later: IN_PROGRESS is not an answer here.
+    return status == atdecc::AEM_STATUS_IN_PROGRESS ? atdecc::AEM_STATUS_ENTITY_MISBEHAVING : status;
+}
+
+auto AvbEntityKit::is_talker_index(uint16_t const idx) const noexcept -> bool
+{
+    return idx < MAX_ENTITY_STREAMS && std::ranges::any_of(talker_specs_, [idx](StreamSpec const& s) { return s.index == idx; });
+}
+
+auto AvbEntityKit::presentation_offset_ns(uint16_t const idx) const noexcept -> uint32_t
+{
+    if (!is_talker_index(idx)) {
+        return 0;
+    }
+    auto const configured = std::min<uint64_t>(effective_presentation_offset_ns(config_), std::numeric_limits<uint32_t>::max());
+    return presentation_offsets_[idx].value_or(static_cast<uint32_t>(configured));
 }
 
 auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status

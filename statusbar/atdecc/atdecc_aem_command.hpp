@@ -1187,6 +1187,10 @@ static_assert(offsetof(AemGetMaxTransitTimeCommandPayload, descriptor_index) == 
 /// GET_MAX_TRANSIT_TIME response payload (same as SET_MAX_TRANSIT_TIME)
 using AemGetMaxTransitTimeResponsePayload = AemSetMaxTransitTimePayload;
 
+/// The longest presentation time offset a talker may be given, in nanoseconds (Milan v1.3
+/// Section 5.4.2.30): half the 32-bit nanosecond range of an AVTP timestamp.
+inline constexpr uint32_t MILAN_PRESENTATION_OFFSET_MAX_NS = 0x7FFFFFFF;
+
 //
 // SET_PTP_PORT_INFO / GET_PTP_PORT_INFO - Clause 7.4.94 / 7.4.95
 // (IEEE 1722.1-2021 Figures 7-122 and 7-124 as corrected by Cor 1-2025)

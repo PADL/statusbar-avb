@@ -4519,6 +4519,223 @@ TEST(nanoavb_entity_get_as_path, a_changed_path_is_notified_to_every_registered_
     EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AS_PATH, kMacA), 2);
 }
 
+//
+// SET_MAX_TRANSIT_TIME / GET_MAX_TRANSIT_TIME - IEEE 1722.1-2021 Clauses 7.4.76, 7.4.77
+//
+
+namespace {
+
+/// The talkers' presentation offsets: STREAM_OUTPUT 0 and 1, the set hook answering @p refusal when set.
+struct OffsetStore
+{
+    std::array<uint32_t, 2> offsets{2'000'000, 2'000'000};
+    std::optional<uint8_t> refusal{};
+    int sets{0};
+
+    void serve(AemCommandHandler& handler)
+    {
+        handler.set_presentation_offset_hooks(
+            [this](uint16_t const index) -> std::optional<uint32_t> {
+                return index < offsets.size() ? std::optional<uint32_t>{offsets.at(index)} : std::nullopt;
+            },
+            [this](uint16_t const index, uint32_t const offset_ns) -> uint8_t {
+                ++sets;
+                if (refusal) {
+                    return *refusal;
+                }
+                offsets.at(index) = offset_ns;
+                return AEM_STATUS_SUCCESS;
+            });
+    }
+};
+
+/// A MAX_TRANSIT_TIME body for (@p type, @p index), @p time_ns in it.
+auto max_transit_time_body(uint16_t const type, uint16_t const index, uint64_t const time_ns = 0)
+    -> std::array<uint8_t, AemSetMaxTransitTimePayload::LENGTH>
+{
+    std::array<uint8_t, AemSetMaxTransitTimePayload::LENGTH> body{};
+    span_store(body, AemSetMaxTransitTimePayload{.descriptor_type = type, .descriptor_index = index, .max_transit_time = time_ns});
+    return body;
+}
+
+/// The max_transit_time a MAX_TRANSIT_TIME response @p body carries.
+auto transit_time_in(std::span<uint8_t const> const body) -> uint64_t
+{
+    AemSetMaxTransitTimePayload payload{};
+    span_load(payload, body);
+    return payload.max_transit_time.get();
+}
+
+/// GET_MAX_TRANSIT_TIME of STREAM_OUTPUT @p index: the time answered, 0 when refused.
+auto transit_time_of(AemCommandHandler& handler, uint16_t const index) -> uint64_t
+{
+    auto const body = max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, index);
+    auto const r = make_test_result(handler, create_aem_header(AEM_COMMAND_GET_MAX_TRANSIT_TIME), std::span{body}.first(4));
+    return r.status == AEM_STATUS_SUCCESS ? transit_time_in(r.response_data()) : 0;
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_max_transit_time, not_implemented_without_the_hooks)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    auto const body = max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 0, 1'000'000);
+    EXPECT_EQ(
+        make_test_result(handler, create_aem_header(AEM_COMMAND_SET_MAX_TRANSIT_TIME), body).status, AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(
+        make_test_result(handler, create_aem_header(AEM_COMMAND_GET_MAX_TRANSIT_TIME), std::span{body}.first(4)).status,
+        AEM_STATUS_NOT_IMPLEMENTED);
+}
+
+TEST(nanoavb_entity_max_transit_time, a_set_is_put_in_force_answered_and_notified_to_the_others)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.serve(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(
+        handler,
+        kEntity,
+        kControllerA,
+        kMacA,
+        AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+        max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 1, 1'500'000));
+    EXPECT_EQ(store.offsets[1], 1'500'000U);
+    EXPECT_EQ(transit_time_of(handler, 1), uint64_t{1'500'000});
+    EXPECT_EQ(transit_time_of(handler, 0), uint64_t{2'000'000});
+    auto const response = first_response(sends);
+    EXPECT_TRUE(response == sends.begin());  // the response first, then the notification
+    EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(transit_time_in(body_of(sends.front())), uint64_t{1'500'000});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacA), 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacB), 1);
+    EXPECT_EQ(transit_time_in(body_of(sends.back())), uint64_t{1'500'000});
+}
+
+// IEEE 1722.1-2021 Table 7-141: a hook that needs time answers IN_PROGRESS; the SET is held as
+// a deferred one, repeated, and finished by complete_pending_command() with the final response.
+TEST(nanoavb_entity_max_transit_time, a_set_whose_hook_needs_time_is_deferred_and_completed)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    OffsetStore store;
+    store.refusal = AEM_STATUS_IN_PROGRESS;
+    store.serve(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    auto const body = max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 1, 1'500'000);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_MAX_TRANSIT_TIME, body);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacB), 0);
+
+    store.offsets[1] = 1'500'000;
+    EXPECT_TRUE(
+        handler.complete_pending_command(AEM_COMMAND_SET_MAX_TRANSIT_TIME, DESCRIPTOR_STREAM_OUTPUT, 1, AEM_STATUS_SUCCESS));
+    EXPECT_EQ(handler.pending_command_count(), size_t{0});
+    EXPECT_EQ(sends.size(), size_t{3});
+    EXPECT_EQ(header_of(sends[1]).status(), AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(header_of(sends[1]).is_unsolicited());
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[1]), body));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacA), 0);
+}
+
+TEST(nanoavb_entity_max_transit_time, a_refused_set_answers_the_time_in_force)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    OffsetStore store;
+    store.serve(handler);
+    store.refusal = AEM_STATUS_STREAM_IS_RUNNING;
+    auto const set = create_aem_header(AEM_COMMAND_SET_MAX_TRANSIT_TIME);
+    auto r = make_test_result(handler, set, max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 0, 1'000'000));
+    EXPECT_EQ(r.status, AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(transit_time_in(r.response_data()), uint64_t{2'000'000});
+
+    // Past the most a presentation offset may be: refused before the hook.
+    store.refusal.reset();
+    r = make_test_result(
+        handler, set, max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 0, uint64_t{MILAN_PRESENTATION_OFFSET_MAX_NS} + 1));
+    EXPECT_EQ(r.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(transit_time_in(r.response_data()), uint64_t{2'000'000});
+    EXPECT_EQ(store.sets, 1);
+
+    // Another controller's lock: ENTITY_LOCKED with the time in force, the hook not asked.
+    auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock.controller_entity_id = kControllerB;
+    std::array<uint8_t, 16> const lock_body{};
+    EXPECT_EQ(make_test_result(handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+    auto locked_out = set;
+    locked_out.controller_entity_id = kControllerA;
+    r = make_test_result(handler, locked_out, max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 0, 1'000'000));
+    EXPECT_EQ(r.status, AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(transit_time_in(r.response_data()), uint64_t{2'000'000});
+    EXPECT_EQ(store.sets, 1);
+    EXPECT_EQ(store.offsets[0], 2'000'000U);
+}
+
+TEST(nanoavb_entity_max_transit_time, only_a_talkers_stream_output_has_one)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    OffsetStore store;
+    store.serve(handler);
+    auto const set = create_aem_header(AEM_COMMAND_SET_MAX_TRANSIT_TIME);
+    auto const get = create_aem_header(AEM_COMMAND_GET_MAX_TRANSIT_TIME);
+    auto const input = max_transit_time_body(DESCRIPTOR_STREAM_INPUT, 0, 1'000'000);
+    EXPECT_EQ(make_test_result(handler, set, input).status, AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(make_test_result(handler, get, std::span{input}.first(4)).status, AEM_STATUS_NOT_SUPPORTED);
+    auto const unknown = max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 7, 1'000'000);
+    EXPECT_EQ(make_test_result(handler, set, unknown).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(make_test_result(handler, get, std::span{unknown}.first(4)).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    auto const entity = max_transit_time_body(DESCRIPTOR_ENTITY, 0, 1'000'000);
+    EXPECT_EQ(make_test_result(handler, set, entity).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(make_test_result(handler, set, std::span{entity}.first(6)).status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(store.sets, 0);
+}
+
+TEST(nanoavb_entity_max_transit_time, under_milan13_the_time_in_force_again_is_neither_applied_nor_notified)
+{
+    for (auto const profile : {AemCommandHandler::Profile::milan13, AemCommandHandler::Profile::classic}) {
+        SetAcceptingHandler app;
+        AemCommandHandler handler{app};
+        handler.set_profile(profile);
+        handler.set_entity_id(kEntity);
+        OffsetStore store;
+        store.serve(handler);
+        std::vector<CapturedSend> sends;
+        capture_sends(handler, sends);
+        register_controller(handler, kEntity, kControllerB, kMacB);
+        sends.clear();
+        inject_command(
+            handler,
+            kEntity,
+            kControllerA,
+            kMacA,
+            AEM_COMMAND_SET_MAX_TRANSIT_TIME,
+            max_transit_time_body(DESCRIPTOR_STREAM_OUTPUT, 0, 2'000'000));
+        bool const milan = profile == AemCommandHandler::Profile::milan13;
+        EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_SUCCESS);
+        EXPECT_EQ(store.sets, milan ? 0 : 1);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_MAX_TRANSIT_TIME, kMacB), milan ? 0 : 1);
+    }
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;

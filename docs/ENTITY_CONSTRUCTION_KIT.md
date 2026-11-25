@@ -390,6 +390,15 @@ that is not Milan. The wire structs are in `atdecc_aecp_mvu.hpp`:
 `atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`, `MvuBindStream`,
 `MvuStreamInput` and `MvuGetStreamInputInfoExResponse`.
 
+GET_MAX_TRANSIT_TIME (IEEE 1722.1-2021 7.4.77) answers a stream output's
+presentation offset: the one above until a controller changes it.
+SET_MAX_TRANSIT_TIME (7.4.76) changes it only through the entity's
+`AvbEntityKit::set_on_presentation_offset_changed` hook, which puts it in
+force in the data plane or refuses it (STREAM_IS_RUNNING while it cannot);
+without the hook the offset is fixed and the SET answers NOT_SUPPORTED.
+Either way an offset past 0x7FFFFFFF ns is BAD_ARGUMENTS (Milan v1.3
+5.4.2.30), a refusal carries the time in force, and a change is notified.
+
 Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while
 acquired, only the acquirer may lock or unlock; a failed SET answers the
