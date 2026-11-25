@@ -14,6 +14,7 @@ statusbar_add_module(
   nanoavb_acmp_listener_sm.cpp
   nanoavb_acmp_talker_sm.cpp
   nanoavb_adp.cpp
+  nanoavb_milan_acmp.cpp
   nanoavb_aem_entity_model.cpp
   nanoavb_entity.cpp
   nanoavb_entity_model.cpp
@@ -42,6 +43,7 @@ statusbar_add_module(
   TESTS
   nanoavb_acmp_test.cpp
   nanoavb_adp_test.cpp
+  nanoavb_milan_acmp_test.cpp
   nanoavb_aem_blob_writer_test.cpp
   nanoavb_aem_fingerprint_test.cpp
   nanoavb_aem_model_store_test.cpp

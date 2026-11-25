@@ -99,6 +99,16 @@ struct TalkerStreamSrpInfo
     Eui64 failure_bridge_id{};
 };
 
+/// A remote Talker attribute this port registers for a stream: what a
+/// Milan sink compares with the parameters it probed (Milan v1.3 5.3.8.8).
+struct RegisteredTalker
+{
+    Eui48 dest_address{};
+    uint16_t vlan_id{0};
+    /// The attribute is a Talker Failed, not a Talker Advertise.
+    bool failed{false};
+};
+
 /// Listener stream info for MSRP: one record per talker stream this port
 /// listens to, however many of its inputs are bound to that stream.
 struct ListenerStreamSrpInfo
@@ -301,6 +311,14 @@ struct MsrpCallbacks
     statusbar::sg14::inplace_function<void(StreamId const& stream_id, ListenerReservationState state, TimePoint now), 64>
         on_listener_state_change;
 
+    /// Called when a remote Talker attribute (Advertise or Failed) for
+    /// @p stream_id was registered, refreshed, changed or withdrawn, whether
+    /// or not a listener here is attached to the stream. Fires from
+    /// receive_packet()/tick(), told that call's time, after the handler has
+    /// brought its own Listener declaration up to date: registered_talker()
+    /// inside the callback is what stands now.
+    statusbar::sg14::inplace_function<void(StreamId const& stream_id, TimePoint now), 64> on_remote_talker;
+
     /// Called when the set of remote listeners for one of OUR advertised talker
     /// streams changes. `ready` is true when at least one registered listener
     /// permits transmit on `stream_id` (the talker may start sending), false
@@ -398,6 +416,12 @@ class MsrpHandler
     void set_on_talker_listener(statusbar::sg14::inplace_function<void(StreamId const&, bool, TimePoint), 64> cb)
     {
         callbacks_.on_talker_listener = std::move(cb);
+    }
+
+    /// Set just the on_remote_talker hook without disturbing the others.
+    void set_on_remote_talker(statusbar::sg14::inplace_function<void(StreamId const&, TimePoint), 64> cb)
+    {
+        callbacks_.on_remote_talker = std::move(cb);
     }
 
     /// Set just the on_domain_adopted hook without disturbing the others.
@@ -689,6 +713,32 @@ class MsrpHandler
             }
         }
         return nullptr;
+    }
+
+    /// The remote Talker attribute this port registers for @p stream_id,
+    /// a Talker Failed before a Talker Advertise when both are (IEEE 802.1Q
+    /// 35.2.6), nullopt with neither.
+    [[nodiscard]] auto registered_talker(StreamId const& stream_id) const noexcept -> std::optional<RegisteredTalker>
+    {
+        if (auto const* failed = participant_.find_registered_talker_failed(stream_id); failed != nullptr) {
+            return registered_talker_from(failed->advertise, true);
+        }
+        if (auto const* advertise = participant_.find_registered_talker_advertise(stream_id); advertise != nullptr) {
+            return registered_talker_from(*advertise, false);
+        }
+        return std::nullopt;
+    }
+
+    /// Whether one of this port's talker streams is declared (Advertise or
+    /// Failed) while a peer's Listener Asking Failed is registered for it:
+    /// REGISTERING_FAILED in a Milan GET_TX_STATE_RESPONSE (v1.3 Table 5.23).
+    [[nodiscard]] auto talker_listener_asking_failed(StreamId const& stream_id) const noexcept -> bool
+    {
+        auto const* talker = get_talker_stream(stream_id);
+        auto const* listener = participant_.find_listener(stream_id);
+        return talker != nullptr && talker_is_declared(talker->state) && listener != nullptr &&
+            listener->operation == statusbar::srp::msrp::Operation::Register && listener->registrar_is_registered() &&
+            listener->substate == statusbar::srp::msrp::ListenerDeclaration::AskingFailed;
     }
 
     /// True when the talker's Advertise is registered from the wire and no
@@ -1082,9 +1132,26 @@ class MsrpHandler
         for (auto& stream : listener_streams_) {
             if (stream.stream_id == sid) {
                 redeclare_attached_listener(stream);
-                return;
+                break;
             }
         }
+        if (callbacks_.on_remote_talker) {
+            callbacks_.on_remote_talker(sid, last_event_time_);
+        }
+    }
+
+    [[nodiscard]] static auto registered_talker_from(
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue const& value, bool const failed) noexcept -> RegisteredTalker
+    {
+        return RegisteredTalker{
+            .dest_address = value.destination_address, .vlan_id = value.vlan_identifier.get(), .failed = failed};
+    }
+
+    /// A talker stream whose attribute is on the wire.
+    [[nodiscard]] static constexpr auto talker_is_declared(TalkerReservationState const state) noexcept -> bool
+    {
+        return state == TalkerReservationState::Advertising || state == TalkerReservationState::Ready ||
+            state == TalkerReservationState::Failed;
     }
 
     /// One more input attached to @p stream_id in @p state: declared Ready or

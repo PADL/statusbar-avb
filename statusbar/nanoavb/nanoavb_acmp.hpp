@@ -141,6 +141,13 @@ class NanoAvbAcmpTalker
         callbacks_.on_disconnect = std::move(on_disconnect);
     }
 
+    /// Set just the sender (AcmpTalkerCallbacks::tx_response) without
+    /// disturbing the others.
+    void set_tx_response(statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> send)
+    {
+        callbacks_.tx_response = std::move(send);
+    }
+
     /// Set just the probe callback (AcmpTalkerCallbacks::on_probe) without
     /// disturbing the others.
     void set_on_probe(statusbar::sg14::inplace_function<void(uint16_t, TimePoint), 64> on_probe)
@@ -241,6 +248,16 @@ class NanoAvbAcmpListener
     {
         callbacks_.on_connect = std::move(on_connect);
         callbacks_.on_disconnect = std::move(on_disconnect);
+    }
+
+    /// Set just the two senders (tx_command to the talker, tx_response to the
+    /// controller) without disturbing the others.
+    void set_senders(
+        statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_command,
+        statusbar::sg14::inplace_function<bool(AcmpCommandResponse const&), 64> tx_response)
+    {
+        callbacks_.tx_command = std::move(tx_command);
+        callbacks_.tx_response = std::move(tx_response);
     }
 
     /// Get the maximum number of streams

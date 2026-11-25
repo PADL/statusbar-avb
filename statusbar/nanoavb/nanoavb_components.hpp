@@ -20,6 +20,7 @@
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
+#include "statusbar/nanoavb/nanoavb_milan_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
@@ -323,6 +324,21 @@ class AtdeccNetHandler : public net::Pollable
     /// Set optional ADP discovery component for controller-side entity tracking
     void set_adp_discovery(NanoAvbAdpDiscovery* discovery) noexcept { adp_discovery_ = discovery; }
 
+    /// Hand ACMP to the Milan v1.3 talker and listener: every ACMP PDU goes
+    /// to them and not to the IEEE 1722.1 pair, the listener also hears ADP
+    /// (each bound sink discovers its own talker, 5.6.4) and is ticked, and
+    /// both send through this handler. Null pointers (the default) leave
+    /// ACMP with the IEEE 1722.1 pair. The two objects must outlive the
+    /// handler; its destructor takes its senders away again, and leaves
+    /// alone those a handler made after it has attached since.
+    void set_milan_acmp(NanoAvbMilanAcmpTalker* talker, NanoAvbMilanAcmpListener* listener);
+
+    ~AtdeccNetHandler() override;
+    AtdeccNetHandler(AtdeccNetHandler const&) = delete;
+    auto operator=(AtdeccNetHandler const&) -> AtdeccNetHandler& = delete;
+    AtdeccNetHandler(AtdeccNetHandler&&) = delete;
+    auto operator=(AtdeccNetHandler&&) -> AtdeccNetHandler& = delete;
+
     /// Get the current tick count
     [[nodiscard]] auto tick_count() const noexcept -> int64_t { return tick_count_; }
 
@@ -345,8 +361,27 @@ class AtdeccNetHandler : public net::Pollable
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
-  private:
+    /// Give one received ATDECC frame (@p payload from the AVTP subtype
+    /// octet on, sent by @p src_mac) to the protocol it belongs to. What
+    /// on_ready() does with each frame it reads; public so that a frame can
+    /// be handed in without a socket.
     void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload);
+
+  private:
+    void dispatch_adp(ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, sm::TimePoint now);
+    void dispatch_acmp(std::span<uint8_t const> payload, sm::TimePoint now);
+    void dispatch_aecp(ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, sm::TimePoint now);
+    /// What an ADP message means for the listener side and the registered controllers.
+    void note_adp(atdecc::AdpDu const& adp, sm::TimePoint now);
+    void dispatch_ieee_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
+    void dispatch_milan_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
+    void trace_listener_command(atdecc::AcmpCommandResponse const& pdu, bool handled) const;
+    /// Take back the senders this handler gave the Milan pair.
+    void release_milan_acmp() noexcept;
+    /// Send an ACMP PDU to the ACMP multicast address, in the 56-octet form.
+    auto send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool;
+    void tick_protocols(sm::TimePoint now);
+    [[nodiscard]] auto listener_connections() const -> size_t;
     void log_status();
 
     net::RawnetContext context_{};
@@ -355,6 +390,8 @@ class AtdeccNetHandler : public net::Pollable
     NanoAvbAcmpListener& acmp_listener_;    // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     AemCommandHandler& aem_handler_;        // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     NanoAvbAdpDiscovery* adp_discovery_{nullptr};
+    NanoAvbMilanAcmpTalker* milan_talker_{nullptr};      ///< see set_milan_acmp
+    NanoAvbMilanAcmpListener* milan_listener_{nullptr};  ///< see set_milan_acmp
     statusbar::itc::TelemetryCounter<int64_t>* ptp_wake_count_{nullptr};
     std::optional<logging::Logger> logger_{};
     int64_t tick_count_{0};
@@ -478,6 +515,13 @@ class GptpAnnounceHandler : public net::Pollable
 /// cross-references valid for the object's whole lifetime. Build it directly as
 /// a value member (entities) or on the heap via the builder (returns a
 /// unique_ptr) — never return it by value or std::move it.
+///
+/// ACMP comes in two implementations. acmp_talker and acmp_listener are IEEE
+/// 1722.1-2021's and always present. use_milan_acmp() adds Milan v1.3's pair
+/// (milan_acmp_talker, milan_acmp_listener), and from then on that pair is
+/// the one the net handler feeds; the IEEE 1722.1 pair stays idle. Code that
+/// only wants ACMP's picture of a stream asks talker_stream() and
+/// listener_sink(), which answer from whichever pair runs.
 struct NanoAvbComponents
 {
     using TimePoint = sm::TimePoint;
@@ -538,11 +582,54 @@ struct NanoAvbComponents
     NanoAvbAcmpListener acmp_listener;
     MvrpHandler mvrp_handler;
     MsrpHandler<> msrp_handler;
+    /// Milan v1.3 connection management, null until use_milan_acmp().
+    std::unique_ptr<NanoAvbMilanAcmpTalker> milan_acmp_talker;
+    std::unique_ptr<NanoAvbMilanAcmpListener> milan_acmp_listener;
 
     void print_info() const;
 
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
+
+    /// Run Milan v1.3 connection management (section 5.5) in place of IEEE
+    /// 1722.1-2021's. A start-up choice: call it before the stream outputs
+    /// are configured and before the net handlers are created. The two
+    /// objects are made here, once, so an entity that never asks carries
+    /// two null pointers and nothing else. Calling it again does nothing.
+    void use_milan_acmp();
+
+    /// True once use_milan_acmp() has been called.
+    [[nodiscard]] auto acmp_is_milan() const noexcept -> bool { return milan_acmp_talker != nullptr; }
+
+    /// ACMP's picture of one stream output: what a PROBE_TX or
+    /// CONNECT_TX response and GET_STREAM_INFO carry.
+    struct TalkerStream
+    {
+        Eui64 stream_id{};
+        Eui48 stream_dest_mac{};
+        uint16_t stream_vlan_id{0};
+    };
+
+    /// ACMP's picture of one stream input. connected is IEEE 1722.1's
+    /// "connected" or Milan's "settled": the stream fields are the talker's.
+    struct ListenerSink
+    {
+        bool connected{false};
+        Eui64 talker_entity_id{};
+        uint16_t talker_unique_id{0};
+        Eui64 stream_id{};
+        Eui48 stream_dest_mac{};
+        uint16_t stream_vlan_id{0};
+    };
+
+    /// Set stream output @p stream_index's parameters in the ACMP talker that runs.
+    [[nodiscard]] auto configure_talker_stream(uint16_t stream_index, Eui64 stream_id, Eui48 dest_mac, uint16_t vlan_id) -> Status;
+
+    /// Stream output @p stream_index as the ACMP talker that runs has it, nullopt when there is none.
+    [[nodiscard]] auto talker_stream(uint16_t stream_index) const noexcept -> std::optional<TalkerStream>;
+
+    /// Stream input @p stream_index as the ACMP listener that runs has it, nullopt when there is none.
+    [[nodiscard]] auto listener_sink(uint16_t stream_index) const noexcept -> std::optional<ListenerSink>;
 };
 
 //
@@ -685,12 +772,22 @@ class NanoAvbNetHandlers
     void print_warnings(std::string_view interface_name) const;
 
   private:
+    /// The ATDECC handler with the discovery database and ACMP wired to it.
+    [[nodiscard]] auto make_atdecc_handler() -> std::unique_ptr<AtdeccNetHandler>;
+    void wire_discovery_ageout();
+
     std::string interface_name_;
     NanoAvbComponents* components_;
     // Passive discovery database, owned here and fed/ticked by the AtdeccNetHandler.
     // Its ageout tears down listener sinks whose talker vanished without an explicit
     // ENTITY_DEPARTING (e.g. powered off). Must outlive the reactor's handlers.
     NanoAvbAdpDiscovery discovery_{};
+    /// A handler whose socket did not open is not the reactor's: it is kept
+    /// here, so the accessors above stay good for it too.
+    std::unique_ptr<MvrpNetHandler> unopened_mvrp_;
+    std::unique_ptr<MsrpNetHandler> unopened_msrp_;
+    std::unique_ptr<AtdeccNetHandler> unopened_atdecc_;
+    std::unique_ptr<GptpAnnounceHandler> unopened_gptp_;
     MvrpNetHandler* mvrp_ptr_{nullptr};
     MsrpNetHandler* msrp_ptr_{nullptr};
     AtdeccNetHandler* atdecc_ptr_{nullptr};

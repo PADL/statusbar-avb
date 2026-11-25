@@ -1,0 +1,472 @@
+// Copyright 2026 Jeff Koftinoff <jeff.koftinoff@statusbar.com>
+// SPDX-License-Identifier: MIT
+
+// The entity's Milan v1.3 ACMP talker and listener (nanoavb_milan_acmp.hpp):
+// which PDUs each takes, what it asks of the rest of the entity, what it
+// tells it. Synthetic time, no sockets.
+
+#include "statusbar/nanoavb/nanoavb_milan_acmp.hpp"
+
+#include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/ieee/ieee.hpp"
+#include "statusbar/sm/sm.hpp"
+#include "statusbar/test/test.hpp"
+
+#include <chrono>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
+
+using namespace statusbar;
+using namespace statusbar::nanoavb;
+using statusbar::atdecc::AcmpCommandResponse;
+using statusbar::atdecc::AdpDu;
+using statusbar::atdecc::MilanBinding;
+using statusbar::atdecc::MilanSinkState;
+using statusbar::atdecc::MilanTalkerRegistration;
+using statusbar::ieee::Eui48;
+using statusbar::ieee::Eui64;
+using TimePoint = statusbar::sm::TimePoint;
+
+namespace {
+
+constexpr Eui64 LISTENER{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88};
+constexpr Eui64 TALKER{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x11};
+constexpr Eui64 SOMEONE_ELSE{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x22};
+constexpr Eui64 CONTROLLER{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+constexpr Eui64 LOCK_HOLDER{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x99};
+constexpr Eui64 STREAM{0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00, 0x05};
+constexpr Eui48 DEST{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+constexpr tsn::ClockIdentity GRANDMASTER{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+
+auto at(int const ms) -> TimePoint
+{
+    return TimePoint{std::chrono::milliseconds{ms}};
+}
+
+auto command(uint8_t const type, Eui64 const& talker, uint16_t const source, Eui64 const& listener, uint16_t const sink)
+    -> AcmpCommandResponse
+{
+    AcmpCommandResponse cmd{};
+    cmd.init_command(type);
+    cmd.controller_entity_id = CONTROLLER;
+    cmd.talker_entity_id = talker;
+    cmd.talker_unique_id = source;
+    cmd.listener_entity_id = listener;
+    cmd.listener_unique_id = sink;
+    cmd.sequence_id = 9;
+    return cmd;
+}
+
+auto available(Eui64 const& talker, uint32_t const available_index) -> AdpDu
+{
+    AdpDu adp{};
+    adp.init_entity_available(talker, 5);
+    adp.available_index = available_index;
+    adp.gptp_grandmaster_id = GRANDMASTER;
+    return adp;
+}
+
+/// A Milan talker with two stream outputs and a record of what it did, in order.
+struct TalkerRig
+{
+    std::vector<std::string> log{};
+    std::vector<AcmpCommandResponse> responses{};
+    bool dest_mac_valid{true};
+    bool registering_failed{false};
+    NanoAvbMilanAcmpTalker talker{TALKER, AcmpTalkerCallbacks{}, 2};
+
+    TalkerRig()
+    {
+        talker.set_tx_response([this](AcmpCommandResponse const& pdu) {
+            log.emplace_back("response");
+            responses.push_back(pdu);
+            return true;
+        });
+        talker.set_on_probe([this](uint16_t const index, TimePoint) { log.push_back("probe " + std::to_string(index)); });
+        talker.set_dest_mac_valid([this](uint16_t) { return dest_mac_valid; });
+        talker.set_registering_failed([this](uint16_t const index) { return registering_failed && index == 1; });
+        EXPECT_TRUE(talker.configure_stream(0, Eui64{1, 1, 1, 1, 1, 1, 0, 0}, Eui48{0x91, 0xE0, 0xF0, 0, 0, 0}, 2).has_value());
+        EXPECT_TRUE(talker.configure_stream(1, STREAM, DEST, 2).has_value());
+    }
+    TalkerRig(TalkerRig const&) = delete;
+    auto operator=(TalkerRig const&) -> TalkerRig& = delete;
+
+    auto receive(uint8_t const type, uint16_t const source, Eui64 const& talker_id = TALKER) -> bool
+    {
+        return talker.receive_command(command(type, talker_id, source, LISTENER, 0), at(1000));
+    }
+};
+
+/// A Milan listener with three stream inputs and a record of what it did.
+struct ListenerRig
+{
+    std::vector<std::string> log{};
+    std::vector<AcmpCommandResponse> probes{};
+    std::vector<AcmpCommandResponse> responses{};
+    std::vector<uint16_t> connected{};
+    std::vector<uint16_t> disconnected{};
+    Eui64 connected_stream{};
+    Eui48 connected_dest{};
+    Eui64 lock_holder{};
+    atdecc::MilanGptpState gptp{.grandmaster_id = GRANDMASTER, .domain_number = 0};
+    MilanTalkerRegistration registration{MilanTalkerRegistration::None};
+    NanoAvbMilanAcmpListener listener{LISTENER, AcmpListenerCallbacks{}, 3};
+
+    ListenerRig()
+    {
+        listener.set_senders(
+            [this](AcmpCommandResponse const& pdu) {
+                log.emplace_back("probe");
+                probes.push_back(pdu);
+                return true;
+            },
+            [this](AcmpCommandResponse const& pdu) {
+                log.emplace_back("response");
+                responses.push_back(pdu);
+                return true;
+            });
+        listener.set_connection_callbacks(
+            [this](uint16_t const index, Eui64 const& stream_id, Eui48 const dest, TimePoint) {
+                connected.push_back(index);
+                connected_stream = stream_id;
+                connected_dest = dest;
+            },
+            [this](uint16_t const index, TimePoint) { disconnected.push_back(index); });
+        listener.set_locked_out([this](Eui64 const& controller) { return lock_holder != Eui64{} && lock_holder != controller; });
+        listener.set_gptp_state([this]() { return gptp; });
+        listener.set_talker_registration([this](atdecc::MilanSrpParameters const&) { return registration; });
+        listener.set_random_delay([]() { return std::chrono::milliseconds{100}; });
+        listener.set_on_bindings_changed([this]() { log.emplace_back("saved"); });
+    }
+    ListenerRig(ListenerRig const&) = delete;
+    auto operator=(ListenerRig const&) -> ListenerRig& = delete;
+
+    auto bind(uint16_t const sink, TimePoint const now, Eui64 const& talker = TALKER) -> bool
+    {
+        return listener.receive_controller_command(
+            command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, talker, 1, LISTENER, sink), now);
+    }
+
+    /// The talker's answer to probe @p probe, with its stream's parameters.
+    static auto answer_to(AcmpCommandResponse const& probe) -> AcmpCommandResponse
+    {
+        AcmpCommandResponse resp = probe;
+        resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+        resp.stream_id = STREAM;
+        resp.stream_dest_mac = DEST;
+        resp.stream_vlan_id = 2;
+        return resp;
+    }
+
+    [[nodiscard]] auto state(uint16_t const sink) const -> MilanSinkState { return listener.sink(sink)->state(); }
+};
+
+}  // namespace
+
+//
+// Talker
+//
+
+TEST(nanoavb_milan_talker, a_probe_is_reported_before_it_is_answered)
+{
+    // Milan v1.3 4.3.3.1 counts the command: the SRP handler must hear of it
+    // first, so the declaration is under way when the listener reads the answer.
+    TalkerRig rig;
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1));
+    EXPECT_EQ(rig.log.size(), 2U);
+    EXPECT_EQ(rig.log[0], std::string{"probe 1"});
+    EXPECT_EQ(rig.log[1], std::string{"response"});
+    auto const& resp = rig.responses.front();
+    EXPECT_EQ(resp.message_type(), atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    EXPECT_EQ(resp.status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(resp.stream_id, STREAM);
+    EXPECT_EQ(resp.stream_dest_mac, DEST);
+    EXPECT_EQ(resp.stream_vlan_id.get(), 2);
+    EXPECT_EQ(resp.connection_count.get(), 0);
+}
+
+TEST(nanoavb_milan_talker, any_number_of_listeners_may_probe_one_stream)
+{
+    // No list of listeners to fill: the fifth distinct listener is answered like the first.
+    TalkerRig rig;
+    for (uint8_t n = 0; n < 40; ++n) {
+        auto cmd = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, TALKER, 1, Eui64{0x10, 0, 0, 0, 0, 0, 0, n}, n);
+        EXPECT_TRUE(rig.talker.receive_command(cmd, at(n)));
+        EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+        EXPECT_EQ(rig.responses.back().connection_count.get(), 0);
+    }
+}
+
+TEST(nanoavb_milan_talker, a_probe_for_a_stream_it_does_not_have_is_answered_and_not_reported)
+{
+    TalkerRig rig;
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2));
+    EXPECT_EQ(rig.log.size(), 1U);
+    EXPECT_EQ(rig.responses.front().status(), atdecc::ACMP_STATUS_TALKER_UNKNOWN_ID);
+}
+
+TEST(nanoavb_milan_talker, a_command_for_another_entity_or_for_a_listener_is_left_alone)
+{
+    TalkerRig rig;
+    EXPECT_FALSE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1, SOMEONE_ELSE));
+    EXPECT_FALSE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, 1));
+    EXPECT_FALSE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE, 1));
+    EXPECT_TRUE(rig.log.empty());
+}
+
+TEST(nanoavb_milan_talker, without_a_valid_address_a_probe_is_refused_and_still_reported)
+{
+    // 5.5.4.1 step 3. The probe is still a probe: whether it leads to a
+    // declaration is the SRP handler's to decide, which knows the address is gone.
+    TalkerRig rig;
+    rig.dest_mac_valid = false;
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1));
+    EXPECT_EQ(rig.responses.front().status(), atdecc::ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+    EXPECT_EQ(rig.log[0], std::string{"probe 1"});
+}
+
+TEST(nanoavb_milan_talker, the_other_commands_change_nothing_and_get_milans_answers)
+{
+    TalkerRig rig;
+    rig.registering_failed = true;
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, 1));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(rig.responses.back().stream_id, Eui64{});
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 1));
+    EXPECT_EQ(rig.responses.back().stream_id, STREAM);
+    EXPECT_EQ(rig.responses.back().flags.get(), atdecc::acmp_flags::SRP_REGISTRATION_FAILED);
+    EXPECT_EQ(rig.responses.back().listener_entity_id, Eui64{});
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, 0));
+    EXPECT_EQ(rig.responses.back().flags.get(), 0);
+    EXPECT_TRUE(rig.receive(atdecc::ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_COMMAND, 1));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(rig.log.size(), 4U);  // four responses, no probe reported
+    EXPECT_EQ(rig.talker.get_stream(1)->stream_id, STREAM);
+}
+
+TEST(nanoavb_milan_talker, streams_beyond_its_count_cannot_be_configured)
+{
+    TalkerRig rig;
+    EXPECT_EQ(rig.talker.max_streams(), 2U);
+    EXPECT_FALSE(rig.talker.configure_stream(2, STREAM, DEST, 2).has_value());
+    EXPECT_TRUE(rig.talker.get_stream(2) == nullptr);
+    NanoAvbMilanAcmpTalker wide{TALKER, AcmpTalkerCallbacks{}, 1000};
+    EXPECT_EQ(wide.max_streams(), NanoAvbMilanAcmpTalker::MAX_STREAMS);
+}
+
+//
+// Listener
+//
+
+TEST(nanoavb_milan_listener, a_bind_is_saved_then_answered_then_probed)
+{
+    // 5.5.3.6.3 steps 2, 3 and 5, in that order.
+    ListenerRig rig;
+    EXPECT_TRUE(rig.bind(1, at(0)));
+    EXPECT_EQ(rig.log.size(), 3U);
+    EXPECT_EQ(rig.log[0], std::string{"saved"});
+    EXPECT_EQ(rig.log[1], std::string{"response"});
+    EXPECT_EQ(rig.log[2], std::string{"probe"});
+    EXPECT_EQ(rig.responses.front().message_type(), atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE);
+    EXPECT_EQ(rig.responses.front().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(rig.probes.front().listener_entity_id, LISTENER);
+    EXPECT_EQ(rig.probes.front().listener_unique_id.get(), 1);
+    EXPECT_TRUE(rig.listener.is_bound(1));
+    EXPECT_FALSE(rig.listener.is_settled(1));
+    EXPECT_FALSE(rig.listener.is_bound(0));
+}
+
+TEST(nanoavb_milan_listener, a_command_for_a_sink_it_does_not_have_is_listener_unknown_id)
+{
+    // 5.5.3.1 step 1, Table 5.27
+    ListenerRig rig;
+    for (uint8_t const type :
+         {atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND,
+          atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND,
+          atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND}) {
+        EXPECT_TRUE(rig.listener.receive_controller_command(command(type, TALKER, 1, LISTENER, 3), at(0)));
+        EXPECT_EQ(rig.responses.back().message_type(), type + 1);
+        EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_LISTENER_UNKNOWN_ID);
+    }
+    EXPECT_TRUE(rig.probes.empty());
+}
+
+TEST(nanoavb_milan_listener, every_other_acmp_message_is_ignored)
+{
+    // 5.5.3.1: "The listener shall ignore all other ACMP messages."
+    ListenerRig rig;
+    EXPECT_FALSE(rig.listener.receive_controller_command(
+        command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, SOMEONE_ELSE, 1), at(0)));
+    for (uint8_t const type :
+         {atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND,
+          atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND,
+          atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND,
+          atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE}) {
+        EXPECT_FALSE(rig.listener.receive_controller_command(command(type, TALKER, 1, LISTENER, 1), at(0)));
+    }
+    EXPECT_FALSE(rig.listener.receive_talker_response(
+        command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_RESPONSE, TALKER, 1, LISTENER, 1), at(0)));
+    EXPECT_TRUE(rig.log.empty());
+}
+
+TEST(nanoavb_milan_listener, the_lock_shuts_another_controller_out_of_bind_and_unbind)
+{
+    // 5.5.2.4 and 5.5.2.5
+    ListenerRig rig;
+    rig.lock_holder = LOCK_HOLDER;
+    EXPECT_TRUE(rig.bind(0, at(0)));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
+    EXPECT_FALSE(rig.listener.is_bound(0));
+    EXPECT_TRUE(rig.probes.empty());
+
+    rig.lock_holder = CONTROLLER;  // the controller that sends the commands holds the lock
+    EXPECT_TRUE(rig.bind(0, at(1)));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_TRUE(rig.listener.is_bound(0));
+
+    rig.lock_holder = LOCK_HOLDER;
+    auto const unbind = command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_controller_command(unbind, at(2)));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
+    EXPECT_TRUE(rig.listener.is_bound(0));
+    // A query is not shut out.
+    auto const query = command(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_controller_command(query, at(3)));
+    EXPECT_EQ(rig.responses.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+}
+
+TEST(nanoavb_milan_listener, a_settled_sink_connects_and_an_unbound_one_disconnects)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.bind(2, at(0)));
+    EXPECT_TRUE(rig.listener.receive_talker_response(ListenerRig::answer_to(rig.probes.back()), at(5)));
+    EXPECT_EQ(rig.state(2), MilanSinkState::SettledNoRsv);
+    EXPECT_TRUE(rig.listener.is_settled(2));
+    EXPECT_EQ(rig.connected.size(), 1U);
+    EXPECT_EQ(rig.connected.front(), 2);
+    EXPECT_EQ(rig.connected_stream, STREAM);
+    EXPECT_EQ(rig.connected_dest, DEST);
+
+    rig.registration = MilanTalkerRegistration::Advertise;
+    rig.listener.on_srp_changed(at(300));
+    EXPECT_EQ(rig.state(2), MilanSinkState::SettledRsvOk);
+
+    auto const unbind = command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER, 1, LISTENER, 2);
+    EXPECT_TRUE(rig.listener.receive_controller_command(unbind, at(400)));
+    EXPECT_EQ(rig.state(2), MilanSinkState::Unbound);
+    EXPECT_EQ(rig.disconnected.size(), 1U);
+    EXPECT_EQ(rig.disconnected.front(), 2);
+    EXPECT_TRUE(rig.listener.bindings().empty());
+}
+
+TEST(nanoavb_milan_listener, a_response_reaches_only_the_sink_it_names)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.bind(0, at(0)));
+    EXPECT_TRUE(rig.bind(1, at(0)));
+    EXPECT_TRUE(rig.bind(2, at(0)));
+    EXPECT_EQ(rig.responses.size(), 3U);  // a burst of binds: each answered, each probing by itself
+    EXPECT_EQ(rig.probes.size(), 3U);
+    EXPECT_NE(rig.probes[0].sequence_id.get(), rig.probes[1].sequence_id.get());
+
+    EXPECT_TRUE(rig.listener.receive_talker_response(ListenerRig::answer_to(rig.probes[1]), at(5)));
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWResp);
+    EXPECT_EQ(rig.state(1), MilanSinkState::SettledNoRsv);
+    EXPECT_EQ(rig.state(2), MilanSinkState::PrbWResp);
+
+    auto for_another_listener = ListenerRig::answer_to(rig.probes[0]);
+    for_another_listener.listener_entity_id = SOMEONE_ELSE;
+    EXPECT_FALSE(rig.listener.receive_talker_response(for_another_listener, at(6)));
+    auto for_no_sink = ListenerRig::answer_to(rig.probes[0]);
+    for_no_sink.listener_unique_id = 7;
+    EXPECT_FALSE(rig.listener.receive_talker_response(for_no_sink, at(6)));  // 5.5.3.1: ignored
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWResp);
+}
+
+TEST(nanoavb_milan_listener, adp_reaches_the_sinks_bound_to_its_sender_on_our_gptp_domain)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.listener.restore_binding(MilanBinding{.listener_unique_id = 0, .talker_entity_id = TALKER}, at(0)));
+    EXPECT_TRUE(rig.listener.restore_binding(MilanBinding{.listener_unique_id = 1, .talker_entity_id = SOMEONE_ELSE}, at(0)));
+    EXPECT_TRUE(rig.listener.restore_binding(MilanBinding{.listener_unique_id = 2, .talker_entity_id = TALKER}, at(0)));
+    EXPECT_FALSE(rig.listener.restore_binding(MilanBinding{.listener_unique_id = 3, .talker_entity_id = TALKER}, at(0)));
+    EXPECT_FALSE(rig.listener.next_deadline().has_value());
+
+    rig.gptp.domain_number = 1;
+    rig.listener.receive_adpdu(available(TALKER, 1), at(100));
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWAvail);  // the talker is on another gPTP domain
+
+    rig.gptp.domain_number = 0;
+    rig.listener.receive_adpdu(available(TALKER, 2), at(200));
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWDelay);
+    EXPECT_EQ(rig.state(1), MilanSinkState::PrbWAvail);
+    EXPECT_EQ(rig.state(2), MilanSinkState::PrbWDelay);
+    EXPECT_EQ(*rig.listener.next_deadline(), at(300));
+
+    rig.listener.tick(at(300));
+    EXPECT_EQ(rig.probes.size(), 2U);
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWResp);
+    EXPECT_EQ(rig.state(2), MilanSinkState::PrbWResp);
+    EXPECT_EQ(*rig.listener.next_deadline(), at(300) + atdecc::MILAN_TMR_NO_RESP);
+}
+
+TEST(nanoavb_milan_listener, the_bindings_are_what_was_bound_and_survive_a_restart)
+{
+    ListenerRig rig;
+    auto bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 4, LISTENER, 2);
+    bind.flags = atdecc::acmp_flags::STREAMING_WAIT;
+    EXPECT_TRUE(rig.listener.receive_controller_command(bind, at(0)));
+    EXPECT_TRUE(rig.listener.receive_talker_response(ListenerRig::answer_to(rig.probes.back()), at(5)));
+    auto const saved = rig.listener.bindings();
+    EXPECT_EQ(saved.size(), 1U);
+    EXPECT_EQ(saved.front().listener_unique_id, 2);
+    EXPECT_EQ(saved.front().talker_entity_id, TALKER);
+    EXPECT_EQ(saved.front().talker_unique_id, 4);
+    EXPECT_EQ(saved.front().controller_entity_id, CONTROLLER);
+    EXPECT_TRUE(saved.front().streaming_wait);
+
+    rig.listener.restart(at(1000));
+    EXPECT_EQ(rig.state(2), MilanSinkState::PrbWAvail);
+    EXPECT_EQ(rig.disconnected.size(), 1U);
+    EXPECT_TRUE(rig.listener.bindings().front() == saved.front());
+
+    // Another listener starting from the saved bindings is where this one is.
+    ListenerRig next;
+    for (auto const& binding : saved) {
+        EXPECT_TRUE(next.listener.restore_binding(binding, at(0)));
+    }
+    EXPECT_EQ(next.state(2), MilanSinkState::PrbWAvail);
+    EXPECT_TRUE(next.log.empty());  // restoring is not a change to save, and answers nobody
+    EXPECT_TRUE(next.listener.bindings().front() == saved.front());
+}
+
+TEST(nanoavb_milan_listener, its_own_random_delay_stays_within_a_second_and_varies)
+{
+    NanoAvbMilanAcmpListener a{LISTENER, AcmpListenerCallbacks{}, 1};
+    NanoAvbMilanAcmpListener b{SOMEONE_ELSE, AcmpListenerCallbacks{}, 1};
+    int differing = 0;
+    std::optional<TimePoint> first{};
+    bool varied = false;
+    for (int round = 0; round < 16; ++round) {
+        auto const now = at(round * 20'000);
+        for (auto* listener : {&a, &b}) {
+            EXPECT_TRUE(listener->restore_binding(MilanBinding{.listener_unique_id = 0, .talker_entity_id = TALKER}, now));
+            listener->set_gptp_state([]() { return atdecc::MilanGptpState{.grandmaster_id = GRANDMASTER}; });
+            listener->receive_adpdu(available(TALKER, 1), now);
+            EXPECT_EQ(listener->sink(0)->state(), MilanSinkState::PrbWDelay);
+            auto const delay = *listener->sink(0)->context().timer - now;
+            EXPECT_TRUE(delay >= std::chrono::milliseconds{0});
+            EXPECT_TRUE(delay <= atdecc::MILAN_TMR_DELAY_MAX);
+        }
+        auto const delay_a = *a.sink(0)->context().timer - now;
+        differing += delay_a != *b.sink(0)->context().timer - now ? 1 : 0;
+        varied = varied || (first.has_value() && TimePoint{delay_a} != *first);
+        first = first.has_value() ? first : std::optional{TimePoint{delay_a}};
+    }
+    EXPECT_TRUE(differing >= 12);  // two entities do not draw the same delays
+    EXPECT_TRUE(varied);           // nor one entity the same delay every time
+}
+
+TEST_MAIN(statusbar_nanoavb, nanoavb_milan_acmp_test)

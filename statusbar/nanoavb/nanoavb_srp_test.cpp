@@ -1476,6 +1476,98 @@ TEST(nanoavb_srp_mvrp, a_dropped_sender_is_let_go_and_nothing_is_sent_after_it)
     EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
 }
 
+namespace {
+
+/// A Talker Advertise a bridge passes on for a stream of somebody else's.
+auto remote_advertise(statusbar::tsn::StreamId const& sid, uint8_t const dest_last, uint16_t const vlan)
+    -> statusbar::srp::msrp::TalkerAdvertiseFirstValue
+{
+    statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+    fv.stream_id = sid;
+    fv.destination_address = Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, dest_last};
+    fv.vlan_identifier = vlan;
+    fv.max_frame_size = 416;
+    fv.max_interval_frames = 1;
+    return fv;
+}
+
+}  // namespace
+
+// A Milan sink compares the Talker attribute this port registers with the
+// parameters it probed (Milan v1.3 5.3.8.8): the handler says which
+// attribute stands, with its address and VLAN, and tells of every change,
+// attached listener or not.
+TEST(nanoavb_srp_msrp, the_remote_talker_registered_for_a_stream_is_reported_with_its_address_and_vlan)
+{
+    TalkerLink link{};
+    statusbar::tsn::StreamId const remote{Eui48{0x00, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e}, 1};
+    std::vector<statusbar::tsn::StreamId> told{};
+    std::optional<RegisteredTalker> seen_in_callback{};
+    link.talker.set_on_remote_talker([&](StreamId const& sid, TimePoint) {
+        told.push_back(sid);
+        seen_in_callback = link.talker.registered_talker(sid);
+    });
+    EXPECT_FALSE(link.talker.registered_talker(remote).has_value());
+
+    EXPECT_TRUE(link.bridge.declare_talker_advertise(remote_advertise(remote, 0x77, 5), link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_FALSE(told.empty());
+    EXPECT_TRUE(told.front() == remote);
+    EXPECT_TRUE(seen_in_callback.has_value());  // the callback reads what stands now
+    auto const registered = link.talker.registered_talker(remote);
+    EXPECT_TRUE(registered.has_value());
+    EXPECT_EQ(registered->dest_address, (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x77}));
+    EXPECT_EQ(registered->vlan_id, 5);
+    EXPECT_FALSE(registered->failed);
+
+    told.clear();
+    EXPECT_TRUE(link.bridge.withdraw_talker(remote, link.now).has_value());
+    link.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_FALSE(told.empty());
+    EXPECT_FALSE(seen_in_callback.has_value());
+    EXPECT_FALSE(link.talker.registered_talker(remote).has_value());
+}
+
+TEST(nanoavb_srp_msrp, a_registered_talker_failed_is_reported_as_failed)
+{
+    TalkerLink link{};
+    statusbar::tsn::StreamId const remote{Eui48{0x00, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e}, 1};
+    statusbar::srp::msrp::TalkerFailedFirstValue failed{};
+    failed.advertise = remote_advertise(remote, 0x78, 2);
+    failed.set_failure_code(statusbar::srp::msrp::FailureCode::InsufficientBandwidth);
+    EXPECT_TRUE(link.bridge.declare_talker_failed(failed, link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+    auto const registered = link.talker.registered_talker(remote);
+    EXPECT_TRUE(registered.has_value());
+    EXPECT_TRUE(registered->failed);
+    EXPECT_EQ(registered->dest_address, (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x78}));
+    EXPECT_EQ(registered->vlan_id, 2);
+}
+
+// REGISTERING_FAILED in a Milan GET_TX_STATE_RESPONSE (v1.3 Table 5.23):
+// the source declares its Talker attribute and registers a Listener Asking
+// Failed for it.
+TEST(nanoavb_srp_msrp, a_declared_talker_with_a_listener_asking_failed_registered_says_so)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    TalkerLink link{};
+    (void)link.talker.talker_advertise(link.info(), link.now);
+    EXPECT_FALSE(link.talker.talker_listener_asking_failed(link.sid));  // nothing declared, nothing registered
+
+    link.talker.note_talker_probe(link.sid, link.now);
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);
+    EXPECT_FALSE(link.talker.talker_listener_asking_failed(link.sid));  // declared, no listener yet
+
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::AskingFailed, link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_TRUE(link.talker.talker_listener_asking_failed(link.sid));
+
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::Ready, link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+    EXPECT_FALSE(link.talker.talker_listener_asking_failed(link.sid));
+}
+
 //
 // Test Runner
 //

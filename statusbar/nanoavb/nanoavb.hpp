@@ -17,6 +17,7 @@
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_gptp_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_listener_engine_sm.hpp"
+#include "statusbar/nanoavb/nanoavb_milan_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_msrp_listener_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_msrp_talker_sm.hpp"
 #include "statusbar/nanoavb/nanoavb_mvrp_sm.hpp"

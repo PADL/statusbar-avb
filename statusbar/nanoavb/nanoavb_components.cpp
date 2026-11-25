@@ -114,6 +114,86 @@ auto NanoAvbComponents::talker_connection_count() const -> size_t
     return count;
 }
 
+void NanoAvbComponents::use_milan_acmp()
+{
+    if (acmp_is_milan()) {
+        return;
+    }
+    milan_acmp_talker =
+        std::make_unique<NanoAvbMilanAcmpTalker>(acmp_talker.entity_id(), AcmpTalkerCallbacks{}, acmp_talker.max_streams());
+    milan_acmp_listener =
+        std::make_unique<NanoAvbMilanAcmpListener>(acmp_listener.entity_id(), AcmpListenerCallbacks{}, acmp_listener.max_streams());
+}
+
+auto NanoAvbComponents::configure_talker_stream(
+    uint16_t const stream_index, Eui64 const stream_id, Eui48 const dest_mac, uint16_t const vlan_id) -> Status
+{
+    if (milan_acmp_talker != nullptr) {
+        return milan_acmp_talker->configure_stream(stream_index, stream_id, dest_mac, vlan_id);
+    }
+    return acmp_talker.configure_stream(stream_index, stream_id, dest_mac, vlan_id);
+}
+
+namespace {
+
+/// The three fields both talkers keep per stream output, under the same names.
+template <typename Stream>
+[[nodiscard]] auto talker_stream_of(Stream const* const stream) noexcept -> std::optional<NanoAvbComponents::TalkerStream>
+{
+    if (stream == nullptr) {
+        return std::nullopt;
+    }
+    return NanoAvbComponents::TalkerStream{
+        .stream_id = stream->stream_id, .stream_dest_mac = stream->stream_dest_mac, .stream_vlan_id = stream->stream_vlan_id};
+}
+
+[[nodiscard]] auto sink_of(atdecc::ListenerStreamInfo const& sink) noexcept -> NanoAvbComponents::ListenerSink
+{
+    return NanoAvbComponents::ListenerSink{
+        .connected = sink.connected,
+        .talker_entity_id = sink.talker_entity_id,
+        .talker_unique_id = sink.talker_unique_id,
+        .stream_id = sink.stream_id,
+        .stream_dest_mac = sink.stream_dest_mac,
+        .stream_vlan_id = sink.stream_vlan_id};
+}
+
+[[nodiscard]] auto sink_of(atdecc::MilanSink const& sink) noexcept -> NanoAvbComponents::ListenerSink
+{
+    auto const& ctx = sink.context();
+    return NanoAvbComponents::ListenerSink{
+        .connected = sink.is_settled(),
+        .talker_entity_id = ctx.binding.has_value() ? ctx.binding->talker_entity_id : Eui64{},
+        .talker_unique_id = ctx.binding.has_value() ? ctx.binding->talker_unique_id : uint16_t{0},
+        .stream_id = ctx.srp.stream_id,
+        .stream_dest_mac = ctx.srp.stream_dest_mac,
+        .stream_vlan_id = ctx.srp.stream_vlan_id};
+}
+
+template <typename Sink>
+[[nodiscard]] auto optional_sink_of(Sink const* const sink) noexcept -> std::optional<NanoAvbComponents::ListenerSink>
+{
+    return sink != nullptr ? std::optional{sink_of(*sink)} : std::nullopt;
+}
+
+}  // namespace
+
+auto NanoAvbComponents::talker_stream(uint16_t const stream_index) const noexcept -> std::optional<TalkerStream>
+{
+    if (milan_acmp_talker != nullptr) {
+        return talker_stream_of(milan_acmp_talker->get_stream(stream_index));
+    }
+    return talker_stream_of(acmp_talker.get_stream(stream_index));
+}
+
+auto NanoAvbComponents::listener_sink(uint16_t const stream_index) const noexcept -> std::optional<ListenerSink>
+{
+    if (milan_acmp_listener != nullptr) {
+        return optional_sink_of(milan_acmp_listener->sink(stream_index));
+    }
+    return optional_sink_of(acmp_listener.get_stream(stream_index));
+}
+
 void NanoAvbComponents::print_info() const
 {
     std::print("Components initialized:\n");
@@ -145,20 +225,68 @@ void AtdeccNetHandler::on_ready(int64_t now_ns)
     }
 }
 
+AtdeccNetHandler::~AtdeccNetHandler()
+{
+    // The Milan pair outlives this handler and sent through it.
+    release_milan_acmp();
+}
+
+void AtdeccNetHandler::release_milan_acmp() noexcept
+{
+    // Only what this handler attached: a handler made later for the same
+    // pair keeps its senders when this one goes.
+    if (milan_talker_ != nullptr) {
+        milan_talker_->detach_sender(this);
+    }
+    if (milan_listener_ != nullptr) {
+        milan_listener_->detach_senders(this);
+    }
+}
+
+void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, NanoAvbMilanAcmpListener* const listener)
+{
+    release_milan_acmp();
+    milan_talker_ = talker;
+    milan_listener_ = listener;
+    if (talker != nullptr) {
+        talker->attach_sender(this, [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); });
+    }
+    if (listener != nullptr) {
+        listener->attach_senders(
+            this,
+            [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); },
+            [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); });
+    }
+}
+
+auto AtdeccNetHandler::send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool
+{
+    if (!valid()) {
+        return false;
+    }
+    // The 56-octet form on Layer 2 (see setup_nanoavb_callbacks), which is
+    // also the truncated ACMPDU Milan v1.3 5.5.2.2 asks for.
+    std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+    return send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(pdu, buf)).has_value();
+}
+
+void AtdeccNetHandler::tick_protocols(sm::TimePoint const now)
+{
+    adp_advertiser_.tick(now);
+    // Neither talker has a timer. One listener runs: the idle one's tick finds nothing due.
+    acmp_listener_.tick(now);
+    if (milan_listener_ != nullptr) {
+        milan_listener_->tick(now);
+    }
+    aem_handler_.tick(now);  // AEM has LOCK / pending-acquire timeout checking
+    if (adp_discovery_ != nullptr) {
+        adp_discovery_->tick(now);
+    }
+}
+
 void AtdeccNetHandler::tick(int64_t now_ns)
 {
-    // Convert nanoseconds to sm::TimePoint for protocol handlers
-    auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-
-    // Tick ATDECC protocol handlers
-    adp_advertiser_.tick(sm_now);
-    // Note: NanoAvbAcmpTalker is event-driven, no tick needed
-    acmp_listener_.tick(sm_now);  // Listener has timeout checking
-    aem_handler_.tick(sm_now);    // AEM has LOCK / pending-acquire timeout checking
-    if (adp_discovery_ != nullptr) {
-        adp_discovery_->tick(sm_now);
-    }
-
+    tick_protocols(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
     ++tick_count_;
 
     // Periodic status (wall-clock gated; emitted only when a logger is set).
@@ -178,113 +306,151 @@ void AtdeccNetHandler::log_status()
         talker_connections += acmp_talker_.connection_count(i);
     }
 
-    // Count listener connections (streams whose ACMP CONNECT_RX completed)
-    size_t listener_connections = 0;
-    for (size_t i = 0; i < acmp_listener_.max_streams(); ++i) {
-        if (acmp_listener_.is_connected(static_cast<uint16_t>(i))) {
-            ++listener_connections;
-        }
-    }
-
     logger_->status(
         "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
         tick_count_,
         wakes,
         adp_advertiser_.state() == AdpAdvertiserState::Advertising ? logging::lit("Advertising") : logging::lit("Stopped"),
         talker_connections,
-        listener_connections);
+        listener_connections());
+}
+
+auto AtdeccNetHandler::listener_connections() const -> size_t
+{
+    // Stream inputs whose CONNECT_RX completed, or under Milan those settled on their talker's stream.
+    size_t count = 0;
+    for (size_t i = 0; i < acmp_listener_.max_streams(); ++i) {
+        auto const index = static_cast<uint16_t>(i);
+        bool const milan_settled = milan_listener_ != nullptr && milan_listener_->is_settled(index);
+        count += (acmp_listener_.is_connected(index) || milan_settled) ? 1U : 0U;
+    }
+    return count;
 }
 
 void AtdeccNetHandler::dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload)
 {
-    using namespace statusbar::atdecc;
-    namespace AvtpSubtype = avtp::AvtpSubtype;
-
     if (payload.empty()) {
         return;
     }
-
-    // First byte is the AVTP subtype
-    uint8_t const subtype = payload[0];
-
     // Convert nanoseconds to sm::TimePoint for protocol handlers
     auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
 
-    switch (subtype) {
-        case AvtpSubtype::adp: {  // NOLINT(statusbar-block-statements) one ADP frame's dispatch; pre-dates the gate
-            // ADP message
-            if (payload.size() < AdpDu::LENGTH) {
-                return;
-            }
-            AdpDu adp{};
-            span_load(adp, payload);
-            adp_advertiser_.receive_adpdu(adp, sm_now);
-            if (adp_discovery_ != nullptr) {
-                adp_discovery_->receive_adpdu(adp, src_mac, sm_now);
-            }
-            // A talker announcing ENTITY_DEPARTING must tear down any listener sink
-            // still connected to it: ACMP alone only clears a sink on an explicit
-            // controller DISCONNECT_RX, so otherwise the sink would report connected
-            // (and hold its SRP reservation) forever after the talker left.
-            if (adp.is_entity_departing()) {
-                (void)acmp_listener_.on_talker_departed(adp.entity_id, sm_now);
-                // A departing controller's unsolicited registration is now stale.
-                (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
-            }
+    // First byte is the AVTP subtype
+    switch (payload[0]) {
+        case avtp::AvtpSubtype::adp:
+            dispatch_adp(src_mac, payload, sm_now);
             break;
-        }
-
-        case AvtpSubtype::acmp: {
-            // ACMP message
-            if (payload.size() < AcmpDu::LENGTH) {
-                return;
-            }
-            AcmpDu acmp{};
-            span_load(acmp, payload);
-            auto const cmd_resp = acmp_command_response_from_pdu(acmp);
-
-            // Dispatch to talker (for commands addressed to us)
-            (void)acmp_talker_.receive_command(cmd_resp, sm_now);
-
-            // Dispatch to listener for controller commands or talker responses
-            bool const listener_handled = acmp_listener_.receive_controller_command(cmd_resp, sm_now);
-            (void)acmp_listener_.receive_talker_response(cmd_resp, sm_now);
-
-            // Diagnostic: trace listener-directed commands (CONNECT_RX=6,
-            // DISCONNECT_RX=8, GET_RX_STATE=10) so a silent listener can be
-            // distinguished from an unhandled one. Only for commands addressed
-            // to OUR listener — the ACMP multicast carries every entity's
-            // traffic, and a controller polling some OTHER listener's RX state
-            // (seen ~1/s in the LA install) would otherwise flood the journal.
-            if (auto const mt = cmd_resp.message_type();
-                (mt == 6 || mt == 8 || mt == 10) && cmd_resp.listener_entity_id == acmp_listener_.entity_id()) {
-                std::print(
-                    stderr,
-                    "[acmp-rx] mt={} target_listener={} my_listener={} handled={} state={}\n",
-                    mt,
-                    ieee::to_string(cmd_resp.listener_entity_id).view(),
-                    ieee::to_string(acmp_listener_.entity_id()).view(),
-                    listener_handled ? 1 : 0,
-                    static_cast<int>(acmp_listener_.current_state()));
-            }
+        case avtp::AvtpSubtype::acmp:
+            dispatch_acmp(payload, sm_now);
             break;
-        }
-
-        case AvtpSubtype::aecp: {
-            // AECP/AEM message - process and send unicast response
-            auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
-            // Advance the handler's clock so a LOCK/ACQUIRE deadline set while
-            // processing this command is relative to now, not epoch 0 (tick()
-            // above then checks those deadlines each reactor tick).
-            aem_handler_.set_event_time(sm_now);
-            (void)aem_handler_.process_packet(src_mac, payload, our_entity_id);
+        case avtp::AvtpSubtype::aecp:
+            dispatch_aecp(src_mac, payload, sm_now);
             break;
-        }
-
         default:
             // Unknown ATDECC subtype
             break;
     }
+}
+
+void AtdeccNetHandler::dispatch_adp(ieee::Eui48 const& src_mac, std::span<uint8_t const> const payload, sm::TimePoint const now)
+{
+    if (payload.size() < atdecc::AdpDu::LENGTH) {
+        return;
+    }
+    atdecc::AdpDu adp{};
+    span_load(adp, payload);
+    adp_advertiser_.receive_adpdu(adp, now);
+    if (adp_discovery_ != nullptr) {
+        adp_discovery_->receive_adpdu(adp, src_mac, now);
+    }
+    note_adp(adp, now);
+}
+
+void AtdeccNetHandler::note_adp(atdecc::AdpDu const& adp, sm::TimePoint const now)
+{
+    // Milan v1.3 5.6.4: each bound sink follows its own talker's ADP, and a
+    // settled sink keeps its stream when the talker departs (5.5.3.6.41).
+    if (milan_listener_ != nullptr) {
+        milan_listener_->receive_adpdu(adp, now);
+    }
+    if (!adp.is_entity_departing()) {
+        return;
+    }
+    // IEEE 1722.1: a talker announcing ENTITY_DEPARTING must tear down any
+    // listener sink still connected to it. ACMP alone only clears a sink on
+    // an explicit controller DISCONNECT_RX, so otherwise the sink would
+    // report connected (and hold its SRP reservation) forever after the
+    // talker left. Under Milan this listener has no sink connected.
+    (void)acmp_listener_.on_talker_departed(adp.entity_id, now);
+    // A departing controller's unsolicited registration is now stale.
+    (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
+}
+
+void AtdeccNetHandler::dispatch_acmp(std::span<uint8_t const> const payload, sm::TimePoint const now)
+{
+    if (payload.size() < atdecc::AcmpDu::LENGTH) {
+        return;
+    }
+    atdecc::AcmpDu acmp{};
+    span_load(acmp, payload);
+    auto const pdu = atdecc::acmp_command_response_from_pdu(acmp);
+    // One ACMP implementation runs: the choice was made at start-up (NanoAvbComponents::use_milan_acmp).
+    if (milan_talker_ != nullptr && milan_listener_ != nullptr) {
+        dispatch_milan_acmp(pdu, now);
+        return;
+    }
+    dispatch_ieee_acmp(pdu, now);
+}
+
+void AtdeccNetHandler::dispatch_milan_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint const now)
+{
+    (void)milan_talker_->receive_command(pdu, now);
+    (void)milan_listener_->receive_controller_command(pdu, now);
+    (void)milan_listener_->receive_talker_response(pdu, now);
+}
+
+void AtdeccNetHandler::dispatch_ieee_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint const now)
+{
+    // Dispatch to talker (for commands addressed to us)
+    (void)acmp_talker_.receive_command(pdu, now);
+
+    // Dispatch to listener for controller commands or talker responses
+    bool const listener_handled = acmp_listener_.receive_controller_command(pdu, now);
+    (void)acmp_listener_.receive_talker_response(pdu, now);
+    trace_listener_command(pdu, listener_handled);
+}
+
+void AtdeccNetHandler::trace_listener_command(atdecc::AcmpCommandResponse const& pdu, bool const handled) const
+{
+    // Diagnostic: trace listener-directed commands (CONNECT_RX=6,
+    // DISCONNECT_RX=8, GET_RX_STATE=10) so a silent listener can be
+    // distinguished from an unhandled one. Only for commands addressed
+    // to OUR listener — the ACMP multicast carries every entity's
+    // traffic, and a controller polling some OTHER listener's RX state
+    // (seen ~1/s in the LA install) would otherwise flood the journal.
+    auto const mt = pdu.message_type();
+    if ((mt != 6 && mt != 8 && mt != 10) || pdu.listener_entity_id != acmp_listener_.entity_id()) {
+        return;
+    }
+    std::print(
+        stderr,
+        "[acmp-rx] mt={} target_listener={} my_listener={} handled={} state={}\n",
+        mt,
+        ieee::to_string(pdu.listener_entity_id).view(),
+        ieee::to_string(acmp_listener_.entity_id()).view(),
+        handled ? 1 : 0,
+        static_cast<int>(acmp_listener_.current_state()));
+}
+
+void AtdeccNetHandler::dispatch_aecp(ieee::Eui48 const& src_mac, std::span<uint8_t const> const payload, sm::TimePoint const now)
+{
+    // AECP/AEM message - process and send unicast response
+    auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
+    // Advance the handler's clock so a LOCK/ACQUIRE deadline set while
+    // processing this command is relative to now, not epoch 0 (tick()
+    // above then checks those deadlines each reactor tick).
+    aem_handler_.set_event_time(now);
+    (void)aem_handler_.process_packet(src_mac, payload, our_entity_id);
 }
 
 //
@@ -386,22 +552,34 @@ auto NanoAvbComponentsBuilder::build(sm::TimePoint const now) -> StatusValue<std
 // NanoAvbNetHandlers implementation
 //
 
-void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
-{  // NOLINT(statusbar-block-statements) the reactor wiring, one handler after another; pre-dates the gate
-    auto mvrp = std::make_unique<MvrpNetHandler>(interface_name_, components_->mvrp_handler);
-    auto msrp = std::make_unique<MsrpNetHandler>(interface_name_, components_->msrp_handler);
-    auto atdecc = std::make_unique<AtdeccNetHandler>(
-        interface_name_,
-        components_->adp_advertiser,
-        components_->acmp_talker,
-        components_->acmp_listener,
-        components_->aem_handler);
+namespace {
 
+/// Hand @p handler to the reactor when its socket opened and keep it in
+/// @p unopened when it did not, so the pointer returned is good either way.
+template <typename Handler>
+auto place_handler(net::MessageReactor& reactor, std::unique_ptr<Handler> handler, std::unique_ptr<Handler>& unopened, bool& valid)
+    -> Handler*
+{
+    Handler* const raw = handler.get();
+    valid = raw->valid();
+    if (valid) {
+        reactor.add(std::move(handler));
+    } else {
+        unopened = std::move(handler);
+    }
+    return raw;
+}
+
+}  // namespace
+
+void NanoAvbNetHandlers::wire_discovery_ageout()
+{
     // Wire discovery ageout -> listener teardown. A talker that is powered off never
     // sends ENTITY_DEPARTING, so the explicit-departing path in dispatch_frame can't
     // catch it; the discovery database expires the stale entity and fires this, which
     // tears down any sink still connected to it. The AtdeccNetHandler feeds this
-    // discovery received ADPDUs and ticks it once set below.
+    // discovery received ADPDUs and ticks it. (A Milan sink times its own talker out,
+    // 5.6.4.5.4; the IEEE 1722.1 listener then has no sink to tear down.)
     AdpDiscoveryCallbacks discovery_callbacks{};
     discovery_callbacks.on_entity_departing = [this](Eui64 id, sm::TimePoint now) {
         (void)components_->acmp_listener.on_talker_departed(id, now);
@@ -409,34 +587,31 @@ void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
         (void)components_->aem_handler.remove_unsolicited_registrations_for(id);
     };
     discovery_.set_callbacks(std::move(discovery_callbacks));
+}
+
+auto NanoAvbNetHandlers::make_atdecc_handler() -> std::unique_ptr<AtdeccNetHandler>
+{
+    auto atdecc = std::make_unique<AtdeccNetHandler>(
+        interface_name_,
+        components_->adp_advertiser,
+        components_->acmp_talker,
+        components_->acmp_listener,
+        components_->aem_handler);
+    wire_discovery_ageout();
     atdecc->set_adp_discovery(&discovery_);
+    // Null for an entity that runs IEEE 1722.1 ACMP: nothing changes for it.
+    atdecc->set_milan_acmp(components_->milan_acmp_talker.get(), components_->milan_acmp_listener.get());
+    return atdecc;
+}
 
-    auto gptp = std::make_unique<GptpAnnounceHandler>(interface_name_);
-
-    mvrp_valid_ = mvrp->valid();
-    msrp_valid_ = msrp->valid();
-    atdecc_valid_ = atdecc->valid();
-    gptp_valid_ = gptp->valid();
-
-    // Capture raw pointers before ownership transfer
-    mvrp_ptr_ = mvrp.get();
-    msrp_ptr_ = msrp.get();
-    atdecc_ptr_ = atdecc.get();
-    gptp_ptr_ = gptp.get();
-
-    // Transfer ownership to reactor (only valid handlers)
-    if (mvrp_valid_) {
-        reactor.add(std::move(mvrp));
-    }
-    if (msrp_valid_) {
-        reactor.add(std::move(msrp));
-    }
-    if (atdecc_valid_) {
-        reactor.add(std::move(atdecc));
-    }
-    if (gptp_valid_) {
-        reactor.add(std::move(gptp));
-    }
+void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
+{
+    mvrp_ptr_ = place_handler(
+        reactor, std::make_unique<MvrpNetHandler>(interface_name_, components_->mvrp_handler), unopened_mvrp_, mvrp_valid_);
+    msrp_ptr_ = place_handler(
+        reactor, std::make_unique<MsrpNetHandler>(interface_name_, components_->msrp_handler), unopened_msrp_, msrp_valid_);
+    atdecc_ptr_ = place_handler(reactor, make_atdecc_handler(), unopened_atdecc_, atdecc_valid_);
+    gptp_ptr_ = place_handler(reactor, std::make_unique<GptpAnnounceHandler>(interface_name_), unopened_gptp_, gptp_valid_);
 }
 
 void NanoAvbNetHandlers::print_status() const
