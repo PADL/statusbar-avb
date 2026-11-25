@@ -505,7 +505,7 @@ Controllers on the same host (la_avdecc's local protocol interface,
 entity over an AF_UNIX datagram socket, without raw-socket privileges
 (`nanoavb_local_port.hpp`).
 
-## Streams sent outside the kit
+## Streams carried outside the kit
 
 A talker stream's frames may be sent by something beside the stream port (a
 NIC or FPGA that packetises the stream itself), from the stream's
@@ -554,6 +554,35 @@ that data plane follows them and reports back:
   gates through `set_on_talker_gate_changed`.
 - **Presentation offset.** As for the kit's own path, through
   `set_on_presentation_offset_changed`.
+
+A listener stream may likewise be received beside the stream port, which then
+receives none of it; the kit keeps the input's connection, MSRP declaration,
+group membership and counters:
+
+- **What it receives.** `ListenerStreams::set_on_input_changed` tells each
+  change of the stream ID an input matches frames by (published when it
+  connects, classic, or settles, Milan; zero when it disconnects, unsettles or
+  stop() releases it) and of whether it discards them
+  (`set_stream_stopped`, Milan v1.2 Section 5.3.8.7), on the reactor. Its
+  format follows `set_on_stream_format_changed`.
+- **Counters.** `notify_received_outside()` adds a `StreamInputCounts` (the
+  per-packet counts `tally_stream_input_packet()` keeps, and the media lock as
+  the data plane checks it) to the input's counters, so GET_COUNTERS and the
+  observation-interval fold go on, and the accepted AVTPDUs and sample frames
+  to its telemetry. A lock gained counts MEDIA_LOCKED, a lock lost
+  MEDIA_UNLOCKED and STREAM_INTERRUPTED, except while the input is stopped or
+  unbound, when it goes without an interruption (Milan v1.2 Sections 5.3.8.7,
+  5.3.8.10). Any report with AVTPDUs or a lock value clears the reactor's
+  pending unlock (a bind, an unbind, a silent interval), as a packet's tally
+  does, and gains no lock in that report. The presentation margin statistics
+  stay the kit's own path's.
+- **Report cadence.** Report each input at least once an observation interval
+  (1 s). At a fold a locked input counts as silent, and so stopped, when a
+  report arrived and no AVTPDU did, or when no report arrived for
+  `StreamInputIntervals::OUTSIDE_QUIET_INTERVALS` (2) intervals in a row; one
+  slow report is no interruption.
+- **Hooks.** As for talkers: `set_on_input_changed` must not throw, and what it
+  captures must outlive the kit, since `stop()` releases every input through it.
 
 ## Notes on the kit's event wiring
 

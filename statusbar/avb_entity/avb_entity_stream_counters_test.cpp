@@ -15,6 +15,7 @@
 #include <string>
 
 using statusbar::avb_entity::StreamInputCounters;
+using statusbar::avb_entity::StreamInputCounts;
 using statusbar::avb_entity::tally_stream_input_packet;
 
 namespace {
@@ -394,5 +395,101 @@ TEST(stream_output_intervals, start_stop_and_intervals)
 }
 
 // Test runner
+
+// Counts from a data plane outside the kit add to the per-packet counters, and its check of the media lock counts
+// as tally_stream_input_packet()'s does: MEDIA_LOCKED once when gained, MEDIA_UNLOCKED and STREAM_INTERRUPTED once when
+// lost; a report while the reactor's unlock is pending clears it and gains no lock; the interval fold counts them.
+TEST(stream_counters, counts_from_outside_add_and_follow_the_lock)
+{
+    StreamInputCounters c{};
+    StreamInputCounts const counts{
+        .frames_rx = 10,
+        .seq_num_mismatch = 1,
+        .media_reset = 2,
+        .timestamp_uncertain = 3,
+        .timestamp_valid = 9,
+        .timestamp_not_valid = 1,
+        .unsupported_format = 6,
+        .late_timestamp = 4,
+        .early_timestamp = 5,
+        .media_locked = true};
+    StreamInputIntervals in{};
+    (void)in.fold(c);
+    add_stream_input_counts(c, counts);
+    add_stream_input_counts(c, counts);
+    EXPECT_EQ(c.frames_rx.load(), 20U);
+    EXPECT_TRUE(c.seq_num_mismatch.load() == 2 && c.media_reset.load() == 4 && c.timestamp_uncertain.load() == 6);
+    EXPECT_TRUE(c.timestamp_valid.load() == 18 && c.timestamp_not_valid.load() == 2 && c.unsupported_format.load() == 12);
+    EXPECT_TRUE(c.late_timestamp.load() == 8 && c.early_timestamp.load() == 10);
+    EXPECT_TRUE(c.media_locked.load() == 1 && c.is_locked.load());
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_TRUE(in.values[StreamInputIntervals::FRAMES_RX] == 1 && in.values[StreamInputIntervals::MEDIA_LOCKED] == 1);
+    EXPECT_EQ(in.values[StreamInputIntervals::LATE_TIMESTAMP], 1U);
+
+    add_stream_input_counts(c, {.frames_rx = 1});  // no check: the lock stands
+    EXPECT_TRUE(c.is_locked.load());
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = false});
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = false});
+    EXPECT_TRUE(c.media_unlocked.load() == 1 && c.stream_interrupted.load() == 1 && !c.is_locked.load());
+
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = true});
+    unlock_stream_input(c);  // the reactor: an unbind
+    EXPECT_TRUE(c.media_locked.load() == 2 && c.media_unlocked.load() == 2 && c.stream_interrupted.load() == 1);
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = true});
+    EXPECT_TRUE(c.media_locked.load() == 2 && !c.is_locked.load());
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = true});
+    EXPECT_TRUE(c.media_locked.load() == 3 && c.is_locked.load());
+}
+
+// After a bind (the reactor's unlock), a report without the lock still clears the pending unlock, as a packet's tally
+// does: the next report that says locked counts MEDIA_LOCKED once.
+TEST(stream_counters, after_a_bind_any_report_clears_the_pending_unlock)
+{
+    StreamInputCounters c{};
+    add_stream_input_counts(c, {.frames_rx = 1, .media_locked = true});
+    unlock_stream_input(c);  // the reactor: a bind
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = false});
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});
+    EXPECT_TRUE(c.media_locked.load() == 2 && c.is_locked.load() && c.stream_interrupted.load() == 0);
+    unlock_stream_input(c);
+    add_stream_input_counts(c, {.frames_rx = 8});  // AVTPDUs, no lock value: cleared as well
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});
+    EXPECT_EQ(c.media_locked.load(), 3U);
+}
+
+// A locked input a data plane outside the kit reports is silent at a fold only when a report arrived and no AVTPDU
+// did, or when no report arrived for OUTSIDE_QUIET_INTERVALS intervals in a row: one slow report is no interruption.
+TEST(stream_input_intervals, an_outside_input_is_silent_only_by_its_reports)
+{
+    using statusbar::avb_entity::StreamInputIntervals;
+    StreamInputCounters c{};
+    StreamInputIntervals in{};
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});
+    (void)in.fold(c);
+    EXPECT_TRUE(c.is_locked.load());
+    (void)in.fold(c);  // no report in this interval: not yet silent
+    EXPECT_TRUE(c.is_locked.load() && c.stream_interrupted.load() == 0);
+    add_stream_input_counts(c, {.frames_rx = 8});
+    (void)in.fold(c);  // a report with AVTPDUs
+    (void)in.fold(c);
+    EXPECT_TRUE(c.is_locked.load());
+    (void)in.fold(c);  // a second interval in a row without one: silent
+    EXPECT_TRUE(!c.is_locked.load() && c.stream_interrupted.load() == 1 && c.media_unlocked.load() == 1);
+
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});  // clears the fold's pending unlock
+    add_stream_input_counts(c, {.frames_rx = 8, .media_locked = true});
+    (void)in.fold(c);
+    add_stream_input_counts(c, {.media_locked = true});  // a report that received nothing
+    (void)in.fold(c);
+    EXPECT_TRUE(!c.is_locked.load() && c.stream_interrupted.load() == 2);
+
+    // The kit's own path, with no report ever: one interval without an AVTPDU is silence, as before.
+    StreamInputCounters own{};
+    StreamInputIntervals own_in{};
+    own.is_locked.store(true);
+    (void)own_in.fold(own);  // the first interval, nothing received
+    EXPECT_TRUE(!own.is_locked.load() && own.stream_interrupted.load() == 1);
+}
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_counters_test)

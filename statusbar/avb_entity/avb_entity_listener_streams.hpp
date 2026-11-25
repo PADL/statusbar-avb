@@ -39,6 +39,7 @@
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
@@ -416,12 +417,27 @@ struct ListenerStreams
 
     /// Discard (@p stopped) or process STREAM_INPUT @p stream_index's
     /// AVTPDUs (ListenerStreamSlot::stopped). Reactor thread.
-    void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
-    {
-        if (auto* const slot = slot_for(stream_index); slot != nullptr) {
-            slot->stopped.store(stopped, std::memory_order_relaxed);
-        }
-    }
+    void set_stream_stopped(uint16_t stream_index, bool stopped) noexcept;
+
+    //
+    // A stream received outside the kit
+    //
+    // Something beside the stream port may receive a STREAM_INPUT's stream itself while the kit receives none of it.
+    // The kit keeps the input's connection and counters; see docs/AVB_ENTITY_KIT.md.
+
+    /// Told, on the reactor, each change of what STREAM_INPUT @p stream_index receives: the stream ID it matches
+    /// frames by (ListenerStreamSlot::rx_stream_id, 0 for none), and whether it discards them (stopped). Not for the
+    /// state at install. Before streams flow; an empty function removes it. It must not throw (set_stream_stopped() is
+    /// noexcept), and what it captures must outlive the kit: stop() releases every input through it.
+    using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, uint64_t stream_id, bool stopped), 32>;
+    void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
+    /// A data plane outside the kit received @p counts of STREAM_INPUT @p stream_index since it last said, @p samples
+    /// sample frames of them accepted: added to its counters (add_stream_input_counts(), so GET_COUNTERS) and
+    /// telemetry. A lock lost while the input is stopped or unbound goes without an interruption (Milan v1.2 Sections
+    /// 5.3.8.7, 5.3.8.10). False for no such input. The one thread that reports the stream, at least once an
+    /// observation interval (StreamInputIntervals::silent()), while the kit receives none of it.
+    [[nodiscard]] auto notify_received_outside(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
+        -> bool;
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
@@ -467,6 +483,12 @@ struct ListenerStreams
     [[nodiscard]] static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Apply @p spec to the newly shaped @p slot and bind its pending callbacks.
     void begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec);
+    /// @p slot matches frames of @p stream_id (0: none) from now on, told to on_input_changed_.
+    void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
+    /// on_input_changed_ told of @p slot as it stands, if set.
+    void tell_input_changed(ListenerStreamSlot const& slot) const noexcept;
+    /// @p counts added to @p slot's counters; a lost lock as unlock_stream_input() while it is stopped or unbound.
+    static void count_received_outside(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's deserializers and @p spec's format into @p slot. Under the guard.
@@ -507,6 +529,7 @@ struct ListenerStreams
     StreamRxAudioSink* audio_sink_{nullptr};
     /// Timestamped raw sink (a host that moves the bytes undecoded). Nullable.
     StreamRxTimedAudioSink* timed_sink_{nullptr};
+    InputChangedFn on_input_changed_{};
     /// The port frames are received from (attach_rx), also used to join and
     /// leave a remote talker's stream group on connect/disconnect. Borrowed.
     StreamPort* port_{nullptr};

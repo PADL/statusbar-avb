@@ -3,6 +3,7 @@
 
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 
+#include <algorithm>
 #include <format>
 #include <iterator>
 #include <utility>
@@ -218,6 +219,45 @@ void tally_stream_input_packet(
     }
 }
 
+namespace {
+
+/// The media lock of @p c as an outside data plane checks it, @p locked; none gained in a report that cleared the
+/// reactor's pending unlock (@p restarted).
+void follow_media_lock(StreamInputCounters& c, bool const locked, bool const restarted) noexcept
+{
+    if (!locked) {
+        if (c.is_locked.exchange(false, relaxed)) {
+            c.media_unlocked.fetch_add(1, relaxed);
+            c.stream_interrupted.fetch_add(1, relaxed);
+        }
+        return;
+    }
+    if (!restarted && !c.is_locked.exchange(true, relaxed)) {
+        c.media_locked.fetch_add(1, relaxed);
+    }
+}
+
+}  // namespace
+
+void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
+{  // NOLINT(statusbar-block-statements): one line per counter of StreamInputCounters
+    c.frames_rx.fetch_add(counts.frames_rx, relaxed);
+    c.seq_num_mismatch.fetch_add(counts.seq_num_mismatch, relaxed);
+    c.media_reset.fetch_add(counts.media_reset, relaxed);
+    c.timestamp_uncertain.fetch_add(counts.timestamp_uncertain, relaxed);
+    c.timestamp_valid.fetch_add(counts.timestamp_valid, relaxed);
+    c.timestamp_not_valid.fetch_add(counts.timestamp_not_valid, relaxed);
+    c.unsupported_format.fetch_add(counts.unsupported_format, relaxed);
+    c.late_timestamp.fetch_add(counts.late_timestamp, relaxed);
+    c.early_timestamp.fetch_add(counts.early_timestamp, relaxed);
+    c.outside_reports.fetch_add(1, relaxed);
+    // As a packet's tally: the reactor's pending unlock is cleared by any report that says something of the stream.
+    bool const restarted = (counts.frames_rx != 0 || counts.media_locked) && c.restart_run.exchange(false, relaxed);
+    if (counts.media_locked) {
+        follow_media_lock(c, *counts.media_locked, restarted);
+    }
+}
+
 void unlock_stream_input(StreamInputCounters& c) noexcept
 {
     c.restart_run.store(true, std::memory_order_relaxed);
@@ -228,12 +268,12 @@ void unlock_stream_input(StreamInputCounters& c) noexcept
 
 namespace {
 
-/// A locked input that received nothing since @p last_frames_rx has stopped: unlock it,
+/// A locked input that received nothing in the interval (@p silent) has stopped: unlock it,
 /// counting an interruption.
-void stop_if_silent(StreamInputCounters& c, uint32_t const last_frames_rx) noexcept
+void stop_if_silent(StreamInputCounters& c, bool const silent) noexcept
 {
     auto const relaxed = std::memory_order_relaxed;
-    if (c.frames_rx.load(relaxed) != last_frames_rx || !c.is_locked.load(relaxed)) {
+    if (!silent || !c.is_locked.load(relaxed)) {
         return;
     }
     c.restart_run.store(true, relaxed);
@@ -272,7 +312,7 @@ void fold_counters(StreamInputIntervals& in, StreamInputCounters const& c) noexc
 auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
 {
     // Nothing received in the interval while locked: the stream stopped.
-    stop_if_silent(c, last[FRAMES_RX]);
+    stop_if_silent(c, silent(c));
     auto const before = values;
     fold_counters(*this, c);
     return values != before;
@@ -330,6 +370,16 @@ auto StreamOutputIntervals::fold_presence() noexcept -> bool
     return changed;
 }
 
+auto StreamInputIntervals::silent(StreamInputCounters const& c) noexcept -> bool
+{
+    auto const relaxed = std::memory_order_relaxed;
+    uint32_t const reports = c.outside_reports.load(relaxed);
+    bool const reported = std::exchange(last_reports, reports) != reports;
+    quiet_intervals = reported ? 0 : static_cast<uint8_t>(std::min<unsigned>(quiet_intervals + 1U, OUTSIDE_QUIET_INTERVALS));
+    bool const unmoved = c.frames_rx.load(relaxed) == last[FRAMES_RX];
+    return unmoved && (reports == 0 || reported || quiet_intervals >= OUTSIDE_QUIET_INTERVALS);
+}
+
 void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
 {  // NOLINT(statusbar-block-statements): one line per counter of Milan v1.2 Table 5.16
     auto const relaxed = std::memory_order_relaxed;
@@ -345,6 +395,8 @@ void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
     last[LATE_TIMESTAMP] = c.late_timestamp.load(relaxed);
     last[EARLY_TIMESTAMP] = c.early_timestamp.load(relaxed);
     last[FRAMES_RX] = c.frames_rx.load(relaxed);
+    last_reports = c.outside_reports.load(relaxed);
+    quiet_intervals = 0;
 }
 
 }  // namespace statusbar::avb_entity

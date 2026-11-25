@@ -87,7 +87,31 @@ struct StreamInputCounters
     /// Set by the reactor when it drops the lock (an unbind, a bind, a stop): the RX thread
     /// starts its clean-step run and its sequence and mr tracking again.
     std::atomic<bool> restart_run{false};
+    /// Reports from a data plane outside the kit (add_stream_input_counts()); 0 while the kit's own path receives.
+    std::atomic<uint32_t> outside_reports{0};
 };
+
+/// What a data plane outside the kit observed of one STREAM_INPUT since it last said, in StreamInputCounters' terms:
+/// AVTPDUs received, and of them those tally_stream_input_packet() would count, and the media lock as it checks it now.
+struct StreamInputCounts
+{
+    uint32_t frames_rx{0};
+    uint32_t seq_num_mismatch{0};
+    uint32_t media_reset{0};
+    uint32_t timestamp_uncertain{0};
+    uint32_t timestamp_valid{0};
+    uint32_t timestamp_not_valid{0};
+    uint32_t unsupported_format{0};
+    uint32_t late_timestamp{0};
+    uint32_t early_timestamp{0};
+    std::optional<bool> media_locked{};  ///< nullopt: it does not check the lock
+};
+
+/// Add @p counts to @p c. A lock gained counts MEDIA_LOCKED and a lock lost MEDIA_UNLOCKED and STREAM_INTERRUPTED, as
+/// tally_stream_input_packet() does. A report with AVTPDUs or a lock value clears the reactor's pending unlock
+/// (restart_run), as a packet's tally does, and gains no lock in that report. The thread that reports the stream, the
+/// RX thread's place; report each input at least once an observation interval (StreamInputIntervals::silent()).
+void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept;
 
 /// Drop @p c's media lock without an interruption (an unbind, or a reset):
 /// MEDIA_UNLOCKED counts it so MEDIA_LOCKED stays MEDIA_UNLOCKED or one more.
@@ -121,11 +145,21 @@ struct StreamInputIntervals
     /// The per-packet counters at the last fold (interval counters) or reset
     /// (event counters), same indices.
     std::array<uint32_t, 12> last{};
+    /// The observation intervals in a row with no report from a data plane outside the kit after which a locked input
+    /// it receives counts as silent: such a plane reports each input at least once an interval.
+    static constexpr uint8_t OUTSIDE_QUIET_INTERVALS = 2;
+    /// StreamInputCounters::outside_reports at the last fold or reset, and the intervals in a row since one moved it.
+    uint32_t last_reports{0};
+    uint8_t quiet_intervals{0};
 
     /// End one observation interval of @p c: a locked stream that received nothing has stopped,
     /// each interval counter whose per-packet counter moved counts one, and the event counters
     /// are brought up to date. True when a value changed.
     [[nodiscard]] auto fold(StreamInputCounters& c) noexcept -> bool;
+    /// Whether @p c received nothing in the interval ending now. The kit's own path: frames_rx did not move. A data
+    /// plane outside the kit: a report arrived and frames_rx did not move, or none arrived for OUTSIDE_QUIET_INTERVALS
+    /// intervals in a row; a slower report is no silence. Called once a fold.
+    [[nodiscard]] auto silent(StreamInputCounters const& c) noexcept -> bool;
 
     /// Zero every counter (Milan v1.2 Section 5.3.8.10: the input became
     /// bound), dropping any media lock first (unlock_stream_input).

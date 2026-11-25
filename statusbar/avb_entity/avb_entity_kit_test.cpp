@@ -3994,6 +3994,24 @@ TEST(avb_entity_kit_formats, milan_v1_3_tspec)
     EXPECT_TRUE(m.kit.host().components().aem_handler.stream_info_layout() == atdecc::aem::StreamInfoLayout::ieee_2021);
 }
 
+// What a data plane outside the kit received of an input reaches GET_COUNTERS as the kit's own reception does: Milan
+// v1.2 Table 5.16's interval counters, MEDIA_LOCKED from its check of the lock.
+TEST(avb_entity_kit_outside, what_was_received_outside_reaches_get_counters)
+{
+    MilanPair p;
+    EXPECT_TRUE(p.start());
+    int64_t t = MilanKit::steady_ns();
+    p.l.kit.poll_counters(t);  // the first interval starts
+    EXPECT_TRUE(p.l.kit.listener()->notify_received_outside(
+        0, {.frames_rx = 8, .seq_num_mismatch = 1, .timestamp_uncertain = 2, .timestamp_valid = 8, .media_locked = true}, 48));
+    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_EQ(c.counters[0].get(), 1U);   // MEDIA_LOCKED
+    EXPECT_EQ(c.counters[3].get(), 1U);   // SEQ_NUM_MISMATCH: one interval
+    EXPECT_EQ(c.counters[5].get(), 1U);   // TIMESTAMP_UNCERTAIN
+    EXPECT_EQ(c.counters[11].get(), 1U);  // FRAMES_RX
+}
+
 // Milan v1.2 Table 5.16: the input's ten counters; zeroed when it becomes
 // bound (Section 5.3.8.10), not when it is unbound; the fold counts intervals.
 TEST(avb_entity_kit_counters, stream_input_reset_on_bind)

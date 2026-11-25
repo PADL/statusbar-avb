@@ -453,7 +453,7 @@ void ListenerStreams::close_rx() noexcept
 void ListenerStreams::release_connections(sm::TimePoint const now)
 {
     for (auto& slot : slots_) {
-        slot.rx_stream_id.publish(0);  // no frame is this input's any more
+        publish_rx_stream(slot, 0);  // no frame is this input's any more
         release_connection(slot.connection, now);
     }
 }
@@ -1123,7 +1123,7 @@ void ListenerStreams::on_listener_connected(
     count_connection(*slot, stream_id);
     bool const ready = attach_or_held_ready(slot->connection, stream_id, talker_match(stream_index, dest_mac), now);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
-    slot->rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
+    publish_rx_stream(*slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
     log_connected(stream_index, dest_mac, ready, slot->connection.group.has_value());
 }
 
@@ -1137,10 +1137,61 @@ auto ListenerStreams::talker_match(uint16_t const stream_index, ieee::Eui48 cons
     return nanoavb::TalkerMatch{.destination = dest_mac, .vid = stream->stream_vlan_id};
 }
 
+void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
+{
+    bool const changed = slot.rx_stream_id.load() != stream_id;
+    slot.rx_stream_id.publish(stream_id);
+    if (changed) {
+        tell_input_changed(slot);
+    }
+}
+
+void ListenerStreams::tell_input_changed(ListenerStreamSlot const& slot) const noexcept
+{
+    if (on_input_changed_) {
+        on_input_changed_(slot.spec.index, slot.rx_stream_id.load(), slot.stopped.load(std::memory_order_relaxed));
+    }
+}
+
+void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot != nullptr && slot->stopped.exchange(stopped, std::memory_order_relaxed) != stopped) {
+        tell_input_changed(*slot);
+    }
+}
+
+auto ListenerStreams::notify_received_outside(
+    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    count_received_outside(*slot, counts);
+    slot->rx_packets.add(counts.frames_rx - std::min(counts.unsupported_format, counts.frames_rx));  // those accepted
+    slot->rx_samples.add(samples);
+    return true;
+}
+
+void ListenerStreams::count_received_outside(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
+{
+    bool const idle = slot.stopped.load(std::memory_order_relaxed) || slot.rx_stream_id.load() == 0;
+    if (!idle || counts.media_locked.value_or(true)) {
+        add_stream_input_counts(slot.counters, counts);
+        return;
+    }
+    // A stopped or unbound input's lock goes without an interruption (Milan v1.2 Sections 5.3.8.7, 5.3.8.10).
+    auto quiet = counts;
+    quiet.media_locked.reset();
+    add_stream_input_counts(slot.counters, quiet);
+    unlock_stream_input(slot.counters);
+}
+
 void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
-        slot->rx_stream_id.publish(0);  // no frame is this input's any more
+        publish_rx_stream(*slot, 0);  // no frame is this input's any more
         release_connection(slot->connection, now);
     }
     if (logger_) {

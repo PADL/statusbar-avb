@@ -33,6 +33,7 @@
 #include <fstream>
 #include <optional>
 #include <span>
+#include <tuple>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -100,6 +101,86 @@ constexpr ieee::Eui64 STREAM_2{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x02};
 constexpr ieee::Eui48 GROUP{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
 
 }  // namespace
+
+// A data plane outside the kit is told each change of what an input receives: the stream it connects to, its
+// stop and start, the disconnect and the release of every connection; a call that changes nothing tells nothing.
+TEST(listener_outside, each_change_of_what_an_input_receives_is_told)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    using Told = std::tuple<uint16_t, uint64_t, bool>;
+    std::vector<Told> told;
+    ls.set_on_input_changed(
+        [&told](uint16_t const idx, uint64_t const id, bool const stopped) { told.emplace_back(idx, id, stopped); });
+    uint64_t const one = STREAM_1.to_uint64();
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_TRUE(told == (std::vector<Told>{{0, one, false}}));
+    ls.set_stream_stopped(0, true);
+    ls.set_stream_stopped(0, true);
+    ls.set_stream_stopped(0, false);
+    EXPECT_TRUE(told == (std::vector<Told>{{0, one, false}, {0, one, true}, {0, one, false}}));
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    EXPECT_TRUE(told.back() == (Told{0, 0, false}));
+    ls.on_listener_connected(0, STREAM_2, GROUP, sm::TimePoint{});
+    EXPECT_TRUE(told.back() == (Told{0, STREAM_2.to_uint64(), false}));
+    ls.release_connections(sm::TimePoint{});
+    EXPECT_TRUE(told.back() == (Told{0, 0, false}));
+    EXPECT_EQ(told.size(), size_t{6});
+    ls.set_stream_stopped(3, true);  // no such input
+    EXPECT_EQ(told.size(), size_t{6});
+}
+
+// What a data plane outside the kit received of an input reaches its counters (so GET_COUNTERS, as IEEE 1722.1's
+// totals here) and its telemetry: the accepted AVTPDUs and their sample frames.
+TEST(listener_outside, counts_received_outside_reach_the_counters_and_telemetry)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(ls.notify_received_outside(
+        0, {.frames_rx = 12, .seq_num_mismatch = 2, .timestamp_valid = 10, .unsupported_format = 2, .media_locked = true}, 120));
+    auto const* const slot = ls.slot_for(0);
+    EXPECT_TRUE(slot->rx_packets.load() == 10 && slot->rx_samples.load() == 120);
+    uint32_t valid = 0;
+    std::array<uint32_t, 32> out{};
+    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
+    EXPECT_TRUE(out[0] == 1 && out[3] == 2 && out[6] == 10 && out[8] == 2 && out[11] == 12);
+    EXPECT_FALSE(ls.notify_received_outside(5, {.frames_rx = 1}, 6));
+}
+
+// A lock a data plane outside the kit reports lost while the input is stopped or unbound goes without an
+// interruption (Milan v1.2 Sections 5.3.8.7, 5.3.8.10): MEDIA_UNLOCKED counts it, STREAM_INTERRUPTED does not.
+TEST(listener_outside, a_lock_lost_while_stopped_or_unbound_is_no_interruption)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto const& c = ls.slot_for(0)->counters;
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = true}, 48));
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 0, .media_locked = false}, 0));
+    EXPECT_TRUE(c.media_unlocked.load() == 1 && c.stream_interrupted.load() == 0 && !c.is_locked.load());
+
+    ls.set_stream_stopped(0, false);
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = true}, 48));  // clears the pending unlock
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = true}, 48));
+    EXPECT_TRUE(c.media_locked.load() == 2 && c.is_locked.load());
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 0, .media_locked = false}, 0));
+    EXPECT_TRUE(c.media_unlocked.load() == 2 && c.stream_interrupted.load() == 0);
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});  // bound and started: a loss interrupts
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = true}, 48));
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = true}, 48));
+    EXPECT_TRUE(ls.notify_received_outside(0, {.frames_rx = 8, .media_locked = false}, 48));
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+}
 
 // IEEE 1722.1-2021 8.2.1.13: the group joined for a talker is its destination
 // when that is a multicast address; a unicast or zero destination has none.
