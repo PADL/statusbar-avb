@@ -2614,6 +2614,74 @@ TEST(configuration, set_validates_switches_and_round_trips)
     EXPECT_EQ(response_configuration(still1.bytes), uint16_t{1});
 }
 
+// IEEE 1722.1-2021 Clause 7.4.7.1: a failed SET_CONFIGURATION answers the configuration in force.
+TEST(configuration, a_failed_set_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    auto const unhooked = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(unhooked.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(unhooked.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(unhooked.bytes), uint16_t{0});
+    auto const bad = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(5));
+    EXPECT_EQ(bad.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(response_configuration(bad.bytes), uint16_t{0});
+    auto const short_set = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, {});
+    EXPECT_EQ(short_set.status, AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(short_set.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(short_set.bytes), uint16_t{0});
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_STREAM_IS_RUNNING; });
+    auto const vetoed = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(vetoed.status, atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(response_configuration(vetoed.bytes), uint16_t{0});
+    EXPECT_EQ(cmd_handler.current_configuration(), uint16_t{0});
+}
+
+// IEEE 1722.1-2021 Table 7-141: SET_CONFIGURATION is not deferred, so a hook's IN_PROGRESS, which
+// no final response would follow, is a failure answering the configuration in force.
+TEST(configuration, a_hook_answering_in_progress_is_refused_with_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return atdecc::AEM_STATUS_IN_PROGRESS; });
+    auto const deferred = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(deferred.status, atdecc::AEM_STATUS_ENTITY_MISBEHAVING);
+    EXPECT_EQ(response_configuration(deferred.bytes), uint16_t{0});
+    EXPECT_EQ(cmd_handler.current_configuration(), uint16_t{0});
+    EXPECT_EQ(cmd_handler.pending_command_count(), size_t{0});
+}
+
+// IEEE 1722.1-2021 Clause 7.4.7.1: a SET_CONFIGURATION refused for another controller's lock answers the one in force.
+TEST(configuration, a_set_refused_for_a_lock_answers_the_configuration_in_force)
+{
+    auto blob = make_blob_with_two_configurations();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_on_configuration_changed([](uint16_t) -> uint8_t { return AEM_STATUS_SUCCESS; });
+
+    atdecc::AemDu lock{};
+    lock.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, atdecc::AemDu::AEM_DATA_LENGTH + atdecc::aem::AemLockEntityPayload::LENGTH);
+    lock.controller_entity_id = Eui64{0xC0, 0, 0, 0, 0, 0, 0, 0x0A};
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> const lock_body{};
+    std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> buf{};
+    EXPECT_EQ(cmd_handler.handle_command(lock, lock_body, make_span(buf)).status, AEM_STATUS_SUCCESS);
+
+    auto const refused = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_CONFIGURATION, make_set_configuration_body(1));
+    EXPECT_EQ(refused.status, atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(refused.bytes.size(), atdecc::aem::AemSetConfigurationPayload::LENGTH);
+    EXPECT_EQ(response_configuration(refused.bytes), uint16_t{0});
+    EXPECT_EQ(cmd_handler.current_configuration(), uint16_t{0});
+}
+
 //
 // Test Runner
 //

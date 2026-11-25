@@ -347,7 +347,8 @@ class AemCommandHandler
     /// to reject. Without a registered callback a configuration SWITCH is
     /// refused (NOT_SUPPORTED) — the entity must not claim a configuration
     /// its streams are not actually built for; a SET to the current
-    /// configuration is always an idempotent SUCCESS.
+    /// configuration is always an idempotent SUCCESS. SET_CONFIGURATION is
+    /// never deferred: an IN_PROGRESS is answered ENTITY_MISBEHAVING.
     void set_on_configuration_changed(statusbar::sg14::inplace_function<uint8_t(uint16_t /*configuration*/), 64> fn)
     {
         on_configuration_changed_ = std::move(fn);
@@ -675,7 +676,8 @@ class AemCommandHandler
     /// the ENTITY descriptor's configurations_count; an actual switch runs
     /// the on_configuration_changed veto/apply hook (refused NOT_SUPPORTED
     /// when no hook is registered); a SET to the current configuration is
-    /// an idempotent SUCCESS.
+    /// an idempotent SUCCESS. The dispatch answers a failure with the
+    /// configuration in force (7.4.7.1).
     [[nodiscard]] auto handle_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
@@ -821,6 +823,13 @@ class AemCommandHandler
     /// The GET that reads what a SET writes (SET_NAME -> GET_NAME, SET_CONTROL ->
     /// GET_CONTROL, ...), or nullopt for a SET without one.
     [[nodiscard]] static auto get_twin_of(uint16_t set_command_type) noexcept -> std::optional<uint16_t>;
+
+    /// @p set_command's response @p r on SUCCESS, else refused_set()'s, for a SET the handler
+    /// answers itself and never defers (SET_CONFIGURATION): an IN_PROGRESS from its hook, which
+    /// no final response could follow, is answered ENTITY_MISBEHAVING.
+    [[nodiscard]] auto refuse_unless_success(
+        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
 
     /// How much of a SET body its GET twin asks with: the descriptor head, the
     /// name head for SET_NAME, the region header for SET_MATRIX.

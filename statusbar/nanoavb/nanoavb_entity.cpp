@@ -211,9 +211,10 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
 
         case AEM_COMMAND_SET_CONFIGURATION:
             if (auto const blocked = check_exclusive_access(header)) {
-                return reject_command(*blocked, command_data, out_buffer);
+                return refused_set(*blocked, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
             }
-            return handle_set_configuration(command_data, out_buffer);
+            return refuse_unless_success(
+                AEM_COMMAND_SET_CONFIGURATION, handle_set_configuration(command_data, out_buffer), command_data, out_buffer);
 
         case AEM_COMMAND_CONTROLLER_AVAILABLE:
             return handle_controller_available(header);
@@ -510,8 +511,9 @@ auto AemCommandHandler::failed_set_body(
 
 auto AemCommandHandler::get_twin_of(uint16_t const set_command_type) noexcept -> std::optional<uint16_t>
 {
-    constexpr std::array<std::pair<uint16_t, uint16_t>, 8> twins{
-        {{AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
+    constexpr std::array<std::pair<uint16_t, uint16_t>, 9> twins{
+        {{AEM_COMMAND_SET_CONFIGURATION, AEM_COMMAND_GET_CONFIGURATION},
+         {AEM_COMMAND_SET_NAME, AEM_COMMAND_GET_NAME},
          {AEM_COMMAND_SET_CONTROL, AEM_COMMAND_GET_CONTROL},
          {AEM_COMMAND_SET_STREAM_FORMAT, AEM_COMMAND_GET_STREAM_FORMAT},
          {AEM_COMMAND_SET_SAMPLING_RATE, AEM_COMMAND_GET_SAMPLING_RATE},
@@ -527,7 +529,10 @@ auto AemCommandHandler::get_twin_request_size(uint16_t const set_command_type) n
 {
     // The GET twin asks with the SET command's head: descriptor_type/index for
     // most, plus the name_index/configuration_index of a name (7.4.18.1) or the
-    // region header of a matrix (7.4.34.1).
+    // region header of a matrix (7.4.34.1). GET_CONFIGURATION asks with nothing (7.4.8.1).
+    if (set_command_type == AEM_COMMAND_SET_CONFIGURATION) {
+        return 0;
+    }
     if (set_command_type == AEM_COMMAND_SET_NAME) {
         return aem::AemNameCommandPayload::LENGTH;
     }
@@ -546,6 +551,18 @@ auto AemCommandHandler::value_in_force(
         return 0;
     }
     return read_back(*twin, command_data.first(request_size), out_buffer);
+}
+
+auto AemCommandHandler::refuse_unless_success(
+    uint16_t const set_command, AemCommandResponse const r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    if (r.status == AEM_STATUS_SUCCESS) {
+        return r;
+    }
+    // Nothing holds a command answered here for a final response (Table 7-141): no IN_PROGRESS.
+    uint8_t const status = r.status == AEM_STATUS_IN_PROGRESS ? AEM_STATUS_ENTITY_MISBEHAVING : r.status;
+    return refused_set(status, set_command, command_data, out_buffer);
 }
 
 auto AemCommandHandler::read_back(uint16_t const get_command_type, std::span<uint8_t const> request, std::span<uint8_t> out_buffer)
