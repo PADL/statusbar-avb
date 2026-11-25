@@ -17,6 +17,7 @@
 /// (5.4.4.8). What they mean to a sink is in atdecc_milan_mvu_stream_input.hpp.
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
+#include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/ieee/ieee.hpp"
 
 #include <compare>
@@ -218,6 +219,77 @@ static_assert(offsetof(MvuGetMilanInfoResponse, certification_version) == 10);
 static_assert(offsetof(MvuGetMilanInfoResponse, specification_version) == 14);
 
 //
+// SET_MEDIA_CLOCK_REFERENCE_INFO and GET_MEDIA_CLOCK_REFERENCE_INFO - 5.4.4.4, 5.4.4.5
+//
+
+/// flags - Table 5.18: which of a SET's fields apply; a response sets the ones the entity supports.
+constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID = 0x01;
+constexpr uint8_t MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID = 0x02;
+constexpr uint8_t MVU_MCR_FLAGS_SUPPORTED =
+    MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID | MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID;
+
+/// Default Media Clock Reference Priorities by type of device - Table 7.3 (7.6.1.1);
+/// MVU_MCR_PRIO_DEFAULT is the priority of a device that gives none.
+constexpr uint8_t MVU_MCR_PRIO_MEDIA_CLOCK_GENERATOR = 240;
+constexpr uint8_t MVU_MCR_PRIO_ROUTER = 224;  ///< matrix mixers, signal routers, switches with audio processing
+constexpr uint8_t MVU_MCR_PRIO_MIXING_CONSOLE = 208;
+constexpr uint8_t MVU_MCR_PRIO_AUDIO_INTERFACE = 192;  ///< stageboxes, audio interfaces
+constexpr uint8_t MVU_MCR_PRIO_LOUDSPEAKER_PROCESSOR = 176;
+constexpr uint8_t MVU_MCR_PRIO_AMPLIFIER = 160;  ///< amplifiers, powered loudspeakers, in-ear transmitters
+constexpr uint8_t MVU_MCR_PRIO_RECORDER = 144;
+constexpr uint8_t MVU_MCR_PRIO_DEFAULT = 128;
+constexpr uint8_t MVU_MCR_PRIO_EFFECT_PROCESSOR = 112;
+constexpr uint8_t MVU_MCR_PRIO_WIRELESS_RECEIVER = 80;
+constexpr uint8_t MVU_MCR_PRIO_MICROPHONE = 64;
+constexpr uint8_t MVU_MCR_PRIO_INSTRUMENT = 48;
+
+/// The media_clock_domain_name a clock domain has until a controller names it (7.6.2).
+inline constexpr std::string_view MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME = "DEFAULT";
+
+/// The command-specific data of a GET_MEDIA_CLOCK_REFERENCE_INFO command.
+struct MvuGetMediaClockReferenceInfoCommand
+{
+    static constexpr size_t LENGTH = 2;
+
+    /// Bytes 30-31: the CLOCK_DOMAIN asked about.
+    doublet_t clock_domain_index{0};
+
+    auto operator<=>(MvuGetMediaClockReferenceInfoCommand const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuGetMediaClockReferenceInfoCommand) == 2, "MvuGetMediaClockReferenceInfoCommand must be exactly 2 bytes");
+
+/// The command-specific data of a SET_MEDIA_CLOCK_REFERENCE_INFO command and its response,
+/// and of a GET_MEDIA_CLOCK_REFERENCE_INFO response: one CLOCK_DOMAIN's settings (7.6).
+struct MvuMediaClockReferenceInfoPayload
+{
+    static constexpr size_t LENGTH = 74;
+
+    /// Bytes 30-31: the CLOCK_DOMAIN.
+    doublet_t clock_domain_index{0};
+    /// Byte 32: Table 5.18.
+    octet_t flags{0};
+    /// Byte 33: reserved, 0.
+    octet_t reserved{0};
+    /// Byte 34: the vendor's default priority; a command's is ignored.
+    octet_t default_mcr_prio{0};
+    /// Byte 35: the user's priority, default_mcr_prio until a controller sets it.
+    octet_t user_mcr_prio{0};
+    /// Bytes 36-39: reserved, 0.
+    quadlet_t reserved2{0};
+    /// Bytes 40-103: the media clock domain name, UTF-8.
+    aem::AtdeccString media_clock_domain_name{};
+
+    auto operator<=>(MvuMediaClockReferenceInfoPayload const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuMediaClockReferenceInfoPayload) == 74, "MvuMediaClockReferenceInfoPayload must be exactly 74 bytes");
+static_assert(offsetof(MvuMediaClockReferenceInfoPayload, flags) == 2);
+static_assert(offsetof(MvuMediaClockReferenceInfoPayload, default_mcr_prio) == 4);
+static_assert(offsetof(MvuMediaClockReferenceInfoPayload, user_mcr_prio) == 5);
+static_assert(offsetof(MvuMediaClockReferenceInfoPayload, media_clock_domain_name) == 10);
+
+//
 // BIND_STREAM - 5.4.4.6, Figure 5.10
 //
 
@@ -339,6 +411,15 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::A
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMilanInfoResponse> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMediaClockReferenceInfoCommand>
+    : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuMediaClockReferenceInfoPayload> : std::true_type
 {};
 
 template <>

@@ -4736,6 +4736,192 @@ TEST(nanoavb_entity_max_transit_time, under_milan13_the_time_in_force_again_is_n
     }
 }
 
+//
+// SET_MEDIA_CLOCK_REFERENCE_INFO / GET_MEDIA_CLOCK_REFERENCE_INFO - Milan v1.3 Sections 5.4.4.4, 5.4.4.5
+//
+
+namespace {
+
+/// A SET_MEDIA_CLOCK_REFERENCE_INFO body for CLOCK_DOMAIN @p index with @p flags, @p prio and @p name.
+auto mcr_set_body(uint16_t const index, uint8_t const flags, uint8_t const prio, std::string_view const name)
+    -> std::array<uint8_t, MvuMediaClockReferenceInfoPayload::LENGTH>
+{
+    MvuMediaClockReferenceInfoPayload payload{};
+    payload.clock_domain_index = index;
+    payload.flags = flags;
+    payload.default_mcr_prio = 0x11;  // ignored in a command
+    payload.user_mcr_prio = prio;
+    payload.media_clock_domain_name = AtdeccString{name};
+    std::array<uint8_t, MvuMediaClockReferenceInfoPayload::LENGTH> body{};
+    span_store(body, payload);
+    return body;
+}
+
+/// The settings an MVU MEDIA_CLOCK_REFERENCE_INFO response @p s carries.
+auto mcr_of(CapturedSend const& s) -> MvuMediaClockReferenceInfoPayload
+{
+    MvuMediaClockReferenceInfoPayload payload{};
+    if (mvu_body_of(s).size() >= MvuMediaClockReferenceInfoPayload::LENGTH) {
+        span_load(payload, mvu_body_of(s));
+    }
+    return payload;
+}
+
+/// What GET_MEDIA_CLOCK_REFERENCE_INFO of CLOCK_DOMAIN @p index answers @p handler's controller A.
+auto get_mcr(AemCommandHandler& handler, std::vector<CapturedSend>& sends, uint16_t const index) -> CapturedSend
+{
+    std::array<uint8_t, MvuGetMediaClockReferenceInfoCommand::LENGTH> body{};
+    span_store(body, MvuGetMediaClockReferenceInfoCommand{.clock_domain_index = index});
+    (void)inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, body);
+    return sends.back();
+}
+
+/// A Milan entity over the clock model (CLOCK_DOMAIN 0 only), its sends captured.
+struct McrEntity
+{
+    EntityModel model{create_clock_model()};
+    AemCommandHandler handler{model};
+    std::vector<CapturedSend> sends;
+
+    McrEntity()
+    {
+        handler.set_entity_id(kEntity);
+        handler.set_milan_info(kMilanInfo);
+        capture_sends(handler, sends);
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_entity_mvu_mcr, get_answers_the_defaults_for_a_clock_domain_the_model_has)
+{
+    McrEntity e;
+    auto const reply = get_mcr(e.handler, e.sends, 0);
+    EXPECT_EQ(mvu_header_of(reply).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(mvu_body_of(reply).size(), MvuMediaClockReferenceInfoPayload::LENGTH);
+    auto const info = mcr_of(reply);
+    EXPECT_EQ(info.flags.get(), MVU_MCR_FLAGS_SUPPORTED);
+    EXPECT_EQ(info.default_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+    EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+    EXPECT_EQ(info.media_clock_domain_name.as_string_view(), MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME);
+
+    EXPECT_EQ(mvu_header_of(get_mcr(e.handler, e.sends, 1)).common.status(), MVU_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(mvu_body_of(e.sends.back()).size(), MvuGetMediaClockReferenceInfoCommand::LENGTH);
+    std::array<uint8_t, 1> const short_command{};
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO, short_command);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+}
+
+TEST(nanoavb_entity_mvu_mcr, a_set_applies_the_fields_its_flags_mark_and_notifies_the_others_after_it)
+{
+    McrEntity e;
+    register_controller(e.handler, kEntity, kControllerA, kMacA);
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+
+    // The priority alone: the name in the command is not applied.
+    auto const prio_only = mcr_set_body(0, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 200, "ignored");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, prio_only);
+    EXPECT_EQ(e.sends.size(), size_t{2});
+    EXPECT_FALSE(mvu_header_of(e.sends.front()).is_unsolicited());  // the response first
+    EXPECT_EQ(mvu_header_of(e.sends.front()).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(mcr_of(e.sends.front()).user_mcr_prio.get(), 200);
+    EXPECT_EQ(mcr_of(e.sends.front()).default_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+    EXPECT_EQ(mcr_of(e.sends.front()).media_clock_domain_name.as_string_view(), MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME);
+    EXPECT_TRUE(
+        mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, kMacB) == std::vector<uint16_t>{0});
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, kMacA).empty());
+    EXPECT_EQ(mcr_of(e.sends.back()).user_mcr_prio.get(), 200);
+
+    // The name alone, then the same name again: applied and notified once.
+    auto const name_only = mcr_set_body(0, MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID, 0, "Front of house");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, name_only);
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, name_only);
+    EXPECT_TRUE(
+        (mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, kMacB) == std::vector<uint16_t>{0, 1}));
+    auto const info = mcr_of(get_mcr(e.handler, e.sends, 0));
+    EXPECT_EQ(info.user_mcr_prio.get(), 200);
+    EXPECT_EQ(info.media_clock_domain_name.as_string_view(), std::string_view{"Front of house"});
+}
+
+TEST(nanoavb_entity_mvu_mcr, a_bad_name_an_unknown_domain_or_another_controllers_lock_changes_nothing)
+{
+    McrEntity e;
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+    auto const malformed = mcr_set_body(0, MVU_MCR_FLAGS_SUPPORTED, 200, "Caf\xC3");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, malformed);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(mcr_of(e.sends.back()).user_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);  // the settings in force
+
+    auto const unknown = mcr_set_body(1, MVU_MCR_FLAGS_SUPPORTED, 200, "Front of house");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, unknown);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_NO_SUCH_DESCRIPTOR);
+
+    auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock.controller_entity_id = kControllerB;
+    std::array<uint8_t, 16> const lock_body{};
+    EXPECT_EQ(make_test_result(e.handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+    auto const valid = mcr_set_body(0, MVU_MCR_FLAGS_SUPPORTED, 200, "Front of house");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, valid);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(mcr_of(e.sends.back()).media_clock_domain_name.as_string_view(), MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME);
+    // The lock is asked first: a locked-out controller learns nothing of its arguments.
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, malformed);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, unknown);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(mcr_of(e.sends.back()).user_mcr_prio.get(), 200);  // the command given back
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, kMacB).empty());
+    auto const info = mcr_of(get_mcr(e.handler, e.sends, 0));
+    EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+}
+
+// Milan v1.3 Section 7.6: the settings belong to a configuration's CLOCK_DOMAINs; a switch starts
+// the new configuration's from their defaults.
+TEST(nanoavb_entity_mvu_mcr, a_configuration_switch_resets_the_settings)
+{
+    DescriptorEntity entity{};
+    entity.configurations_count = 2;
+    DescriptorConfiguration config{};
+    DescriptorClockDomain domain{};
+    EntityModel model = EntityModelBuilder{}.entity(entity).configuration(config).clock_domain(domain).build();
+    AemCommandHandler handler{model};
+    std::vector<CapturedSend> sends;
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    capture_sends(handler, sends);
+    handler.set_on_configuration_changed([](uint16_t) { return AEM_STATUS_SUCCESS; });
+    auto const named = mcr_set_body(0, MVU_MCR_FLAGS_SUPPORTED, 200, "Front of house");
+    (void)inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, named);
+    EXPECT_EQ(mcr_of(get_mcr(handler, sends, 0)).user_mcr_prio.get(), 200);
+
+    std::array<uint8_t, AemSetConfigurationPayload::LENGTH> to_1{};
+    span_store(to_1, AemSetConfigurationPayload{.reserved = uint16_t{0}, .configuration_index = uint16_t{1}});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONFIGURATION, to_1);
+    EXPECT_EQ(handler.current_configuration(), uint16_t{1});
+    auto const info = mcr_of(get_mcr(handler, sends, 0));
+    EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+    EXPECT_EQ(info.media_clock_domain_name.as_string_view(), MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME);
+}
+
+TEST(nanoavb_entity_mvu_mcr, the_user_priority_follows_the_default_until_a_controller_sets_one)
+{
+    McrEntity e;
+    EXPECT_TRUE(e.handler.set_default_mcr_priority(0, MVU_MCR_PRIO_AUDIO_INTERFACE));
+    EXPECT_FALSE(e.handler.set_default_mcr_priority(AemCommandHandler::MAX_CLOCK_DOMAINS, MVU_MCR_PRIO_ROUTER));
+    auto info = mcr_of(get_mcr(e.handler, e.sends, 0));
+    EXPECT_EQ(info.default_mcr_prio.get(), MVU_MCR_PRIO_AUDIO_INTERFACE);
+    EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_AUDIO_INTERFACE);
+
+    auto const set = mcr_set_body(0, MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID, 100, "");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, set);
+    EXPECT_TRUE(e.handler.set_default_mcr_priority(0, MVU_MCR_PRIO_ROUTER));
+    info = mcr_of(get_mcr(e.handler, e.sends, 0));
+    EXPECT_EQ(info.default_mcr_prio.get(), MVU_MCR_PRIO_ROUTER);
+    EXPECT_EQ(info.user_mcr_prio.get(), 100);
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;

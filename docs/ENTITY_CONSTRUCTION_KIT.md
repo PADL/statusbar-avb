@@ -377,18 +377,32 @@ states it by itself: set under the Milan profile, clear under any other,
 whatever `milan.features_flags` gives. A Milan model held to the classic
 profile has no sink to bind, and answers the three NOT_IMPLEMENTED.
 
+SET_MEDIA_CLOCK_REFERENCE_INFO and GET_MEDIA_CLOCK_REFERENCE_INFO
+(5.4.4.4, 5.4.4.5), required of every PAAD-AE, keep each CLOCK_DOMAIN's
+user priority and media clock domain name (7.6) for the first
+`AemCommandHandler::MAX_CLOCK_DOMAINS` (4) the model has; a later one, or
+one the model lacks, is NO_SUCH_DESCRIPTOR. The default priority is
+MVU_MCR_PRIO_DEFAULT (128) until the entity names its own with
+`set_default_mcr_priority()` (Table 7.3), and the user priority follows it
+until a controller sets one. A SET applies the fields its flags mark,
+refuses a name that is not well-formed UTF-8 BAD_ARGUMENTS and a
+controller the lock shuts out ENTITY_LOCKED, answers the settings in
+force, and when it changed them sends that answer, after it, to the other
+registered controllers as an MVU notification (5.4.5.3). The settings are
+held in memory only: `media_clock_reference_info()` reads them, and
+nothing yet reports a change to the entity or restores them, which an
+entity that keeps them across a restart (as Milan asks) would need.
+
 Every other MVU command answers NOT_IMPLEMENTED with its data given back.
 Milan allows that of SET_SYSTEM_UNIQUE_ID and GET_SYSTEM_UNIQUE_ID, which
-are optional. SET_MEDIA_CLOCK_REFERENCE_INFO and
-GET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.4, 5.4.4.5) are required of every
-PAAD-AE and are not implemented yet, and no MVU response is sent as an
-unsolicited notification.
+are optional.
 
 Without `entity.milan` the entity is a plain 1722.1 entity and lets every
 MVU command pass unanswered, as 5.4.4.1 recommends of a Configuration
 that is not Milan. The wire structs are in `atdecc_aecp_mvu.hpp`:
-`atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`, `MvuBindStream`,
-`MvuStreamInput` and `MvuGetStreamInputInfoExResponse`.
+`atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`,
+`MvuGetMediaClockReferenceInfoCommand`, `MvuMediaClockReferenceInfoPayload`,
+`MvuBindStream`, `MvuStreamInput` and `MvuGetStreamInputInfoExResponse`.
 
 GET_MAX_TRANSIT_TIME (IEEE 1722.1-2021 7.4.77) answers a stream output's
 presentation offset: the one above until a controller changes it.

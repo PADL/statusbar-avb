@@ -347,6 +347,19 @@ class AemCommandHandler
     void set_milan_info(std::optional<MilanInfo> const info) noexcept { milan_info_ = info; }
     [[nodiscard]] auto milan_info() const noexcept -> std::optional<MilanInfo> const& { return milan_info_; }
 
+    /// The CLOCK_DOMAINs whose media clock reference settings the entity keeps (Milan v1.3
+    /// Section 7.6); MEDIA_CLOCK_REFERENCE_INFO for a later one is NO_SUCH_DESCRIPTOR.
+    static constexpr size_t MAX_CLOCK_DOMAINS = 4;
+
+    /// The vendor's Default Media Clock Reference Priority of CLOCK_DOMAIN @p clock_domain_index
+    /// (Milan v1.3 Section 7.6.1.1, Table 7.3), MVU_MCR_PRIO_DEFAULT until set; a user priority
+    /// no controller has set follows it. False past MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto set_default_mcr_priority(uint16_t clock_domain_index, uint8_t prio) noexcept -> bool;
+
+    /// What GET_MEDIA_CLOCK_REFERENCE_INFO answers for CLOCK_DOMAIN @p clock_domain_index (Milan
+    /// v1.3 Section 5.4.4.5), whether or not the model has it; the defaults past MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto media_clock_reference_info(uint16_t clock_domain_index) const noexcept -> MvuMediaClockReferenceInfoPayload;
+
     /// Give the handler what answers BIND_STREAM, UNBIND_STREAM and
     /// GET_STREAM_INPUT_INFO_EX, on behalf of @p owner, an address that names
     /// whoever attaches (a net handler passes itself). Without it the three
@@ -672,6 +685,9 @@ class AemCommandHandler
     /// the sender owns the entity (or it is free) and the command may proceed.
     [[nodiscard]] auto check_exclusive_access(AemDu const& header) const noexcept -> std::optional<uint8_t>;
 
+    /// check_exclusive_access() for a command from @p controller_entity_id, AEM or MVU.
+    [[nodiscard]] auto exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>;
+
     /// Build a rejection response: the given status, echoing the command payload so
     /// the controller can match the response. Applies no mutation.
     [[nodiscard]] static auto reject_command(uint8_t status, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -762,6 +778,15 @@ class AemCommandHandler
     /// configuration in force (7.4.7.1).
     [[nodiscard]] auto handle_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
+
+    /// SET_CONFIGURATION, answered as refuse_unless_success() answers it; a switch forgets what
+    /// belonged to the old configuration (forget_configuration_state()).
+    [[nodiscard]] auto answer_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// Forget what controllers set on the old configuration's descriptors: the media clock
+    /// reference settings of its CLOCK_DOMAINs (Milan v1.3 Section 7.6).
+    void forget_configuration_state();
 
     /// Handle CONTROLLER_AVAILABLE command (always SUCCESS, no body).
     [[nodiscard]] static auto handle_controller_available(AemDu const& /*header*/) -> AemCommandResponse
@@ -1067,15 +1092,41 @@ class AemCommandHandler
     /// notifications its dispatch raises leave out.
     [[nodiscard]] auto dispatch_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool;
 
-    /// Answer an MVU command that is not a bind or unbind: handle_mvu_command(), then the response.
-    [[nodiscard]] auto answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool;
+    /// Answer an MVU command that is not a bind or unbind: handle_mvu_command(), then the
+    /// response, then, when the command changed what it names, the same response to the other
+    /// registered controllers (Milan v1.3 Section 5.4.5.3).
+    [[nodiscard]] auto answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool;
 
-    /// Dispatch one MVU command that is answered from what the handler can
-    /// read (Milan v1.3 5.4.4): GET_MILAN_INFO from milan_info_,
-    /// GET_STREAM_INPUT_INFO_EX from the attached stream inputs, every other
-    /// command NOT_IMPLEMENTED with its data given back. Writes the
-    /// response's command-specific data into @p out_buffer.
-    [[nodiscard]] auto handle_mvu_command(MvuCommand const& command, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+    /// Dispatch one MVU command that is answered by the handler (Milan v1.3
+    /// 5.4.4): GET_MILAN_INFO from milan_info_, SET and GET_MEDIA_CLOCK_REFERENCE_INFO
+    /// from the clock domains' settings, GET_STREAM_INPUT_INFO_EX from the attached
+    /// stream inputs, every other command NOT_IMPLEMENTED with its data given back.
+    /// Writes the response's command-specific data into @p out_buffer.
+    [[nodiscard]] auto handle_mvu_command(MvuCommand const& command, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// GET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.5): a CLOCK_DOMAIN the model lacks is
+    /// NO_SUCH_DESCRIPTOR with the command given back.
+    [[nodiscard]] auto handle_mvu_get_mcr_info(MvuCommand const& command, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
+
+    /// SET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.4): the fields its flags mark, a well-formed UTF-8
+    /// name, from a controller the lock does not shut out. Answers the settings in force, the
+    /// command given back for a CLOCK_DOMAIN the model lacks.
+    [[nodiscard]] auto handle_mvu_set_mcr_info(MvuCommand const& command, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// The status SET_MEDIA_CLOCK_REFERENCE_INFO @p request from @p controller answers, before
+    /// anything is applied: NO_SUCH_DESCRIPTOR, BAD_ARGUMENTS, ENTITY_LOCKED or SUCCESS.
+    [[nodiscard]] auto mcr_set_status(Eui64 const& controller, MvuMediaClockReferenceInfoPayload const& request) const -> uint8_t;
+
+    /// What SET_MEDIA_CLOCK_REFERENCE_INFO @p request is answered with: the settings in force, or the
+    /// command given back for a CLOCK_DOMAIN the model lacks.
+    [[nodiscard]] auto mcr_info_answer(MvuMediaClockReferenceInfoPayload const& request) const -> MvuMediaClockReferenceInfoPayload;
+
+    /// Apply the fields of @p request its flags mark; mvu_changed_ says whether they changed anything.
+    void apply_mcr_info(MvuMediaClockReferenceInfoPayload const& request);
+
+    /// Whether the current configuration has CLOCK_DOMAIN @p index whose settings are kept.
+    [[nodiscard]] auto has_clock_domain(uint16_t index) const -> bool;
 
     /// GET_MILAN_INFO (5.4.4.1).
     [[nodiscard]] auto handle_mvu_get_milan_info(MvuCommand const& command, std::span<uint8_t> out_buffer) const
@@ -1151,6 +1202,22 @@ class AemCommandHandler
 
     // The GET_MILAN_INFO answer; nullopt for an entity that is not a Milan device.
     std::optional<MilanInfo> milan_info_{};
+
+    // One CLOCK_DOMAIN's media clock reference settings (Milan v1.3 Section 7.6): the user
+    // priority a controller set (none: the default priority's) and the domain name.
+    struct McrInfo
+    {
+        std::optional<uint8_t> user_mcr_prio{};
+        aem::AtdeccString domain_name{atdecc::MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME};
+    };
+    std::array<McrInfo, MAX_CLOCK_DOMAINS> mcr_info_{};
+    std::array<uint8_t, MAX_CLOCK_DOMAINS> default_mcr_prio_{[] {
+        std::array<uint8_t, MAX_CLOCK_DOMAINS> prio{};
+        prio.fill(atdecc::MVU_MCR_PRIO_DEFAULT);
+        return prio;
+    }()};
+    // The MVU command answer_mvu_command() dispatches changed what it names: its response is notified.
+    bool mvu_changed_{false};
 
     // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
     // implicitly registers the acquiring controller for unsolicited notifications.

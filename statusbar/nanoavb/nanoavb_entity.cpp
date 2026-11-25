@@ -5,6 +5,7 @@
 
 #include "statusbar/atdecc/atdecc_addresses.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
+#include "statusbar/atdecc/atdecc_utf8.hpp"
 
 #include <algorithm>
 #include <array>
@@ -283,8 +284,7 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
             if (auto const blocked = check_exclusive_access(header)) {
                 return refused_set(*blocked, AEM_COMMAND_SET_CONFIGURATION, command_data, out_buffer);
             }
-            return refuse_unless_success(
-                AEM_COMMAND_SET_CONFIGURATION, handle_set_configuration(command_data, out_buffer), command_data, out_buffer);
+            return answer_set_configuration(command_data, out_buffer);
 
         case AEM_COMMAND_CONTROLLER_AVAILABLE:
             return handle_controller_available(header);
@@ -469,13 +469,18 @@ auto AemCommandHandler::handle_get_name(std::span<uint8_t const> command_data, s
 
 auto AemCommandHandler::check_exclusive_access(AemDu const& header) const noexcept -> std::optional<uint8_t>
 {
+    return exclusive_access_status(header.controller_entity_id);
+}
+
+auto AemCommandHandler::exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>
+{
     // ENTITY_ACQUIRED takes precedence over ENTITY_LOCKED (an acquisition is the
     // stronger claim). Either held by a controller OTHER than the sender blocks the
     // mutation; the owning controller (or a free entity) proceeds.
-    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+    if (acquired_ && !(acquiring_controller_ == controller_entity_id)) {
         return AEM_STATUS_ENTITY_ACQUIRED;
     }
-    if (locked_ && !(locking_controller_ == header.controller_entity_id)) {
+    if (locked_ && !(locking_controller_ == controller_entity_id)) {
         return AEM_STATUS_ENTITY_LOCKED;
     }
     return std::nullopt;
@@ -1683,6 +1688,23 @@ auto AemCommandHandler::handle_set_configuration(std::span<uint8_t const> comman
     return {.status = AEM_STATUS_SUCCESS, .size = AemSetConfigurationPayload::LENGTH};
 }
 
+auto AemCommandHandler::answer_set_configuration(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    uint16_t const before = current_configuration_;
+    auto const r = refuse_unless_success(
+        AEM_COMMAND_SET_CONFIGURATION, handle_set_configuration(command_data, out_buffer), command_data, out_buffer);
+    if (current_configuration_ != before) {
+        forget_configuration_state();
+    }
+    return r;
+}
+
+void AemCommandHandler::forget_configuration_state()
+{
+    mcr_info_ = {};  // the new configuration's CLOCK_DOMAINs start from their defaults
+}
+
 auto AemCommandHandler::send_response(
     Eui48 const& dest_mac, AemDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool
 {
@@ -1922,19 +1944,27 @@ auto AemCommandHandler::dispatch_mvu_command(Eui48 const& src_mac, MvuCommand co
     return sent;
 }
 
-auto AemCommandHandler::answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool
+auto AemCommandHandler::answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool
 {
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
     auto const response = handle_mvu_command(command, out_buffer);
-    return send_mvu_response(src_mac, command.header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    auto const body = std::span<uint8_t const>{out_buffer.data(), response.size};
+    bool const sent = send_mvu_response(src_mac, command.header, response.status, body);
+    if (std::exchange(mvu_changed_, false)) {
+        emit_mvu_unsolicited(command.header.command_type(), body);  // after the response (5.4.5.3)
+    }
+    return sent;
 }
 
-auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
-    -> AemCommandResponse
+auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<uint8_t> const out_buffer) -> AemCommandResponse
 {
     switch (command.header.command_type()) {
         case MVU_COMMAND_GET_MILAN_INFO:
             return handle_mvu_get_milan_info(command, out_buffer);
+        case MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO:
+            return handle_mvu_set_mcr_info(command, out_buffer);
+        case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
+            return handle_mvu_get_mcr_info(command, out_buffer);
         case MVU_COMMAND_GET_STREAM_INPUT_INFO_EX:
             return handle_mvu_get_stream_input_info_ex(command, out_buffer);
         default:
@@ -1950,6 +1980,107 @@ auto AemCommandHandler::handle_mvu_get_milan_info(MvuCommand const& command, std
     }
     span_store(out_buffer, milan_info_response());
     return {.status = MVU_STATUS_SUCCESS, .size = MvuGetMilanInfoResponse::LENGTH};
+}
+
+auto AemCommandHandler::handle_mvu_get_mcr_info(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    auto const request = load_payload<MvuGetMediaClockReferenceInfoCommand>(command.data);
+    if (!request) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    uint16_t const index = request->clock_domain_index.get();
+    if (!has_clock_domain(index)) {
+        span_store(out_buffer, *request);
+        return {.status = MVU_STATUS_NO_SUCH_DESCRIPTOR, .size = MvuGetMediaClockReferenceInfoCommand::LENGTH};
+    }
+    span_store(out_buffer, media_clock_reference_info(index));
+    return {.status = MVU_STATUS_SUCCESS, .size = MvuMediaClockReferenceInfoPayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_mvu_set_mcr_info(MvuCommand const& command, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
+    auto const request = load_payload<MvuMediaClockReferenceInfoPayload>(command.data);
+    if (!request) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    uint8_t const status = mcr_set_status(command.header.common.controller_entity_id, *request);
+    if (status == MVU_STATUS_SUCCESS) {
+        apply_mcr_info(*request);
+    }
+    span_store(out_buffer, mcr_info_answer(*request));
+    return {.status = status, .size = MvuMediaClockReferenceInfoPayload::LENGTH};
+}
+
+auto AemCommandHandler::mcr_info_answer(MvuMediaClockReferenceInfoPayload const& request) const -> MvuMediaClockReferenceInfoPayload
+{
+    // The settings in force, as a failed AEM SET answers its value; the command for no domain.
+    uint16_t const index = request.clock_domain_index.get();
+    return has_clock_domain(index) ? media_clock_reference_info(index) : request;
+}
+
+auto AemCommandHandler::mcr_set_status(Eui64 const& controller, MvuMediaClockReferenceInfoPayload const& request) const -> uint8_t
+{
+    // The lock first, as for every SET; MVU has no ENTITY_ACQUIRED, so an acquisition answers the same.
+    if (exclusive_access_status(controller)) {
+        return MVU_STATUS_ENTITY_LOCKED;
+    }
+    if (!has_clock_domain(request.clock_domain_index.get())) {
+        return MVU_STATUS_NO_SUCH_DESCRIPTOR;
+    }
+    bool const naming = request.flags.has_flag(MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID);
+    bool const well_formed = !naming || atdecc::utf8_well_formed(request.media_clock_domain_name.as_string_view());
+    return well_formed ? MVU_STATUS_SUCCESS : MVU_STATUS_BAD_ARGUMENTS;
+}
+
+void AemCommandHandler::apply_mcr_info(MvuMediaClockReferenceInfoPayload const& request)
+{
+    uint16_t const index = request.clock_domain_index.get();
+    auto const before = media_clock_reference_info(index);
+    auto& info = mcr_info_[index];
+    if (request.flags.has_flag(MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID)) {
+        info.user_mcr_prio = request.user_mcr_prio.get();
+    }
+    if (request.flags.has_flag(MVU_MCR_FLAGS_MEDIA_CLOCK_DOMAIN_NAME_VALID)) {
+        info.domain_name = aem::AtdeccString{request.media_clock_domain_name.as_string_view()};
+    }
+    mvu_changed_ = !std::ranges::equal(make_const_span(before), make_const_span(media_clock_reference_info(index)));
+}
+
+auto AemCommandHandler::has_clock_domain(uint16_t const index) const -> bool
+{
+    if (index >= MAX_CLOCK_DOMAINS) {
+        return false;
+    }
+    std::array<uint8_t, atdecc::aem::AEM_DESCRIPTOR_SIZE> scratch{};
+    AemEntityModel const aem_model{*handler_};
+    DescriptorRef const ref{
+        .configuration_index = current_configuration_, .descriptor_type = DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = index};
+    return aem_model.get_descriptor_for_wire(ref, scratch) != 0;
+}
+
+auto AemCommandHandler::media_clock_reference_info(uint16_t const clock_domain_index) const noexcept
+    -> MvuMediaClockReferenceInfoPayload
+{
+    bool const held = clock_domain_index < MAX_CLOCK_DOMAINS;
+    uint8_t const default_prio = held ? default_mcr_prio_[clock_domain_index] : MVU_MCR_PRIO_DEFAULT;
+    McrInfo const kept = held ? mcr_info_[clock_domain_index] : McrInfo{};
+    return MvuMediaClockReferenceInfoPayload{
+        .clock_domain_index = clock_domain_index,
+        .flags = MVU_MCR_FLAGS_SUPPORTED,
+        .default_mcr_prio = default_prio,
+        .user_mcr_prio = kept.user_mcr_prio.value_or(default_prio),
+        .media_clock_domain_name = kept.domain_name};
+}
+
+auto AemCommandHandler::set_default_mcr_priority(uint16_t const clock_domain_index, uint8_t const prio) noexcept -> bool
+{
+    if (clock_domain_index >= MAX_CLOCK_DOMAINS) {
+        return false;
+    }
+    default_mcr_prio_[clock_domain_index] = prio;
+    return true;
 }
 
 auto AemCommandHandler::handle_mvu_get_stream_input_info_ex(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
