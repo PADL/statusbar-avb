@@ -16,6 +16,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -112,6 +113,41 @@ TEST(gptp_announce_handler, silence_for_the_receipt_timeout_loses_the_grandmaste
     EXPECT_EQ(seen.changes.size(), size_t{2});
     // logMessageInterval -3: 125 ms Announces, held for 375 ms.
     EXPECT_EQ(handler.announce_receipt_timeout_ns(), (3 * ONE_SECOND_NS) / 8);
+}
+
+TEST(gptp_announce_handler, the_path_trace_follows_the_announces_and_is_emptied_on_loss)
+{
+    int changes = 0;
+    GptpAnnounceHandler handler{"no-such-interface-0"};
+    handler.set_on_path_trace_changed([&](int64_t) { ++changes; });
+    AsPath through_bridge{};
+    through_bridge.push_back(kGmA.to_eui64());
+    through_bridge.push_back(ieee::Eui64{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x02});
+
+    handler.observe_announce(ONE_SECOND_NS, announce_from(kGmA), through_bridge);
+    EXPECT_EQ(changes, 1);
+    EXPECT_TRUE(std::ranges::equal(handler.path_trace(), through_bridge));
+    handler.observe_announce(2 * ONE_SECOND_NS, announce_from(kGmA), through_bridge);
+    EXPECT_EQ(changes, 1);
+    // An Announce without the TLV names its grandmaster alone.
+    handler.observe_announce(3 * ONE_SECOND_NS, announce_from(kGmA));
+    EXPECT_EQ(changes, 2);
+    std::array const gm_alone{kGmA.to_eui64()};
+    EXPECT_TRUE(std::ranges::equal(handler.path_trace(), gm_alone));
+    handler.tick(6 * ONE_SECOND_NS);
+    EXPECT_FALSE(handler.has_grandmaster());
+    EXPECT_TRUE(handler.path_trace().empty());
+    EXPECT_EQ(changes, 3);
+}
+
+TEST(gptp_announce_handler, replacing_the_callbacks_keeps_the_path_trace_observer)
+{
+    int changes = 0;
+    GptpAnnounceHandler handler{"no-such-interface-0"};
+    handler.set_on_path_trace_changed([&](int64_t) { ++changes; });
+    handler.set_callbacks(GptpAnnounceCallbacks{.grandmaster_lost = [](int64_t) {}});
+    handler.observe_announce(ONE_SECOND_NS, announce_from(kGmA));
+    EXPECT_EQ(changes, 1);
 }
 
 TEST(maap_net_handler, retire_releases_the_range_and_finishes_the_port)

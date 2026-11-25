@@ -19,6 +19,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/tsn/tsn_clock_identity.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstdint>
@@ -48,24 +49,89 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
         if (!result || *result <= 0) {
             break;
         }
-        auto const msg = parse_gptp(std::span<uint8_t const>{payload_buf_.data(), static_cast<size_t>(*result)});
+        auto const payload = std::span<uint8_t const>{payload_buf_.data(), static_cast<size_t>(*result)};
+        auto const msg = parse_gptp(payload);
         if (!msg) {
             continue;
         }
 
         if (auto const* announce = std::get_if<AnnounceMessage>(&*msg)) {
-            observe_announce(now_ns, *announce);
+            observe_announce(now_ns, *announce, parse_announce_path_trace(payload));
         }
     }
 }
 
-void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceMessage const& announce)
+namespace {
+
+/// The TLVs after the Announce body of @p announce, as far as its messageLength (IEEE 802.1AS-2020
+/// Clause 10.6.3.1); empty when there are none.
+auto announce_tlvs(std::span<uint8_t const> const announce) noexcept -> std::span<uint8_t const>
+{
+    if (announce.size() < gptp::AnnounceMessage::LENGTH) {
+        return {};
+    }
+    gptp::MessageHeader header{};
+    span_load(header, announce);
+    size_t const end = std::min<size_t>(announce.size(), header.message_length.get());
+    return end > gptp::AnnounceMessage::LENGTH
+        ? announce.subspan(gptp::AnnounceMessage::LENGTH, end - gptp::AnnounceMessage::LENGTH)
+        : std::span<uint8_t const>{};
+}
+
+/// The value of the PATH_TRACE TLV among @p tlvs; empty when it is absent or a TLV runs past them.
+auto path_trace_value(std::span<uint8_t const> tlvs) noexcept -> std::span<uint8_t const>
+{
+    while (tlvs.size() >= gptp::TlvHeader::LENGTH) {
+        gptp::TlvHeader tlv{};
+        span_load(tlv, tlvs);
+        auto const value = tlvs.subspan(gptp::TlvHeader::LENGTH);
+        if (value.size() < tlv.length_field.get()) {
+            return {};
+        }
+        if (tlv.tlv_type.get() == gptp::TLV_TYPE_PATH_TRACE) {
+            return value.first(tlv.length_field.get());
+        }
+        tlvs = value.subspan(tlv.length_field.get());
+    }
+    return {};
+}
+
+/// The path @p announce makes known: @p path_trace, or its grandmaster alone without one.
+auto announced_path(gptp::AnnounceMessage const& announce, AsPath const& path_trace) -> AsPath
+{
+    if (!path_trace.empty()) {
+        return path_trace;
+    }
+    AsPath path{};
+    path.push_back(announce.grandmaster_identity.to_eui64());
+    return path;
+}
+
+}  // namespace
+
+auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept -> AsPath
+{
+    AsPath path{};
+    auto const value = path_trace_value(announce_tlvs(announce));
+    for (size_t at = 0; at + Eui64::LENGTH <= value.size() && path.size() < AsPath::capacity(); at += Eui64::LENGTH) {
+        span_load(path.emplace_back(), value.subspan(at));
+    }
+    return path;
+}
+
+void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace)
 {
     // Record first: a callback that asks last_announce() must be told the
     // Announce that named the grandmaster it is being told about.
     last_announce_time_ns_ = now_ns;
     last_announce_ = announce;
     has_announce_ = true;
+    set_path_trace(now_ns, announced_path(announce, path_trace));
+    observe_grandmaster(now_ns, announce);
+}
+
+void GptpAnnounceHandler::observe_grandmaster(int64_t const now_ns, gptp::AnnounceMessage const& announce)
+{
     if (announce.grandmaster_identity == grandmaster_identity_) {
         return;
     }
@@ -98,6 +164,18 @@ void GptpAnnounceHandler::tick(int64_t const now_ns)
     grandmaster_identity_ = {};
     if (callbacks_.grandmaster_lost) {
         callbacks_.grandmaster_lost(now_ns);
+    }
+    set_path_trace(now_ns, AsPath{});
+}
+
+void GptpAnnounceHandler::set_path_trace(int64_t const now_ns, AsPath const& path)
+{
+    if (std::ranges::equal(path, path_trace_)) {
+        return;
+    }
+    path_trace_ = path;
+    if (on_path_trace_changed_) {
+        on_path_trace_changed_(now_ns);
     }
 }
 
