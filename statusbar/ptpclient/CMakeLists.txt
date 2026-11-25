@@ -41,6 +41,7 @@ statusbar_add_module(
   ptpclient_test.cpp
   FUNCTIONAL_TESTS
   ptpclient_bridge_functional_test.cpp
+  ptpclient_management_functional_test.cpp
   ptpclient_phc_functional_test.cpp)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
