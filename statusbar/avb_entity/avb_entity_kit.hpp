@@ -49,6 +49,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <memory_resource>
 #include <optional>
@@ -228,6 +229,24 @@ class AvbEntityKit
     /// an index that is no talker stream's. Reactor thread.
     [[nodiscard]] auto presentation_offset_ns(uint16_t idx) const noexcept -> uint32_t;
 
+    // --- Sampling rate (IEEE 1722.1-2021 Clause 7.4.21) -------------------------
+    /// A stream a SET_SAMPLING_RATE re-times: its descriptor, and its format before and after.
+    struct RetimedFormat
+    {
+        uint16_t type{0};
+        uint16_t index{0};
+        uint64_t from{0};
+        uint64_t to{0};
+    };
+    using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
+    /// The entity's data plane moves AUDIO_UNIT 0 to @p rate and each of @p streams to its new
+    /// format, all or none, and answers an AEM status (STREAM_IS_RUNNING when a talker cannot change
+    /// while it streams). Reactor thread. Without one, a rate but the one in force is NOT_SUPPORTED.
+    /// The kit's engines, specs, sample_rate() and TSpecs keep their rate: an entity whose streams
+    /// run on them answers NOT_SUPPORTED; one running its own moves them and declares their TSpecs.
+    using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
+    void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
@@ -258,6 +277,8 @@ class AvbEntityKit
     /// model's (a Milan model does, any other does not).
     [[nodiscard]] auto milan_profile() const noexcept -> bool;
     [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
+    /// The rate the kit's engines were built with; a SET_SAMPLING_RATE does not change it
+    /// (set_on_unit_rate_changed()), so any thread may read it.
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
 
   private:
@@ -302,6 +323,32 @@ class AvbEntityKit
     [[nodiscard]] auto change_presentation_offset(uint16_t idx, uint32_t offset_ns) -> uint8_t;
     /// Whether @p idx is one of the kit's talker streams.
     [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
+    /// The storage handler's SET_SAMPLING_RATE hook: SUCCESS for the rate in force; another
+    /// rate re-times AUDIO_UNIT 0's streams through on_unit_rate_changed_, NOT_SUPPORTED without it.
+    [[nodiscard]] auto change_sampling_rate(uint16_t audio_unit, uint32_t rate) -> uint8_t;
+    /// AUDIO_UNIT 0's streams at @p from, each at @p rate; else NOT_SUPPORTED (an audio stream that
+    /// lists no such format) or STREAM_IS_RUNNING (an input runs, Milan v1.3 Section 5.4.2.7).
+    [[nodiscard]] auto retimed_formats(uint32_t from, uint32_t rate) -> std::expected<RetimedFormats, uint8_t>;
+    /// Stream @p spec (an output when @p output) added to @p out when a re-time from @p from to
+    /// @p rate moves it; else the status retimed_formats() refuses with, or SUCCESS.
+    [[nodiscard]] auto add_retimed(bool output, StreamSpec const& spec, uint32_t from, uint32_t rate, RetimedFormats& out)
+        -> uint8_t;
+    /// That stream's format in force when a re-time from @p from moves it: an audio stream at
+    /// that rate in AUDIO_UNIT 0's clock domain (IEEE 1722.1-2021 Clauses 7.2.3, 7.2.6); else nullopt.
+    [[nodiscard]] auto retimed_from(bool output, StreamSpec const& spec, uint32_t from) -> std::optional<uint64_t>;
+    /// Format @p word of stream @p index at @p rate; else NOT_SUPPORTED when the stream's descriptor
+    /// does not list it, or STREAM_IS_RUNNING for a running input (Milan v1.3 Section 5.4.2.7).
+    [[nodiscard]] auto retimed_to(bool output, uint16_t index, uint64_t word, uint32_t rate) const
+        -> std::expected<uint64_t, uint8_t>;
+    /// Whether STREAM_INPUT @p index runs: its Milan sink bound, or connected under IEEE 1722.1.
+    [[nodiscard]] auto input_running(uint16_t index) const noexcept -> bool;
+    /// @p retimed put in force at @p rate by the entity's data plane, then in the descriptors,
+    /// its notifications left for after the response; the data plane's status.
+    [[nodiscard]] auto retime_streams(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
+    /// Notify @p retimed as SET_STREAM_FORMATs once the SET_SAMPLING_RATE is answered.
+    void notify_after_response(RetimedFormats const& retimed);
+    /// The SET_STREAM_FORMAT notification of each stream notify_after_response() was given.
+    void notify_retimed();
     /// A PROBE_TX_COMMAND arrived for stream output @p stream_index: tell the
     /// SRP handler, which under the Milan profile declares the stream's
     /// Talker attribute on it (Milan v1.3 4.3.3.1).
@@ -416,6 +463,9 @@ class AvbEntityKit
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;
+    /// AUDIO_UNIT 0's CLOCK_DOMAIN, whose streams a SET_SAMPLING_RATE re-times; nullopt without
+    /// the unit, or when another unit shares the domain (its rate would change with it).
+    std::optional<uint16_t> retimed_clock_domain_;
 
     /// Reusable AVB control plane: talker/listener stream counts from the
     /// blob, 4 max listeners per talker stream.
@@ -461,6 +511,9 @@ class AvbEntityKit
     /// the configured one.
     std::array<std::optional<uint32_t>, MAX_ENTITY_STREAMS> presentation_offsets_{};
     PresentationOffsetFn on_presentation_offset_changed_{};
+    UnitRateFn on_unit_rate_changed_{};
+    /// The streams a SET_SAMPLING_RATE re-timed, notified after its response.
+    RetimedFormats retimed_notices_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

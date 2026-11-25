@@ -8,6 +8,7 @@
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
+#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
@@ -18,6 +19,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
+#include <cstddef>
+#include <initializer_list>
 #include <limits>
 #include <memory>
 #include <span>
@@ -25,8 +29,10 @@
 
 namespace statusbar::avb_entity {
 
+using statusbar::atdecc::aem::DESCRIPTOR_AUDIO_UNIT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
+using statusbar::atdecc::aem::DescriptorRef;
 using statusbar::nanoavb::DomainInfo;
 
 namespace {
@@ -37,6 +43,29 @@ namespace {
     nanoavb::StreamId stream_id{};
     (void)statusbar::tsn::load_unchecked(acmp_stream_id.span(), &stream_id);
     return stream_id;
+}
+
+/// Stream (@p type, @p index) of configuration 0, the one the kit runs.
+[[nodiscard]] constexpr auto stream_ref(uint16_t const type, uint16_t const index) noexcept -> DescriptorRef
+{
+    return DescriptorRef{.configuration_index = 0, .descriptor_type = type, .descriptor_index = index};
+}
+
+/// AUDIO_UNIT 0's CLOCK_DOMAIN in @p storage, unless the unit is missing or another unit shares
+/// its domain: a stream runs at the rate of the unit in its domain (IEEE 1722.1-2021 Clause 7.2.3).
+[[nodiscard]] auto retimed_clock_domain(atdecc::aem::DescriptorStorage const& storage) -> std::optional<uint16_t>
+{
+    auto const unit_zero = load_descriptor<atdecc::aem::DescriptorAudioUnit>(storage, 0, DESCRIPTOR_AUDIO_UNIT, 0);
+    if (!unit_zero) {
+        return std::nullopt;
+    }
+    for (uint16_t k = 1; k < std::numeric_limits<uint16_t>::max(); ++k) {
+        auto const unit = load_descriptor<atdecc::aem::DescriptorAudioUnit>(storage, 0, DESCRIPTOR_AUDIO_UNIT, k);
+        if (!unit || unit->clock_domain_index == unit_zero->clock_domain_index) {
+            return unit ? std::nullopt : std::optional<uint16_t>{unit_zero->clock_domain_index.get()};
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace
@@ -58,6 +87,7 @@ AvbEntityKit::AvbEntityKit(
     , listener_specs_{listener_specs}
     , sample_rate_{sample_rate}
     , storage_handler_{handler}
+    , retimed_clock_domain_{retimed_clock_domain(handler.storage())}
     , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
     , gate_{config.gate_talker_on_listener, host_.components()}
     , talker_{std::make_unique<TalkerStreams>(
@@ -200,6 +230,9 @@ void AvbEntityKit::install_storage_hooks()
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
+    // SET_SAMPLING_RATE: the rate in force, or a re-time the entity's data plane makes.
+    storage_handler_.set_on_sampling_rate_changed(
+        [this](uint16_t const audio_unit, uint32_t const rate) -> uint8_t { return change_sampling_rate(audio_unit, rate); });
 }
 
 auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
@@ -594,6 +627,122 @@ auto AvbEntityKit::presentation_offset_ns(uint16_t const idx) const noexcept -> 
     }
     auto const configured = std::min<uint64_t>(effective_presentation_offset_ns(config_), std::numeric_limits<uint32_t>::max());
     return presentation_offsets_[idx].value_or(static_cast<uint32_t>(configured));
+}
+
+auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t const rate) -> uint8_t
+{
+    // IEEE 1722.1-2021 Clause 7.4.21: the rate in force is a no-op; another moves the data plane or is refused.
+    auto const in_force = storage_handler_.current_sampling_rate(
+        {.configuration_index = 0, .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = audio_unit});
+    if (in_force == rate) {
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+    if (audio_unit != 0 || !in_force || !on_unit_rate_changed_ || !retimed_clock_domain_) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    auto const retimed = retimed_formats(*in_force, rate);
+    return retimed ? retime_streams(rate, *retimed) : retimed.error();
+}
+
+auto AvbEntityKit::retimed_formats(uint32_t const from, uint32_t const rate) -> std::expected<RetimedFormats, uint8_t>
+{
+    RetimedFormats out{};
+    for (bool const output : {true, false}) {
+        for (auto const& spec : output ? talker_specs_ : listener_specs_) {
+            if (auto const status = add_retimed(output, spec, from, rate, out); status != atdecc::AEM_STATUS_SUCCESS) {
+                return std::unexpected(status);
+            }
+        }
+    }
+    return out;
+}
+
+auto AvbEntityKit::add_retimed(
+    bool const output, StreamSpec const& spec, uint32_t const from, uint32_t const rate, RetimedFormats& out) -> uint8_t
+{
+    auto const word = retimed_from(output, spec, from);
+    if (!word) {
+        return atdecc::AEM_STATUS_SUCCESS;  // a CRF's format stays, as does one at another rate or in another domain
+    }
+    auto const to = retimed_to(output, spec.index, *word, rate);
+    if (!to) {
+        return to.error();
+    }
+    (void)out.try_push_back(
+        {.type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, .index = spec.index, .from = *word, .to = *to});
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::retimed_from(bool const output, StreamSpec const& spec, uint32_t const from) -> std::optional<uint64_t>
+{
+    auto const in_force =
+        storage_handler_.current_stream_format(stream_ref(output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, spec.index));
+    uint64_t const word = in_force.value_or(ieee::Eui64{}).to_uint64();
+    auto const format = decode_stream_format(word);
+    bool const audio = format.kind == StreamKind::aaf || format.kind == StreamKind::am824;
+    bool const moves = audio && format.sample_rate_hz == from && spec.clock_domain_index == retimed_clock_domain_;
+    return moves ? std::optional<uint64_t>{word} : std::nullopt;
+}
+
+auto AvbEntityKit::retimed_to(bool const output, uint16_t const index, uint64_t const word, uint32_t const rate) const
+    -> std::expected<uint64_t, uint8_t>
+{
+    auto const to = aaf_format_at_rate(word, rate);
+    if (!to ||
+        !storage_handler_.stream_format_listed(
+            stream_ref(output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, index), ieee::Eui64{}.from_uint64(*to))) {
+        return std::unexpected(atdecc::AEM_STATUS_NOT_SUPPORTED);  // AM824, or a stream that lists no such format
+    }
+    // Milan v1.3 Section 5.4.2.7: refused as the input's own SET_STREAM_FORMAT would be; an output is the hook's.
+    if (!output && input_running(index)) {
+        return std::unexpected(atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    }
+    return *to;
+}
+
+auto AvbEntityKit::input_running(uint16_t const index) const noexcept -> bool
+{
+    auto const& components = host_.components();
+    if (components.acmp_is_milan()) {
+        return components.milan_acmp_listener->is_bound(index);
+    }
+    return components.acmp_listener.is_connected(index);
+}
+
+auto AvbEntityKit::retime_streams(uint32_t const rate, RetimedFormats const& retimed) -> uint8_t
+{
+    // The data plane first, all or none; then the descriptors, reactor-side state, follow it. The
+    // kit's own specs and engines are not touched: the media thread reads them unguarded.
+    if (auto const status = on_unit_rate_changed_(rate, retimed); status != atdecc::AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    for (auto const& r : retimed) {
+        (void)storage_handler_.set_runtime_stream_format(stream_ref(r.type, r.index), ieee::Eui64{}.from_uint64(r.to));
+    }
+    notify_after_response(retimed);
+    host_.ctl_log().status("aem: AUDIO_UNIT 0 at {} Hz, {} streams re-timed", rate, retimed.size());
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+void AvbEntityKit::notify_after_response(RetimedFormats const& retimed)
+{
+    retimed_notices_ = retimed;
+    host_.components().aem_handler.call_after_response([this] { notify_retimed(); });
+}
+
+void AvbEntityKit::notify_retimed()
+{
+    // As each stream's own SET_STREAM_FORMAT would be notified (IEEE 1722.1-2021 Clause 7.5.2).
+    for (auto const& r : std::exchange(retimed_notices_, {})) {
+        std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> body{};
+        span_store(
+            std::span{body},
+            atdecc::aem::AemStreamFormatPayload{
+                .descriptor_type = r.type,
+                .descriptor_index = r.index,
+                .stream_format = std::bit_cast<std::array<ieee::octet_t, 8>>(ieee::octlet_t{r.to})});
+        host_.components().aem_handler.emit_unsolicited(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, body);
+    }
 }
 
 auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status

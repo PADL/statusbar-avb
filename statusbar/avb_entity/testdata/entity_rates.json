@@ -1,0 +1,120 @@
+{
+  "$schema": "../../../standards/ieee1722.1-schema/atdecc_aem.schema.json",
+  "entity": {
+    "vendor": "Statusbar",
+    "model": "Rate Test",
+    "name": "Statusbar Rate Test",
+    "firmware": "1.0",
+    "capabilities": [
+      "AEM_SUPPORTED",
+      "CLASS_A_SUPPORTED",
+      "GPTP_SUPPORTED"
+    ],
+    "talker": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "AUDIO_SOURCE",
+        "MEDIA_CLOCK_SOURCE"
+      ],
+      "stream_sources": 2
+    },
+    "listener": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "AUDIO_SINK"
+      ],
+      "stream_sinks": 1
+    },
+    "configurations": [
+      {
+        "name": "Rates",
+        "streams_in": [
+          {
+            "name": "StreamInputAAF",
+            "symbol": "aaf_in",
+            "format": { "type": "AAF", "rate": 48000, "channels": 8, "depth": 32 },
+            "formats": [
+              { "type": "AAF", "rate": 48000, "channels": 8, "depth": 32 },
+              { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 }
+            ],
+            "flags": [ "CLASS_A" ],
+            "buffer_length": 2126000
+          }
+        ],
+        "streams_out": [
+          {
+            "name": "StreamOutputAAF",
+            "symbol": "aaf_out",
+            "format": { "type": "AAF", "rate": 48000, "channels": 8, "depth": 32 },
+            "formats": [
+              { "type": "AAF", "rate": 48000, "channels": 8, "depth": 32 },
+              { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 }
+            ],
+            "flags": [ "CLASS_A" ]
+          },
+          {
+            "name": "StreamOutputCRF",
+            "symbol": "crf_out",
+            "format": "0x041060010000BB80",
+            "flags": [ "CLASS_A" ]
+          }
+        ],
+        "audio_units": [
+          {
+            "name": "AudioUnit",
+            "rates": [ 48000, 96000, 192000 ],
+            "input_ports": [
+              {
+                "clusters": [
+                  { "name": "Input 1", "channels": 1 },
+                  { "name": "Input 2", "channels": 1 },
+                  { "name": "Input 3", "channels": 1 },
+                  { "name": "Input 4", "channels": 1 },
+                  { "name": "Input 5", "channels": 1 },
+                  { "name": "Input 6", "channels": 1 },
+                  { "name": "Input 7", "channels": 1 },
+                  { "name": "Input 8", "channels": 1 }
+                ]
+              }
+            ],
+            "output_ports": [
+              {
+                "clusters": [
+                  { "name": "Output 1", "channels": 1 },
+                  { "name": "Output 2", "channels": 1 },
+                  { "name": "Output 3", "channels": 1 },
+                  { "name": "Output 4", "channels": 1 },
+                  { "name": "Output 5", "channels": 1 },
+                  { "name": "Output 6", "channels": 1 },
+                  { "name": "Output 7", "channels": 1 },
+                  { "name": "Output 8", "channels": 1 }
+                ]
+              }
+            ]
+          }
+        ],
+        "avb_interfaces": [
+          {
+            "name": "eth0",
+            "flags": [ "GPTP_SUPPORTED", "SRP_SUPPORTED" ]
+          }
+        ],
+        "clock_sources": [
+          {
+            "name": "Internal",
+            "type": "INTERNAL",
+            "location_type": 2,
+            "location_index": 0
+          }
+        ],
+        "clock_domains": [
+          {
+            "name": "ClockDomain",
+            "source": 0,
+            "sources": [ 0 ]
+          }
+        ]
+      }
+    ]
+  }
+}

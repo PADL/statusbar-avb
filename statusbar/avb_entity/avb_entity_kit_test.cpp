@@ -22,8 +22,11 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -35,6 +38,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -511,6 +515,279 @@ TEST(avb_entity_kit_profile, mvu_binding_is_advertised_when_bind_stream_is_answe
     KitUnderTest milan{make_config(2, "", true)};
     EXPECT_TRUE(milan->host().components().acmp_is_milan());
     EXPECT_EQ(milan_info_of(milan)->features_flags, atdecc::MVU_FEATURE_MVU_BINDING);
+}
+
+//
+// SET_SAMPLING_RATE - IEEE 1722.1-2021 Clause 7.4.21
+//
+
+namespace {
+
+constexpr uint64_t AAF_48K_8CH = 0x0205022002006000ULL;  // AAF 48k INT_32 8ch 6 samples/frame
+constexpr uint64_t AAF_96K_8CH = 0x020702200200C000ULL;  // AAF 96k INT_32 8ch 12 samples/frame
+constexpr uint64_t CRF_48K = 0x041060010000BB80ULL;
+Eui64 const RATE_ENTITY{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
+Eui64 const RATE_CONTROLLER_A{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xA1};
+Eui64 const RATE_CONTROLLER_B{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xB2};
+Eui48 const RATE_MAC_A{0x02, 0x00, 0x00, 0x00, 0x00, 0xA1};
+Eui48 const RATE_MAC_B{0x02, 0x00, 0x00, 0x00, 0x00, 0xB2};
+
+/// A model whose AUDIO_UNIT 0 lists 48, 96 and 192 kHz, with an AAF stream input and output listing
+/// their format at 48 and 96 kHz, a CRF output, and dynamic stream ports (source: entity_rates.json).
+auto make_rates_config(std::string_view const profile) -> AvbEntityAudioIOConfig
+{
+    auto config = make_config(2, profile);
+    config.descriptor_storage_blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_rates.bin");
+    return config;
+}
+
+/// One frame the kit's AEM handler sent: where to, and the AECPDU.
+struct SentFrame
+{
+    Eui48 dest{};
+    std::vector<uint8_t> frame;
+
+    [[nodiscard]] auto header() const -> atdecc::AemDu
+    {
+        atdecc::AemDu du{};
+        span_load(du, std::span<uint8_t const>{frame});
+        return du;
+    }
+    [[nodiscard]] auto body() const -> std::span<uint8_t const>
+    {
+        return std::span<uint8_t const>{frame}.subspan(atdecc::AemDu::LENGTH);
+    }
+};
+
+/// The kit's AEM handler as two controllers see it: commands go in through process_packet(),
+/// every frame it sends is kept.
+struct RateControllers
+{
+    KitUnderTest& kit;
+    std::vector<SentFrame> sent{};
+    uint16_t sequence_id{0};
+
+    explicit RateControllers(KitUnderTest& under_test)
+        : kit{under_test}
+    {
+        kit->host().components().aem_handler.set_send_response([this](Eui48 const& dest, std::span<uint8_t const> const frame) {
+            sent.push_back({.dest = dest, .frame = {frame.begin(), frame.end()}});
+            return true;
+        });
+    }
+
+    /// @p controller at @p mac sends AEM @p command with @p body; its response's status.
+    auto command(Eui64 const& controller, Eui48 const& mac, uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
+    {
+        atdecc::AemDu header{};
+        header.init_command(command, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        header.target_entity_id = RATE_ENTITY;
+        header.controller_entity_id = controller;
+        header.sequence_id = ++sequence_id;
+        std::vector<uint8_t> frame(atdecc::AemDu::LENGTH + body.size());
+        span_store(std::span{frame}, header);
+        std::ranges::copy(body, frame.begin() + atdecc::AemDu::LENGTH);
+        size_t const before = sent.size();
+        (void)kit->host().components().aem_handler.process_packet(mac, frame, header.target_entity_id);
+        auto const response = std::find_if(sent.begin() + static_cast<std::ptrdiff_t>(before), sent.end(), [](SentFrame const& f) {
+            return !f.header().is_unsolicited();
+        });
+        return response != sent.end() ? response->header().status() : uint8_t{0xFF};
+    }
+
+    auto set_rate(uint32_t const rate) -> uint8_t
+    {
+        std::array<uint8_t, atdecc::aem::AemSamplingRatePayload::LENGTH> body{};
+        span_store(
+            std::span{body},
+            atdecc::aem::AemSamplingRatePayload{
+                .descriptor_type = atdecc::aem::DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0, .sampling_rate = rate});
+        return command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, body);
+    }
+
+    /// The rate GET_SAMPLING_RATE answers for AUDIO_UNIT 0.
+    auto rate() -> uint32_t
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x02, 0x00, 0x00};
+        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, body);
+        atdecc::aem::AemSamplingRatePayload answer{};
+        span_load(answer, sent.back().body());
+        return answer.sampling_rate.get();
+    }
+
+    /// The format GET_STREAM_FORMAT answers for stream (@p type, @p index).
+    auto format(uint16_t const type, uint16_t const index) -> uint64_t
+    {
+        std::array<uint8_t, 4> const body{0x00, static_cast<uint8_t>(type), 0x00, static_cast<uint8_t>(index)};
+        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, body);
+        ieee::octlet_t word{};
+        span_load(word, sent.back().body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
+        return word.get();
+    }
+
+    void register_b()
+    {
+        (void)command(RATE_CONTROLLER_B, RATE_MAC_B, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
+        sent.clear();
+    }
+
+    /// The unsolicited SET_STREAM_FORMATs in sent: (type, index, format).
+    [[nodiscard]] auto format_notifications() const -> std::vector<std::tuple<uint16_t, uint16_t, uint64_t>>
+    {
+        std::vector<std::tuple<uint16_t, uint16_t, uint64_t>> found;
+        for (auto const& f : sent) {
+            if (f.header().is_unsolicited() && f.header().command_code() == atdecc::AEM_COMMAND_SET_STREAM_FORMAT) {
+                atdecc::aem::AemStreamFormatPayload payload{};
+                span_load(payload, f.body());
+                ieee::octlet_t word{};
+                span_load(word, f.body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
+                found.emplace_back(payload.descriptor_type.get(), payload.descriptor_index.get(), word.get());
+            }
+        }
+        return found;
+    }
+};
+
+/// What the entity's data plane was asked: each rate with its streams.
+struct UnitRateRecorder
+{
+    std::vector<std::pair<uint32_t, std::vector<AvbEntityKit::RetimedFormat>>> asked{};
+    uint8_t answer{atdecc::AEM_STATUS_SUCCESS};
+
+    void install(KitUnderTest& kit)
+    {
+        kit->set_on_unit_rate_changed([this](uint32_t const rate, std::span<AvbEntityKit::RetimedFormat const> const streams) {
+            asked.emplace_back(rate, std::vector<AvbEntityKit::RetimedFormat>{streams.begin(), streams.end()});
+            return answer;
+        });
+    }
+};
+
+}  // namespace
+
+TEST(avb_entity_kit_rate, without_a_unit_rate_hook_only_the_rate_in_force_is_accepted)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    EXPECT_EQ(controllers.set_rate(48'000), atdecc::AEM_STATUS_SUCCESS);
+    // The data plane keeps its rate, so the unit does not report another (IEEE 1722.1-2021 Clause 7.4.21).
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(controllers.rate(), 48'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_48K_8CH);
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+}
+
+TEST(avb_entity_kit_rate, a_unit_rate_hook_retimes_the_units_streams_notified_after_the_response)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    controllers.register_b();
+
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    // The AAF output and input, their layout kept; the CRF output stays.
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    if (data_plane.asked.size() == 1) {
+        auto const& [rate, streams] = data_plane.asked.front();
+        EXPECT_EQ(rate, 96'000U);
+        EXPECT_EQ(streams.size(), size_t{2});
+        EXPECT_TRUE(std::ranges::all_of(streams, [](auto const& s) { return s.from == AAF_48K_8CH && s.to == AAF_96K_8CH; }));
+    }
+    // The response first, to A; then, to B alone, the rate's notification and each stream's.
+    EXPECT_FALSE(controllers.sent.empty());
+    EXPECT_FALSE(controllers.sent.front().header().is_unsolicited());
+    EXPECT_TRUE(std::ranges::all_of(
+        controllers.sent.begin() + 1, controllers.sent.end(), [](SentFrame const& f) { return f.dest == RATE_MAC_B; }));
+    EXPECT_EQ(controllers.sent.size(), size_t{4});
+    using Notice = std::tuple<uint16_t, uint16_t, uint64_t>;
+    EXPECT_TRUE(
+        controllers.format_notifications() ==
+        (std::vector<Notice>{
+            {atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0, AAF_96K_8CH}, {atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0, AAF_96K_8CH}}));
+
+    // The descriptors report what the data plane runs.
+    EXPECT_EQ(controllers.rate(), 96'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_96K_8CH);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_96K_8CH);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 1), CRF_48K);
+    // The kit's specs and engines keep the rate they were built with: the media thread reads them.
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+    EXPECT_EQ(kit->talker_specs().front().format.sample_rate_hz, 48'000U);
+    EXPECT_EQ(kit->talker_specs().front().format_word, AAF_48K_8CH);
+}
+
+TEST(avb_entity_kit_rate, a_refused_or_unlisted_rate_moves_nothing)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    controllers.register_b();
+
+    // The unit lists 192 kHz, its AAF streams do not: the data plane is not asked.
+    EXPECT_EQ(controllers.set_rate(192'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(data_plane.asked.empty());
+    // The data plane refuses: its status, and the rate and formats in force.
+    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    EXPECT_TRUE(controllers.format_notifications().empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_48K_8CH);
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+}
+
+TEST(avb_entity_kit_rate, a_bound_milan_input_keeps_the_rate)
+{
+    KitUnderTest kit{make_rates_config("milan13")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    auto& sinks = *kit->host().components().milan_acmp_listener;
+    EXPECT_TRUE(sinks.restore_binding(
+        atdecc::MilanBinding{.listener_unique_id = 0, .talker_entity_id = RATE_CONTROLLER_B}, TimePoint{std::chrono::seconds{1}}));
+
+    // Milan v1.3 Section 5.4.2.7: as the input's own SET_STREAM_FORMAT would be.
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_TRUE(data_plane.asked.empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+}
+
+// Milan v1.3 Section 5.4.2.13: a mapping held on a stream at the rate in force refuses a re-time,
+// the data plane not asked; once it is removed the unit re-times.
+TEST(avb_entity_kit_rate, a_held_mapping_refuses_a_retime)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    auto& aem = kit->host().components().aem_handler;
+    auto const maps = std::make_unique<nanoavb::DynamicAudioMaps>();
+    aem.set_dynamic_audio_maps(maps.get());
+    aem.set_on_audio_mappings_changed(
+        [](uint16_t, uint16_t, std::span<nanoavb::DynamicAudioMapping const>) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
+    auto const mapping = [&controllers](uint16_t const command) {
+        std::array<uint8_t, atdecc::aem::AemAudioMappingsCommandHeader::LENGTH + atdecc::aem::AemAudioMapping::LENGTH> body{};
+        span_store(
+            std::span{body},
+            atdecc::aem::AemAudioMappingsCommandHeader{
+                .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, .descriptor_index = 0, .number_of_mappings = 1});
+        span_store(
+            std::span{body}.subspan(atdecc::aem::AemAudioMappingsCommandHeader::LENGTH),
+            atdecc::aem::AemAudioMapping{.stream_index = 0, .stream_channel = 0, .cluster_offset = 0, .cluster_channel = 0});
+        return controllers.command(RATE_CONTROLLER_A, RATE_MAC_A, command, body);
+    };
+    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(data_plane.asked.empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+
+    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    EXPECT_TRUE(aem.mappings_hold());
+    aem.set_dynamic_audio_maps(nullptr);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
