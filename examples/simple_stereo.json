@@ -36,7 +36,8 @@
             "format": "0x00A0020860000200",
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "buffer_length": 2126000
           }
         ],
         "streams_out": [
@@ -101,7 +102,8 @@
           {
             "name": "eth0",
             "flags": [
-              "GPTP_SUPPORTED"
+              "GPTP_SUPPORTED",
+              "SRP_SUPPORTED"
             ]
           }
         ],

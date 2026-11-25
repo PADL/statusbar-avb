@@ -56,8 +56,38 @@ build-host-runnable generator binary. The C++ `DescriptorStorage` *parser*
 was kept during the migration as a CONTENT-parity reference until every model was proven
 byte-equivalent at the descriptor level, then deleted.)
 
-Four ctests keep the pipeline honest: `statusbar/avb/aem_json_models_compile`
-(`verify_models.py` — every model compiles and parses back),
+## Milan models
+
+Every model here keeps the Milan v1.3 descriptor rules that a model decides
+(section 5.3.3), and `verify_models.py` fails a model that breaks one:
+
+| Rule | In the model |
+|---|---|
+| An AUDIO_CLUSTER has one channel (5.3.3.8) | a stream port of eight channels is eight clusters of `"channels": 1`, and its maps pair stream channel *i* with cluster *i*, `cluster_ch` 0 |
+| A channel of a Stream Output has one static mapping at most (5.3.3.9) | each stream port's maps name its own stream: port 0 maps stream 0, port 1 stream 1 |
+| A STREAM_INPUT's buffer_length is at least 2.126 ms (5.3.3.4) | `"buffer_length": 2126000` (nanoseconds) on every entry of `streams_in`; left out, the field is 0 |
+| An AVB_INTERFACE has GPTP_SUPPORTED and SRP_SUPPORTED (5.3.3.5) | both in `avb_interfaces[].flags` |
+
+`buffer_length` says how much audio the input can hold. The entity kit
+hands received samples on with their presentation time and holds none
+itself, so the figure is a promise made for whatever consumes them: a
+consumer that plays out has to keep 2.126 ms of room for it to be true.
+
+What a model does not decide is not authored. The entity adds
+VENDOR_UNIQUE_SUPPORTED and AEM_INTERFACE_INDEX_VALID to its
+entity_capabilities when it runs as a Milan device (`entity.milan`), and
+sends the 2021 descriptor lengths under the Milan profile; see
+`../docs/ENTITY_CONSTRUCTION_KIT.md`. The same blobs serve a plain
+IEEE 1722.1 entity unchanged.
+
+Not yet Milan in the models: an AAF input lists one channel count where
+section 6.5 has five, and `tone-aaf.json` has no CRF stream.
+
+The data plane takes its channel count from the first stream port: the
+channels of its clusters, summed.
+
+Four ctests guard the pipeline: `statusbar/avb/aem_json_models_compile`
+(`verify_models.py` — every model compiles and parses back, and keeps the rules above),
 `statusbar/avb/aem_json_models_schema` (`validate_schema.py` — every model matches the
 authoring schema; skips without jsonschema — `uv sync --group validate` in `../python/`,
 or Debian python3-jsonschema, activates it),

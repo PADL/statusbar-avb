@@ -25,3 +25,17 @@ If regenerated, the expected descriptor counts in
 
 To inspect the blob, run `statusbar-descriptor-storage` (see
 `statusbar/atdecc/atdecc_descriptor_storage_tool.cpp`).
+
+## `entity_audio.bin`, `entity_tone.bin`, `entity_tone_aaf.bin`, `entity_tone_aaf_crf.bin`
+
+The shipped models of `examples/` (`dual.json`, `tone.json`,
+`tone-aaf.json`, `tone-aaf-crf.json`), compiled with the version the
+tests expect. After a model changes, write them again from the top of the
+repository and commit them with it:
+
+```
+for pair in dual:entity_audio tone:entity_tone tone-aaf:entity_tone_aaf tone-aaf-crf:entity_tone_aaf_crf; do
+    python3 python/aemxml/aemxml_tool.py json2bin "examples/${pair%%:*}.json" \
+        "statusbar/avb_entity/testdata/${pair##*:}.bin" --set version=0.0.0-test
+done
+```

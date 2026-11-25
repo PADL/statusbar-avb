@@ -35,7 +35,8 @@
             "format": "0x00A0040860000800",
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "buffer_length": 2126000
           },
           {
             "name": "StreamInputAAF",
@@ -48,7 +49,8 @@
             },
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "buffer_length": 2126000
           },
           {
             "name": "StreamInputCRF",
@@ -56,7 +58,8 @@
             "format": "0x041060010000BB80",
             "flags": [
               "CLASS_A"
-            ]
+            ],
+            "buffer_length": 2126000
           }
         ],
         "streams_out": [
@@ -100,8 +103,36 @@
               {
                 "clusters": [
                   {
-                    "name": "InputCluster",
-                    "channels": 8
+                    "name": "Input 1",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 2",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 3",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 4",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 5",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 6",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 7",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 8",
+                    "channels": 1
                   }
                 ],
                 "maps": [
@@ -114,102 +145,130 @@
                   {
                     "stream": 0,
                     "stream_ch": 1,
-                    "cluster": 0,
-                    "cluster_ch": 1
+                    "cluster": 1,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 2,
-                    "cluster": 0,
-                    "cluster_ch": 2
+                    "cluster": 2,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 3,
-                    "cluster": 0,
-                    "cluster_ch": 3
+                    "cluster": 3,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 4,
-                    "cluster": 0,
-                    "cluster_ch": 4
+                    "cluster": 4,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 5,
-                    "cluster": 0,
-                    "cluster_ch": 5
+                    "cluster": 5,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 6,
-                    "cluster": 0,
-                    "cluster_ch": 6
+                    "cluster": 6,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 7,
-                    "cluster": 0,
-                    "cluster_ch": 7
+                    "cluster": 7,
+                    "cluster_ch": 0
                   }
                 ]
               },
               {
                 "clusters": [
                   {
-                    "name": "InputCluster",
-                    "channels": 8
+                    "name": "Input 1",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 2",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 3",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 4",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 5",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 6",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 7",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Input 8",
+                    "channels": 1
                   }
                 ],
                 "maps": [
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 0,
                     "cluster": 0,
                     "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 1,
-                    "cluster": 0,
-                    "cluster_ch": 1
+                    "cluster": 1,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 2,
-                    "cluster": 0,
-                    "cluster_ch": 2
+                    "cluster": 2,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 3,
-                    "cluster": 0,
-                    "cluster_ch": 3
+                    "cluster": 3,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 4,
-                    "cluster": 0,
-                    "cluster_ch": 4
+                    "cluster": 4,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 5,
-                    "cluster": 0,
-                    "cluster_ch": 5
+                    "cluster": 5,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 6,
-                    "cluster": 0,
-                    "cluster_ch": 6
+                    "cluster": 6,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 7,
-                    "cluster": 0,
-                    "cluster_ch": 7
+                    "cluster": 7,
+                    "cluster_ch": 0
                   }
                 ]
               }
@@ -218,8 +277,36 @@
               {
                 "clusters": [
                   {
-                    "name": "OutputCluster",
-                    "channels": 8
+                    "name": "Output 1",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 2",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 3",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 4",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 5",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 6",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 7",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 8",
+                    "channels": 1
                   }
                 ],
                 "maps": [
@@ -232,102 +319,130 @@
                   {
                     "stream": 0,
                     "stream_ch": 1,
-                    "cluster": 0,
-                    "cluster_ch": 1
+                    "cluster": 1,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 2,
-                    "cluster": 0,
-                    "cluster_ch": 2
+                    "cluster": 2,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 3,
-                    "cluster": 0,
-                    "cluster_ch": 3
+                    "cluster": 3,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 4,
-                    "cluster": 0,
-                    "cluster_ch": 4
+                    "cluster": 4,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 5,
-                    "cluster": 0,
-                    "cluster_ch": 5
+                    "cluster": 5,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 6,
-                    "cluster": 0,
-                    "cluster_ch": 6
+                    "cluster": 6,
+                    "cluster_ch": 0
                   },
                   {
                     "stream": 0,
                     "stream_ch": 7,
-                    "cluster": 0,
-                    "cluster_ch": 7
+                    "cluster": 7,
+                    "cluster_ch": 0
                   }
                 ]
               },
               {
                 "clusters": [
                   {
-                    "name": "OutputCluster",
-                    "channels": 8
+                    "name": "Output 1",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 2",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 3",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 4",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 5",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 6",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 7",
+                    "channels": 1
+                  },
+                  {
+                    "name": "Output 8",
+                    "channels": 1
                   }
                 ],
                 "maps": [
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 0,
                     "cluster": 0,
                     "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 1,
-                    "cluster": 0,
-                    "cluster_ch": 1
+                    "cluster": 1,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 2,
-                    "cluster": 0,
-                    "cluster_ch": 2
+                    "cluster": 2,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 3,
-                    "cluster": 0,
-                    "cluster_ch": 3
+                    "cluster": 3,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 4,
-                    "cluster": 0,
-                    "cluster_ch": 4
+                    "cluster": 4,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 5,
-                    "cluster": 0,
-                    "cluster_ch": 5
+                    "cluster": 5,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 6,
-                    "cluster": 0,
-                    "cluster_ch": 6
+                    "cluster": 6,
+                    "cluster_ch": 0
                   },
                   {
-                    "stream": 0,
+                    "stream": 1,
                     "stream_ch": 7,
-                    "cluster": 0,
-                    "cluster_ch": 7
+                    "cluster": 7,
+                    "cluster_ch": 0
                   }
                 ]
               }
@@ -350,7 +465,8 @@
           {
             "name": "eth0",
             "flags": [
-              "GPTP_SUPPORTED"
+              "GPTP_SUPPORTED",
+              "SRP_SUPPORTED"
             ]
           }
         ],

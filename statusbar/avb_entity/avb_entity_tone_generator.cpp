@@ -95,7 +95,7 @@ struct ToneStreams
     size_t channels;
 };
 
-/// Whether every audio stream carries the AUDIO_CLUSTER's channel count.
+/// Whether every audio stream carries the stream port's channel count.
 [[nodiscard]] auto audio_channels_match(StreamSpecs const& specs, size_t channels) -> bool
 {
     return std::ranges::all_of(specs, [channels](StreamSpec const& spec) {
@@ -113,7 +113,7 @@ struct ToneStreams
     }
     size_t const channels = channels_from_storage(storage, 8);
     if (!audio_channels_match(specs, channels)) {
-        return failure(std::errc::invalid_argument);  // stream format vs AUDIO_CLUSTER channel mismatch
+        return failure(std::errc::invalid_argument);  // stream format vs stream port channel mismatch
     }
     return ToneStreams{.specs = specs, .listener_specs = listener_specs, .rate = *rate, .channels = channels};
 }

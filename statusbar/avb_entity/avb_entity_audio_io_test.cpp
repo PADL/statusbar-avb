@@ -225,7 +225,9 @@ TEST(audio_io_model, declares_streams_and_ports)
     };
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 3u);   // AM824 + AAF + CRF media-clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);  // AM824 + AAF + CRF media clock
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 4u);
+    // Two stream ports each way, each of eight one-channel clusters (Milan
+    // v1.3 5.3.3.8) under one map.
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 32u);
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 4u);
 }
 

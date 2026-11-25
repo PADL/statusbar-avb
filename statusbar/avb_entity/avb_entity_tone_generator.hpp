@@ -83,9 +83,9 @@ class AvbEntityToneGenerator
 
     /// Factory — constructs and validates the entity from configuration. Parses
     /// the descriptor-storage blob: the STREAM_OUTPUT descriptors shape the
-    /// stream slots (kind/format/rate per current_format), the first
-    /// AUDIO_CLUSTER supplies the channel count, and every audio stream must
-    /// agree on one sample rate and the cluster channel count (loud create-time
+    /// stream slots (kind/format/rate per current_format), the first stream
+    /// port's AUDIO_CLUSTERs supply the channel count, and every audio stream must
+    /// agree on one sample rate and that channel count (loud create-time
     /// failure instead of silent blob/C++ divergence). `base_midi_note` selects
     /// the lowest white-key tone (default C4); each channel takes the next
     /// white key up.

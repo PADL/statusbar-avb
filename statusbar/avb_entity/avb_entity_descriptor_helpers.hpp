@@ -11,8 +11,9 @@
 ///
 ///   - load_descriptor<T>()        — load one AEM descriptor of type T from a
 ///                                   DescriptorStorage blob (partial-load safe).
-///   - channels_from_storage()     — channel count from the first AUDIO_CLUSTER
-///                                   descriptor (per-entity default).
+///   - channels_from_storage()     — channel count of the first stream port:
+///                                   its AUDIO_CLUSTERs' channels, summed
+///                                   (per-entity default).
 ///   - EntityIdentityDescriptorHandler — serves descriptors from an .aem blob
 ///                                   (symbol-aware), patching the runtime-only
 ///                                   ENTITY identity and (optionally) the
@@ -39,10 +40,13 @@ namespace statusbar::avb_entity {
 
 using statusbar::atdecc::aem::AtdeccString;
 using statusbar::atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER;
+using statusbar::atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
+using statusbar::atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT;
 using statusbar::atdecc::aem::DescriptorAudioCluster;
 using statusbar::atdecc::aem::DescriptorAvbInterface;
 using statusbar::atdecc::aem::DescriptorEntity;
 using statusbar::atdecc::aem::DescriptorRef;
+using statusbar::atdecc::aem::DescriptorStreamPort;
 
 /// Load a single AEM descriptor of type T from storage.
 /// Accepts blobs smaller than sizeof(T) via partial-load fallback.
@@ -60,19 +64,44 @@ template <typename T>
     return success(desc);
 }
 
-/// Channel count from the first AUDIO_CLUSTER descriptor (default_channels when
-/// absent). Drives the data-plane buffer sizing; the rest of the model is served
-/// straight from the blob.
-[[nodiscard]] inline auto channels_from_storage(nanoavb::DescriptorStorage const& storage, size_t default_channels) -> size_t
+/// The channels of AUDIO_CLUSTER @p index (0 when the model has no such cluster).
+[[nodiscard]] inline auto cluster_channels(nanoavb::DescriptorStorage const& storage, uint16_t const index) -> size_t
 {
-    size_t channels = default_channels;
-    if (auto r = load_descriptor<DescriptorAudioCluster>(storage, 0, DESCRIPTOR_AUDIO_CLUSTER, 0)) {
-        auto const ch = static_cast<uint16_t>(r->channel_count);
-        if (ch >= 1) {
-            channels = static_cast<size_t>(ch);
-        }
+    auto const cluster = load_descriptor<DescriptorAudioCluster>(storage, 0, DESCRIPTOR_AUDIO_CLUSTER, index);
+    return cluster ? static_cast<size_t>(cluster->channel_count.get()) : 0;
+}
+
+/// The channels of stream port @p index of @p type (STREAM_PORT_INPUT or
+/// STREAM_PORT_OUTPUT): those of its AUDIO_CLUSTERs, summed. 0 when the model
+/// has no such port.
+[[nodiscard]] inline auto stream_port_channels(nanoavb::DescriptorStorage const& storage, uint16_t const type, uint16_t const index)
+    -> size_t
+{
+    auto const port = load_descriptor<DescriptorStreamPort>(storage, 0, type, index);
+    if (!port) {
+        return 0;
+    }
+    size_t channels = 0;
+    for (uint16_t i = 0; i < port->number_of_clusters.get(); ++i) {
+        channels += cluster_channels(storage, static_cast<uint16_t>(port->base_cluster.get() + i));
     }
     return channels;
+}
+
+/// Channel count of the model's first stream port, the input before the
+/// output (default_channels when it has none): the channels of the port's
+/// AUDIO_CLUSTERs, summed, so a port of eight one-channel clusters (Milan
+/// v1.3 5.3.3.8 has channel_count 1) and a port of one eight-channel cluster
+/// both give eight. Drives the data-plane buffer sizing; the rest of the model
+/// is served straight from the blob.
+[[nodiscard]] inline auto channels_from_storage(nanoavb::DescriptorStorage const& storage, size_t default_channels) -> size_t
+{
+    for (auto const type : {DESCRIPTOR_STREAM_PORT_INPUT, DESCRIPTOR_STREAM_PORT_OUTPUT}) {
+        if (auto const channels = stream_port_channels(storage, type, 0); channels >= 1) {
+            return channels;
+        }
+    }
+    return default_channels;
 }
 
 /// Find the clock-source index whose CLOCK_SOURCE descriptor is the

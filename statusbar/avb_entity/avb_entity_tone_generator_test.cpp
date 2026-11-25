@@ -172,9 +172,9 @@ TEST(tone_model, declares_three_outputs_and_crf_input)
         }
         return n;
     };
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);   // the CRF clock input
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);  // AM824 + AAF + CRF
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 2u);  // AM824 + AAF output clusters
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);    // the CRF clock input
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 3u);   // AM824 + AAF + CRF
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 16u);  // AM824 + AAF outputs, eight one-channel clusters each
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 2u);
 }
 
@@ -381,7 +381,7 @@ TEST(tone_aaf_model, declares_one_aaf_output_no_inputs)
     };
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 0u);
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 1u);  // AAF only
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 8u);  // eight one-channel clusters
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 1u);
     // STREAM_OUTPUT[0] must be the AAF int32 format (0x0207022002 00C000).
     auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0);
@@ -440,7 +440,7 @@ TEST(tone_aafcrf_model, declares_aaf_plus_crf_and_crf_input)
     };
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);   // the CRF clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 2u);  // AAF + CRF
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 1u);  // AAF audio only
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 8u);  // AAF audio only, eight one-channel clusters
     // STREAM_OUTPUT[0] = AAF, STREAM_OUTPUT[1] = Milan CRF.
     auto const aaf = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0);
     auto const crf = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 1);
