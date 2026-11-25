@@ -557,6 +557,27 @@ TEST(nanoavb_milan_listener, an_mvu_bind_is_given_what_was_heard_of_its_talker_t
     EXPECT_EQ(rig.listener.sink(0)->discovery_state(), atdecc::MilanDiscoveryState::TkDiscovered);
 }
 
+TEST(nanoavb_milan_listener, a_started_or_stopped_change_is_saved_as_a_binding_is)
+{
+    // START_STREAMING and STOP_STREAMING reach a sink through the listener
+    // (Milan v1.3 5.4.2.19, 5.4.2.20); the state is saved with its binding.
+    ListenerRig rig;
+    EXPECT_FALSE(rig.listener.set_streaming_wait(1, true));  // not bound: no effect
+    EXPECT_FALSE(rig.listener.set_streaming_wait(3, true));  // no such stream input
+    EXPECT_TRUE(rig.log.empty());
+
+    EXPECT_TRUE(rig.bind(1, at(0)));
+    rig.log.clear();
+    EXPECT_TRUE(rig.listener.set_streaming_wait(1, true));
+    EXPECT_EQ(rig.log.size(), 1U);
+    EXPECT_EQ(rig.log[0], std::string{"saved"});
+    EXPECT_TRUE(rig.listener.bindings().front().streaming_wait);
+    EXPECT_FALSE(rig.listener.set_streaming_wait(1, true));  // already stopped
+    EXPECT_EQ(rig.log.size(), 1U);
+    EXPECT_TRUE(rig.listener.set_streaming_wait(1, false));
+    EXPECT_FALSE(rig.listener.bindings().front().streaming_wait);
+}
+
 TEST(nanoavb_milan_listener, the_bindings_are_what_was_bound_and_survive_a_restart)
 {
     ListenerRig rig;

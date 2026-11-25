@@ -259,6 +259,12 @@ void NanoAvbMilanAcmpListener::on_srp_changed(TimePoint const now)
     }
 }
 
+auto NanoAvbMilanAcmpListener::set_streaming_wait(uint16_t const stream_index, bool const wait) -> bool
+{
+    auto* const found = mutable_sink(stream_index);
+    return found != nullptr && found->set_streaming_wait(wait);
+}
+
 void NanoAvbMilanAcmpListener::tick(TimePoint const now)
 {
     for (auto& each : sinks_) {

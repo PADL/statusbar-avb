@@ -404,6 +404,50 @@ TEST(milan_sink_wiring, the_lock_is_passed_to_the_bind_and_unbind_but_not_to_the
     EXPECT_EQ(rig.responses.back().status(), ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
 }
 
+TEST(milan_sink_wiring, start_and_stop_streaming_change_a_bound_sinks_saved_state_and_nothing_else)
+{
+    // Milan v1.3 5.4.2.19, 5.4.2.20 and 5.3.8.3: the started/stopped state
+    // is a binding parameter. It is not an event of Table 5.30.
+    Rig rig;
+    int saved = 0;
+    rig.env.binding_changed = [&saved](uint16_t) { ++saved; };
+
+    // "No effect on a Stream Input that is not already bound."
+    EXPECT_FALSE(rig.sink.set_streaming_wait(true));
+    EXPECT_EQ(saved, 0);
+    EXPECT_FALSE(rig.sink.is_bound());
+
+    rig.registration = MilanTalkerRegistration::Advertise;
+    rig.bind(TALKER, at(0));
+    rig.answer_probe(at(5));
+    EXPECT_EQ(rig.sink.state(), State::SettledRsvOk);
+    EXPECT_EQ(saved, 1);
+    size_t const probes = rig.probes.size();
+    size_t const responses = rig.responses.size();
+
+    EXPECT_TRUE(rig.sink.set_streaming_wait(true));
+    EXPECT_EQ(saved, 2);
+    EXPECT_TRUE(rig.sink.context().binding->streaming_wait);
+    EXPECT_EQ(rig.sink.state(), State::SettledRsvOk);  // still settled, still reserving
+    EXPECT_EQ(rig.stopped, 0);
+    EXPECT_EQ(rig.probes.size(), probes);
+    EXPECT_EQ(rig.responses.size(), responses);  // the AEM response is not the sink's to send
+
+    // "... or already stopped": nothing to save.
+    EXPECT_FALSE(rig.sink.set_streaming_wait(true));
+    EXPECT_EQ(saved, 2);
+
+    // GET_RX_STATE reports the saved state (Table 5.44).
+    rig.sink.on_command(rig.command(ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER), false, at(10));
+    EXPECT_TRUE(rig.responses.back().is_streaming_wait());
+
+    EXPECT_TRUE(rig.sink.set_streaming_wait(false));
+    EXPECT_EQ(saved, 3);
+    rig.sink.on_command(rig.command(ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER), false, at(11));
+    EXPECT_FALSE(rig.responses.back().is_streaming_wait());
+    EXPECT_FALSE(rig.sink.set_streaming_wait(false));
+}
+
 TEST(milan_sink_wiring, a_restart_takes_a_bound_sink_back_to_waiting_and_leaves_an_unbound_one_alone)
 {
     Rig bound;

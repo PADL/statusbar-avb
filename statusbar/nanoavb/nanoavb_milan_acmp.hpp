@@ -306,6 +306,11 @@ class NanoAvbMilanAcmpListener
     /// What SRP registers may have changed: the settled sinks look again.
     void on_srp_changed(TimePoint now);
 
+    /// START_STREAMING (@p wait false) or STOP_STREAMING (true) for stream
+    /// input @p stream_index: MilanSink::set_streaming_wait(). True when the
+    /// sink's state changed; on_bindings_changed has then been called.
+    auto set_streaming_wait(uint16_t stream_index, bool wait) -> bool;
+
     /// Run the timers that have fallen due.
     void tick(TimePoint now);
 

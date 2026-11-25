@@ -41,6 +41,18 @@ void MilanSink::on_command(AcmpCommandResponse const& cmd, bool const locked_out
     }
 }
 
+auto MilanSink::set_streaming_wait(bool const wait) -> bool
+{
+    if (!ctx_.binding.has_value() || ctx_.binding->streaming_wait == wait) {
+        return false;
+    }
+    ctx_.binding->streaming_wait = wait;
+    if (ctx_.env->binding_changed) {
+        ctx_.env->binding_changed(ctx_.index);
+    }
+    return true;
+}
+
 void MilanSink::on_probe_response(AcmpCommandResponse const& resp, TimePoint const now)
 {
     ctx_.env->rcvd = resp;

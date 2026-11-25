@@ -45,6 +45,15 @@ class MilanSink
     /// sink. @p locked_out: the entity is locked by another controller.
     void on_command(AcmpCommandResponse const& cmd, bool locked_out, TimePoint now);
 
+    /// START_STREAMING or STOP_STREAMING for this stream input (Milan v1.3
+    /// 5.4.2.19, 5.4.2.20): a bound sink takes the started (@p wait false) or
+    /// stopped state. It is a binding parameter (5.3.8.3), so it is saved
+    /// as a bind's STREAMING_WAIT is, and GET_RX_STATE reports it. Not an
+    /// event of the sink machine: the sink goes on probing or stays settled
+    /// as it was. Nothing changes, and false, for a sink that is not bound
+    /// or is in that state already.
+    auto set_streaming_wait(bool wait) -> bool;
+
     /// A PROBE_TX_RESPONSE naming this sink.
     void on_probe_response(AcmpCommandResponse const& resp, TimePoint now);
 
