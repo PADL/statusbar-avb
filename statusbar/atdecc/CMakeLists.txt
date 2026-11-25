@@ -60,6 +60,7 @@ statusbar_add_module(
   atdecc_aem_control_values_test.cpp
   atdecc_aem_print_test.cpp
   atdecc_aem_units_test.cpp
+  atdecc_utf8_test.cpp
   atdecc_descriptor_storage_test.cpp
   atdecc_jdks_test.cpp
   atdecc_adp_discovery_test.cpp
