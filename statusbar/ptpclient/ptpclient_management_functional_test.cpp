@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <format>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -453,6 +454,68 @@ TEST(ptp_management, silence_or_a_vanished_socket_is_unreachable)
     EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
     EXPECT_TRUE(last.error == std::errc::no_such_file_or_directory || last.error == std::errc::connection_refused);
     EXPECT_FALSE(c.finished());
+    client->reset();
+    std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+/// How many datagrams one fresh socket got into `address`'s queue before a send was refused.
+auto send_until_refused(sockaddr_un const& address) -> int
+{
+    int const fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+    int sent = 0;
+    char const octet = 0;
+    while (sent < 4096 &&
+           ::sendto(fd, &octet, 1, MSG_DONTWAIT, reinterpret_cast<sockaddr const*>(&address), sizeof(address)) == 1) {
+        ++sent;
+    }
+    ::close(fd);
+    return sent;
+}
+
+/// Fills the queue of the socket at `path`, so the next send to it is refused with EAGAIN. Its length is
+/// net.unix.max_dgram_qlen: 10 in a new network namespace, as in a container, and often 512 on a host.
+/// Fresh sockets, because one sender's own buffer fills before a long queue does; the queue is full
+/// when a fresh socket's first datagram is refused.
+void fill_queue(std::string const& path)
+{
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path, path.data(), path.size());
+    int sockets = 0;
+    while (sockets < 64 && send_until_refused(address) != 0) {
+        ++sockets;
+    }
+}
+
+}  // namespace
+
+// A send that meets ptp4l's full queue leaves EAGAIN as the error and ptp4l reachable. When the socket
+// then goes, the client is unreachable and says why: the socket, not the queue.
+TEST(ptp_management, a_vanished_socket_is_reported_over_an_earlier_full_queue)
+{
+    auto const dir = socket_dir("full");
+    PtpManagementState last{};
+    auto ptp4l = std::make_unique<Ptp4l>(dir);
+    auto client = PtpManagementClient::create(
+        PtpManagementConfig{.uds_address = ptp4l->path, .subscription_duration_s = 6},
+        [&](PtpManagementState const& state) { last = state; });
+    EXPECT_TRUE(client.has_value());
+    if (!client) {
+        return;
+    }
+    auto& c = **client;
+    fill_queue(ptp4l->path);
+    c.handle(PARENT_RESPONSE, 0);  // reachable: the fetches it starts meet the full queue
+    EXPECT_TRUE(last.status == PtpManagementStatus::locked);
+    EXPECT_TRUE(last.error == std::errc::resource_unavailable_try_again);
+
+    ptp4l.reset();
+    std::filesystem::remove(dir / "ptp4l");
+    c.tick(3 * SECOND);  // a renewal
+    EXPECT_TRUE(last.status == PtpManagementStatus::unreachable);
+    EXPECT_TRUE(last.error == std::errc::no_such_file_or_directory || last.error == std::errc::connection_refused);
     client->reset();
     std::filesystem::remove_all(dir);
 }

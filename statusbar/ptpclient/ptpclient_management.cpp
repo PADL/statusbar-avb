@@ -890,8 +890,14 @@ auto PtpManagementClient::send_as(
 
 auto PtpManagementClient::notify_send_error(std::error_code const error) -> std::error_code
 {
+    bool const gone = server_gone(error);
+    if (gone && state_.error && !server_gone(state_.error)) {
+        // The socket being gone is why ptp4l is unreachable: it replaces an earlier error that is
+        // not (EAGAIN from a send that met ptp4l's full queue).
+        state_.error = {};
+    }
     notify_error(error);
-    server_gone_ = server_gone_ || server_gone(error);
+    server_gone_ = server_gone_ || gone;
     return error;
 }
 

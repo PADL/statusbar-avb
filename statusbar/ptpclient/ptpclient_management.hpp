@@ -361,6 +361,9 @@ struct PtpManagementState
     std::optional<TimeStatusNp> time_status;
     /// The first send or receive error since the last answer (EACCES on a
     /// root-only socket, ENOENT with no ptp4l, ...); clear while ptp4l answers.
+    /// A send error that says ptp4l's socket is gone (ENOENT, ECONNREFUSED)
+    /// replaces an earlier one that does not, such as EAGAIN from a send that
+    /// met ptp4l's full queue: it is the reason the client is unreachable.
     std::error_code error;
 };
 
@@ -458,7 +461,8 @@ class PtpManagementClient final : public net::Pollable
     [[nodiscard]] auto send_as(
         ManagementAction action, uint16_t management_id, std::span<uint8_t const> data, uint8_t transport_specific) -> Status;
     void send_gets(std::span<uint16_t const> ids);
-    /// A send's @p error, noted (state().error, and whether ptp4l's socket is gone); returned.
+    /// A send's @p error, noted (state().error, where one that says ptp4l's socket is gone replaces
+    /// an earlier one that does not, and whether the socket is gone); returned.
     auto notify_send_error(std::error_code error) -> std::error_code;
     void send_settings();
     void send_subscription(int64_t now_ns);

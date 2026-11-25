@@ -182,7 +182,9 @@ fetches everything again and sends its settings, and settings other than ours ar
 sent again. It is also the keepalive: two renewals without any answer from ptp4l
 make the client unreachable, and so does a send ptp4l's socket refuses (ENOENT,
 ECONNREFUSED: it exited or is restarting); everything learnt is then forgotten and
-the probes resume. A client being destroyed unsubscribes (an empty bitmask).
+the probes resume. `state().error` then holds that error, also when an earlier
+send had left another there (EAGAIN from a send that met ptp4l's full queue). A
+client being destroyed unsubscribes (an empty bitmask).
 
 `set_grandmaster_settings()` sends SET GRANDMASTER_SETTINGS_NP: the clockQuality
 (clockClass, clockAccuracy, offsetScaledLogVariance), currentUtcOffset, the time
