@@ -43,6 +43,7 @@ auto available(uint32_t const available_index) -> AdpDu
     adp.gptp_grandmaster_id = GRANDMASTER;
     adp.gptp_domain_number = 0;
     adp.interface_index = 1;
+    adp.entity_capabilities = entity_capabilities::AEM_SUPPORTED | entity_capabilities::AEM_CONFIGURATION_INDEX_VALID;
     adp.current_configuration_index = 0;
     return adp;
 }
@@ -198,12 +199,48 @@ TEST(milan_discovery, another_configuration_is_a_departure_and_a_discovery)
     EXPECT_EQ(d.state(), State::TkDiscovered);
     EXPECT_TRUE(d.ctx.departed);
     EXPECT_TRUE(d.ctx.discovered);
-    EXPECT_EQ(d.ctx.current_configuration_index, 1);
+    EXPECT_TRUE(d.ctx.current_configuration_index == uint16_t{1});
     // The same configuration again is an ordinary refresh.
     auto next = available(9);
     next.current_configuration_index = 1;
     EXPECT_TRUE(d.receive(next, at(4000)));
     EXPECT_FALSE(d.ctx.departed);
+}
+
+TEST(milan_discovery, a_configuration_index_not_marked_valid_is_not_compared)
+{
+    // 5.6.4.5.2 step 2 compares the field "if present": IEEE 1722.1-2021
+    // 6.2.1.10 gives it a meaning only under AEM_CONFIGURATION_INDEX_VALID.
+    Discovery d;
+    d.discover();
+    auto unmarked = available(8);
+    unmarked.entity_capabilities = entity_capabilities::AEM_SUPPORTED;
+    unmarked.current_configuration_index = 5;
+    EXPECT_TRUE(d.receive(unmarked, at(3000)));
+    EXPECT_FALSE(d.ctx.departed);
+    EXPECT_FALSE(d.ctx.current_configuration_index.has_value());
+    // Marked valid again: there is no earlier value to differ from.
+    auto marked = available(9);
+    marked.current_configuration_index = 5;
+    EXPECT_TRUE(d.receive(marked, at(4000)));
+    EXPECT_FALSE(d.ctx.departed);
+    // From here on a change is a restart.
+    auto changed = available(10);
+    changed.current_configuration_index = 6;
+    EXPECT_TRUE(d.receive(changed, at(5000)));
+    EXPECT_TRUE(d.ctx.departed);
+    EXPECT_TRUE(d.ctx.discovered);
+}
+
+TEST(milan_discovery, a_valid_time_of_zero_is_good_for_one_unit)
+{
+    Discovery d;
+    d.start();
+    auto brief = available(7);
+    brief.set_valid_time(0);
+    EXPECT_TRUE(d.receive(brief, at(1000)));
+    EXPECT_EQ(d.state(), State::TkDiscovered);
+    EXPECT_EQ(*d.ctx.timer, at(3000));
 }
 
 TEST(milan_discovery, a_talker_that_restarted_on_another_grandmaster_is_only_departed)

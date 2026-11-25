@@ -52,6 +52,18 @@ class MilanSink
     /// bound to; @p own is this listener's gPTP state on the port.
     void on_adp(AdpDu const& adp, MilanGptpState const& own, TimePoint now);
 
+    /// The bound talker's last ENTITY_AVAILABLE, heard before the bind that
+    /// has just been handled and good until @p valid_until. Every bind
+    /// treatment starts discovery with the talker not discovered (5.5.3.6.3
+    /// step 4), and a controller usually binds a talker it has just seen
+    /// advertise. Taken to the letter, a first probe that is refused or lost
+    /// then waits in PRB_W_AVAIL for the talker's next advertisement, seconds
+    /// past TMR_RETRY and TMR_DELAY. Here the advertisement is run through the
+    /// discovery machine as if it had arrived after the bind, with the checks
+    /// of 5.6.4.5.1 and its own time to live. It does nothing unless the sink
+    /// is bound to its sender and has not discovered it.
+    void on_advertisement_heard_earlier(AdpDu const& adp, MilanGptpState const& own, TimePoint valid_until, TimePoint now);
+
     /// What SRP registers may have changed: a settled sink looks again
     /// (EVT_TK_REGISTERED, EVT_TK_UNREGISTERED).
     void on_srp_changed(TimePoint now);

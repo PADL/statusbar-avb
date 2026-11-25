@@ -65,10 +65,13 @@ struct MilanDiscoveryContext
     /// The ADP message the event being handled arrived in.
     AdpDu rcvd{};
 
-    /// What the talker's last accepted ENTITY_AVAILABLE said.
+    /// What the talker's last accepted ENTITY_AVAILABLE said. The
+    /// configuration index is noted only when the advertisement marks the
+    /// field valid (AEM_CONFIGURATION_INDEX_VALID, IEEE 1722.1-2021 6.2.1.10):
+    /// 5.6.4.5.2 compares it "if present".
     uint16_t interface_index{0};
     uint32_t available_index{0};
-    uint16_t current_configuration_index{0};
+    std::optional<uint16_t> current_configuration_index{};
 
     /// TMR_NO_ADP: when the talker's advertisement lapses.
     std::optional<sm::TimePoint> timer{};
@@ -79,11 +82,23 @@ struct MilanDiscoveryContext
     bool discovered{false};
 };
 
-/// The time an ENTITY_AVAILABLE stays good for: valid_time counts 2 second units.
+/// The time an ENTITY_AVAILABLE stays good for: valid_time counts 2 second
+/// units. A valid_time of 0, which no ENTITY_AVAILABLE should carry (IEEE
+/// 1722.1-2021 6.2.1.6), is taken as one unit, so that such a talker is
+/// discovered for two seconds and not for none.
 [[nodiscard]] constexpr auto milan_adp_valid_for(AdpDu const& adp) noexcept -> std::chrono::seconds
 {
-    return std::chrono::seconds{2 * static_cast<int>(adp.valid_time())};
+    int const units = adp.valid_time() == 0 ? 1 : static_cast<int>(adp.valid_time());
+    return std::chrono::seconds{2 * units};
 }
+
+/// An ENTITY_AVAILABLE heard earlier and still good: what an entity's ADP
+/// discovery holds of a talker when a sink is bound to it.
+struct MilanHeardAdvertisement
+{
+    AdpDu adp{};
+    sm::TimePoint valid_until{};  ///< when TMR_NO_ADP, run from its arrival, falls due
+};
 
 namespace milan_discovery_actions {
 

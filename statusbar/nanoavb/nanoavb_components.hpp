@@ -375,6 +375,9 @@ class AtdeccNetHandler : public net::Pollable
     void note_adp(atdecc::AdpDu const& adp, sm::TimePoint now);
     void dispatch_ieee_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
     void dispatch_milan_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
+    /// What ADP discovery holds of @p talker: its last ENTITY_AVAILABLE while
+    /// it is still good, for a Milan sink a controller binds to it.
+    [[nodiscard]] auto heard_advertisement_of(Eui64 const& talker) const -> std::optional<atdecc::MilanHeardAdvertisement>;
     void trace_listener_command(atdecc::AcmpCommandResponse const& pdu, bool handled) const;
     /// Take back the senders this handler gave the Milan pair.
     void release_milan_acmp() noexcept;

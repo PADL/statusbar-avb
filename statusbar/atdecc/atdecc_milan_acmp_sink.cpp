@@ -60,6 +60,18 @@ void MilanSink::on_adp(AdpDu const& adp, MilanGptpState const& own, TimePoint co
     }
 }
 
+void MilanSink::on_advertisement_heard_earlier(
+    AdpDu const& adp, MilanGptpState const& own, TimePoint const valid_until, TimePoint const now)
+{
+    if (discovery_.current_state() != MilanDiscoveryState::TkNotDiscovered || valid_until <= now) {
+        return;
+    }
+    on_adp(adp, own, now);
+    if (discovery_.current_state() == MilanDiscoveryState::TkDiscovered) {
+        discovery_ctx_.timer = valid_until;  // it has been ageing since it was heard
+    }
+}
+
 void MilanSink::on_srp_changed(TimePoint const now)
 {
     check_registration(now);

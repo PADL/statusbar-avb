@@ -174,7 +174,8 @@ void NanoAvbMilanAcmpListener::restart(TimePoint const now)
     }
 }
 
-auto NanoAvbMilanAcmpListener::receive_controller_command(AcmpCommandResponse const& cmd, TimePoint const event_time) -> bool
+auto NanoAvbMilanAcmpListener::receive_controller_command(
+    AcmpCommandResponse const& cmd, TimePoint const event_time, std::optional<atdecc::MilanHeardAdvertisement> const& heard) -> bool
 {
     if (cmd.listener_entity_id != env_.my_id || !is_listener_command(cmd.message_type())) {
         return false;
@@ -186,6 +187,10 @@ auto NanoAvbMilanAcmpListener::receive_controller_command(AcmpCommandResponse co
         return true;
     }
     found->on_command(cmd, is_locked_out(cmd.controller_entity_id), event_time);
+    if (heard.has_value() && cmd.message_type() == ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND) {
+        auto const own = gptp_state_ ? gptp_state_() : atdecc::MilanGptpState{};
+        found->on_advertisement_heard_earlier(heard->adp, own, heard->valid_until, event_time);
+    }
     return true;
 }
 

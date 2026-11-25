@@ -327,6 +327,69 @@ TEST(milan_sink_wiring, a_bind_starts_discovery_afresh_and_an_unbind_stops_it)
     EXPECT_FALSE(rig.sink.next_deadline().has_value());
 }
 
+TEST(milan_sink_wiring, a_talker_heard_before_the_bind_is_probed_again_without_waiting_for_its_next_advertisement)
+{
+    // The bind starts discovery with the talker not discovered (5.5.3.6.3
+    // step 4). Its advertisement of two seconds before is run through
+    // discovery as if it came after the bind, so a refused first probe is
+    // retried after TMR_RETRY and TMR_DELAY (5.5.3.6.30 step 2).
+    Rig rig;
+    rig.bind(TALKER, at(2000));
+    rig.sink.on_advertisement_heard_earlier(available(TALKER, 7), OWN, at(10'000), at(2000));
+    EXPECT_EQ(rig.sink.state(), State::PrbWResp);  // 5.5.3.6.21: only noted
+    EXPECT_EQ(rig.sink.discovery_state(), MilanDiscoveryState::TkDiscovered);
+    EXPECT_TRUE(rig.sink.context().talker_discovered);
+
+    rig.answer_probe(at(2050), ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+    EXPECT_EQ(rig.sink.state(), State::PrbWRetry);
+    rig.sink.tick(at(6050));
+    EXPECT_EQ(rig.sink.state(), State::PrbWDelay);
+    rig.sink.tick(at(6150));
+    EXPECT_EQ(rig.sink.state(), State::PrbWResp);
+    EXPECT_EQ(rig.probes.size(), size_t{2});
+
+    // The advertisement keeps the time to live it had when it was heard.
+    rig.sink.tick(at(10'000));
+    EXPECT_EQ(rig.sink.discovery_state(), MilanDiscoveryState::TkNotDiscovered);
+    EXPECT_EQ(rig.sink.state(), State::PrbWAvail);
+}
+
+TEST(milan_sink_wiring, without_an_earlier_advertisement_a_refused_first_probe_waits_for_the_talker_to_advertise)
+{
+    Rig rig;
+    rig.bind(TALKER, at(2000));
+    rig.answer_probe(at(2050), ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+    rig.sink.tick(at(6050));
+    EXPECT_EQ(rig.sink.state(), State::PrbWAvail);  // 5.5.3.6.30 step 1
+    EXPECT_EQ(rig.probes.size(), size_t{1});
+}
+
+TEST(milan_sink_wiring, an_earlier_advertisement_is_held_to_the_checks_of_one_that_arrives)
+{
+    // Another talker's, one that has lapsed, and one on another grandmaster discover nothing.
+    Rig rig;
+    rig.bind(TALKER, at(2000));
+    rig.sink.on_advertisement_heard_earlier(available(OTHER_TALKER, 7), OWN, at(10'000), at(2000));
+    rig.sink.on_advertisement_heard_earlier(available(TALKER, 7), OWN, at(2000), at(2000));
+    auto elsewhere = available(TALKER, 7);
+    elsewhere.gptp_grandmaster_id = ClockIdentity{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x00, 0x02};
+    rig.sink.on_advertisement_heard_earlier(elsewhere, OWN, at(10'000), at(2000));
+    EXPECT_EQ(rig.sink.discovery_state(), MilanDiscoveryState::TkNotDiscovered);
+    EXPECT_FALSE(rig.sink.context().talker_discovered);
+
+    // A talker already discovered is not discovered a second time: nothing is restarted.
+    rig.sink.on_adp(available(TALKER, 8), OWN, at(2100));
+    rig.sink.on_advertisement_heard_earlier(available(TALKER, 7), OWN, at(10'000), at(2100));
+    EXPECT_EQ(rig.sink.discovery_state(), MilanDiscoveryState::TkDiscovered);
+    EXPECT_EQ(rig.sink.state(), State::PrbWResp);
+    EXPECT_EQ(rig.probes.size(), size_t{1});
+
+    // An unbound sink has no talker to have heard.
+    Rig unbound;
+    unbound.sink.on_advertisement_heard_earlier(available(TALKER, 7), OWN, at(10'000), at(2000));
+    EXPECT_EQ(unbound.sink.discovery_state(), MilanDiscoveryState::Stopped);
+}
+
 TEST(milan_sink_wiring, the_lock_is_passed_to_the_bind_and_unbind_but_not_to_the_query)
 {
     Rig rig;

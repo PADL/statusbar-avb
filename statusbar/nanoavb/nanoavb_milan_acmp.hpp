@@ -268,8 +268,14 @@ class NanoAvbMilanAcmpListener
 
     /// Process a received ACMP PDU as a controller's command. True when it
     /// was a BIND_RX, UNBIND_RX or GET_RX_STATE command addressed to this
-    /// entity (5.5.3.1); every other ACMP message is ignored.
-    auto receive_controller_command(AcmpCommandResponse const& cmd, TimePoint event_time) -> bool;
+    /// entity (5.5.3.1); every other ACMP message is ignored. @p heard is the
+    /// last ENTITY_AVAILABLE of the talker the command names, when the
+    /// entity's ADP discovery holds one that is still good: after a bind the
+    /// sink is given it (MilanSink::on_advertisement_heard_earlier).
+    auto receive_controller_command(
+        AcmpCommandResponse const& cmd,
+        TimePoint event_time,
+        std::optional<atdecc::MilanHeardAdvertisement> const& heard = std::nullopt) -> bool;
 
     /// Process a received ACMP PDU as a talker's PROBE_TX_RESPONSE. True
     /// when it named this entity and one of its sinks.

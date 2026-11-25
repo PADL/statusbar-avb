@@ -412,6 +412,37 @@ TEST(nanoavb_milan_listener, adp_reaches_the_sinks_bound_to_its_sender_on_our_gp
     EXPECT_EQ(*rig.listener.next_deadline(), at(300) + atdecc::MILAN_TMR_NO_RESP);
 }
 
+TEST(nanoavb_milan_listener, a_bind_is_given_what_was_heard_of_its_talker_before_it)
+{
+    using atdecc::MilanDiscoveryState;
+    using atdecc::MilanHeardAdvertisement;
+    auto const bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 0);
+    MilanHeardAdvertisement const heard{.adp = available(TALKER, 4), .valid_until = at(9000)};
+
+    // Heard on our grandmaster and still good: the talker is discovered from the bind on.
+    ListenerRig rig;
+    EXPECT_TRUE(rig.listener.receive_controller_command(bind, at(1000), heard));
+    EXPECT_EQ(rig.listener.sink(0)->discovery_state(), MilanDiscoveryState::TkDiscovered);
+    EXPECT_EQ(rig.state(0), MilanSinkState::PrbWResp);
+    EXPECT_EQ(rig.probes.size(), 1U);
+
+    // Heard on another grandmaster, or nothing heard: the sink waits for an advertisement.
+    ListenerRig elsewhere;
+    elsewhere.gptp.domain_number = 1;
+    EXPECT_TRUE(elsewhere.listener.receive_controller_command(bind, at(1000), heard));
+    EXPECT_EQ(elsewhere.listener.sink(0)->discovery_state(), MilanDiscoveryState::TkNotDiscovered);
+    ListenerRig unheard;
+    EXPECT_TRUE(unheard.listener.receive_controller_command(bind, at(1000)));
+    EXPECT_EQ(unheard.listener.sink(0)->discovery_state(), MilanDiscoveryState::TkNotDiscovered);
+
+    // Only a bind takes it: a query of a sink that waits for its talker leaves it waiting.
+    ListenerRig waiting;
+    EXPECT_TRUE(waiting.listener.restore_binding(MilanBinding{.listener_unique_id = 0, .talker_entity_id = TALKER}, at(0)));
+    auto const query = command(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(waiting.listener.receive_controller_command(query, at(1000), heard));
+    EXPECT_EQ(waiting.state(0), MilanSinkState::PrbWAvail);
+}
+
 TEST(nanoavb_milan_listener, the_bindings_are_what_was_bound_and_survive_a_restart)
 {
     ListenerRig rig;

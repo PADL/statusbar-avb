@@ -405,8 +405,17 @@ void AtdeccNetHandler::dispatch_acmp(std::span<uint8_t const> const payload, sm:
 void AtdeccNetHandler::dispatch_milan_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint const now)
 {
     (void)milan_talker_->receive_command(pdu, now);
-    (void)milan_listener_->receive_controller_command(pdu, now);
+    (void)milan_listener_->receive_controller_command(pdu, now, heard_advertisement_of(pdu.talker_entity_id));
     (void)milan_listener_->receive_talker_response(pdu, now);
+}
+
+auto AtdeccNetHandler::heard_advertisement_of(Eui64 const& talker) const -> std::optional<atdecc::MilanHeardAdvertisement>
+{
+    auto const* const entity = adp_discovery_ != nullptr ? adp_discovery_->find_entity(talker) : nullptr;
+    if (entity == nullptr) {
+        return std::nullopt;
+    }
+    return atdecc::MilanHeardAdvertisement{.adp = entity->adpdu, .valid_until = entity->expiry_time};
 }
 
 void AtdeccNetHandler::dispatch_ieee_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint const now)

@@ -332,6 +332,34 @@ TEST(nanoavb_components_acmp, the_milan_listener_hears_adp_and_is_ticked_through
     EXPECT_EQ(net.milan_sent.front().talker_entity_id, REMOTE_TALKER);
 }
 
+TEST(nanoavb_components_acmp, a_milan_bind_finds_its_talker_discovered_when_adp_discovery_heard_it_first)
+{
+    auto components = two_stream_components();
+    components->use_milan_acmp();
+    AtdeccOnNoInterface net{*components};
+    NanoAvbAdpDiscovery discovery{};
+    net.handler.set_adp_discovery(&discovery);
+    auto const& sink = *components->milan_acmp_listener->sink(0);
+
+    // The talker advertises while nothing is bound to it: only ADP discovery keeps it.
+    atdecc::AdpDu adp{};
+    adp.init_entity_available(REMOTE_TALKER, 5);
+    adp.available_index = 1;
+    std::array<uint8_t, atdecc::AdpDu::LENGTH> buf{};
+    span_store(std::span<uint8_t>{buf}, adp);
+    net.receive({buf.begin(), buf.end()}, ONE_SECOND_NS);
+    EXPECT_EQ(sink.discovery_state(), atdecc::MilanDiscoveryState::Stopped);
+
+    // A controller binds a second later: the sink probes and has its talker discovered.
+    net.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, REMOTE_TALKER, ENTITY), 2 * ONE_SECOND_NS);
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::PrbWResp);
+    EXPECT_EQ(sink.discovery_state(), atdecc::MilanDiscoveryState::TkDiscovered);
+
+    // The advertisement lapses ten seconds after it was heard, not after the bind.
+    net.handler.tick(11 * ONE_SECOND_NS);
+    EXPECT_EQ(sink.discovery_state(), atdecc::MilanDiscoveryState::TkNotDiscovered);
+}
+
 TEST(nanoavb_components_acmp, a_handler_that_goes_away_takes_its_senders_back)
 {
     auto components = two_stream_components();

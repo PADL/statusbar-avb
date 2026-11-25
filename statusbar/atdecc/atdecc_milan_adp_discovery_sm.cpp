@@ -19,11 +19,25 @@ namespace {
     return adp.gptp_grandmaster_id == own.grandmaster_id && adp.gptp_domain_number.get() == own.domain_number;
 }
 
-/// 5.6.4.5.2 step 2: the talker went away and came back between two advertisements.
+/// The advertisement's current_configuration_index, when its capabilities
+/// mark the field valid (IEEE 1722.1-2021 6.2.1.10).
+[[nodiscard]] auto configuration_of(AdpDu const& adp) noexcept -> std::optional<uint16_t>
+{
+    if (!adp.has_entity_capability(entity_capabilities::AEM_CONFIGURATION_INDEX_VALID)) {
+        return std::nullopt;
+    }
+    return adp.current_configuration_index.get();
+}
+
+/// 5.6.4.5.2 step 2: the talker went away and came back between two
+/// advertisements, or changed configuration. The configuration is compared
+/// "if present": when this advertisement and the last both mark it valid.
 [[nodiscard]] auto shows_restart(MilanDiscoveryContext const& ctx, AdpDu const& adp) noexcept -> bool
 {
-    return adp.available_index.get() <= ctx.available_index ||
-        adp.current_configuration_index.get() != ctx.current_configuration_index;
+    auto const configuration = configuration_of(adp);
+    bool const reconfigured = configuration.has_value() && ctx.current_configuration_index.has_value() &&
+        *configuration != *ctx.current_configuration_index;
+    return adp.available_index.get() <= ctx.available_index || reconfigured;
 }
 
 [[nodiscard]] auto discovered_talker_event(MilanDiscoveryContext const& ctx, AdpDu const& adp, MilanGptpState const& own) noexcept
@@ -52,7 +66,7 @@ void note_advertisement(MilanDiscoveryContext& ctx, sm::TimePoint const now)
 {
     ctx.interface_index = ctx.rcvd.interface_index.get();
     ctx.available_index = ctx.rcvd.available_index.get();
-    ctx.current_configuration_index = ctx.rcvd.current_configuration_index.get();
+    ctx.current_configuration_index = configuration_of(ctx.rcvd);
     ctx.timer = now + milan_adp_valid_for(ctx.rcvd);
 }
 
