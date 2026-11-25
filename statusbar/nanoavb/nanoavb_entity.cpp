@@ -206,7 +206,27 @@ auto AemCommandHandler::answer_aem_command(
     // The response, then the notifications the command raised (Milan v1.3 Section 5.4.5.3).
     bool const sent = send_response(src_mac, header, response.status, body);
     flush_notifications();
+    run_after_response(header.controller_entity_id);
     return sent;
+}
+
+void AemCommandHandler::run_after_response(Eui64 const& requester)
+{
+    // As the command's dispatch would: its controller is left out of what the work notifies.
+    Eui64 const outer = std::exchange(requester_, requester);
+    for (auto& fn : std::exchange(after_response_, {})) {
+        fn();
+    }
+    requester_ = outer;
+}
+
+void AemCommandHandler::call_after_response(AfterResponseFn fn)
+{
+    if (!dispatching_ || after_response_.size() == MAX_AFTER_RESPONSE) {
+        fn();
+        return;
+    }
+    after_response_.push_back(std::move(fn));
 }
 
 auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
