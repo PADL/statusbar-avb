@@ -137,7 +137,8 @@ inline void add_milan_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConf
     specs.add<uint32_t>(
         "milan.features_flags",
         "GET_MILAN_INFO features_flags (Milan v1.3 Table 5.17): REDUNDANCY 1, TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, "
-        "MVU_BINDING 4, TALKER_SIGNAL_PRESENCE 8. Default 0.",
+        "TALKER_SIGNAL_PRESENCE 8. Default 0. MVU_BINDING (4) is set by the entity under the Milan profile and cleared "
+        "under any other, whatever is given here.",
         entity.milan_features_flags,
         [&entity](auto v) { entity.milan_features_flags = v; });
     specs.add<std::string>(

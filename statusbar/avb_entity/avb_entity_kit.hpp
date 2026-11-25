@@ -349,6 +349,9 @@ class AvbEntityKit
     /// Give the AEM handler the GET_MILAN_INFO answer a Milan model makes, or
     /// none for any other model.
     void install_milan_info();
+    /// The features_flags of GET_MILAN_INFO: the configuration's, with
+    /// MVU_BINDING set under the Milan profile and clear under any other.
+    [[nodiscard]] auto milan_features_flags() const noexcept -> uint32_t;
     /// @p text as a Milan version word, or @p fallback (logged against the
     /// configuration key @p key) when it is not dotted numbers.
     [[nodiscard]] auto milan_version_or(std::string const& text, uint32_t fallback, std::string_view key) -> uint32_t;

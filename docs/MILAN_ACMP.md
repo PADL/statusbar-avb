@@ -122,7 +122,7 @@ takes each answer through a setter, and the entity kit supplies them:
 | Is this controller shut out by the lock? (5.5.2.4) | `set_locked_out` | `AemCommandHandler::is_locked()` and `locking_controller()` |
 | Our gPTP grandmaster and domain (5.6.4.5.1) | `set_gptp_state` | what the entity's own ADP reports |
 | Which Talker attribute matches these parameters? (5.3.8.8) | `set_talker_registration` | `MsrpHandler::registered_talker()` with the sink's `TalkerMatch`: StreamID, destination address and VLAN |
-| Was its talker heard before the bind? | the `heard` argument of `receive_controller_command` | `AtdeccNetHandler`, from the ADP discovery it feeds |
+| Was its talker heard before the bind? | the `heard` argument of `receive_controller_command` and `receive_mvu_binding_command` | `AtdeccNetHandler`, from the ADP discovery it feeds |
 | Look again, SRP changed | `on_srp_changed()` | from `MsrpHandler`'s `on_remote_talker` |
 | Start and stop the reservation | `AcmpListenerCallbacks::on_connect`, `on_disconnect` | `ListenerStreams`: MSRP Listener attach with the same `TalkerMatch`, multicast join |
 | Save the bindings (5.5.2.4) | `set_on_bindings_changed` | the `listener.bindings` file, written before the controller is answered |
@@ -164,6 +164,56 @@ process and one status line at start says so.
 The file is the one the IEEE 1722.1 listener uses for its fast-connect
 goals, in a second form (`statusbar-listener-bindings v2`) with the two
 fields the first has no place for; each listener reads both forms.
+
+### Binding over AECP MVU (5.4.4.6 to 5.4.4.8)
+
+A controller may bind and unbind with the vendor-unique commands
+BIND_STREAM and UNBIND_STREAM, unicast to the listener, where ACMP's
+BIND_RX and UNBIND_RX commands go to the ACMP multicast address. The
+sink state machine has one event for each pair (RCV_BIND_RX_CMD,
+RCV_UNBIND_RX_CMD), and 5.5.3.2 sends an MVU command through it as
+5.5.3.1 sends the ACMP one. So there is no second treatment here:
+
+1. `AemCommandHandler` reads the command. One shorter than its format is
+   answered PAYLOAD_TOO_SHORT, one whose descriptor_type is not
+   STREAM_INPUT BAD_ARGUMENTS, and neither reaches a sink.
+2. The command becomes the ACMP command it equals by Table 5.22
+   (`atdecc::milan_bind_command_from_mvu`, `milan_unbind_command_from_mvu`):
+   the target is the listener, descriptor_index the listener_unique_id,
+   talker_stream_index the talker_unique_id. STREAMING_WAIT is the one
+   flag carried over; the bits Table 5.19 reserves are not ACMP flags.
+3. `NanoAvbMilanAcmpListener::receive_mvu_binding_command` gives it to the
+   sink, with the talker's last advertisement as for an ACMP bind. Where
+   the sink would send its ACMP response, the response goes to the caller
+   and nothing goes out on ACMP. The MVU response is sent from there:
+   after the binding is saved and before the probe, as the steps of
+   5.5.3.6.3 are numbered.
+4. The status of the sink's ACMP response names the MVU one
+   (`atdecc::mvu_status_for_binding_response`):
+
+| The sink answers | The MVU response says | Table |
+|---|---|---|
+| SUCCESS | SUCCESS | 5.35, 5.41 |
+| LISTENER_UNKNOWN_ID | NO_SUCH_DESCRIPTOR | 5.28 |
+| CONTROLLER_NOT_AUTHORIZED | ENTITY_LOCKED | 5.33, 5.39 |
+
+A sink bound one way may be bound again or unbound the other way: it is
+one binding, saved in one file.
+
+GET_STREAM_INPUT_INFO_EX reads a sink's variables
+(`atdecc::milan_stream_input_info_ex`): the talker it is bound to, zero
+when unbound, the Probing status and the ACMP status of 5.3.8.6. It is
+not a sink event and is not shut out by the lock.
+
+`AtdeccNetHandler::set_milan_acmp` attaches the listener's sinks to the
+AEM handler (`AemCommandHandler::attach_mvu_stream_inputs`) and its
+destructor takes them back. An entity that answers MVU and runs IEEE
+1722.1 connection management has nothing attached, and answers the three
+commands NOT_IMPLEMENTED.
+
+The MVU_BINDING flag of GET_MILAN_INFO says that BIND_STREAM and
+UNBIND_STREAM are implemented. The kit sets it under the Milan profile
+and clears it under any other, whatever `milan.features_flags` gives.
 
 ## The talker
 
@@ -213,12 +263,28 @@ which is what the grace was for.
 - A stop and start of the entity kit is a power cycle to a bound sink: it
   gives up its reservation and waits in PRB_W_AVAIL.
 - The transmit gate has no grace under Milan.
+- Tables 5.28, 5.33, 5.35, 5.39 and 5.41 give the message_type of a
+  BIND_STREAM or UNBIND_STREAM response as VENDOR_UNIQUE_COMMAND. It is
+  sent as VENDOR_UNIQUE_RESPONSE, as every AECP response is.
+- A BIND_STREAM or UNBIND_STREAM response gives back the fields 5.4.4.6
+  and 5.4.4.7 name, the flags as they came, and a reserved field of zero.
+  A refusal carries them too; PAYLOAD_TOO_SHORT carries no data.
+- A GET_STREAM_INPUT_INFO_EX that is refused answers in the response's
+  own format, eighteen octets: the descriptor it named, and zero for the
+  rest. A controller that checks a response's length before its status
+  still reads it.
+- The handler answers ENTITY_MISBEHAVING if a sink gives a bind or unbind
+  no answer at all. No transition of Table 5.31 does that.
 
 ## Not done
 
-- BIND_STREAM and UNBIND_STREAM (the MVU form of bind and unbind, 5.4.4.6
-  and 5.4.4.7, optional) and GET_STREAM_INPUT_INFO_EX (5.4.4.8, which
-  reports the Probing status and ACMP status kept here).
+- MVU unsolicited notifications (5.4.5.2, 5.4.5.3). A BIND_STREAM or
+  UNBIND_STREAM answered SUCCESS is to be followed by one to the other
+  registered controllers, and Table 5.21 asks for a
+  GET_STREAM_INPUT_INFO_EX notification whenever the talker, the Probing
+  status, the ACMP status or the Talker attribute's registration changes.
+  The entity sends AEM notifications only: it has no MVU notification
+  sender, and no MVU sequence number per registered controller.
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
 - START_STREAMING and STOP_STREAMING on a STREAM_INPUT do not change the

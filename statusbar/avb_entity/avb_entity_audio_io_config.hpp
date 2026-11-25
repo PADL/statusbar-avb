@@ -229,13 +229,17 @@ struct AvbEntityAudioIOConfig
 
     /// The model is a Milan PAAD-AE. The entity then answers the Milan
     /// vendor-unique commands: GET_MILAN_INFO (Milan v1.3 5.4.4.1) with the
-    /// three fields below, the others NOT_IMPLEMENTED; and an empty
-    /// atdecc_profile means "milan13". Off, the entity is a plain 1722.1
-    /// entity and lets every MVU command pass unanswered (5.4.4.1, Note).
+    /// three fields below; under the Milan profile BIND_STREAM,
+    /// UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX (5.4.4.6 to 5.4.4.8); the
+    /// others NOT_IMPLEMENTED. An empty atdecc_profile then means "milan13".
+    /// Off, the entity is a plain 1722.1 entity and lets every MVU command
+    /// pass unanswered (5.4.4.1, Note).
     bool milan{false};
     /// GET_MILAN_INFO features_flags, Table 5.17 (REDUNDANCY 1,
-    /// TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, MVU_BINDING 4,
-    /// TALKER_SIGNAL_PRESENCE 8). None by default: none is implemented.
+    /// TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, TALKER_SIGNAL_PRESENCE 8).
+    /// None by default: none is implemented. MVU_BINDING (4) is not set
+    /// here: the entity sets it under the Milan profile, where it answers
+    /// BIND_STREAM and UNBIND_STREAM, and clears it under any other.
     uint32_t milan_features_flags{0};
     /// The Milan certification the device has passed, as dotted numbers
     /// ("1.2", "1.3.0.0"); "0.0.0.0" for none.

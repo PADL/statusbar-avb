@@ -381,17 +381,18 @@ TEST(avb_entity_kit_profile, the_milan_info_comes_from_the_configuration)
     auto const& info = milan_info_of(kit);
     EXPECT_TRUE(info.has_value());
     if (info) {
-        EXPECT_EQ(info->features_flags, atdecc::MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING);
+        EXPECT_EQ(
+            info->features_flags, atdecc::MVU_FEATURE_TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING | atdecc::MVU_FEATURE_MVU_BINDING);
         EXPECT_EQ(info->certification_version, atdecc::mvu_version(1, 2));
         EXPECT_EQ(info->specification_version, atdecc::mvu_version(1, 3));
     }
 
-    // Defaults: no certification, Milan 1.3, no features.
+    // Defaults: no certification, Milan 1.3, and the one feature the Milan profile brings.
     KitUnderTest defaults{make_config(2, "", true)};
     auto const& given = milan_info_of(defaults);
     EXPECT_TRUE(given.has_value());
     if (given) {
-        EXPECT_EQ(given->features_flags, 0U);
+        EXPECT_EQ(given->features_flags, atdecc::MVU_FEATURE_MVU_BINDING);
         EXPECT_EQ(given->certification_version, 0U);
         EXPECT_EQ(given->specification_version, atdecc::mvu_version(1, 3));
     }
@@ -407,6 +408,22 @@ TEST(avb_entity_kit_profile, the_milan_info_comes_from_the_configuration)
         EXPECT_EQ(fell->certification_version, 0U);
         EXPECT_EQ(fell->specification_version, atdecc::mvu_version(1, 3));
     }
+}
+
+TEST(avb_entity_kit_profile, mvu_binding_is_advertised_when_bind_stream_is_answered_and_only_then)
+{
+    // Milan v1.3 5.4.4.6: the flag says the commands are implemented. They
+    // are under the Milan profile, whatever the configuration leaves out,
+    // and are not under IEEE 1722.1 connection management, whatever it claims.
+    auto claimed = make_config(2, "classic", true);
+    claimed.milan_features_flags = atdecc::MVU_FEATURE_MVU_BINDING | atdecc::MVU_FEATURE_REDUNDANCY;
+    KitUnderTest classic{claimed};
+    EXPECT_FALSE(classic->host().components().acmp_is_milan());
+    EXPECT_EQ(milan_info_of(classic)->features_flags, atdecc::MVU_FEATURE_REDUNDANCY);
+
+    KitUnderTest milan{make_config(2, "", true)};
+    EXPECT_TRUE(milan->host().components().acmp_is_milan());
+    EXPECT_EQ(milan_info_of(milan)->features_flags, atdecc::MVU_FEATURE_MVU_BINDING);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

@@ -810,10 +810,20 @@ void AvbEntityKit::install_milan_info()
         return;
     }
     host_.components().aem_handler.set_milan_info(nanoavb::AemCommandHandler::MilanInfo{
-        .features_flags = config_.milan_features_flags,
+        .features_flags = milan_features_flags(),
         .certification_version = milan_version_or(config_.milan_certification_version, 0, "milan.certification_version"),
         .specification_version =
             milan_version_or(config_.milan_specification_version, atdecc::mvu_version(1, 3), "milan.specification_version")});
+}
+
+auto AvbEntityKit::milan_features_flags() const noexcept -> uint32_t
+{
+    // MVU_BINDING says that BIND_STREAM and UNBIND_STREAM are implemented
+    // (Milan v1.3 5.4.4.6, 5.4.4.7). They are whenever Milan connection
+    // management runs and never otherwise, so the bit follows the profile
+    // and not the configuration.
+    uint32_t const configured = config_.milan_features_flags & ~atdecc::MVU_FEATURE_MVU_BINDING;
+    return configured | (milan_profile() ? atdecc::MVU_FEATURE_MVU_BINDING : 0U);
 }
 
 auto AvbEntityKit::milan_version_or(std::string const& text, uint32_t const fallback, std::string_view const key) -> uint32_t

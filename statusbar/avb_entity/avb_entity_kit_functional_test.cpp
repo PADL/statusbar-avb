@@ -1016,6 +1016,194 @@ TEST(avb_entity_kit_acmp, without_a_bindings_file_a_milan_binding_lasts_a_stop_a
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+//
+// BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX - Milan v1.3 5.4.4.6 to 5.4.4.8
+//
+
+namespace {
+
+/// A Milan pair whose listener is a Milan model, so that it answers MVU, and
+/// a controller that speaks MVU to it: each response is kept.
+struct MvuKitPair
+{
+    KitPair pair;
+    std::vector<std::vector<uint8_t>> responses{};
+
+    MvuKitPair()
+        : pair{"milan13", milan_listener_config()}
+    {
+        pair.listener->host().components().aem_handler.set_send_response(
+            [this](Eui48 const&, std::span<uint8_t const> const response) {
+                responses.emplace_back(response.begin(), response.end());
+                return true;
+            });
+    }
+
+    static auto milan_listener_config() -> AvbEntityAudioIOConfig
+    {
+        auto config = make_io_config(LISTENER_ID, "milan13");
+        config.milan = true;
+        return config;
+    }
+
+    /// The controller sends @p data as the MVU command @p command to the listener.
+    template <typename Data>
+    void controller_sends(uint16_t const command, Data const& data, Eui64 const& controller = CONTROLLER_ID)
+    {
+        atdecc::AecpMvuDu du{};
+        du.init_command(command, static_cast<uint16_t>(Data::LENGTH));
+        du.common.target_entity_id = LISTENER_ID;
+        du.common.controller_entity_id = controller;
+        std::vector<uint8_t> frame(atdecc::AecpMvuDu::LENGTH + Data::LENGTH);
+        span_store(std::span<uint8_t>{frame}.first(atdecc::AecpMvuDu::LENGTH), du);
+        span_store(std::span<uint8_t>{frame}.subspan(atdecc::AecpMvuDu::LENGTH), data);
+        pair.listener->host().net_handlers()->atdecc_handler().dispatch_frame(
+            ns_of(pair.now), Eui48{0x02, 0, 0, 0, 0, 0x09}, frame);
+        pair.deliver();
+    }
+
+    void bind_stream()
+    {
+        atdecc::MvuBindStream bind{};
+        bind.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+        bind.descriptor_index = pair.sink;
+        bind.talker_entity_id = TALKER_ID;
+        bind.talker_stream_index = pair.source;
+        controller_sends(atdecc::MVU_COMMAND_BIND_STREAM, bind);
+    }
+
+    [[nodiscard]] auto sink_named() const -> atdecc::MvuStreamInput
+    {
+        atdecc::MvuStreamInput input{};
+        input.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+        input.descriptor_index = pair.sink;
+        return input;
+    }
+
+    /// The status of the last response.
+    [[nodiscard]] auto last_status() const -> uint8_t
+    {
+        atdecc::AecpMvuDu du{};
+        span_load(du, std::span<uint8_t const>{responses.back()}.first(atdecc::AecpMvuDu::LENGTH));
+        return du.common.status();
+    }
+
+    /// The sink's info, as GET_STREAM_INPUT_INFO_EX answers it now.
+    auto info() -> atdecc::MvuGetStreamInputInfoExResponse
+    {
+        controller_sends(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, sink_named());
+        atdecc::MvuGetStreamInputInfoExResponse answer{};
+        span_load(answer, std::span<uint8_t const>{responses.back()}.subspan(atdecc::AecpMvuDu::LENGTH));
+        return answer;
+    }
+};
+
+}  // namespace
+
+TEST(avb_entity_kit_mvu, a_milan_listener_bound_with_bind_stream_settles_and_says_how_far_it_is)
+{
+    using atdecc::MilanSinkState;
+    MvuKitPair mvu;
+    auto& pair = mvu.pair;
+    auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
+    EXPECT_EQ(mvu.info().pbsta(), 0);  // PROBING_DISABLED
+
+    // 5.5.3.2: the bind is the sink's, whichever protocol brought it. The
+    // answer is the MVU one and no BIND_RX_RESPONSE goes out beside it.
+    mvu.bind_stream();
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_SUCCESS);
+    EXPECT_FALSE(pair.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_RESPONSE).has_value());
+    EXPECT_TRUE(pair.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND).has_value());
+    EXPECT_EQ(pair.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND)->controller_entity_id, CONTROLLER_ID);
+    EXPECT_TRUE(sink.is_settled());
+
+    auto const settled = mvu.info();
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_SUCCESS);
+    EXPECT_EQ(settled.talker_entity_id, TALKER_ID);
+    EXPECT_EQ(settled.talker_unique_id.get(), pair.source);
+    EXPECT_EQ(settled.pbsta(), 3);  // PROBING_COMPLETED
+    EXPECT_EQ(settled.acmpsta(), 0);
+
+    // The reservation follows as after an ACMP bind.
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(sink.state(), MilanSinkState::SettledRsvOk);
+    EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
+
+    mvu.controller_sends(atdecc::MVU_COMMAND_UNBIND_STREAM, mvu.sink_named());
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_SUCCESS);
+    EXPECT_FALSE(sink.is_bound());
+    EXPECT_FALSE(pair.last(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_RESPONSE).has_value());
+    auto const unbound = mvu.info();
+    EXPECT_EQ(unbound.talker_entity_id, Eui64{});
+    EXPECT_EQ(unbound.pbsta(), 0);
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_mvu, a_locked_milan_entity_answers_another_controllers_bind_stream_entity_locked)
+{
+    // Tables 5.33 and 5.39: the same lock that refuses a BIND_RX_COMMAND
+    // CONTROLLER_NOT_AUTHORIZED, under the name AECP has for it.
+    MvuKitPair mvu;
+    auto& pair = mvu.pair;
+    lock_entity(pair.listener, OTHER_CONTROLLER_ID);
+    mvu.bind_stream();
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_FALSE(pair.listener->host().components().milan_acmp_listener->is_bound(pair.sink));
+    EXPECT_TRUE(pair.wire.empty());
+
+    pair.listener->host().components().aem_handler.release_lock();
+    lock_entity(pair.listener, CONTROLLER_ID);  // the controller that binds holds the lock
+    mvu.bind_stream();
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_SUCCESS);
+    EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->is_bound(pair.sink));
+
+    // Locked out of the unbind too, and of nothing that only reads.
+    pair.listener->host().components().aem_handler.release_lock();
+    lock_entity(pair.listener, OTHER_CONTROLLER_ID);
+    mvu.controller_sends(atdecc::MVU_COMMAND_UNBIND_STREAM, mvu.sink_named());
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->is_bound(pair.sink));
+    EXPECT_EQ(mvu.info().talker_entity_id, TALKER_ID);
+    EXPECT_EQ(mvu.last_status(), atdecc::MVU_STATUS_SUCCESS);
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_mvu, a_milan_model_held_to_ieee_1722_1_says_it_does_not_implement_bind_stream)
+{
+    // It answers GET_MILAN_INFO, without MVU_BINDING, and has no sink to bind.
+    auto config = make_io_config(LISTENER_ID, "classic");
+    config.milan = true;
+    KitUnderTest kit{config};
+    bring_up(kit);
+    std::vector<std::vector<uint8_t>> responses{};
+    kit->host().components().aem_handler.set_send_response([&responses](Eui48 const&, std::span<uint8_t const> const response) {
+        responses.emplace_back(response.begin(), response.end());
+        return true;
+    });
+    atdecc::MvuBindStream bind{};
+    bind.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    bind.talker_entity_id = TALKER_ID;
+    atdecc::AecpMvuDu du{};
+    du.init_command(atdecc::MVU_COMMAND_BIND_STREAM, atdecc::MvuBindStream::LENGTH);
+    du.common.target_entity_id = LISTENER_ID;
+    du.common.controller_entity_id = CONTROLLER_ID;
+    std::vector<uint8_t> frame(atdecc::AecpMvuDu::LENGTH + atdecc::MvuBindStream::LENGTH);
+    span_store(std::span<uint8_t>{frame}.first(atdecc::AecpMvuDu::LENGTH), du);
+    span_store(std::span<uint8_t>{frame}.subspan(atdecc::AecpMvuDu::LENGTH), bind);
+    kit->host().net_handlers()->atdecc_handler().dispatch_frame(0, Eui48{0x02, 0, 0, 0, 0, 0x09}, frame);
+    EXPECT_EQ(responses.size(), 1U);
+    if (responses.size() == 1) {
+        atdecc::AecpMvuDu answer{};
+        span_load(answer, std::span<uint8_t const>{responses.front()}.first(atdecc::AecpMvuDu::LENGTH));
+        EXPECT_EQ(answer.common.status(), atdecc::MVU_STATUS_NOT_IMPLEMENTED);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{}));
+}
+
 namespace {
 
 /// An empty state directory of the test's own, and the listener's directory inside it.

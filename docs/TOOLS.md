@@ -65,8 +65,9 @@ is required on `avb-am824-io`. Useful flags on the entity tools:
 `--ptp.driver=linuxptp|ntpshm|system`, `--ptp.device=/dev/ptp0`, `--vlan_id`,
 `--entity.id`/`--entity.name`, `--atdecc.version=2016|2021`,
 `--atdecc.profile=classic|milan13` and `--entity.milan` (a Milan model
-answers GET_MILAN_INFO and takes `milan13` as its default profile; see
-`ENTITY_CONSTRUCTION_KIT.md`), `--presentation_offset_ns` (0, the default,
+answers GET_MILAN_INFO, takes `milan13` as its default profile, and under
+that profile answers BIND_STREAM, UNBIND_STREAM and
+GET_STREAM_INPUT_INFO_EX; see `ENTITY_CONSTRUCTION_KIT.md`), `--presentation_offset_ns` (0, the default,
 takes the profile's: 2 ms under Milan, 1 ms otherwise),
 `--net.backend=rawnet|mmap|xdp`
 (+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.

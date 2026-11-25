@@ -309,6 +309,7 @@ Everything not listed here is the same under both.
 | MRP timers (MSRP and MVRP) | 802.1Q Table 10-7: JoinTime 200 ms, LeaveTime 1000 ms, LeaveAll 10 to 15 s, periodic 1 s | Milan Table 4.3: the same with LeaveTime 5000 ms (4.2.7.1.1) |
 | Connection management | IEEE 1722.1-2021 clause 8: the listener relays a controller's connect to the talker, the talker keeps a list of its listeners. `NanoAvbAcmpListener`, `NanoAvbAcmpTalker` | Milan v1.3 section 5.5, a separate implementation (`MILAN_ACMP.md`): a bind is saved and answered at once, the listener then probes its talker and follows the talker's SRP attribute by itself; the talker answers probes and keeps nothing. `NanoAvbMilanAcmpListener`, `NanoAvbMilanAcmpTalker`, chosen at start-up by `NanoAvbComponents::use_milan_acmp` |
 | A bind or connect from a controller other than the one holding the lock | accepted: ACMP does not ask | refused CONTROLLER_NOT_AUTHORIZED (5.5.2.4, 5.5.2.5) |
+| BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX, on a Milan model (`entity.milan`) | NOT_IMPLEMENTED, and MVU_BINDING clear in GET_MILAN_INFO | answered by the stream inputs' sinks (5.4.4.6 to 5.4.4.8), a bind from a controller the lock shuts out ENTITY_LOCKED; MVU_BINDING set |
 | When a talker stream is put on the wire (`stream.gate_talker_on_listener`) | an ACMP connection, the stream started and MSRP Listener Ready, held five seconds past the last Listener Ready seen | the stream started and MSRP Listener Ready, with no grace: a Milan talker has no connections (5.5.4.1) and hears of no disconnect |
 | Which Talker attribute a stream input's Listener declaration follows | any of the stream's StreamID (IEEE 802.1Q 35.1.2.2) | the one on the destination address and VLAN the talker's PROBE_TX_RESPONSE gave (5.3.8.5) |
 | `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, they go to `listener-bindings` in the entity's state directory (below); with no state directory either, they last as long as the process |
@@ -353,15 +354,29 @@ with `entity.milan = true` the entity answers the Milan vendor-unique (MVU)
 commands of Milan v1.3 5.4.3 and 5.4.4. GET_MILAN_INFO (5.4.4.1), the one a
 Milan controller uses to tell a Milan device from any other ATDECC entity,
 answers protocol_version 1, `milan.features_flags` (Table 5.17; 0 by
-default, none being implemented), `milan.certification_version` ("0.0.0.0"
-by default: none passed) and `milan.specification_version` ("1.3.0.0").
-Every other MVU command answers NOT_IMPLEMENTED with its data given back;
-SET/GET_SYSTEM_UNIQUE_ID, the media clock reference info and the MVU
-binding commands are optional in Milan and not implemented here. Without
-`entity.milan` the entity is a plain 1722.1 entity and lets every MVU
-command pass unanswered, as 5.4.4.1 recommends of a Configuration that is
-not Milan. The wire structs are `atdecc::AecpMvuDu` and
-`atdecc::MvuGetMilanInfoResponse` (`atdecc_aecp_mvu.hpp`).
+default), `milan.certification_version` ("0.0.0.0" by default: none
+passed) and `milan.specification_version` ("1.3.0.0").
+
+Under the Milan profile the entity also answers BIND_STREAM,
+UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX (5.4.4.6 to 5.4.4.8) from its
+stream inputs' sinks; `MILAN_ACMP.md` has how. The MVU_BINDING bit of the
+features_flags says that the first two are implemented, so the entity
+states it by itself: set under the Milan profile, clear under any other,
+whatever `milan.features_flags` gives. A Milan model held to the classic
+profile has no sink to bind, and answers the three NOT_IMPLEMENTED.
+
+Every other MVU command answers NOT_IMPLEMENTED with its data given back.
+Milan allows that of SET_SYSTEM_UNIQUE_ID and GET_SYSTEM_UNIQUE_ID, which
+are optional. SET_MEDIA_CLOCK_REFERENCE_INFO and
+GET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.4, 5.4.4.5) are required of every
+PAAD-AE and are not implemented yet, and no MVU response is sent as an
+unsolicited notification.
+
+Without `entity.milan` the entity is a plain 1722.1 entity and lets every
+MVU command pass unanswered, as 5.4.4.1 recommends of a Configuration
+that is not Milan. The wire structs are in `atdecc_aecp_mvu.hpp`:
+`atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`, `MvuBindStream`,
+`MvuStreamInput` and `MvuGetStreamInputInfoExResponse`.
 
 Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while
