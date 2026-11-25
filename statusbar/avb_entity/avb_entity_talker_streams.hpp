@@ -96,6 +96,31 @@ struct TalkerTxCounters
     bool have_mr{false};  ///< media thread only
 };
 
+/// The bytes every frame of one talker stream starts with, its 802.1Q-tagged Ethernet header and AVTPDU header, with
+/// sequence_num, avtp_timestamp, mr and tu zero, and where those four go: a frame's headers are these bytes with the
+/// four written (write()), byte for byte what TalkerStreams sends for the stream.
+struct StreamFrameTemplate
+{
+    /// The most header bytes: a tagged AAF frame's.
+    static constexpr size_t CAPACITY = 14 + ieee::VlanTag::LENGTH + avtp::AafPdu::HEADER_LENGTH;
+    /// mr's bit in its octet and tu's in its (IEEE 1722-2016 Clauses 4.4.3, 7.2, 10.4).
+    static constexpr uint8_t MR_BIT = 0x08U;
+    static constexpr uint8_t TU_BIT = 0x01U;
+
+    std::array<uint8_t, CAPACITY> bytes{};
+    size_t length{0};            ///< header bytes before the payload: 42 for AAF, 38 for CRF
+    size_t sequence_offset{0};   ///< sequence_num's octet
+    size_t timestamp_offset{0};  ///< avtp_timestamp's four octets, big-endian; 0 for CRF, whose timestamps are its payload
+    size_t mr_offset{0};         ///< the octet whose MR_BIT is mr
+    size_t tu_offset{0};         ///< the octet whose TU_BIT is tu
+
+    /// The header bytes, `length` of them.
+    [[nodiscard]] auto header() const noexcept -> std::span<uint8_t const> { return std::span{bytes}.first(length); }
+    /// Writes the headers of the frame with `sequence`, `timestamp` (ignored for CRF), `mr` and `tu` to the start of
+    /// `out`; false, writing nothing, when `out` is shorter than `length`.
+    [[nodiscard]] auto write(uint8_t sequence, uint32_t timestamp, bool mr, bool tu, std::span<uint8_t> out) const noexcept -> bool;
+};
+
 struct TalkerStreams
 {
     TalkerStreams(
@@ -299,6 +324,12 @@ struct TalkerStreams
         }
     }
 
+    /// STREAM_OUTPUT @p stream_index's frames as a template: what this talker sends for it now (destination, VID and
+    /// PCP in force, stream ID and format), from @p src_mac, an AAF frame carrying @p frames frames (a CRF one its
+    /// format's timestamps). nullopt for no AAF or CRF stream there, or a frame the talker would not send. Reactor thread.
+    [[nodiscard]] auto frame_template(uint16_t stream_index, uint16_t frames, ieee::Eui48 const& src_mac) const noexcept
+        -> std::optional<StreamFrameTemplate>;
+
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.
     [[nodiscard]] auto tx_counters(uint16_t const stream_index) const noexcept -> TalkerTxCounters const*
@@ -387,6 +418,9 @@ struct TalkerStreams
         Serialize const& serialize) -> bool;
     /// @p slot's 802.1Q-tagged stream header at the start of @p buffer: its length, 0 when it does not fit.
     [[nodiscard]] auto store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> buffer) const noexcept -> size_t;
+    /// @p slot's 802.1Q-tagged stream header from @p src_mac: its destination, the VID and PCP in force.
+    [[nodiscard]] auto stream_header(TalkerStreamSlot const& slot, ieee::Eui48 const& src_mac) const noexcept
+        -> ieee::EthernetFrame;
     /// Up to @p length octets of @p buffer after its @p header octets: where the AVTPDU is serialized.
     [[nodiscard]] static auto payload_window(std::span<uint8_t> buffer, size_t header, size_t length) noexcept
         -> std::span<uint8_t>;
@@ -548,5 +582,20 @@ void fill_crf_timestamps(
     std::span<uint64_t const> timestamps,
     bool timestamp_uncertain = false,
     bool media_clock_restart = false) -> size_t;
+
+// ---------------------------------------------------------------------------
+// Stream frame templates (pure, socket-free -- unit-testable in isolation).
+// ---------------------------------------------------------------------------
+
+/// The template of an AAF stream's frames of @p frames frames behind @p header (stream_frame_header()): the headers
+/// serialize_aaf_raw() writes for @p ctx's stream, format and channels. nullopt for a format with no byte layout, no
+/// frames, or a frame past an Ethernet payload.
+[[nodiscard]] auto aaf_frame_template(
+    avtp::AafStreamOutputContext const& ctx, uint16_t frames, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>;
+/// The template of a CRF stream's frames behind @p header: the headers serialize_crf_raw() writes for @p ctx's stream
+/// and format, its timestamps per packet the payload. nullopt for none, or more than TalkerStreams sends.
+[[nodiscard]] auto crf_frame_template(avtp::CrfStreamOutputContext const& ctx, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>;
 
 }  // namespace statusbar::avb_entity

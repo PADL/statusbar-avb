@@ -388,6 +388,17 @@ void store_am824_raw_header(
     span_store(frame.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
 }
 
+/// The CRF header of a PDU of @p ctx's timestamps per packet into @p frame.
+void store_crf_header(avtp::CrfStreamOutputContext const& ctx, std::span<uint8_t> const frame, HeaderFlags const flags) noexcept
+{
+    avtp::CrfPdu pdu{};
+    pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, ctx.timestamps_per_packet);
+    pdu.set_sequence_num(ctx.sequence_num);
+    pdu.set_tu(flags.timestamp_uncertain);
+    pdu.set_mr(flags.media_clock_restart);
+    span_store(frame.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+}
+
 }  // namespace
 
 auto serialize_aaf_raw(
@@ -588,16 +599,11 @@ auto serialize_crf_raw(
     if (n_ts == 0 || timestamps.size() != n_ts || frame.size() < frame_len) {
         return 0;
     }
-    avtp::CrfPdu pdu{};
-    pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, n_ts);
-    pdu.set_sequence_num(ctx.sequence_num);
-    pdu.set_tu(timestamp_uncertain);
-    pdu.set_mr(media_clock_restart);
     std::span<uint8_t> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH, frame_len - avtp::CrfPdu::HEADER_LENGTH);
     for (uint16_t i = 0; i < n_ts; ++i) {
         (void)avtp::crf_set_timestamp(ts_data, i, timestamps[i]);
     }
-    span_store(frame.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+    store_crf_header(ctx, frame, {.timestamp_uncertain = timestamp_uncertain, .media_clock_restart = media_clock_restart});
     ctx.sequence_num = static_cast<uint8_t>((ctx.sequence_num + 1U) & 0xFFU);
     ++ctx.packets_sent;
     ctx.total_timestamps_sent += n_ts;
@@ -703,8 +709,13 @@ auto TalkerStreams::tx_begin(size_t const length) noexcept -> std::span<uint8_t>
 
 auto TalkerStreams::store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> const buffer) const noexcept -> size_t
 {
-    auto const header = stream_frame_header(slot.dest_mac, port_->port().hardware_address(), vlan_id(), stream_pcp());
+    auto const header = stream_header(slot, port_->port().hardware_address());
     return buffer.size() > ieee::wire_size(header) ? ieee::store_unchecked(buffer, header) : 0;
+}
+
+auto TalkerStreams::stream_header(TalkerStreamSlot const& slot, ieee::Eui48 const& src_mac) const noexcept -> ieee::EthernetFrame
+{
+    return stream_frame_header(slot.dest_mac, src_mac, vlan_id(), stream_pcp());
 }
 
 auto TalkerStreams::payload_window(std::span<uint8_t> const buffer, size_t const header, size_t const length) noexcept
@@ -868,6 +879,146 @@ void TalkerStreams::serve_crf(
     if (plan.send) {
         transmit_crf(slot, *plan.send);
     }
+}
+
+//
+// Stream frame templates
+//
+
+namespace {
+
+/// Where a template's varying fields sit in its AVTPDU header (0 for a timestamp it does not carry).
+struct PduOffsets
+{
+    size_t sequence;
+    size_t timestamp;
+    size_t mr;
+    size_t tu;
+};
+
+constexpr PduOffsets AAF_OFFSETS{
+    .sequence = offsetof(avtp::AafPdu, sequence_num),
+    .timestamp = offsetof(avtp::AafPdu, avtp_timestamp),
+    .mr = offsetof(avtp::AafPdu, sv_version_flags),
+    .tu = offsetof(avtp::AafPdu, reserved_tu)};
+constexpr PduOffsets CRF_OFFSETS{
+    .sequence = offsetof(avtp::CrfPdu, sequence_num),
+    .timestamp = 0,
+    .mr = offsetof(avtp::CrfPdu, sv_version_mr_r_fs_tu),
+    .tu = offsetof(avtp::CrfPdu, sv_version_mr_r_fs_tu)};
+
+/// @p result with an AVTPDU header of @p pdu_header octets at @p pdu, its varying fields at @p offsets in it.
+[[nodiscard]] auto template_at(
+    StreamFrameTemplate result, size_t const pdu, size_t const pdu_header, PduOffsets const offsets) noexcept -> StreamFrameTemplate
+{
+    result.length = pdu + pdu_header;
+    result.sequence_offset = pdu + offsets.sequence;
+    result.timestamp_offset = offsets.timestamp != 0 ? pdu + offsets.timestamp : 0;
+    result.mr_offset = pdu + offsets.mr;
+    result.tu_offset = pdu + offsets.tu;
+    return result;
+}
+
+/// A template holding @p header with room for a @p pdu_header-octet AVTPDU header behind it, its varying fields at
+/// @p offsets; nullopt when they do not fit.
+[[nodiscard]] auto template_for(ieee::EthernetFrame const& header, size_t const pdu_header, PduOffsets const offsets) noexcept
+    -> std::optional<StreamFrameTemplate>
+{
+    StreamFrameTemplate result{};
+    size_t const pdu = ieee::wire_size(header);
+    if (pdu + pdu_header > result.bytes.size()) {
+        return std::nullopt;
+    }
+    (void)ieee::store_unchecked(std::span{result.bytes}, header);
+    return template_at(result, pdu, pdu_header, offsets);
+}
+
+/// The AVTPDU header's place in @p result.
+[[nodiscard]] auto pdu_header_of(StreamFrameTemplate& result, size_t const pdu_header) noexcept -> std::span<uint8_t>
+{
+    return std::span{result.bytes}.subspan(result.length - pdu_header, pdu_header);
+}
+
+/// @p flag set in the octet at the start of @p out, when @p on.
+void set_flag(std::span<uint8_t> const out, uint8_t const flag, bool const on) noexcept
+{
+    ieee::octet_t octet{};
+    span_load(octet, out.first(1));
+    octet.set_flag(flag, on);
+    span_store(out, octet);
+}
+
+/// @p tmpl's varying fields in @p out, a frame its header was copied to.
+void store_varying(
+    StreamFrameTemplate const& tmpl,
+    std::span<uint8_t> const out,
+    uint8_t const sequence,
+    uint32_t const timestamp,
+    bool const mr,
+    bool const tu) noexcept
+{
+    span_store(out.subspan(tmpl.sequence_offset), ieee::octet_t{sequence});
+    if (tmpl.timestamp_offset != 0) {
+        span_store(out.subspan(tmpl.timestamp_offset), ieee::quadlet_t{timestamp});
+    }
+    set_flag(out.subspan(tmpl.mr_offset), StreamFrameTemplate::MR_BIT, mr);
+    set_flag(out.subspan(tmpl.tu_offset), StreamFrameTemplate::TU_BIT, tu);
+}
+
+}  // namespace
+
+auto aaf_frame_template(avtp::AafStreamOutputContext const& ctx, uint16_t const frames, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>
+{
+    size_t const payload = static_cast<size_t>(frames) * ctx.channel_count * avtp::aaf_bytes_per_sample(ctx.format);
+    auto result = template_for(header, avtp::AafPdu::HEADER_LENGTH, AAF_OFFSETS);
+    if (!result || payload == 0 || avtp::AafPdu::HEADER_LENGTH + payload > MAX_AUDIO_PAYLOAD) {
+        return std::nullopt;
+    }
+    // serialize_aaf_raw()'s header from a serializer of the stream at sequence 0, presented at 0, tu and mr clear.
+    avtp::AafStreamOutputContext twin{ctx.stream_id, ctx.format, ctx.sample_rate, ctx.channel_count, ctx.bit_depth, 0};
+    store_aaf_raw_header(twin, pdu_header_of(*result, avtp::AafPdu::HEADER_LENGTH), frames, 0, HeaderFlags{});
+    return result;
+}
+
+auto crf_frame_template(avtp::CrfStreamOutputContext const& ctx, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>
+{
+    auto result = template_for(header, avtp::CrfPdu::HEADER_LENGTH, CRF_OFFSETS);
+    if (!result || ctx.timestamps_per_packet == 0 || ctx.timestamps_per_packet > TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU) {
+        return std::nullopt;
+    }
+    // serialize_crf_raw()'s header at sequence 0, tu and mr clear.
+    avtp::CrfStreamOutputContext const twin{
+        ctx.stream_id, ctx.type, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, ctx.timestamps_per_packet};
+    store_crf_header(twin, pdu_header_of(*result, avtp::CrfPdu::HEADER_LENGTH), HeaderFlags{});
+    return result;
+}
+
+auto StreamFrameTemplate::write(
+    uint8_t const sequence, uint32_t const timestamp, bool const mr, bool const tu, std::span<uint8_t> const out) const noexcept
+    -> bool
+{
+    if (out.size() < length) {
+        return false;
+    }
+    span_copy(out, header());
+    store_varying(*this, out, sequence, timestamp, mr, tu);
+    return true;
+}
+
+auto TalkerStreams::frame_template(uint16_t const stream_index, uint16_t const frames, ieee::Eui48 const& src_mac) const noexcept
+    -> std::optional<StreamFrameTemplate>
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return std::nullopt;
+    }
+    auto const header = stream_header(*slot, src_mac);
+    if (slot->aaf) {
+        return aaf_frame_template(*slot->aaf, frames, header);
+    }
+    return slot->crf ? crf_frame_template(*slot->crf, header) : std::nullopt;
 }
 
 }  // namespace statusbar::avb_entity

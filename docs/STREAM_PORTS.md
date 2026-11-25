@@ -41,6 +41,20 @@ kicks the ring backends and ends the port's cycle; with an external kick
 (`set_external_kick`) the kicker thread calls `kick_tx()` and `flush_tx()` only
 ends the cycle. It fails with the kick's error, else the cycle's.
 
+**Frame templates.** Every frame of one stream carries the same bytes but for
+sequence_num, avtp_timestamp, mr and tu, so something that sends a stream's
+frames itself, beside the port, can write them from one template.
+`TalkerStreams::frame_template()` returns the headers the talker sends for a
+STREAM_OUTPUT now (its destination, the VID and PCP in force, its stream ID and
+format) from a given source address, as a `StreamFrameTemplate`: 42 octets for
+AAF, with sequence_num at 20, avtp_timestamp at 30, mr in octet 19 and tu in
+octet 21; 38 for CRF, mr and tu both in octet 19, whose timestamps are its
+payload. `write()` copies it and stores the four. `aaf_frame_template()` and
+`crf_frame_template()` build one from a serializer's context. The bytes come
+from the header builders `serialize_aaf_raw()` and `serialize_crf_raw()` use,
+and the tag from the one the in-slot path writes, so a written template is the
+frame the talker sends.
+
 ## Receive
 
 `ListenerStreams::drain_rx()` reads every queued frame in one port cycle. On a

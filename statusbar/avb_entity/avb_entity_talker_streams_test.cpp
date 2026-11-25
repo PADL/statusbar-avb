@@ -22,6 +22,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory_resource>
+#include <random>
 #include <span>
 #include <thread>
 #include <vector>
@@ -1149,6 +1150,266 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     auto const crf = spec_of(0, 0x041060010000BB80ULL);
     EXPECT_FALSE(talker.reformat_stream(crf).has_value());  // never to CRF
     EXPECT_TRUE(slot->aaf.has_value());
+}
+
+//
+// Stream frame templates
+//
+
+namespace {
+
+/// An AAF format word (IEEE 1722-2016 Clause 7.3.4): nsr, sample format, bit depth, channels, samples per frame.
+constexpr auto aaf_word(
+    uint8_t const nsr, avtp::AafFormat const format, uint8_t const depth, uint16_t const channels, uint16_t const samples)
+    -> uint64_t
+{
+    return (uint64_t{avtp::AvtpSubtype::aaf} << 56U) | (uint64_t{nsr} << 48U) | (uint64_t{static_cast<uint8_t>(format)} << 40U) |
+        (uint64_t{depth} << 32U) | (uint64_t{channels} << 22U) | (uint64_t{samples} << 12U);
+}
+
+constexpr std::array<uint64_t, 4> kTemplateFormats{
+    aaf_word(0x07, avtp::AafFormat::int_32bit, 32, 8, 12),
+    aaf_word(0x05, avtp::AafFormat::int_24bit, 24, 2, 6),
+    aaf_word(0x05, avtp::AafFormat::int_16bit, 16, 1, 6),
+    aaf_word(0x09, avtp::AafFormat::float_32bit, 32, 4, 24)};
+
+/// A render writing each payload byte from the packet's first index.
+avb_entity::StreamRawRenderFn const kPatternRender = [](std::span<uint8_t> payload, uint32_t, uint64_t first_index, uint64_t) {
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>(first_index + (i * 7U));
+    }
+    return true;
+};
+
+/// Whether @p frame is @p tmpl written with @p sequence, @p timestamp, @p mr and @p tu, then @p payload_length octets.
+auto is_template_frame(
+    avb_entity::StreamFrameTemplate const& tmpl,
+    std::span<uint8_t const> const frame,
+    size_t const payload_length,
+    uint8_t const sequence,
+    uint32_t const timestamp,
+    bool const mr,
+    bool const tu) -> bool
+{
+    std::array<uint8_t, avb_entity::StreamFrameTemplate::CAPACITY> expected{};
+    return tmpl.write(sequence, timestamp, mr, tu, expected) && frame.size() == tmpl.length + payload_length &&
+        same_bytes(frame.first(tmpl.length), std::span{expected}.first(tmpl.length));
+}
+
+}  // namespace
+
+// Every AAF frame the talker sends is the stream's template with its sequence number, the low 32 bits of its
+// presentation time, mr and tu written, then the payload: through four formats, a sequence wrap, tu set and clear,
+// mr toggles and a Domain's new VID and PCP, on a port one thread drives and on a serialized one.
+TEST(talker_template, an_aaf_frame_is_its_template_with_the_varying_fields_written)
+{
+    for (bool const single_threaded : {true, false}) {
+        for (uint64_t const word : kTemplateFormats) {
+            avb_entity::StreamPort port;
+            EXPECT_TRUE(port.set_single_threaded(single_threaded).has_value());
+            auto& wire = open_test_port(port);
+            ptpclient::MediaClockGenerator const media_clock{};
+            std::atomic<int64_t> const last_gptp_ns{0};
+            avb_entity::TalkerStreams talker{
+                avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+                media_clock,
+                last_gptp_ns,
+                std::pmr::get_default_resource()};
+            EXPECT_TRUE(talker.open_stream(spec_of(4, word), kStreamId, kDest).has_value());
+            EXPECT_TRUE(talker.open_tx(port).has_value());
+            auto* const slot = talker.slot_for(4);
+            uint16_t const frames = slot->aaf_samples;
+            size_t const payload = size_t{frames} * slot->spec.format.channels * avtp::aaf_bytes_per_sample(slot->aaf->format);
+            bool mr = false;
+            for (uint32_t i = 0; i < 300; ++i) {
+                bool const tu = i % 37 < 9;
+                tu ? talker.notify_grandmaster_lost() : talker.notify_own_grandmaster();
+                if (i % 20 == 19) {
+                    EXPECT_TRUE(talker.toggle_media_clock_restart(4).has_value());  // past the hold: this PDU
+                    mr = !mr;
+                }
+                if (i == 150) {
+                    talker.set_vlan(0x0AB, 5);
+                }
+                uint64_t const pts = 0x0000'0007'FFFF'0000ULL + (uint64_t{i} * 125'000U);
+                EXPECT_TRUE(talker.transmit_aaf_raw(*slot, uint64_t{i} * frames, pts, frames, kPatternRender));
+                auto const sent = wire.pop_tx();
+                auto const tmpl = talker.frame_template(4, frames, kPortMac);
+                EXPECT_TRUE(sent.has_value() && tmpl.has_value());
+                EXPECT_TRUE(
+                    sent && tmpl &&
+                    is_template_frame(*tmpl, sent->frame, payload, static_cast<uint8_t>(i), static_cast<uint32_t>(pts), mr, tu));
+            }
+        }
+    }
+}
+
+// Every CRF PDU the talker sends is the stream's template with its sequence number, mr and tu written, then the
+// timestamps.
+TEST(talker_template, a_crf_frame_is_its_template_with_the_varying_fields_written)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());  // Milan CRF
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    bool mr = false;
+    for (uint32_t i = 0; i < 270; ++i) {
+        bool const tu = i % 11 < 3;
+        tu ? talker.notify_grandmaster_lost() : talker.notify_own_grandmaster();
+        if (i % 30 == 29) {
+            EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
+            mr = !mr;
+        }
+        std::array<uint64_t, 1> const ts{0x0123'4567'89AB'0000ULL + i};
+        EXPECT_TRUE(talker.transmit_crf_raw(*talker.slot_for(1), ts));
+        auto const sent = wire.pop_tx();
+        auto const tmpl = talker.frame_template(1, 0, kPortMac);
+        EXPECT_TRUE(sent.has_value() && tmpl.has_value());
+        EXPECT_TRUE(
+            sent && tmpl &&
+            is_template_frame(*tmpl, sent->frame, avtp::CrfPdu::TIMESTAMP_SIZE, static_cast<uint8_t>(i), 0, mr, tu));
+    }
+}
+
+// The templates hold the tagged header and the AVTPDU header at IEEE 1722-2016's offsets, the varying fields zero:
+// AAF sequence_num 20, avtp_timestamp 30, mr in 19 and tu in 21 (Clause 4.4.3, Figure 21); CRF sequence_num 20, mr and
+// tu in 19 and no avtp_timestamp (Clause 10.4, Figure 47).
+TEST(talker_template, the_varying_fields_are_at_ieee_1722s_offsets_and_zero)
+{
+    auto const header = avb_entity::stream_frame_header(kDest, kPortMac, 2, 3);
+    avtp::AafStreamOutputContext const aaf_ctx{
+        kStreamId, avtp::AafFormat::int_24bit, avtp::AafSampleRate::rate_48_khz, 2, 24, /*pres_offset=*/0};
+    auto const aaf = avb_entity::aaf_frame_template(aaf_ctx, 6, header);
+    EXPECT_TRUE(aaf.has_value());
+    EXPECT_TRUE(aaf && aaf->length == 42 && aaf->sequence_offset == 20 && aaf->timestamp_offset == 30);
+    EXPECT_TRUE(aaf && aaf->mr_offset == 19 && aaf->tu_offset == 21);
+    // subtype AAF; sv and tv set, mr clear; sequence 0; tu clear; timestamp 0; 2 x 24-bit x 6 frames = 36 octets.
+    EXPECT_TRUE(
+        aaf && same_bytes(std::span{aaf->bytes}.subspan(18, 4), std::array<uint8_t, 4>{avtp::AvtpSubtype::aaf, 0x81, 0x00, 0x00}));
+    EXPECT_TRUE(aaf && same_bytes(std::span{aaf->bytes}.subspan(30, 4), std::array<uint8_t, 4>{}));
+    EXPECT_TRUE(aaf && same_bytes(std::span{aaf->bytes}.subspan(38, 2), std::array<uint8_t, 2>{0x00, 36}));
+
+    avtp::CrfStreamOutputContext const crf_ctx{kStreamId, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 6};
+    auto const crf = avb_entity::crf_frame_template(crf_ctx, header);
+    EXPECT_TRUE(crf.has_value());
+    EXPECT_TRUE(crf && crf->length == 38 && crf->sequence_offset == 20 && crf->timestamp_offset == 0);
+    EXPECT_TRUE(crf && crf->mr_offset == 19 && crf->tu_offset == 19);
+    EXPECT_TRUE(
+        crf && same_bytes(std::span{crf->bytes}.subspan(18, 3), std::array<uint8_t, 3>{avtp::AvtpSubtype::crf, 0x80, 0x00}));
+    EXPECT_TRUE(crf && same_bytes(std::span{crf->bytes}.subspan(34, 2), std::array<uint8_t, 2>{0x00, 48}));  // 6 x 8 octets
+}
+
+// write() stores the four fields and only them, and leaves a buffer shorter than the headers alone.
+TEST(talker_template, write_stores_the_varying_fields_and_refuses_a_short_buffer)
+{
+    avtp::AafStreamOutputContext const ctx{
+        kStreamId, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_96_khz, 8, 32, /*pres_offset=*/0};
+    auto const tmpl = avb_entity::aaf_frame_template(ctx, 12, avb_entity::stream_frame_header(kDest, kPortMac, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    if (!tmpl) {
+        return;
+    }
+    std::array<uint8_t, 64> out{};
+    out.fill(0xEE);
+    EXPECT_TRUE(tmpl->write(0xA5, 0x1234'5678U, true, true, out));
+    std::vector<uint8_t> expected{tmpl->header().begin(), tmpl->header().end()};
+    expected[20] = 0xA5;
+    expected[19] |= 0x08U;
+    expected[21] |= 0x01U;
+    expected[30] = 0x12;
+    expected[31] = 0x34;
+    expected[32] = 0x56;
+    expected[33] = 0x78;
+    EXPECT_TRUE(same_bytes(std::span{out}.first(tmpl->length), expected));
+    EXPECT_EQ(out[tmpl->length], uint8_t{0xEE});
+
+    std::array<uint8_t, 41> short_out{};
+    short_out.fill(0xEE);
+    EXPECT_FALSE(tmpl->write(1, 2, true, true, short_out));
+    EXPECT_TRUE(std::ranges::all_of(short_out, [](uint8_t const b) { return b == 0xEE; }));
+}
+
+// A template is refused where the talker sends no such frame: no stream, no frames, more than an Ethernet payload,
+// a format with no byte layout; and a CRF stream with no timestamps or more than a PDU holds.
+TEST(talker_template, refused_where_the_talker_sends_no_such_frame)
+{
+    avb_entity::StreamPort port;
+    open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());  // 8 x int32
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    EXPECT_FALSE(talker.frame_template(1, 12, kPortMac).has_value());
+    EXPECT_FALSE(talker.frame_template(0, 0, kPortMac).has_value());
+    EXPECT_TRUE(talker.frame_template(0, 46, kPortMac).has_value());  // 24 + 1472 octets
+    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 0, 46, kPatternRender));
+    EXPECT_FALSE(talker.frame_template(0, 47, kPortMac).has_value());  // 24 + 1504
+    EXPECT_FALSE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 0, 47, kPatternRender));
+
+    auto const header = avb_entity::stream_frame_header(kDest, kPortMac, 2, 3);
+    avtp::AafStreamOutputContext const user{
+        kStreamId, avtp::AafFormat::user_specified, avtp::AafSampleRate::rate_48_khz, 2, 24, /*pres_offset=*/0};
+    EXPECT_FALSE(avb_entity::aaf_frame_template(user, 6, header).has_value());
+    avtp::CrfStreamOutputContext crf{kStreamId, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 0};
+    EXPECT_FALSE(avb_entity::crf_frame_template(crf, header).has_value());
+    crf.timestamps_per_packet = avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU + 1;
+    EXPECT_FALSE(avb_entity::crf_frame_template(crf, header).has_value());
+    crf.timestamps_per_packet = avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU;
+    EXPECT_TRUE(avb_entity::crf_frame_template(crf, header).has_value());
+}
+
+// A template patched with random fields equals serialize_aaf_raw() behind build_stream_frame() byte for byte, over
+// random streams, formats, channel counts, frames, destinations, VIDs and PCPs.
+TEST(talker_template, a_patched_template_equals_the_serialized_frame)
+{
+    std::mt19937 rng{0x1722};
+    constexpr std::array<avtp::AafFormat, 4> formats{
+        avtp::AafFormat::float_32bit, avtp::AafFormat::int_32bit, avtp::AafFormat::int_24bit, avtp::AafFormat::int_16bit};
+    std::array<uint8_t, net::MAX_ETHERNET_PAYLOAD + 32> serialized{};
+    std::array<uint8_t, net::MAX_ETHERNET_PAYLOAD + 32> frame{};
+    for (int k = 0; k < 2000; ++k) {
+        auto const format = formats[rng() % formats.size()];
+        auto const channels = static_cast<uint16_t>(1 + (rng() % 64));
+        auto const frames = static_cast<uint16_t>(1 + (rng() % 24));
+        ieee::Eui48 dest{};
+        for (auto& b : dest.value) {
+            b = static_cast<uint8_t>(rng());
+        }
+        tsn::StreamId const id{dest, static_cast<uint16_t>(rng())};
+        avtp::AafStreamOutputContext ctx{id, format, avtp::AafSampleRate::rate_48_khz, channels, 24, /*pres_offset=*/0};
+        ctx.sequence_num = static_cast<uint8_t>(rng());
+        auto const vid = static_cast<uint16_t>(rng() & 0x0FFFU);
+        auto const pcp = static_cast<uint8_t>(rng() & 0x07U);
+        uint64_t const pts = (uint64_t{rng()} << 32U) | rng();
+        bool const tu = (rng() & 1U) != 0;
+        bool const mr = (rng() & 1U) != 0;
+        auto const tmpl = avb_entity::aaf_frame_template(ctx, frames, avb_entity::stream_frame_header(dest, kPortMac, vid, pcp));
+        uint8_t const sequence = ctx.sequence_num;
+        size_t const pdu = avb_entity::serialize_aaf_raw(
+            ctx, std::span{serialized}.first(net::MAX_ETHERNET_PAYLOAD), frames, 0, pts, kPatternRender, tu, mr);
+        EXPECT_EQ(tmpl.has_value(), pdu != 0);
+        if (!tmpl || pdu == 0) {
+            continue;
+        }
+        size_t const length = avb_entity::build_stream_frame(frame, dest, kPortMac, vid, pcp, std::span{serialized}.first(pdu));
+        EXPECT_TRUE(is_template_frame(
+            *tmpl,
+            std::span{frame}.first(length),
+            pdu - avtp::AafPdu::HEADER_LENGTH,
+            sequence,
+            static_cast<uint32_t>(pts),
+            mr,
+            tu));
+    }
 }
 
 // IEEE 1722-2016 Clause 10.4: a media clock restart toggles mr on the next CRF PDU and the bit
