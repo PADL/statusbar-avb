@@ -394,7 +394,10 @@ Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while
 acquired, only the acquirer may lock or unlock; a failed SET answers the
 value in force; the unsolicited notification of a command goes to every
-registered controller except the one that sent it (7.5.2, 5.4.5.3);
+registered controller except the one that sent it (7.5.2, 5.4.5.3), and
+after the command's response, with those its hooks raise (four held at
+most, the command's own last; one of the command's type past those is not
+sent, each controller's sequence id spent so it sees the gap, 5.4.5.1);
 SET_CONTROL of the IDENTIFY control honours acquire and
 lock like any other control (7.4.25.2, 5.4.2.17). The last one has a knob,
 `atdecc.identify_bypasses_lock`, off by default, for installations that
