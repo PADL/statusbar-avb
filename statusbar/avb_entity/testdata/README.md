@@ -48,8 +48,9 @@ listing their 8-channel format at 48 and 96 kHz, a CRF stream output,
 and stream ports of eight one-channel clusters without AUDIO_MAP
 descriptors. It keeps the Milan v1.3 5.3.3 model rules
 (`examples/verify_models.py`'s `milan_model_faults`). Loaded by
-`avb_entity_kit_test.cpp` for SET_SAMPLING_RATE. Write it again from the
-top of the repository:
+`avb_entity_kit_test.cpp` for SET_SAMPLING_RATE, and compiled into
+`nanoavb_aem_fuzzer.cpp` with `#embed`. Write it again from the top of
+the repository:
 
 ```
 python3 python/aemxml/aemxml_tool.py json2bin statusbar/avb_entity/testdata/entity_rates.json \

@@ -65,6 +65,7 @@ statusbar_add_module(
   nanoavb_components_functional_test.cpp)
 
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_audio_mappings_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_aem_fuzzer.cpp)
 
 add_executable(nanoavb_example nanoavb_example.cpp)
 target_link_libraries(nanoavb_example PRIVATE statusbar)
