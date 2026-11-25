@@ -852,6 +852,11 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
             auto const* last = handlers.gptp_handler().last_announce();
             report_grandmaster(components, gptp::ClockIdentity{}, last != nullptr ? last->header.domain_number.get() : 0);
         }});
+
+    // A new path trace, or none, is an unsolicited GET_AS_PATH (IEEE 1722.1-2021 Clause 7.4.41).
+    // Apart from the callbacks above, which integrators replace whole.
+    handlers.gptp_handler().set_on_path_trace_changed(
+        [&components](int64_t /*now_ns*/) -> void { (void)components.aem_handler.notify_as_path_changed(0); });
 }
 
 void report_grandmaster(NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain)

@@ -80,6 +80,12 @@ using statusbar::Status;
     return cfg;
 }
 
+/// An AS path from an Announce's @p path_trace (IEEE 802.1AS-2020 Clause 10.3.9.23): the trace,
+/// then @p own_clock_identity unless it is unknown, the trace is empty (no grandmaster), the
+/// trace ends with it already (this system is the grandmaster) or the path is full.
+[[nodiscard]] auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity)
+    -> nanoavb::AsPath;
+
 /// The shared AVB entity control plane: state machines + NanoAvbComponents + net
 /// handlers + lifecycle. Owned by a concrete entity (composition). Non-copyable and
 /// non-movable (NanoAvbComponents pins itself), so build it in place in the entity's
@@ -308,6 +314,12 @@ class AvbEntityHost
     /// The GET_AVB_INFO answer for AVB_INTERFACE @p index: what controllers see.
     [[nodiscard]] auto avb_info(uint16_t index = 0) const -> nanoavb::AvbInfo;
 
+    /// The GET_AS_PATH answer for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
+    /// gPTP Announces' path trace, then the clock identity the interface's descriptor reports
+    /// (compose_as_path); empty without a grandmaster or before start_control_plane(). False
+    /// for an interface the model lacks. Reactor thread.
+    [[nodiscard]] auto as_path(uint16_t index, nanoavb::AsPath& path) const -> bool;
+
     /// Propagation delay (ns) to report in the observed (non-mirrored) state
     /// (e.g. the entity's own peer-delay measurement).
     void set_propagation_delay_ns(uint32_t ns);
@@ -358,6 +370,8 @@ class AvbEntityHost
     [[nodiscard]] auto own_avb_flags() const -> uint8_t;
     void add_srp_mapping(nanoavb::AvbInfo& info) const;
     void add_gptp_state(nanoavb::AvbInfo& info) const;
+    /// The clock identity AVB_INTERFACE @p index reports (READ_DESCRIPTOR), nullopt when unset or unknown.
+    [[nodiscard]] auto interface_clock_identity(uint16_t index) const -> std::optional<ieee::Eui64>;
     void attach_mirror(net::MessageReactor& reactor);
     void apply_interface_runtime();
     void on_mirror_update(uint16_t index, atdecc::aem::DescriptorAvbInterface const* desc, nanoavb::AvbInfo const* info);
