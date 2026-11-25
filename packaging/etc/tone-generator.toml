@@ -42,8 +42,9 @@ talker_on_listener = true
 # Saved power-on state. The entity keeps what must outlast a restart in
 # <dir>/<its entity ID as 16 hex digits>/, one file per kind:
 #   listener-bindings   its stream inputs' bindings, under the Milan profile
-#   maap-range          the MAAP block it defended, under
-#                       stream.address_mode = "maap"
+#   maap-range          the MAAP block it defended, where its stream
+#                       addresses come from MAAP: stream.address_mode =
+#                       "maap", or the Milan profile with that key unset
 # The package creates the default directory. dir = "" saves nothing there;
 # listener.bindings and stream.maap_range_file name a file of your own.
 # [state]

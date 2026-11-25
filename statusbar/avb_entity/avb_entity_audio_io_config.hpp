@@ -211,8 +211,11 @@ struct AvbEntityAudioIOConfig
     /// are identical across both standards; the 2021 IP-extended ACMPDU form
     /// (96B, control_data_length=84, carries the connected stream's IP address) is
     /// NOT implemented -- it is only needed to connect IP-transported streams, and
-    /// is deferred until there is an IP-stream use case. Default "2016".
-    std::string atdecc_version{"2016"};
+    /// is deferred until there is an IP-stream use case. Empty (the default):
+    /// the profile decides, see effective_atdecc_version() - "2021" under the
+    /// Milan profile, whose descriptors are those of 1722.1-2021 (Milan v1.3
+    /// 5.3.3), "2016" otherwise.
+    std::string atdecc_version{};
 
     /// Let any controller's SET_CONTROL of the IDENTIFY control through while
     /// another controller holds the entity acquired or locked. Off by default,
@@ -247,13 +250,17 @@ struct AvbEntityAudioIOConfig
     /// The Milan specification the device supports, as dotted numbers.
     std::string milan_specification_version{"1.3.0.0"};
 
-    /// Stream destination address source. "static" (default) uses the
+    /// Stream destination address source. "static" uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
     /// addresses from the IEEE 1722 dynamic pool via MAAP at start() and assigns
     /// one per talker stream (block+0=AM824, +1=AAF, +2=CRF), then defends them for
     /// the entity's lifetime. Acquisition is synchronous at startup (~2-3 s of
     /// probing); on failure the entity falls back to the static MACs with a warning.
-    std::string stream_address_mode{"static"};
+    /// Empty (the default): the profile decides, see
+    /// effective_stream_address_mode() - "maap" under the Milan profile, which
+    /// has its talkers take their addresses from MAAP (Milan v1.3 4.3.3.1),
+    /// "static" otherwise.
+    std::string stream_address_mode{};
 
     /// Under "maap": where the block defended is saved, and read back at the
     /// next start to be probed first, so a restart keeps its destination
@@ -503,6 +510,30 @@ inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
         return config.presentation_offset_ns;
     }
     return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
+}
+
+/// The ATDECC wire version the entity's descriptors are sent in: what the
+/// configuration gives, or the profile's when it gives none. Milan v1.3 5.3.3
+/// has the descriptors of IEEE 1722.1-2021; an entity held to 1722.1 alone
+/// keeps the 2013/2016 lengths that older controllers expect.
+[[nodiscard]] inline auto effective_atdecc_version(AvbEntityAudioIOConfig const& config) -> std::string_view
+{
+    if (!config.atdecc_version.empty()) {
+        return config.atdecc_version;
+    }
+    return is_milan_profile(config) ? "2021" : "2016";
+}
+
+/// Where the talker streams' destination addresses come from: what the
+/// configuration gives, or the profile's when it gives none. Milan v1.3
+/// 4.3.3.1 has a talker's addresses allocated by MAAP; an entity held to
+/// 1722.1 alone keeps its configured ones.
+[[nodiscard]] inline auto effective_stream_address_mode(AvbEntityAudioIOConfig const& config) -> std::string_view
+{
+    if (!config.stream_address_mode.empty()) {
+        return config.stream_address_mode;
+    }
+    return is_milan_profile(config) ? "maap" : "static";
 }
 
 }  // namespace statusbar::avb_entity

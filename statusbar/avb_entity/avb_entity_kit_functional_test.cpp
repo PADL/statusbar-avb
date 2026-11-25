@@ -1491,7 +1491,11 @@ TEST(avb_entity_kit_state, a_named_bindings_file_is_used_and_the_state_directory
 {
     StateDir const dir{"statusbar_state_dir_named_functional_test"};
     auto const named = (dir.state / "named-bindings.txt").string();
-    KitPair pair{"milan13", dir.listener_config("milan13", named)};
+    // Static addresses: a kit that asks MAAP for its own keeps the range it
+    // defends in the state directory (the test after next).
+    auto config = dir.listener_config("milan13", named);
+    config.stream_address_mode = "static";
+    KitPair pair{"milan13", std::move(config)};
     pair.bind();
     EXPECT_EQ(load_saved_listener_bindings(named)->size(), 1U);
     EXPECT_FALSE(std::filesystem::exists(dir.entity));
@@ -1532,6 +1536,16 @@ TEST(avb_entity_kit_state, a_maap_kit_has_its_state_directory_for_the_range_it_d
     auto config = dir.listener_config("classic");
     config.stream_address_mode = "maap";
     KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_TRUE(std::filesystem::is_directory(dir.entity));
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+TEST(avb_entity_kit_state, a_milan_kit_given_no_address_mode_asks_maap_and_so_has_its_state_directory)
+{
+    // Milan v1.3 4.3.3.1: nothing said of the addresses, a Milan talker takes them from MAAP.
+    StateDir const dir{"statusbar_state_dir_milan_maap_functional_test"};
+    KitUnderTest kit{dir.listener_config("milan13")};
     EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
     EXPECT_TRUE(std::filesystem::is_directory(dir.entity));
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));

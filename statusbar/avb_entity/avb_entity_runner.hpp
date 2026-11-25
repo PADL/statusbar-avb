@@ -105,7 +105,7 @@ inline void add_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOCon
     specs.add<std::string>(
         "atdecc.version",
         "ATDECC wire version: '2016' truncates descriptors to their 1722.1-2013/2016 lengths; '2021' emits full "
-        "2021 descriptors. Default 2016.",
+        "2021 descriptors. Default empty: the profile decides, 2021 under milan13 and 2016 otherwise.",
         entity.atdecc_version,
         [&entity](auto v) { entity.atdecc_version = std::string{v}; });
     specs.add<bool>(
@@ -169,7 +169,8 @@ inline void add_network_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOCo
     specs.add<std::string>(
         "stream.address_mode",
         "Talker stream dest-address source: 'static' (the configured *_dest_mac) or 'maap' (acquire a block from "
-        "the 1722 dynamic pool via MAAP at startup). Default static.",
+        "the 1722 dynamic pool via MAAP at startup). Default empty: the profile decides, maap under milan13 and "
+        "static otherwise.",
         entity.stream_address_mode,
         [&entity](auto v) { entity.stream_address_mode = std::string{v}; });
     specs.add<std::string>(

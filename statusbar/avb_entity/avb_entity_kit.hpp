@@ -367,6 +367,9 @@ class AvbEntityKit
     /// Give the AEM handler the GET_MILAN_INFO answer a Milan model makes, or
     /// none for any other model.
     void install_milan_info();
+    /// Say in the ENTITY descriptor and in ADP what a Milan PAAD-AE is held
+    /// to say of itself (Milan v1.3 5.3.3.1, 5.6.2).
+    void advertise_milan_capabilities();
     /// The features_flags of GET_MILAN_INFO: the configuration's, with
     /// MVU_BINDING set under the Milan profile and clear under any other.
     [[nodiscard]] auto milan_features_flags() const noexcept -> uint32_t;

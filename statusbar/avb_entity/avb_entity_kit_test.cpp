@@ -95,6 +95,16 @@ class KitUnderTest
     {}
 
     auto operator->() noexcept -> AvbEntityKit* { return &kit_; }
+
+    /// The ENTITY descriptor's entity_capabilities, as a controller reads them.
+    [[nodiscard]] auto entity_capabilities() -> uint32_t
+    {
+        atdecc::aem::DescriptorEntity entity{};
+        nanoavb::DescriptorId const id{
+            .ref = {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_ENTITY, .descriptor_index = 0},
+            .symbol = 0};
+        return handler_.on_get_entity(id, entity) ? entity.entity_capabilities.get() : 0;
+    }
     [[nodiscard]] auto talker_specs() const noexcept -> StreamSpecs const& { return talker_specs_; }
 
     /// Bring the control plane up (or up again), as the tool does at @p now.
@@ -133,6 +143,12 @@ using Profile = nanoavb::AemCommandHandler::Profile;
 auto profile_of(KitUnderTest& kit) -> Profile
 {
     return kit->host().components().aem_handler.profile();
+}
+
+/// The entity_capabilities @p kit advertises in ADP.
+auto advertised_capabilities(KitUnderTest& kit) -> uint32_t
+{
+    return kit->host().components().adp_advertiser.adpdu().entity_capabilities.get();
 }
 
 auto milan_info_of(KitUnderTest& kit) -> std::optional<nanoavb::AemCommandHandler::MilanInfo> const&
@@ -343,6 +359,77 @@ TEST(avb_entity_kit_profile, a_talker_given_no_presentation_offset_takes_its_pro
     classic.presentation_offset_ns = 3'000'000;
     EXPECT_EQ(effective_presentation_offset_ns(milan), 1'000'000U);
     EXPECT_EQ(effective_presentation_offset_ns(classic), 3'000'000U);
+}
+
+TEST(avb_entity_kit_profile, the_wire_version_and_the_address_mode_given_by_nobody_are_the_profiles)
+{
+    // Milan v1.3 5.3.3 has the descriptors of IEEE 1722.1-2021, and 4.3.3.1
+    // has a talker's addresses come from MAAP. An entity held to 1722.1 alone
+    // keeps the 2013/2016 lengths and its configured addresses. What the
+    // configuration says is used under either profile.
+    auto milan = make_config(2, "milan13");
+    auto classic = make_config(2, "classic");
+    auto milan_model = make_config(2, "", true);
+    auto pinned = make_config(2, "classic", true);
+    EXPECT_TRUE(milan.atdecc_version.empty());
+    EXPECT_TRUE(milan.stream_address_mode.empty());
+    EXPECT_EQ(effective_atdecc_version(milan), std::string_view{"2021"});
+    EXPECT_EQ(effective_atdecc_version(classic), std::string_view{"2016"});
+    EXPECT_EQ(effective_atdecc_version(milan_model), std::string_view{"2021"});
+    EXPECT_EQ(effective_atdecc_version(pinned), std::string_view{"2016"});
+    EXPECT_EQ(effective_stream_address_mode(milan), std::string_view{"maap"});
+    EXPECT_EQ(effective_stream_address_mode(classic), std::string_view{"static"});
+    EXPECT_EQ(effective_stream_address_mode(milan_model), std::string_view{"maap"});
+    EXPECT_EQ(effective_stream_address_mode(pinned), std::string_view{"static"});
+
+    milan.atdecc_version = "2016";
+    milan.stream_address_mode = "static";
+    classic.atdecc_version = "2021";
+    classic.stream_address_mode = "maap";
+    EXPECT_EQ(effective_atdecc_version(milan), std::string_view{"2016"});
+    EXPECT_EQ(effective_stream_address_mode(milan), std::string_view{"static"});
+    EXPECT_EQ(effective_atdecc_version(classic), std::string_view{"2021"});
+    EXPECT_EQ(effective_stream_address_mode(classic), std::string_view{"maap"});
+}
+
+TEST(avb_entity_kit_profile, a_kit_sends_its_descriptors_in_its_profiles_wire_version)
+{
+    KitUnderTest milan{make_config(2, "milan13")};
+    KitUnderTest classic{make_config(2, "classic")};
+    EXPECT_FALSE(milan->host().components().aem_handler.legacy_2016());
+    EXPECT_TRUE(classic->host().components().aem_handler.legacy_2016());
+
+    auto asked = make_config(2, "milan13");
+    asked.atdecc_version = "2016";
+    KitUnderTest held{asked};
+    EXPECT_TRUE(held->host().components().aem_handler.legacy_2016());
+}
+
+TEST(avb_entity_kit_profile, a_milan_entity_says_vendor_unique_and_interface_index_valid)
+{
+    // Milan v1.3 5.3.3.1 (ENTITY descriptor) and 5.6.2 (ADPDU): both bits are
+    // 1. The model authors neither: they follow the entity answering MVU,
+    // which a Milan model does under either profile and a plain one never.
+    using namespace atdecc::entity_capabilities;
+    uint32_t const milan_bits = VENDOR_UNIQUE_SUPPORTED | AEM_INTERFACE_INDEX_VALID;
+    // What the tone model has: its three flags, and the IDENTIFY control its generator names.
+    uint32_t const authored = AEM_SUPPORTED | CLASS_A_SUPPORTED | GPTP_SUPPORTED | AEM_IDENTIFY_CONTROL_INDEX_VALID;
+
+    KitUnderTest plain{make_config(2, "")};
+    EXPECT_EQ(plain.entity_capabilities(), authored);
+    EXPECT_EQ(advertised_capabilities(plain), authored);
+
+    KitUnderTest milan{make_config(2, "", true)};
+    EXPECT_EQ(milan.entity_capabilities(), authored | milan_bits);
+    EXPECT_EQ(advertised_capabilities(milan), authored | milan_bits);
+
+    KitUnderTest pinned{make_config(2, "classic", true)};
+    EXPECT_EQ(pinned.entity_capabilities(), authored | milan_bits);
+    EXPECT_EQ(advertised_capabilities(pinned), authored | milan_bits);
+
+    KitUnderTest opted_in{make_config(2, "milan13")};
+    EXPECT_EQ(opted_in.entity_capabilities(), authored);
+    EXPECT_EQ(advertised_capabilities(opted_in), authored);
 }
 
 TEST(avb_entity_kit_profile, an_empty_profile_is_the_models_and_an_explicit_one_wins)

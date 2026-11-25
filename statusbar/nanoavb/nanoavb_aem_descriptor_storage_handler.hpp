@@ -124,8 +124,16 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (manage_entity_name_) {
             desc.entity_name = entity_name_;
         }
+        desc.entity_capabilities.set_flag(added_entity_capabilities_);
         return true;
     }
+
+    /// Set @p bits in the ENTITY descriptor's entity_capabilities on top of
+    /// what the blob authors: what the entity is able to do that is decided
+    /// when it is built, and not by its model (a profile that answers vendor
+    /// unique commands, say). ADP copies the descriptor once, so an entity
+    /// already built is told of the change by its owner.
+    void add_entity_capabilities(uint32_t const bits) noexcept { added_entity_capabilities_ |= bits; }
 
     // ---- Built-in entity name (every entity has exactly one) -------------
     //
@@ -1736,6 +1744,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     AtdeccString entity_name_{};
     bool manage_entity_name_{false};
     bool manage_object_names_{false};
+    uint32_t added_entity_capabilities_{0};
     statusbar::sg14::inplace_vector<ObjectNameState, MAX_OBJECT_NAMES> object_names_;
     statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> on_entity_name_changed_{};
 };

@@ -84,10 +84,11 @@ void AvbEntityKit::make_listener_streams(std::atomic<int64_t>& last_gptp_ns, Str
 
 void AvbEntityKit::configure_control_plane()
 {
-    // ATDECC descriptor wire version. Default "2016": emit descriptors at their
+    // ATDECC descriptor wire version. "2016" emits descriptors at their
     // 1722.1-2013/2016 lengths so controllers that reject 2021-length descriptors
-    // can enumerate the model. "2021" emits the full 2021 forms.
-    host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
+    // can enumerate the model; "2021" emits the full 2021 forms. Nothing said:
+    // the profile's (effective_atdecc_version).
+    host_.components().aem_handler.set_legacy_2016(effective_atdecc_version(config_) != "2021");
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
     apply_profile();
@@ -705,7 +706,7 @@ auto AvbEntityKit::claim_stream_addresses(net::MessageReactor& reactor, TimePoin
     // addresses via MAAP: the Link Up begins it (B.3.5.9), and the acquired
     // addresses then overwrite the static defaults the data plane reads below.
     // Non-fatal inside: on socket failure the entity keeps the static MACs.
-    return config_.stream_address_mode == "maap" ? setup_maap_addresses(reactor, now) : success();
+    return effective_stream_address_mode(config_) == "maap" ? setup_maap_addresses(reactor, now) : success();
 }
 
 auto AvbEntityKit::open_streams(net::MessageReactor& reactor) -> Status
@@ -875,12 +876,36 @@ auto AvbEntityKit::milan_profile() const noexcept -> bool
     return is_milan_profile(config_);
 }
 
+namespace {
+
+/// What a Milan PAAD-AE says of itself in its entity_capabilities (Milan v1.3
+/// 5.3.3.1, 5.6.2): it answers the MVU commands, and the ADPDU's
+/// interface_index names its AVB_INTERFACE.
+constexpr uint32_t MILAN_ENTITY_CAPABILITIES =
+    atdecc::entity_capabilities::VENDOR_UNIQUE_SUPPORTED | atdecc::entity_capabilities::AEM_INTERFACE_INDEX_VALID;
+
+}  // namespace
+
+void AvbEntityKit::advertise_milan_capabilities()
+{
+    // Both are what this entity does because it was built as a Milan one,
+    // whatever its model authors, so they are added here: to the ENTITY
+    // descriptor it serves, and to the copy of it that ADP advertises from.
+    storage_handler_.add_entity_capabilities(MILAN_ENTITY_CAPABILITIES);
+    auto& adp = host_.components().adp_advertiser;
+    auto entity = adp.entity();
+    entity.entity_capabilities.set_flag(MILAN_ENTITY_CAPABILITIES);
+    adp.set_entity(entity);
+    adp.notify_entity_changed();
+}
+
 void AvbEntityKit::install_milan_info()
 {
     if (!config_.milan) {
         host_.components().aem_handler.set_milan_info(std::nullopt);
         return;
     }
+    advertise_milan_capabilities();
     host_.components().aem_handler.set_milan_info(nanoavb::AemCommandHandler::MilanInfo{
         .features_flags = milan_features_flags(),
         .certification_version = milan_version_or(config_.milan_certification_version, 0, "milan.certification_version"),

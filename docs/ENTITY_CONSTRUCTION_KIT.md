@@ -317,6 +317,8 @@ Everything not listed here is the same under both.
 | `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, they go to `listener-bindings` in the entity's state directory (below); with no state directory either, they last as long as the process |
 | When a stream output's Talker attribute is declared | once the entity is ready and its stream addresses are final | only while a listener wants the stream: a PROBE_TX_COMMAND for it arrived in the last 15 s, or a Listener attribute for its StreamID is registered on the port; withdrawn when neither holds, and while MAAP reports the address lost (4.3.3.1). `MsrpHandler::set_talker_waits_for_listener` |
 | Talker presentation offset when `presentation_offset_ns` is 0 (the default) | 1 ms | 2 ms (5.3.7.6); a value other than 0 is used as given under either |
+| Descriptor lengths when `atdecc.version` is empty (the default) | `2016`: STREAM, AVB_INTERFACE, AUDIO_CLUSTER and the other descriptors that grew are cut to their 1722.1-2013/2016 lengths, for controllers that reject the longer ones | `2021`: the full IEEE 1722.1-2021 descriptors, which are the ones Milan names (5.3.3); `2016` or `2021` given outright is used under either |
+| Stream destination addresses when `stream.address_mode` is empty (the default) | `static`: the configured `*_dest_mac` | `maap`: a block acquired and defended by MAAP (4.3.3.1), kept across restarts in `maap-range`; `static` or `maap` given outright is used under either. Where the MAAP socket cannot be opened the entity still falls back to the configured addresses, with a warning |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 
 ### Saved state
@@ -336,7 +338,7 @@ different programs on one machine never share a file
 | File | Written | By default |
 |---|---|---|
 | `listener-bindings` | the stream inputs' bindings (Milan v1.3 5.3.8.3) | under the Milan profile. The IEEE 1722.1 listener's fast-connect memory changes what a restart does, so it is saved only where `listener.bindings` names a file |
-| `maap-range` | the MAAP block the entity defended, probed first at the next start | under `stream.address_mode = "maap"`, either profile |
+| `maap-range` | the MAAP block the entity defended, probed first at the next start | wherever the addresses come from MAAP: `stream.address_mode = "maap"` under either profile, and the Milan profile when the key is left empty |
 
 A key that names a file (`listener.bindings`, `stream.maap_range_file`)
 is used as given and the state directory is left alone for that kind. A
@@ -358,6 +360,13 @@ Milan controller uses to tell a Milan device from any other ATDECC entity,
 answers protocol_version 1, `milan.features_flags` (Table 5.17; 0 by
 default), `milan.certification_version` ("0.0.0.0" by default: none
 passed) and `milan.specification_version` ("1.3.0.0").
+
+Because it answers them, a Milan model also says so: the kit sets
+VENDOR_UNIQUE_SUPPORTED and AEM_INTERFACE_INDEX_VALID in the
+entity_capabilities of the ENTITY descriptor it serves and of the ADPDU it
+advertises (5.3.3.1, 5.6.2), on top of what the model authors. A model
+does not author the two itself: the same blob serves a plain 1722.1
+entity, which answers no MVU command and so must not claim to.
 
 Under the Milan profile the entity also answers BIND_STREAM,
 UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX (5.4.4.6 to 5.4.4.8) from its

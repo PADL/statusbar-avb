@@ -268,6 +268,8 @@ class AemCommandHandler
     /// for controllers that reject 2021-length descriptors. Default off
     /// (2021 lengths).
     void set_legacy_2016(bool enable) noexcept { legacy_2016_ = enable; }
+    /// Whether descriptors go out at their 1722.1-2013/2016 lengths.
+    [[nodiscard]] auto legacy_2016() const noexcept -> bool { return legacy_2016_; }
 
     /// Let a SET_CONTROL of the entity's IDENTIFY control through while another
     /// controller holds the entity acquired or locked. Off by default: IEEE

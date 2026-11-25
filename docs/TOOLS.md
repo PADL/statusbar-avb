@@ -63,7 +63,8 @@ defaults to the packaged blob on `avb-audio-io` (`entity_audio.bin`) and the
 tone generator (`entity_tone*.bin`, picked by `--streams=all|aaf|aaf+crf`) and
 is required on `avb-am824-io`. Useful flags on the entity tools:
 `--ptp.driver=linuxptp|ntpshm|system`, `--ptp.device=/dev/ptp0`, `--vlan_id`,
-`--entity.id`/`--entity.name`, `--atdecc.version=2016|2021`,
+`--entity.id`/`--entity.name`, `--atdecc.version=2016|2021` (empty, the
+default, takes the profile's: 2021 under Milan, 2016 otherwise),
 `--atdecc.profile=classic|milan13` and `--entity.milan` (a Milan model
 answers GET_MILAN_INFO, takes `milan13` as its default profile, and under
 that profile answers BIND_STREAM, UNBIND_STREAM and
@@ -73,7 +74,8 @@ takes the profile's: 2 ms under Milan, 1 ms otherwise),
 (+ `--net.xdp_queue`), `--filter.freq_hz`/`--filter.gain_db`/`--filter.q`.
 `avb-audio-io` adds `--udptun.*` (peer/egress/listen/wcl_ns/rendezvous/max_tai_error_us),
 `--tx_pcap.path`, `--gate.talker_on_listener`, `--media.*`, `--tone.*`,
-`--srp.*` workarounds and `--stream.address_mode=static|maap` (under `maap`
+`--srp.*` workarounds and `--stream.address_mode=static|maap` (empty, the
+default, takes the profile's: `maap` under Milan, `static` otherwise; under `maap`
 the first ENTITY_AVAILABLE after a Link Up waits until the MAAP block is
 defended, so a listener that discovers the entity is never told
 TALKER_DEST_MAC_FAIL for an address still being probed; with
