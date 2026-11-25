@@ -287,7 +287,11 @@ Exposes:
   the talker's attribute arrives and withdrawn when it has gone.
   `MsrpHandler::set_listener_waits_for_talker(false)` makes an attached
   listener declare Asking Failed while neither is registered, which is
-  the other choice both documents leave open.
+  the other choice both documents leave open. An attach may name the one
+  Talker attribute to follow (`TalkerMatch`: destination address and
+  VLAN, what a Milan sink probed): one of the StreamID on another address
+  or VLAN is then as good as none. Without a match any Talker attribute of
+  the StreamID is followed.
 - **Indications** — an observer hears of a registration once, when the
   attribute becomes registered, and again only when a registered value
   or a Listener's Declaration Type changes. A repeated New and the Join
