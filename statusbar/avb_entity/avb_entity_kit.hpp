@@ -325,6 +325,11 @@ class AvbEntityKit
     void install_storage_hooks();
     /// START_STREAMING or STOP_STREAMING was accepted for a stream.
     [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
+    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_OUTPUT
+    /// @p index: the talker's stream stopped or started under IEEE 1722.1,
+    /// NOT_SUPPORTED and nothing changed under the Milan profile. The status
+    /// of the command.
+    [[nodiscard]] auto start_or_stop_output(uint16_t index, bool stopped) -> uint8_t;
     /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_INPUT
     /// @p index: to its Milan sink, or straight to the input under IEEE 1722.1.
     void start_or_stop_input(uint16_t index, bool stopped);

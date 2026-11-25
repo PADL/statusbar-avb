@@ -1227,28 +1227,43 @@ TEST(avb_entity_kit_mvu, a_milan_model_held_to_ieee_1722_1_says_it_does_not_impl
 
 namespace {
 
-/// START_STREAMING or STOP_STREAMING (@p command) for STREAM_INPUT @p index of @p kit, from @p controller: the status.
-auto streaming_command(KitUnderTest& kit, uint16_t const command, uint16_t const index, Eui64 const& controller = CONTROLLER_ID)
-    -> uint8_t
+/// One stream descriptor of a kit.
+struct StreamOf
+{
+    KitUnderTest& kit;
+    uint16_t index{0};
+    uint16_t type{atdecc::aem::DESCRIPTOR_STREAM_INPUT};
+};
+
+/// START_STREAMING or STOP_STREAMING (@p command) for @p stream, from @p controller: the status.
+auto streaming_command(StreamOf const stream, uint16_t const command, Eui64 const& controller = CONTROLLER_ID) -> uint8_t
 {
     atdecc::AemDu header{};
     header.init_command(command, atdecc::aem::AemStreamingPayload::LENGTH);
     header.controller_entity_id = controller;
     atdecc::aem::AemStreamingPayload payload{};
-    payload.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
-    payload.descriptor_index = index;
+    payload.descriptor_type = stream.type;
+    payload.descriptor_index = stream.index;
     std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    return kit->host().components().aem_handler.handle_command(header, make_const_span(payload), out).status;
+    return stream.kit->host().components().aem_handler.handle_command(header, make_const_span(payload), out).status;
 }
 
-/// Whether GET_STREAM_INFO reports STREAM_INPUT @p index of @p kit as STREAMING_WAIT.
-auto reports_streaming_wait(KitUnderTest& kit, uint16_t const index) -> bool
+/// START_STREAMING or STOP_STREAMING (@p command) for STREAM_INPUT @p index of @p kit.
+auto streaming_command(KitUnderTest& kit, uint16_t const command, uint16_t const index, Eui64 const& controller = CONTROLLER_ID)
+    -> uint8_t
+{
+    return streaming_command(StreamOf{.kit = kit, .index = index}, command, controller);
+}
+
+/// Whether GET_STREAM_INFO reports @p index of @p kit, a STREAM_INPUT unless @p type says otherwise, as STREAMING_WAIT.
+auto reports_streaming_wait(KitUnderTest& kit, uint16_t const index, uint16_t const type = atdecc::aem::DESCRIPTOR_STREAM_INPUT)
+    -> bool
 {
     atdecc::AemDu header{};
     header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
     header.controller_entity_id = CONTROLLER_ID;
     atdecc::aem::AemGetStreamInfoCommandPayload asked{};
-    asked.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    asked.descriptor_type = type;
     asked.descriptor_index = index;
     std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
     auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
@@ -1344,6 +1359,50 @@ TEST(avb_entity_kit_stopped, a_locked_milan_entity_refuses_another_controllers_s
         streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink, OTHER_CONTROLLER_ID),
         atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(pair.listener->listener()->stream_stopped(pair.sink));
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stopped, a_milan_stream_output_cannot_be_stopped)
+{
+    // Milan v1.3 5.4.2.19, 5.4.2.20: "shall not support ... for a Stream
+    // Output (NOT_SUPPORTED shall be returned)". 5.3.7.3: an output streams
+    // while its Talker attribute is declared and a Listener registered.
+    KitPair pair{"milan13"};
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_TRUE(pair.talker_transmits());
+    StreamOf const output{.kit = pair.talker, .index = pair.source, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+
+    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_FALSE(pair.talker->talker().stream_stopped(pair.source));
+    EXPECT_TRUE(pair.talker_transmits());
+    EXPECT_FALSE(reports_streaming_wait(pair.talker, pair.source, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT));  // Table 5.9: always 0
+    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_START_STREAMING), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    pair.run(ROUNDS_PER_SECOND);
+    EXPECT_TRUE(pair.talker_transmits());
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stopped, an_ieee_1722_1_stream_output_is_stopped_and_started_as_before)
+{
+    // IEEE 1722.1-2021 7.4.35, 7.4.36 and Table 7-145: the classic profile is unchanged.
+    KitPair pair{"classic"};
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_TRUE(pair.talker_transmits());
+    StreamOf const output{.kit = pair.talker, .index = pair.source, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+
+    // The latch is the talker streams' own, beside the gate: a stopped stream is not sent.
+    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(pair.talker->talker().stream_stopped(pair.source));
+    EXPECT_TRUE(reports_streaming_wait(pair.talker, pair.source, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT));
+    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_START_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(pair.talker->talker().stream_stopped(pair.source));
+    EXPECT_FALSE(reports_streaming_wait(pair.talker, pair.source, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT));
 
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));

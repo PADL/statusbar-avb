@@ -201,17 +201,30 @@ void AvbEntityKit::install_storage_hooks()
 
 auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
 {
-    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+    if (type == DESCRIPTOR_STREAM_INPUT) {
+        start_or_stop_input(index, !streaming);
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+    return type == DESCRIPTOR_STREAM_OUTPUT ? start_or_stop_output(index, !streaming) : atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::start_or_stop_output(uint16_t const index, bool const stopped) -> uint8_t
+{
+    // Milan v1.3 5.4.2.19 and 5.4.2.20: "The PAAD-AE shall not support the
+    // START_STREAMING command for a Stream Output (NOT_SUPPORTED shall be
+    // returned)", and the same of STOP_STREAMING. A Milan stream output
+    // cannot be stopped (5.3.7.3): it streams for as long as its Talker
+    // attribute is declared and a Listener registered.
+    if (milan_profile()) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    // IEEE 1722.1: a controller's STOP_STREAMING gates the talker slot
     // (the media thread treats it as a closed SRP gate); START reopens.
     // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
     // Table 7-145), so every subscribed controller is told by an unsolicited
     // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
-    if (type == DESCRIPTOR_STREAM_OUTPUT) {
-        talker_->set_stream_stopped(index, !streaming);
-        (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
-    } else if (type == DESCRIPTOR_STREAM_INPUT) {
-        start_or_stop_input(index, !streaming);
-    }
+    talker_->set_stream_stopped(index, stopped);
+    (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     return atdecc::AEM_STATUS_SUCCESS;
 }
 

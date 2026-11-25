@@ -207,6 +207,13 @@ Under IEEE 1722.1 connection management the two commands stop and start
 an input the same way. Nothing binds an input stopped there, and the
 state is not saved.
 
+A stream output cannot be stopped under the Milan profile (5.3.7.3): it
+streams for as long as its Talker attribute is declared and a Listener
+registered. START_STREAMING and STOP_STREAMING for a STREAM_OUTPUT are
+answered NOT_SUPPORTED and change nothing (5.4.2.19, 5.4.2.20), and
+GET_STREAM_INFO never reports an output as STREAMING_WAIT (Table 5.9).
+Under IEEE 1722.1 they stop and start the talker's stream.
+
 ### Binding over AECP MVU (5.4.4.6 to 5.4.4.8)
 
 A controller may bind and unbind with the vendor-unique commands
@@ -346,10 +353,6 @@ which is what the grace was for.
   sender, and no MVU sequence number per registered controller.
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
-- START_STREAMING and STOP_STREAMING on a STREAM_OUTPUT are accepted
-  under the Milan profile and stop the talker, where 5.4.2.19 and
-  5.4.2.20 ask for NOT_SUPPORTED and 5.3.7.3 for an output that cannot
-  be stopped.
 - MVRP is declared for the Class A Domain's VLAN. A sink settled on
   another VLAN does not add that one (4.4.1).
 - A PROBE_TX_COMMAND is not checked against the interface it arrived on
