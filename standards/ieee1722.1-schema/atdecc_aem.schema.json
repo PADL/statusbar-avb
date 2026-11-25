@@ -850,6 +850,13 @@
           "default": 0,
           "description": "Index of the CLOCK_DOMAIN this stream belongs to."
         },
+        "buffer_length": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "default": 0,
+          "description": "STREAM_INPUT buffer_length: how much audio the input can hold, in nanoseconds (IEEE 1722.1-2021 Table 7.8). Milan v1.3 5.3.3.4 has at least 2126000."
+        },
         "symbol": {
           "$ref": "#/$defs/symbol"
         }

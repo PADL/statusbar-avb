@@ -1767,6 +1767,50 @@ def test_json_pull_rates():
     print("  [+] JSON pull rates: OK")
 
 
+def test_json_stream_buffer_length():
+    """A stream's buffer_length is authored in JSON and lands at octet 128."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+
+    json_str = json.dumps(
+        {
+            "entity": {
+                "name": "Buffer Length Test",
+                "capabilities": ["AEM_SUPPORTED"],
+                "configuration": {
+                    "streams_in": [
+                        {
+                            "name": "In",
+                            "format": "0x00A0020860000200",
+                            "buffer_length": 2126000,
+                        },
+                        {"name": "Unsaid", "format": "0x00A0020860000200"},
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    streams = entity.configurations[0].streams_input
+    assert streams[0].buffer_length == 2126000
+    assert streams[1].buffer_length == 0
+
+    descs, _ = flatten(entity)
+    inputs = [d for d in descs if d.descriptor_type == DESCRIPTOR_STREAM_INPUT]
+    assert unpack_u32(inputs[0].wire_bytes, 128) == 2126000
+    assert unpack_u32(inputs[1].wire_bytes, 128) == 0
+
+    # The writer says it only where it is given.
+    written = json.loads(write_json(entity))["entity"]["configuration"]["streams_in"]
+    assert written[0]["buffer_length"] == 2126000
+    assert "buffer_length" not in written[1]
+    assert read_json(write_json(entity)).configurations[0].streams_input[
+        0
+    ].buffer_length == (2126000)
+
+    print("  [+] JSON stream buffer_length: OK")
+
+
 def test_json_localized_dict():
     """Dict-form localized strings: {locale: text} authored at the field site
     generates the LOCALE + STRINGS descriptors and the wire references."""
@@ -2715,6 +2759,7 @@ def main():
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,
         test_json_pull_rates,
+        test_json_stream_buffer_length,
         test_json_localized_dict,
         test_json_control_values,
         test_json_signal_selector_and_control_grouping,

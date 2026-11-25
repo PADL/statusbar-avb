@@ -305,6 +305,7 @@ def _parse_stream(s: dict, strings: _LocalizedStrings, context: str) -> Stream:
         stream_flags=flags,
         avb_interface_index=s.get("avb_interface_index", 0),
         clock_domain_index=s.get("clock_domain_index", 0),
+        buffer_length=s.get("buffer_length", 0),
         symbol=s.get("symbol"),
     )
 
