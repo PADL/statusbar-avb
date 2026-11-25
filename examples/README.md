@@ -73,6 +73,14 @@ hands received samples on with their presentation time and holds none
 itself, so the figure is a promise made for whatever consumes them: a
 consumer that plays out has to keep 2.126 ms of room for it to be true.
 
+The generator keeps one more rule for every model: a CONFIGURATION's
+descriptor_counts list the top level descriptors only (IEEE 1722.1-2021
+7.2.2, Milan v1.3 5.3.3.2). STRINGS, the stream ports, the clusters and
+the maps are not counted there: each is reached from the descriptor that
+owns it. A controller has to follow those owners to see them, as
+`statusbar-atdecc-controller` and `statusbar-atdecc-monitor --enumerate`
+do.
+
 What a model does not decide is not authored. The entity adds
 VENDOR_UNIQUE_SUPPORTED and AEM_INTERFACE_INDEX_VALID to its
 entity_capabilities when it runs as a Milan device (`entity.milan`), and

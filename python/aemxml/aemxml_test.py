@@ -1574,6 +1574,46 @@ def test_json_to_blob():
     print("  [+] JSON to blob: OK")
 
 
+def test_configuration_counts_list_top_level_types_only():
+    """IEEE 1722.1-2021 7.2.2: descriptor_counts names top level types only."""
+    from aemxml.json_reader import read_json
+
+    # The types 7.2.2 lists. Everything else has an owner that names it.
+    top_level = {
+        0x0002, 0x0003, 0x0004, 0x0005, 0x0006, 0x0007, 0x0008, 0x0009, 0x000A,
+        0x000B, 0x000C, 0x001A, 0x001B, 0x001C, 0x001D, 0x001E, 0x001F, 0x0020,
+        0x0021, 0x0022, 0x0023, 0x0024, 0x0025, 0x0026, 0x0027,
+    }  # fmt: skip
+    examples = Path(__file__).parent.parent.parent / "examples"
+    for name in ("simple_stereo", "tone-aaf-crf", "dual"):
+        entity = read_json(
+            str(examples / f"{name}.json"), variables={"version": "0.0.0-test"}
+        )
+        descs, _ = flatten(entity)
+        config = next(d for d in descs if d.descriptor_type == DESCRIPTOR_CONFIGURATION)
+        count = unpack_u16(config.wire_bytes, 70)
+        offset = unpack_u16(config.wire_bytes, 72)
+        counted = {
+            unpack_u16(config.wire_bytes, offset + 4 * i): unpack_u16(
+                config.wire_bytes, offset + 4 * i + 2
+            )
+            for i in range(count)
+        }
+        assert set(counted) <= top_level, f"{name}: {sorted(set(counted) - top_level)}"
+        # The owned descriptors are still in the model, under their owners.
+        types = {d.descriptor_type for d in descs}
+        assert (
+            DESCRIPTOR_STREAM_PORT_INPUT in types
+            or DESCRIPTOR_STREAM_PORT_OUTPUT in types
+        )
+        assert DESCRIPTOR_AUDIO_CLUSTER in types and DESCRIPTOR_STRINGS in types
+        # What is counted is all there.
+        for desc_type, n in counted.items():
+            assert sum(1 for d in descs if d.descriptor_type == desc_type) == n
+
+    print("  [+] configuration counts are top level only: OK")
+
+
 def test_json_to_xml_round_trip():
     """Test JSON -> Entity -> AEMXML -> Entity -> JSON round-trip."""
     from aemxml.json_reader import read_json
@@ -2756,6 +2796,7 @@ def main():
         test_json_read_simple_stereo,
         test_json_round_trip,
         test_json_to_blob,
+        test_configuration_counts_list_top_level_types_only,
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,
         test_json_pull_rates,

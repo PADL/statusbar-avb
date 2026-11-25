@@ -1138,7 +1138,7 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
             if count > 0:
                 descriptor_counts.append((desc_type, count))
 
-        # Count top-level descriptors
+        # Count the top level descriptors (IEEE 1722.1-2021 7.2.2)
         add_count(DESCRIPTOR_AUDIO_UNIT, len(config.audio_units))
         add_count(DESCRIPTOR_VIDEO_UNIT, len(config.video_units))
         add_count(DESCRIPTOR_SENSOR_UNIT, len(config.sensor_units))
@@ -1168,75 +1168,13 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
         add_count(DESCRIPTOR_TIMING, len(config.timings))
         add_count(DESCRIPTOR_PTP_INSTANCE, len(config.ptp_instances))
 
-        # Count stream ports, external/internal ports, clusters, maps across all units
-        all_units = (
-            list(config.audio_units)
-            + list(config.video_units)
-            + list(config.sensor_units)
-        )
-        total_stream_port_inputs = sum(len(u.input_stream_ports) for u in all_units)
-        total_stream_port_outputs = sum(len(u.output_stream_ports) for u in all_units)
-        total_external_port_inputs = sum(len(u.input_external_ports) for u in all_units)
-        total_external_port_outputs = sum(
-            len(u.output_external_ports) for u in all_units
-        )
-        total_internal_port_inputs = sum(len(u.input_internal_ports) for u in all_units)
-        total_internal_port_outputs = sum(
-            len(u.output_internal_ports) for u in all_units
-        )
-        total_audio_clusters = sum(
-            len(c)
-            for u in config.audio_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for c in [p.clusters]
-        )
-        total_audio_maps = sum(
-            len(m)
-            for u in config.audio_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for m in [p.maps]
-        )
-        total_video_clusters = sum(
-            len(c)
-            for u in config.video_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for c in [p.clusters]
-        )
-        total_video_maps = sum(
-            len(m)
-            for u in config.video_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for m in [p.maps]
-        )
-        total_sensor_clusters = sum(
-            len(c)
-            for u in config.sensor_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for c in [p.clusters]
-        )
-        total_sensor_maps = sum(
-            len(m)
-            for u in config.sensor_units
-            for p in (u.input_stream_ports + u.output_stream_ports)
-            for m in [p.maps]
-        )
-        total_strings = sum(len(loc.strings_descriptors) for loc in config.locales)
-        total_ptp_ports = sum(len(pi.ptp_ports) for pi in config.ptp_instances)
-
-        add_count(DESCRIPTOR_STREAM_PORT_INPUT, total_stream_port_inputs)
-        add_count(DESCRIPTOR_STREAM_PORT_OUTPUT, total_stream_port_outputs)
-        add_count(DESCRIPTOR_EXTERNAL_PORT_INPUT, total_external_port_inputs)
-        add_count(DESCRIPTOR_EXTERNAL_PORT_OUTPUT, total_external_port_outputs)
-        add_count(DESCRIPTOR_INTERNAL_PORT_INPUT, total_internal_port_inputs)
-        add_count(DESCRIPTOR_INTERNAL_PORT_OUTPUT, total_internal_port_outputs)
-        add_count(DESCRIPTOR_AUDIO_CLUSTER, total_audio_clusters)
-        add_count(DESCRIPTOR_VIDEO_CLUSTER, total_video_clusters)
-        add_count(DESCRIPTOR_SENSOR_CLUSTER, total_sensor_clusters)
-        add_count(DESCRIPTOR_AUDIO_MAP, total_audio_maps)
-        add_count(DESCRIPTOR_VIDEO_MAP, total_video_maps)
-        add_count(DESCRIPTOR_SENSOR_MAP, total_sensor_maps)
-        add_count(DESCRIPTOR_STRINGS, total_strings)
-        add_count(DESCRIPTOR_PTP_PORT, total_ptp_ports)
+        # Nothing else is counted. IEEE 1722.1-2021 7.2.2 has descriptor_counts
+        # list the top level descriptors only, the types above. STRINGS, the
+        # stream, external and internal ports, the clusters, the maps and the
+        # PTP_PORTs are reached from the descriptor that owns them (a LOCALE's
+        # base_strings, a unit's base_stream_input_port, a stream port's
+        # base_cluster and base_map, a PTP_INSTANCE's base_ptp_port), and a
+        # count of them here would give each a second parent.
 
         # Serialize configuration descriptor
         descriptors.append(
