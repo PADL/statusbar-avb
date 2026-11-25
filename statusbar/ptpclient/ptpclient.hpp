@@ -38,6 +38,7 @@
 #include "statusbar/ptpclient/ptpclient_base.hpp"
 #include "statusbar/ptpclient/ptpclient_bridge.hpp"
 #include "statusbar/ptpclient/ptpclient_linuxptp.hpp"
+#include "statusbar/ptpclient/ptpclient_management.hpp"
 #include "statusbar/ptpclient/ptpclient_phc.hpp"
 #include "statusbar/ptpclient/ptpclient_phc_follower.hpp"
 #include "statusbar/ptpclient/ptpclient_phc_servo.hpp"

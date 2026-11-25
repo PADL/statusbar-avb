@@ -162,7 +162,8 @@ facility-based tools also support `--completion` and a TOML config cascade
   state machines, link delay, servo, Linux clock/socket integration, and an
   NTP-SHM publisher.
 - **`ptpclient`** — application-facing PTP client abstraction with a bridge
-  to `linuxptp` and a wake/timer interface: PTP deadlines on the
+  to `linuxptp`, a ptp4l management client for the grandmaster's data sets
+  (`ptpclient_management`), and a wake/timer interface: PTP deadlines on the
   `CLOCK_MONOTONIC_RAW` timing reference, slept early on `CLOCK_MONOTONIC`,
   spun to on RAW, and the wake told to the callback on both clocks (see
   [`docs/PTP_WAKE_TIMING.md`](docs/PTP_WAKE_TIMING.md) and core's
