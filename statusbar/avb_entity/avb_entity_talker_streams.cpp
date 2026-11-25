@@ -834,8 +834,7 @@ auto TalkerStreams::tx_begin(size_t const length) noexcept -> std::span<uint8_t>
 
 auto TalkerStreams::store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> const buffer) const noexcept -> size_t
 {
-    auto const header = stream_frame_header(
-        slot.dest_mac, port_->port().hardware_address(), vlan_id_.load(std::memory_order_relaxed), config_.stream_pcp);
+    auto const header = stream_frame_header(slot.dest_mac, port_->port().hardware_address(), vlan_id(), stream_pcp());
     return buffer.size() > ieee::wire_size(header) ? ieee::store_unchecked(buffer, header) : 0;
 }
 
