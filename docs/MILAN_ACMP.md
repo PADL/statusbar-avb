@@ -135,10 +135,15 @@ destination address and VLAN its PROBE_TX_RESPONSE gave
 (`nanoavb::TalkerMatch`, `MsrpHandler::listener_attach`), and from then on
 only a Talker attribute of the StreamID on that address and VLAN counts:
 another leaves the Listener Waiting with nothing declared, and the sink
-unregistered, so the two cannot disagree. A probe answer that names VLAN 0
-is from a talker older than the field; it follows the attribute on
-whichever VLAN it is declared. An IEEE 1722.1 connection names no match
-and follows any Talker attribute of its StreamID, as before.
+unregistered, so the two cannot disagree. A Milan talker names its VLAN
+(Table 5.48). An IEEE 1722.1 talker answers VLAN 0 when its stream uses
+the VLAN of the SRP Domain attribute (IEEE 1722.1-2021 8.2.1.17), and no
+Talker attribute is ever declared on VLAN 0, so a sink that insisted on
+it would never settle on such a talker. A probe answer of VLAN 0
+therefore follows the attribute on whichever VLAN it is declared; the
+sink still reports 0, the value it was given (5.3.8.9). An IEEE 1722.1
+connection names no match and follows any Talker attribute of its
+StreamID, as before.
 
 ### Bindings across a restart
 
@@ -150,7 +155,10 @@ ADP. The file is the one the IEEE 1722.1 listener uses for its
 fast-connect goals, in a second form (`statusbar-listener-bindings v2`)
 with the two fields the first has no place for; each listener reads both
 forms. With the key unset the bindings last as long as the process: no
-file is written that the configuration did not name.
+file is written that the configuration did not name, and one status line
+at start says so. A Milan device's configuration therefore names the
+file, and `stream.maap_range_file` beside it so that a restart keeps its
+stream addresses.
 
 ## The talker
 
@@ -193,7 +201,8 @@ which is what the grace was for.
 - A talker heard before the bind counts as discovered, and the
   configuration index is compared only when marked valid (both under
   "Discovery state machine" above).
-- A probe answer naming VLAN 0 follows the Talker attribute on any VLAN.
+- A probe answer naming VLAN 0 (IEEE 1722.1-2021 8.2.1.17: the SRP
+  Domain's VLAN) follows the Talker attribute on any VLAN.
 - A PROBE_TX_COMMAND counts for the 15 seconds of 4.3.3.1 when it is
   answered TALKER_DEST_MAC_FAILED too.
 - A stop and start of the entity kit is a power cycle to a bound sink: it

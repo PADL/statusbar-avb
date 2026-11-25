@@ -116,8 +116,10 @@ struct RegisteredTalker
 struct TalkerMatch
 {
     Eui48 dest_address{};
-    /// 0: the answer named no VLAN (a talker older than the field), and a
-    /// Talker attribute on any VLAN is the one.
+    /// 0: the answer named no VLAN. An IEEE 1722.1 talker sends 0 for "the
+    /// VLAN of the SRP Domain attribute" (IEEE 1722.1-2021 8.2.1.17; a Milan
+    /// talker names its VLAN, Table 5.48), and a Talker attribute on any
+    /// VLAN is the one.
     uint16_t vlan_id{0};
 
     [[nodiscard]] constexpr auto admits(RegisteredTalker const& talker) const noexcept -> bool
