@@ -45,6 +45,9 @@ using statusbar::container::SlotTable;
 /// is passed into the per-command handlers.
 constexpr size_t MAX_AEM_RESPONSE_SIZE = 1024;
 
+/// The most AEM command-specific data one AECPDU can carry (IEEE 1722.1-2021 Clause 9.2.1.1.7).
+constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
+
 /// Small value returned by each AEM command handler.
 ///
 /// Handlers write their response bytes into a caller-supplied
@@ -540,9 +543,9 @@ class AemCommandHandler
     /// is taken is refused NO_RESOURCES before its hook runs, so no work is
     /// begun that could not be finished through complete_pending_command().
     static constexpr size_t MAX_PENDING_COMMANDS = 8;
-    /// Longest command body a deferred command keeps for its echoed responses
-    /// (SET_STREAM_FORMAT is 12 octets); longer bodies are answered NO_RESOURCES.
-    static constexpr size_t MAX_PENDING_BODY = 64;
+    /// Longest command body a deferred command keeps for its echoed responses: any an AECPDU
+    /// carries, so no deferral is refused for its length after its hook has begun its work.
+    static constexpr size_t MAX_PENDING_BODY = MAX_AEM_BODY;
     /// How long a deferred command waits for complete_pending_command() before
     /// tick() answers it PENDING_COMMAND_EXPIRED_STATUS with the value in force
     /// and frees its slot. Twice the SRP re-registration the corrigendum
