@@ -2216,11 +2216,8 @@ void AemCommandHandler::emit_held(QueuedNotification const& n)
 
 auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
 {
-    // Milan v1.3 5.3.4.1 and 5.4.2.17: while a controller holds the lock, the
-    // entity's state is not changed by non-ATDECC means either (a front panel,
-    // a software identify button).
-    if (profile_ == Profile::milan13 && locked_) {
-        return AEM_STATUS_ENTITY_LOCKED;
+    if (auto const refusal = local_change_refusal()) {
+        return *refusal;
     }
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
     return apply_and_notify(command_type, command_body);
