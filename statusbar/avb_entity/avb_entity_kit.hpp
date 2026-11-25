@@ -275,6 +275,12 @@ class AvbEntityKit
     /// Pass an empty function to remove it before whatever it captures goes.
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
+    /// Called on the reactor thread with talker stream @p idx's talker_should_transmit() each time it changes (a
+    /// STREAM_START or STREAM_STOP): what a data plane outside the kit starts and stops the stream's frames by
+    /// (TalkerStreams::outside_header()). Not for the state at install. stop() closes every gate through it, so what it
+    /// captures must outlive the kit (or pass an empty function first); it must not throw.
+    using TalkerGateFn = sg14::inplace_function<void(uint16_t idx, bool open), 32>;
+    void set_on_talker_gate_changed(TalkerGateFn fn) noexcept { on_talker_gate_changed_ = std::move(fn); }
     /// Reactor thread: an MSRP listener declaration for @p stream_id was registered
     /// (@p ready) or withdrawn at the reactor's @p now_ns, the gate's clock reading
     /// @p gate_now; feeds the gate and the declarations, re-evaluates admission.
@@ -972,6 +978,7 @@ class AvbEntityKit
     AdmittedStreams admitted_{};
     std::optional<GateTimePoint> admission_deadline_{};  ///< the earliest grace end, on the gate's clock
     AdmissionChangedFn on_admission_changed_{};
+    TalkerGateFn on_talker_gate_changed_{};
     /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
     /// the observation interval, and each Milan input's bound state.
     std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};

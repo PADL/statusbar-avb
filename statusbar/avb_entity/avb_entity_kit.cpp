@@ -766,6 +766,9 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
         if (!retiming_) {
             refresh_output_mappings();  // a re-time refreshes them once, at its end
         }
+        if (talker_->slot_for(updated.index) != nullptr) {
+            talker_->tell_frames_changed(updated.index);  // the entity's hook accepted it: the frames are the new format's
+        }
     }
     host_.ctl_log().status(
         "aem: {} stream {} format {:016x} -> {:016x}",
@@ -1177,8 +1180,12 @@ void AvbEntityKit::update_output_streaming(GateTimePoint const now)
     }
     for (auto const& spec : talker_specs_) {
         bool const on = talker_should_transmit(spec.index, now);
-        if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
-            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        if (!output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
+            continue;
+        }
+        (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        if (on_talker_gate_changed_) {
+            on_talker_gate_changed_(spec.index, on);
         }
     }
 }

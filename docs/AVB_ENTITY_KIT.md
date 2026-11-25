@@ -505,6 +505,56 @@ Controllers on the same host (la_avdecc's local protocol interface,
 entity over an AF_UNIX datagram socket, without raw-socket privileges
 (`nanoavb_local_port.hpp`).
 
+## Streams sent outside the kit
+
+A talker stream's frames may be sent by something beside the stream port (a
+NIC or FPGA that packetises the stream itself), from the stream's
+`TalkerStreams::frame_template()` (STREAM_PORTS.md), while the kit sends none
+of it. The kit keeps the stream's control state and its per-packet decisions;
+that data plane follows them and reports back:
+
+- **Gate.** `set_on_talker_gate_changed` tells each change of
+  `talker_should_transmit()` on the reactor, as STREAM_START and STREAM_STOP
+  count it: a reservation, STOP_STREAMING or START_STREAMING, MAAP, the grace
+  running out. The data plane sends while it is open.
+- **Sequence and mr.** `outside_header()` gives the stream's next sequence_num
+  and mr, a pending `toggle_media_clock_restart` applied as for an AVTPDU the
+  kit sends. `notify_sent_outside()` reports the AVTPDUs sent since, how many
+  with tu set (at most all of them), and the next sequence_num; they are
+  counted as the kit's own (`tx_counters()`, so GET_COUNTERS), run down the mr
+  hold, and leave the serializer's sequence there, so the kit's own path goes
+  on from it. It answers the header the next AVTPDUs carry. Both answer
+  `resource_unavailable_try_again`, applying nothing, while the stream is being
+  re-shaped (report again), and `no_such_device` for no stream.
+- **One writer.** The thread that reports a stream must be its only writer, and
+  the kit must not transmit it meanwhile: the guard the two calls try protects
+  against a re-shape (`reformat_stream()`) only. The kit's own transmits do not
+  all lock it (`transmit_crf_raw()` does not), and its counters are written
+  without read-modify-write.
+- **mr at a report boundary.** AVTPDUs counted before the data plane applied a
+  new mr carry the old one. With `SentOutside::last_mr`, the mr of the last
+  AVTPDU sent, a toggle is counted once the wire carries it, and the hold runs
+  down only by the AVTPDUs known to carry the new mr: none before it shows, one
+  in the report where it first shows, all after. The hold may so last longer
+  than `MR_HOLD_PDUS`, never less (IEEE 1722-2016 Clause 4.4.4.3 asks for at
+  least). Without `last_mr` every reported AVTPDU counts with the mr last
+  answered, and a toggle near a report boundary can be counted, and its hold
+  run down, a report early.
+- **tu.** `set_on_timestamp_uncertainty_changed` tells each change of
+  `timestamp_uncertainty()`: set while no grandmaster is known, and until a
+  steady-clock time after a change, which the data plane clears itself.
+- **Frames.** `TalkerStreams::set_on_frames_changed` tells each change of an
+  open stream's template on the control thread: a Domain's VID or PCP
+  (`set_vlan()`), a MAAP block's destination (`set_destination()`, from
+  `MaapAddressAcquirer::publish_block`), a format once the entity's
+  `set_on_stream_format_changed` hook accepted it (none for a refused format or
+  the format in force). The data plane reads the template again.
+- **Hooks.** None of them may throw (some are called from `noexcept`
+  functions), and what each captures must outlive the kit: `stop()` closes the
+  gates through `set_on_talker_gate_changed`.
+- **Presentation offset.** As for the kit's own path, through
+  `set_on_presentation_offset_changed`.
+
 ## Notes on the kit's event wiring
 
 - A stream streams only while declaring its Talker Advertise (Milan v1.2

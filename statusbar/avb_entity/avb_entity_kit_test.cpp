@@ -944,6 +944,34 @@ TEST(avb_entity_kit_maap, an_adopted_vlan_survives_the_acquisition_of_a_block)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
+// A MAAP block moves the streams' destinations, so it changes their frames: a data plane outside the kit is told of
+// each stream it moves, at the first block and at a new one after a conflict, and of none when the block is the same.
+TEST(avb_entity_kit_maap, a_new_block_is_told_as_a_change_of_the_frames)
+{
+    auto config = make_config(2, "milan13");
+    config.stream_address_mode = "maap";
+    std::vector<uint16_t> told;  // outlives the kit
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    kit->talker().set_on_frames_changed([&told](uint16_t const idx) { told.push_back(idx); });
+    std::vector<uint16_t> indices;
+    for (auto const& spec : kit.talker_specs()) {
+        indices.push_back(spec.index);
+    }
+    Eui48 const first{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    Eui48 const second{0x91, 0xE0, 0xF0, 0x00, 0x56, 0x00};
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, first);
+    EXPECT_TRUE(told == indices);
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, first);
+    EXPECT_EQ(told.size(), indices.size());
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, second);
+    EXPECT_EQ(told.size(), 2 * indices.size());
+    auto const* const slot = kit->talker().slot_for(indices.front());
+    EXPECT_TRUE(slot != nullptr && slot->dest_mac == avtp::maap_block_address(second, 0));
+    kit->talker().set_on_frames_changed({});
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
 TEST(avb_entity_kit_maap, a_link_up_while_the_link_is_up_is_a_repeat_and_a_restart_starts_afresh)
 {
     // The runner raises the start-up Link Up itself and then installs a link
@@ -3774,6 +3802,100 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     MilanKit classic{false, 0x61};
     EXPECT_TRUE(classic.start_ready());
     EXPECT_EQ(counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
+}
+
+// A data plane outside the kit is told each change of a talker stream's gate, as STREAM_START and STREAM_STOP count
+// it: a Listener Ready, STOP_STREAMING and START_STREAMING, the grace running out; nothing once the hook is removed.
+TEST(avb_entity_kit_outside, the_gate_hook_follows_stream_start_and_stop)
+{
+    std::vector<std::pair<uint16_t, bool>> told;  // outlives the kit, whose stop() closes the gate
+    MilanKit m{false, 0x64};
+    m.kit.set_on_talker_gate_changed([&told](uint16_t const idx, bool const open) { told.emplace_back(idx, open); });
+    EXPECT_TRUE(m.start_ready());
+    EXPECT_TRUE(told.empty());
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_TRUE(told == (std::vector<std::pair<uint16_t, bool>>{{0, true}}));
+    std::array<uint8_t, 4> const output{0x00, 0x06, 0x00, 0x00};
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_STOP_STREAMING, output).status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(m.aem_command(atdecc::AEM_COMMAND_START_STREAMING, output).status, atdecc::AEM_STATUS_SUCCESS);
+    nanoavb::StreamId sid{};
+    sid.from_uint64(m.sid(0).to_uint64());
+    auto const left = MilanKit::raw_now();
+    m.kit.notify_listener_ready(sid, false, MilanKit::steady_ns(), left);
+    EXPECT_EQ(told.size(), size_t{3});  // the grace still admits
+    m.kit.on_admission_timer(left + TalkerGate::GRACE);
+    EXPECT_TRUE(told == (std::vector<std::pair<uint16_t, bool>>{{0, true}, {0, false}, {0, true}, {0, false}}));
+    auto const c = counters_of(m, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_TRUE(c.counters[0].get() == 2U && c.counters[1].get() == 2U);  // STREAM_START, STREAM_STOP
+    m.kit.set_on_talker_gate_changed({});
+    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(told.size(), size_t{4});
+}
+
+// A stream's new format is told as a change of its frames once the entity's hook accepted it, after the kit's stream
+// path has the new shape; a format the hook refuses, and the format in force, tell nothing.
+TEST(avb_entity_kit_outside, an_accepted_format_is_told_as_a_change_of_the_frames)
+{
+    std::vector<uint16_t> told;  // outlives the kit
+    MilanKit p{std::nullopt, 0x67, true, make_multirate_blob(false, false, false, true)};
+    uint8_t answer = atdecc::AEM_STATUS_SUCCESS;
+    p.kit.set_on_stream_format_changed([&answer](uint16_t, uint16_t, StreamFormatFields const&) { return answer; });
+    EXPECT_TRUE(p.start_ready());
+    p.kit.talker().set_on_frames_changed([&told, &p](uint16_t const idx) {
+        told.push_back(idx);
+        told.push_back(p.kit.talker().slot_for(idx)->spec.format.channels);  // the frames are the new format's
+    });
+    auto const set = [&p](uint16_t const channels) {
+        return p
+            .aem_command(
+                atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, base_format(48000, channels)))
+            .status;
+    };
+    answer = atdecc::AEM_STATUS_NOT_SUPPORTED;
+    EXPECT_EQ(set(2), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(told.empty());
+    answer = atdecc::AEM_STATUS_SUCCESS;
+    EXPECT_EQ(set(2), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 2}));
+    EXPECT_EQ(set(2), atdecc::AEM_STATUS_SUCCESS);  // the format in force
+    EXPECT_EQ(told.size(), size_t{2});
+    p.kit.talker().set_on_frames_changed({});
+}
+
+// What a data plane outside the kit sent of a talker stream reaches GET_COUNTERS as the kit's own AVTPDUs do: the
+// classic totals of AVTPDUs, tu AVTPDUs and mr toggles, and Milan v1.3's interval counters.
+TEST(avb_entity_kit_outside, what_was_sent_outside_reaches_get_counters)
+{
+    MilanKit classic{false, 0x65};
+    EXPECT_TRUE(classic.start_ready());
+    auto& talker = classic.kit.talker();
+    auto const first = talker.outside_header(0);
+    EXPECT_TRUE(first.has_value() && !first->mr);
+    EXPECT_TRUE(talker.notify_sent_outside(0, {.pdus = 40, .tu_pdus = 8, .next_sequence = 40}).has_value());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
+    auto const toggled = talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 40});
+    EXPECT_TRUE(toggled.has_value() && toggled->mr);
+    EXPECT_TRUE(talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 48}).has_value());
+    auto const c = counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(c.counters[3].get(), 1U);   // mr toggles
+    EXPECT_EQ(c.counters[4].get(), 8U);   // tu AVTPDUs
+    EXPECT_EQ(c.counters[7].get(), 48U);  // FRAMES_TX
+
+    MilanKit milan{std::nullopt, 0x66};
+    EXPECT_TRUE(milan.start_ready());
+    int64_t t = MilanKit::steady_ns();
+    milan.kit.poll_counters(t);  // the first interval starts
+    auto& milan_talker = milan.kit.talker();
+    EXPECT_TRUE(milan_talker.outside_header(0).has_value());
+    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 1, .next_sequence = 8}).has_value());
+    EXPECT_TRUE(milan_talker.toggle_media_clock_restart(0).has_value());
+    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 8}).has_value());
+    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 16}).has_value());
+    milan.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const v = counters_of(milan, DESCRIPTOR_STREAM_OUTPUT, 0);
+    EXPECT_EQ(v.counters[3].get(), 1U);  // MEDIA_RESET: an interval with an mr toggle
+    EXPECT_EQ(v.counters[4].get(), 1U);  // TIMESTAMP_UNCERTAIN
+    EXPECT_EQ(v.counters[7].get(), 1U);  // FRAMES_TX
 }
 
 // IEEE 1722.1-2021 Table 7-145: a classic output stopped by STOP_STREAMING reports STREAMING_WAIT

@@ -31,6 +31,7 @@
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -137,11 +138,7 @@ struct TalkerStreams
     /// Tag the stream frames with @p vlan_id and priority @p pcp from now on
     /// (the SR class Domain adopted from the wire). Safe from the control
     /// thread while the media thread transmits.
-    void set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
-    {
-        vlan_id_.store(vlan_id, std::memory_order_relaxed);
-        stream_pcp_.store(pcp, std::memory_order_relaxed);
-    }
+    void set_vlan(uint16_t vlan_id, uint8_t pcp) noexcept;
     [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
     [[nodiscard]] auto stream_pcp() const noexcept -> uint8_t { return stream_pcp_.load(std::memory_order_relaxed); }
 
@@ -233,25 +230,42 @@ struct TalkerStreams
     /// B.1.1); tu is also set while no grandmaster is known at all. Reactor thread writes,
     /// media thread reads; an entity that never reports gPTP state never sets tu.
     static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
+    /// When tu is set: while no grandmaster is known, and before steady-clock time until_ns (net::monotonic_ns()).
+    struct TimestampUncertainty
+    {
+        bool grandmaster_lost{false};
+        int64_t until_ns{0};
+        friend auto operator==(TimestampUncertainty const&, TimestampUncertainty const&) -> bool = default;
+    };
     /// A grandmaster was found or changed at steady-clock time @p now_ns.
     void notify_grandmaster_changed(int64_t const now_ns) noexcept
     {
-        tu_until_ns_.store(now_ns + TU_AFTER_GM_CHANGE_NS, std::memory_order_relaxed);
-        gptp_lost_.store(false, std::memory_order_relaxed);
+        set_uncertainty({.grandmaster_lost = false, .until_ns = now_ns + TU_AFTER_GM_CHANGE_NS});
     }
     /// No grandmaster is known (the Announces stopped, or a gPTP stack names none): tu until one is.
-    void notify_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
-    /// This entity is the grandmaster: its time base does not step, so tu is clear, a window cut short.
-    void notify_own_grandmaster() noexcept
+    void notify_grandmaster_lost() noexcept
     {
-        tu_until_ns_.store(0, std::memory_order_relaxed);
-        gptp_lost_.store(false, std::memory_order_relaxed);
+        set_uncertainty({.grandmaster_lost = true, .until_ns = tu_until_ns_.load(std::memory_order_relaxed)});
     }
+    /// This entity is the grandmaster: its time base does not step, so tu is clear, a window cut short.
+    void notify_own_grandmaster() noexcept { set_uncertainty({}); }
     /// Whether a PDU stamped at steady-clock time @p now_ns carries tu = 1.
     [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
     {
         return gptp_lost_.load(std::memory_order_relaxed) || now_ns < tu_until_ns_.load(std::memory_order_relaxed);
     }
+    /// When tu is set, as the notify_* calls left it. Any thread.
+    [[nodiscard]] auto timestamp_uncertainty() const noexcept -> TimestampUncertainty
+    {
+        return {
+            .grandmaster_lost = gptp_lost_.load(std::memory_order_relaxed),
+            .until_ns = tu_until_ns_.load(std::memory_order_relaxed)};
+    }
+    /// Told each change of timestamp_uncertainty() on the notifying (reactor) thread: what a data plane outside the
+    /// kit sets tu by, clearing it itself at until_ns. Not for the state in force at install. Before streams flow; it
+    /// must not throw (the notify_* calls are noexcept), and what it captures must outlive this TalkerStreams.
+    using TimestampUncertaintyFn = sg14::inplace_function<void(TimestampUncertainty), 32>;
+    void set_on_timestamp_uncertainty_changed(TimestampUncertaintyFn fn) noexcept { on_uncertainty_changed_ = std::move(fn); }
 
     /// A media clock restart on STREAM_OUTPUT @p stream_index: mr toggles on its next PDU, at least MR_HOLD_PDUS after
     /// the last toggle (IEEE 1722-2016 Clause 4.4.4.3), and stays; requests before then toggle it once. Any thread,
@@ -330,12 +344,59 @@ struct TalkerStreams
     [[nodiscard]] auto frame_template(uint16_t stream_index, uint16_t frames, ieee::Eui48 const& src_mac) const noexcept
         -> std::optional<StreamFrameTemplate>;
 
+    /// Told, on the control thread that made it, each change of an open stream's frame_template(): a new VID or PCP
+    /// (set_vlan(), every open stream), destination (set_destination(), a MAAP block) or format (tell_frames_changed()
+    /// from AvbEntityKit, once the entity's format hook accepted it). Not for open_stream(). Before streams flow; it must
+    /// not throw (set_vlan() is noexcept), and what it captures must outlive this TalkerStreams.
+    using FramesChangedFn = sg14::inplace_function<void(uint16_t stream_index), 32>;
+    void set_on_frames_changed(FramesChangedFn fn) noexcept { on_frames_changed_ = std::move(fn); }
+    /// STREAM_OUTPUT @p stream_index's frames go to @p dest_mac from now on (a MAAP block), told as a change of its
+    /// frames when it moves. Control thread; the media thread reads it as it always has.
+    void set_destination(uint16_t stream_index, ieee::Eui48 const& dest_mac) noexcept;
+    /// on_frames_changed_ told of STREAM_OUTPUT @p stream_index, if set.
+    void tell_frames_changed(uint16_t stream_index) const noexcept;
+
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.
     [[nodiscard]] auto tx_counters(uint16_t const stream_index) const noexcept -> TalkerTxCounters const*
     {
         return stream_index < tx_counters_.size() ? &tx_counters_[stream_index] : nullptr;
     }
+
+    //
+    // A stream sent outside the kit
+    //
+    // Something beside the stream port may send a STREAM_OUTPUT's frames itself (frame_template()) while the kit sends
+    // none of it. The kit keeps the stream's sequence_num and mr and counts what it sent; see docs/AVB_ENTITY_KIT.md.
+    // The reporting thread must be the stream's only writer: the guard these calls try protects against a re-shape
+    // (reformat_stream()) only, not against the kit's own transmits (transmit_crf_raw() does not lock it).
+
+    /// The varying header fields a data plane outside the kit gives its next AVTPDU of a stream.
+    struct OutsideHeader
+    {
+        uint8_t sequence_num{0};
+        bool mr{false};
+    };
+    /// What a data plane outside the kit sent of a stream since it last said.
+    struct SentOutside
+    {
+        uint32_t pdus{0};          ///< AVTPDUs sent
+        uint32_t tu_pdus{0};       ///< of them, those with tu set
+        uint8_t next_sequence{0};  ///< the sequence_num of the next it sends
+        /// The mr of the last AVTPDU it sent, when it knows it: a toggle is then counted, and the mr hold run down,
+        /// only once the wire carries it. Without it every AVTPDU reported counts with the mr last answered.
+        std::optional<bool> last_mr{};
+    };
+    /// STREAM_OUTPUT @p stream_index's next AVTPDU's sequence_num and mr, a pending media clock restart applied as for an
+    /// AVTPDU the kit sends: what a data plane outside the kit starts the stream with. Errors, nothing applied:
+    /// no_such_device for no AAF, AM824 or CRF stream there; resource_unavailable_try_again while it is being re-shaped
+    /// (ask again). The one thread that sends the stream, while the kit does not.
+    [[nodiscard]] auto outside_header(uint16_t stream_index) noexcept -> StatusValue<OutsideHeader>;
+    /// The data plane outside the kit sent @p sent of STREAM_OUTPUT @p stream_index since outside_header() or the last
+    /// call: counted as the kit's own AVTPDUs are (an mr toggle once an AVTPDU carries it; tu_pdus at most pdus), the mr
+    /// hold run down by them, the stream's sequence updated so the kit's own path goes on from it; then
+    /// outside_header(). Its errors count nothing: on resource_unavailable_try_again, say it again.
+    [[nodiscard]] auto notify_sent_outside(uint16_t stream_index, SentOutside const& sent) noexcept -> StatusValue<OutsideHeader>;
 
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
@@ -373,14 +434,28 @@ struct TalkerStreams
     std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
     std::atomic<int64_t> tu_until_ns_{0};  ///< steady-clock end of the post-GM-change tu window
     std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
+    TimestampUncertaintyFn on_uncertainty_changed_{};
+    FramesChangedFn on_frames_changed_{};
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;
 
+    /// tu set by @p uncertainty from now on, told to on_uncertainty_changed_ when that changed it. Reactor thread.
+    void set_uncertainty(TimestampUncertainty uncertainty) noexcept;
     /// STREAM_OUTPUT @p stream_index opened: toggles accepted from now on, none pending.
     void mark_open(uint16_t stream_index) noexcept;
     /// The mr bit @p slot's next PDU carries: toggled once for the restarts requested since its last. Media thread.
     [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
+    /// @p slot's next sequence_num, by its serializer's kind; nullopt for none.
+    [[nodiscard]] static auto next_sequence(TalkerStreamSlot const& slot) noexcept -> std::optional<uint8_t>;
+    /// outside_header() (@p sent none) or notify_sent_outside().
+    [[nodiscard]] auto report_outside(uint16_t stream_index, std::optional<SentOutside> const& sent) noexcept
+        -> StatusValue<OutsideHeader>;
+    /// report_outside() once the guard is held.
+    [[nodiscard]] auto report_held(TalkerStreamSlot& slot, std::optional<SentOutside> const& sent) noexcept
+        -> StatusValue<OutsideHeader>;
+    /// @p sent counted on @p slot, its mr hold run down and its serializer's sequence updated. Under the guard.
+    void count_sent_outside(TalkerStreamSlot& slot, SentOutside const& sent) noexcept;
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
     [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;

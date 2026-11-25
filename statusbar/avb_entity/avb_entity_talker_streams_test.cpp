@@ -24,6 +24,7 @@
 #include <memory_resource>
 #include <random>
 #include <span>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -461,6 +462,39 @@ TEST(talker_tu, clear_while_this_entity_is_the_grandmaster)
     talker.notify_grandmaster_lost();
     talker.notify_own_grandmaster();
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 4));
+}
+
+// Each change of when tu is set is told to the hook, once: a grandmaster change's window, a loss, this entity becoming
+// the grandmaster; a call that changes nothing tells nothing.
+TEST(talker_tu, each_change_of_the_uncertainty_is_told)
+{
+    ptpclient::MediaClockGenerator media_clock{};
+    std::atomic<int64_t> last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
+    using U = avb_entity::TalkerStreams::TimestampUncertainty;
+    std::vector<U> told;
+    talker.set_on_timestamp_uncertainty_changed([&told](U const u) { told.push_back(u); });
+    constexpr int64_t t0 = 5'000'000'000;
+    talker.notify_own_grandmaster();
+    EXPECT_TRUE(told.empty());  // clear already
+    talker.notify_grandmaster_changed(t0);
+    talker.notify_grandmaster_changed(t0);
+    EXPECT_TRUE(told == (std::vector<U>{{.grandmaster_lost = false, .until_ns = t0 + 250'000'000}}));
+    talker.notify_grandmaster_lost();
+    talker.notify_grandmaster_lost();
+    EXPECT_EQ(told.size(), size_t{2});
+    EXPECT_TRUE(told.back() == (U{.grandmaster_lost = true, .until_ns = t0 + 250'000'000}));
+    talker.notify_grandmaster_changed(t0 + 1);
+    EXPECT_TRUE(told.back() == (U{.grandmaster_lost = false, .until_ns = t0 + 250'000'001}));
+    talker.notify_own_grandmaster();
+    talker.notify_own_grandmaster();
+    EXPECT_EQ(told.size(), size_t{4});
+    EXPECT_TRUE(told.back() == U{});
+    EXPECT_TRUE(talker.timestamp_uncertainty() == U{});
+    talker.set_on_timestamp_uncertainty_changed({});
+    talker.notify_grandmaster_lost();
+    EXPECT_EQ(told.size(), size_t{4});
 }
 
 // GET_COUNTERS' transmit totals (Milan v1.2 Table 5.4): every PDU handed to
@@ -1410,6 +1444,141 @@ TEST(talker_template, a_patched_template_equals_the_serialized_frame)
             mr,
             tu));
     }
+}
+
+//
+// A stream sent outside the kit
+//
+
+// A data plane outside the kit starts a stream at the kit's sequence and mr; what it sends is counted as the kit's own
+// AVTPDUs are (an mr toggle once an AVTPDU carries it), runs down the mr hold, and leaves the stream's sequence where
+// it stopped, so the kit's own path goes on from there; tu AVTPDUs are at most the AVTPDUs. A stream being re-shaped
+// answers "try again" and one that is not there "no such device", and neither is counted.
+TEST(talker_outside, the_kit_keeps_the_sequence_and_mr_and_counts_what_was_sent)
+{
+    avb_entity::StreamPort port;
+    auto& wire = open_test_port(port);
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_tx(port).has_value());
+    auto* const slot = talker.slot_for(0);
+    for (uint64_t i = 0; i < 3; ++i) {
+        EXPECT_TRUE(talker.transmit_aaf_raw(*slot, i * 12, 1'000'000 + i, 12, kPatternRender));
+        (void)wire.pop_tx();
+    }
+    using H = avb_entity::TalkerStreams::OutsideHeader;
+    auto const same = [](StatusValue<H> const& h, uint8_t const sequence, bool const mr) {
+        return h.has_value() && h->sequence_num == sequence && h->mr == mr;
+    };
+    EXPECT_TRUE(same(talker.outside_header(0), 3, false));
+
+    // A restart pending is applied by the next header; the PDUs reported before it carried mr clear.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
+    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 10, .tu_pdus = 4, .next_sequence = 13}), 13, true));
+    auto const* const c = talker.tx_counters(0);
+    EXPECT_TRUE(c->pdus.load() == 13 && c->tu_pdus.load() == 4 && c->mr_toggles.load() == 0);
+    // Another restart waits for eight PDUs with mr set; the first of them counts the toggle.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
+    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 18}), 18, true));
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 3, .tu_pdus = 0, .next_sequence = 21}), 21, false));
+    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 3, .next_sequence = 22}), 22, false));
+    EXPECT_TRUE(c->pdus.load() == 22 && c->tu_pdus.load() == 5 && c->mr_toggles.load() == 2);
+
+    // Being re-shaped: nothing applied or counted, and the report can be made again.
+    talker.guards_[0].lock();
+    auto const busy = talker.notify_sent_outside(0, {.pdus = 7, .tu_pdus = 0, .next_sequence = 29});
+    talker.guards_[0].unlock();
+    EXPECT_TRUE(!busy && busy.error() == std::errc::resource_unavailable_try_again);
+    EXPECT_EQ(c->pdus.load(), 22U);
+
+    // The kit's own path goes on from the outside's sequence and mr.
+    EXPECT_TRUE(talker.transmit_aaf_raw(*slot, 1200, 2'000'000, 12, kPatternRender));
+    auto const sent = wire.pop_tx();
+    EXPECT_TRUE(
+        sent.has_value() && sent->frame[VLAN_HEADER_LENGTH + 2] == 22 && (sent->frame[VLAN_HEADER_LENGTH + 1] & 0x08U) == 0);
+    EXPECT_TRUE(c->pdus.load() == 23 && slot->tx_packets == 23);
+
+    auto const none = talker.outside_header(1);
+    EXPECT_TRUE(!none && none.error() == std::errc::no_such_device);
+    EXPECT_FALSE(talker.notify_sent_outside(1, {.pdus = 1, .tu_pdus = 0, .next_sequence = 1}).has_value());
+}
+
+// With the mr of the last AVTPDU it sent, a data plane outside the kit has a toggle counted only once the wire carries
+// it, and the hold run down only by the AVTPDUs known to carry it: none before, the last one when it first shows,
+// every one after. A restart asked for meanwhile waits for eight of them.
+TEST(talker_outside, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
+{
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 96'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
+    auto const mr_of = [](auto const& h) { return h.has_value() && h->mr; };
+    EXPECT_FALSE(mr_of(talker.outside_header(0)));
+    (void)talker.notify_sent_outside(0, {.pdus = 4, .tu_pdus = 0, .next_sequence = 4, .last_mr = false});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
+    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 4, .last_mr = false})));
+    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());  // waits for the first toggle's hold
+    auto const* const c = talker.tx_counters(0);
+    // 20 AVTPDUs latched before the outside sender applied the new mr: no toggle yet, no hold run down.
+    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 20, .tu_pdus = 0, .next_sequence = 24, .last_mr = false})));
+    EXPECT_EQ(c->mr_toggles.load(), 0U);
+    // The wire shows it: the toggle counted, one AVTPDU of the hold known; six more leave one to go.
+    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 29, .last_mr = true})));
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 6, .tu_pdus = 0, .next_sequence = 35, .last_mr = true})));
+    EXPECT_FALSE(mr_of(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 0, .next_sequence = 36, .last_mr = true})));
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(c->pdus.load(), 36U);
+}
+
+// Each change of an open stream's frames is told, its template then the new one: a new VID or PCP for every open
+// stream, a new destination for its stream; a set_vlan() or set_destination() that changes nothing tells nothing,
+// and neither does reformat_stream(), whose change the kit tells once the entity accepted it.
+TEST(talker_outside, a_new_vid_pcp_or_format_is_told_as_a_change_of_the_frames)
+{
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, aaf_word(0x05, avtp::AafFormat::int_32bit, 32, 8, 6)), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());  // Milan CRF
+    std::vector<uint16_t> told;
+    talker.set_on_frames_changed([&told](uint16_t const idx) { told.push_back(idx); });
+    talker.set_vlan(2, 3);
+    EXPECT_TRUE(told.empty());
+    talker.set_vlan(5, 3);
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1}));
+    talker.set_vlan(5, 6);
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1, 0, 1}));
+    auto const tagged = talker.frame_template(0, 6, kPortMac);
+    EXPECT_TRUE(tagged && same_bytes(std::span{tagged->bytes}.subspan(14, 2), std::array<uint8_t, 2>{0xC0, 0x05}));
+
+    ieee::Eui48 const moved{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x42};
+    talker.set_destination(1, kDest);
+    talker.set_destination(1, moved);
+    talker.set_destination(7, moved);  // no such stream
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1, 0, 1, 1}));
+    auto const crf = talker.frame_template(1, 0, kPortMac);
+    EXPECT_TRUE(crf && same_bytes(std::span{crf->bytes}.first(6), moved.value));
+
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, aaf_word(0x05, avtp::AafFormat::int_32bit, 32, 2, 6))).has_value());
+    auto const narrowed = talker.frame_template(0, 6, kPortMac);
+    EXPECT_TRUE(narrowed && same_bytes(std::span{narrowed->bytes}.subspan(38, 2), std::array<uint8_t, 2>{0x00, 48}));  // 6 x 2 x 4
+    EXPECT_EQ(told.size(), size_t{5});
 }
 
 // IEEE 1722-2016 Clause 10.4: a media clock restart toggles mr on the next CRF PDU and the bit

@@ -110,6 +110,12 @@ void bump(std::atomic<uint32_t>& n) noexcept
     n.store(n.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
 }
 
+/// @p k more in a counter only one thread writes.
+void add(std::atomic<uint32_t>& n, uint32_t const k) noexcept
+{
+    n.store(n.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
+}
+
 /// Count an mr toggle when @p mr differs from the last PDU's.
 void notify_mr(TalkerTxCounters& c, bool const mr) noexcept
 {
@@ -141,6 +147,41 @@ void count_pdu(TalkerTxCounters& c, std::span<uint8_t const> const frame) noexce
         bump(c.tu_pdus);
     }
     notify_mr(c, (frame[1] & 0x08U) != 0);
+}
+
+/// @p pdus AVTPDUs counted, @p tu_pdus of them with tu set, every one carrying @p mr.
+void count_pdus(TalkerTxCounters& c, uint32_t const pdus, uint32_t const tu_pdus, bool const mr) noexcept
+{
+    add(c.pdus, pdus);
+    add(c.tu_pdus, tu_pdus);
+    notify_mr(c, mr);
+}
+
+/// How many of @p sent's AVTPDUs are known to carry @p mr, the mr a toggle's hold is for (a hold lasts for PDUs sent
+/// with it): all of them without last_mr; with it, all when the wire carried @p mr before, one (the last) when it
+/// carries it from this report, none while it does not. @p c holds the mr of the last AVTPDU counted before.
+[[nodiscard]] auto pdus_carrying(TalkerTxCounters const& c, bool const mr, TalkerStreams::SentOutside const& sent) noexcept
+    -> uint32_t
+{
+    if (!sent.last_mr) {
+        return sent.pdus;
+    }
+    if (*sent.last_mr != mr) {
+        return 0;
+    }
+    return c.have_mr && c.last_mr == mr ? sent.pdus : 1;
+}
+
+/// @p slot's serializer to give its next PDU sequence_num @p sequence.
+void set_sequence(TalkerStreamSlot& slot, uint8_t const sequence) noexcept
+{
+    if (slot.aaf) {
+        slot.aaf->sequence_num = sequence;
+    } else if (slot.am824) {
+        slot.am824->sequence_num = sequence;
+    } else if (slot.crf) {
+        slot.crf->sequence_num = sequence;
+    }
 }
 
 }  // namespace
@@ -199,6 +240,34 @@ auto TalkerStreams::reshape(TalkerStreamSlot& slot, StreamSpec const& spec) -> S
     std::scoped_lock const lock{guards_[spec.index]};
     adopt_shape(slot, std::move(trial), spec);
     return success();
+}
+
+void TalkerStreams::set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
+{
+    bool const moved = vlan_id_.exchange(vlan_id, std::memory_order_relaxed) != vlan_id;
+    if (stream_pcp_.exchange(pcp, std::memory_order_relaxed) == pcp && !moved) {
+        return;
+    }
+    for (auto const& slot : slots_) {
+        tell_frames_changed(slot.spec.index);
+    }
+}
+
+void TalkerStreams::set_destination(uint16_t const stream_index, ieee::Eui48 const& dest_mac) noexcept
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr || slot->dest_mac == dest_mac) {
+        return;
+    }
+    slot->dest_mac = dest_mac;
+    tell_frames_changed(stream_index);
+}
+
+void TalkerStreams::tell_frames_changed(uint16_t const stream_index) const noexcept
+{
+    if (on_frames_changed_) {
+        on_frames_changed_(stream_index);
+    }
 }
 
 void TalkerStreams::adopt_shape(TalkerStreamSlot& slot, TalkerStreamSlot&& trial, StreamSpec const& spec) noexcept
@@ -655,6 +724,76 @@ auto TalkerStreams::next_mr(TalkerStreamSlot& slot) noexcept -> bool
         slot.mr_hold = MR_HOLD_PDUS;
     }
     return slot.mr;
+}
+
+auto TalkerStreams::next_sequence(TalkerStreamSlot const& slot) noexcept -> std::optional<uint8_t>
+{
+    if (slot.aaf) {
+        return slot.aaf->sequence_num;
+    }
+    if (slot.am824) {
+        return slot.am824->sequence_num;
+    }
+    return slot.crf ? std::optional<uint8_t>{slot.crf->sequence_num} : std::nullopt;
+}
+
+auto TalkerStreams::outside_header(uint16_t const stream_index) noexcept -> StatusValue<OutsideHeader>
+{
+    return report_outside(stream_index, std::nullopt);
+}
+
+auto TalkerStreams::notify_sent_outside(uint16_t const stream_index, SentOutside const& sent) noexcept -> StatusValue<OutsideHeader>
+{
+    return report_outside(stream_index, sent);
+}
+
+auto TalkerStreams::report_outside(uint16_t const stream_index, std::optional<SentOutside> const& sent) noexcept
+    -> StatusValue<OutsideHeader>
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return failure(std::errc::no_such_device);
+    }
+    std::unique_lock const entry{guards_[slot->spec.index], std::try_to_lock};
+    if (!entry.owns_lock()) {
+        return failure(std::errc::resource_unavailable_try_again);  // being re-shaped (reformat_stream)
+    }
+    return report_held(*slot, sent);
+}
+
+auto TalkerStreams::report_held(TalkerStreamSlot& slot, std::optional<SentOutside> const& sent) noexcept
+    -> StatusValue<OutsideHeader>
+{
+    auto const sequence = next_sequence(slot);
+    if (!sequence) {
+        return failure(std::errc::no_such_device);  // no AAF, AM824 or CRF serializer
+    }
+    if (sent) {
+        count_sent_outside(slot, *sent);
+    }
+    return OutsideHeader{.sequence_num = next_sequence(slot).value_or(*sequence), .mr = next_mr(slot)};
+}
+
+void TalkerStreams::count_sent_outside(TalkerStreamSlot& slot, SentOutside const& sent) noexcept
+{
+    slot.tx_packets += sent.pdus;
+    set_sequence(slot, sent.next_sequence);
+    if (sent.pdus == 0 || slot.spec.index >= tx_counters_.size()) {
+        return;
+    }
+    auto& c = tx_counters_[slot.spec.index];
+    slot.mr_hold -= static_cast<uint8_t>(std::min<uint32_t>(slot.mr_hold, pdus_carrying(c, slot.mr, sent)));
+    count_pdus(c, sent.pdus, std::min(sent.tu_pdus, sent.pdus), sent.last_mr.value_or(slot.mr));
+}
+
+void TalkerStreams::set_uncertainty(TimestampUncertainty const uncertainty) noexcept
+{
+    auto const before = timestamp_uncertainty();
+    tu_until_ns_.store(uncertainty.until_ns, std::memory_order_relaxed);
+    gptp_lost_.store(uncertainty.grandmaster_lost, std::memory_order_relaxed);
+    if (uncertainty != before && on_uncertainty_changed_) {
+        on_uncertainty_changed_(uncertainty);
+    }
 }
 
 auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
