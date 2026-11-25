@@ -241,6 +241,26 @@ void AtdeccNetHandler::release_milan_acmp() noexcept
     if (milan_listener_ != nullptr) {
         milan_listener_->detach_senders(this);
     }
+    aem_handler_.detach_mvu_stream_inputs(this);
+}
+
+void AtdeccNetHandler::attach_mvu_stream_inputs()
+{
+    // Milan v1.3 5.5.3.2: a BIND_STREAM or UNBIND_STREAM is the sink's bind
+    // or unbind event, whichever protocol brought it. The talker's last
+    // advertisement goes with it, as with the ACMP command (dispatch_milan_acmp).
+    aem_handler_.attach_mvu_stream_inputs(
+        this,
+        MvuStreamInputCallbacks{
+            .binding_command =
+                [this](atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond) {
+                    (void)milan_listener_->receive_mvu_binding_command(
+                        command, aem_handler_.event_time(), respond, heard_advertisement_of(command.talker_entity_id));
+                },
+            .stream_input_info = [this](uint16_t const index) -> std::optional<atdecc::MvuGetStreamInputInfoExResponse> {
+                auto const* const sink = milan_listener_->sink(index);
+                return sink != nullptr ? std::optional{atdecc::milan_stream_input_info_ex(sink->context())} : std::nullopt;
+            }});
 }
 
 void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, NanoAvbMilanAcmpListener* const listener)
@@ -256,6 +276,7 @@ void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, Nano
             this,
             [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); },
             [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); });
+        attach_mvu_stream_inputs();
     }
 }
 

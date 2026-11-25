@@ -277,6 +277,24 @@ class NanoAvbMilanAcmpListener
         TimePoint event_time,
         std::optional<atdecc::MilanHeardAdvertisement> const& heard = std::nullopt) -> bool;
 
+    /// What takes a sink's answer to a controller in place of tx_response.
+    using Respond = statusbar::sg14::inplace_function<void(AcmpCommandResponse const&), 64>;
+
+    /// A BIND_STREAM or UNBIND_STREAM command (AECP MVU, Milan v1.3 5.4.4.6
+    /// and 5.4.4.7), given as the BIND_RX or UNBIND_RX command it equals
+    /// (Table 5.22, atdecc::milan_bind_command_from_mvu). The sink treats it
+    /// as it treats the ACMP command (5.5.3.2), and at the step where it
+    /// would send its ACMP response it calls @p respond with that response:
+    /// the caller answers in MVU form there, before the sink goes on to
+    /// probe. Nothing is sent through tx_response. @p heard as for
+    /// receive_controller_command(). False, and @p respond is not called,
+    /// when @p cmd is not a bind or unbind for this entity.
+    auto receive_mvu_binding_command(
+        AcmpCommandResponse const& cmd,
+        TimePoint event_time,
+        Respond const& respond,
+        std::optional<atdecc::MilanHeardAdvertisement> const& heard = std::nullopt) -> bool;
+
     /// Process a received ACMP PDU as a talker's PROBE_TX_RESPONSE. True
     /// when it named this entity and one of its sinks.
     auto receive_talker_response(AcmpCommandResponse const& resp, TimePoint event_time) -> bool;
@@ -296,12 +314,20 @@ class NanoAvbMilanAcmpListener
 
   private:
     void wire_env();
+    /// A sink's answer to a controller: to the MVU caller while one waits
+    /// for it, through tx_response otherwise.
+    auto answer_controller(AcmpCommandResponse const& pdu) -> bool;
+    /// A controller's command for this entity goes to its sink, or is
+    /// answered for a sink that does not exist (5.5.3.1 and 5.5.3.2, step 1).
+    void treat_controller_command(
+        AcmpCommandResponse const& cmd, TimePoint event_time, std::optional<atdecc::MilanHeardAdvertisement> const& heard);
     [[nodiscard]] auto draw_delay() noexcept -> std::chrono::milliseconds;
     [[nodiscard]] auto is_locked_out(Eui64 const& controller) const -> bool;
     [[nodiscard]] auto mutable_sink(uint16_t stream_index) noexcept -> atdecc::MilanSink*;
 
     AcmpListenerCallbacks callbacks_;
-    void const* sender_owner_{nullptr};  ///< see attach_senders
+    void const* sender_owner_{nullptr};    ///< see attach_senders
+    Respond const* mvu_respond_{nullptr};  ///< see receive_mvu_binding_command
     atdecc::MilanListenerEnv env_{};
     statusbar::sg14::inplace_function<bool(Eui64 const&), 64> locked_out_{};
     statusbar::sg14::inplace_function<atdecc::MilanGptpState(), 64> gptp_state_{};

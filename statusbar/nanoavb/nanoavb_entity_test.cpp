@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstring>
 #include <functional>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -3243,6 +3244,383 @@ TEST(nanoavb_entity_mvu, ethernet_padding_is_not_command_data)
     }
     EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_NOT_IMPLEMENTED);
     EXPECT_EQ(mvu_body_of(sends[0]).size(), data.size());
+}
+
+//
+// The stream input commands - Milan v1.3 5.4.4.6 to 5.4.4.8
+//
+
+namespace {
+
+Eui64 const kTalker{0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x09};
+constexpr uint16_t kStreamInput = 0x0005;
+constexpr uint16_t kStreamOutput = 0x0006;
+
+/// What stands in for Milan connection management: two stream inputs, the
+/// commands it was given, and the ACMP status it answers a bind or unbind with.
+struct StreamInputs
+{
+    std::vector<statusbar::atdecc::AcmpCommandResponse> commands{};
+    std::vector<size_t> sends_when_answered{};
+    std::vector<CapturedSend> const* sends{nullptr};
+    std::optional<uint8_t> acmp_status{statusbar::atdecc::ACMP_STATUS_SUCCESS};
+
+    void attach(AemCommandHandler& handler, std::vector<CapturedSend> const& captured)
+    {
+        sends = &captured;
+        handler.attach_mvu_stream_inputs(
+            this,
+            MvuStreamInputCallbacks{
+                .binding_command =
+                    [this](statusbar::atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond) {
+                        on_binding_command(command, respond);
+                    },
+                .stream_input_info = [](uint16_t const index) { return info_of(index); }});
+    }
+
+    void on_binding_command(statusbar::atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond)
+    {
+        commands.push_back(command);
+        if (!acmp_status.has_value()) {
+            return;
+        }
+        auto response = command;
+        response.set_status(*acmp_status);
+        respond(response);
+        sends_when_answered.push_back(sends->size());
+    }
+
+    static auto info_of(uint16_t const index) -> std::optional<MvuGetStreamInputInfoExResponse>
+    {
+        if (index >= 2) {
+            return std::nullopt;
+        }
+        MvuGetStreamInputInfoExResponse info{};
+        info.descriptor_type = kStreamInput;
+        info.descriptor_index = index;
+        info.talker_entity_id = kTalker;
+        info.talker_unique_id = 4;
+        info.set_status(2, 7);
+        return info;
+    }
+};
+
+auto stream_input(uint16_t const descriptor_type, uint16_t const index, uint16_t const reserved = 0)
+    -> std::array<uint8_t, MvuStreamInput::LENGTH>
+{
+    MvuStreamInput input{};
+    input.reserved = reserved;
+    input.descriptor_type = descriptor_type;
+    input.descriptor_index = index;
+    std::array<uint8_t, MvuStreamInput::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, input);
+    return bytes;
+}
+
+auto bind_stream(uint16_t const descriptor_type, uint16_t const index, uint16_t const flags = 0)
+    -> std::array<uint8_t, MvuBindStream::LENGTH>
+{
+    MvuBindStream bind{};
+    bind.flags = flags;
+    bind.descriptor_type = descriptor_type;
+    bind.descriptor_index = index;
+    bind.talker_entity_id = kTalker;
+    bind.talker_stream_index = 4;
+    bind.reserved = 0xBEEF;  // a sender's mistake, not to come back
+    std::array<uint8_t, MvuBindStream::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, bind);
+    return bytes;
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_mvu, without_milan_connection_management_the_stream_input_commands_are_not_implemented)
+{
+    // An entity that answers MVU but runs IEEE 1722.1 connection management
+    // has no sink to bind and no Probing status to report.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    auto const bind = bind_stream(kStreamInput, 0);
+    auto const input = stream_input(kStreamInput, 0);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind, 70));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, input, 71));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, input, 72));
+    EXPECT_EQ(sends.size(), size_t{3});
+    for (auto const& each : sends) {
+        EXPECT_EQ(mvu_header_of(each).common.status(), MVU_STATUS_NOT_IMPLEMENTED);
+    }
+}
+
+TEST(nanoavb_entity_mvu, get_stream_input_info_ex_answers_as_figure_5_12)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    // The command's reserved field is ignored (5.4.4.8).
+    auto const asked = stream_input(kStreamInput, 1, 0xFFFF);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, asked, 73));
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() != 1) {
+        return;
+    }
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_TRUE(hdr.is_response());
+    EXPECT_FALSE(hdr.is_unsolicited());
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(hdr.command_type(), MVU_COMMAND_GET_STREAM_INPUT_INFO_EX);
+    EXPECT_EQ(hdr.common.sequence_id.get(), 73);
+    EXPECT_EQ(hdr.common.control_data_length(), AecpMvuDu::MVU_DATA_LENGTH + MvuGetStreamInputInfoExResponse::LENGTH);
+    EXPECT_EQ(sends[0].bytes.size(), size_t{48});
+    EXPECT_EQ(sends[0].dest, kMacA);
+
+    MvuGetStreamInputInfoExResponse info{};
+    span_load(info, mvu_body_of(sends[0]));
+    EXPECT_EQ(info.reserved.get(), 0);
+    EXPECT_EQ(info.descriptor_type.get(), kStreamInput);
+    EXPECT_EQ(info.descriptor_index.get(), 1);
+    EXPECT_EQ(info.talker_entity_id, kTalker);
+    EXPECT_EQ(info.talker_unique_id.get(), 4);
+    EXPECT_EQ(info.pbsta(), 2);
+    EXPECT_EQ(info.acmpsta(), 7);
+    EXPECT_TRUE(inputs.commands.empty());
+}
+
+TEST(nanoavb_entity_mvu, get_stream_input_info_ex_refuses_what_is_not_a_stream_input_of_the_entity)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    auto const output = stream_input(kStreamOutput, 0, 0xFFFF);
+    auto const beyond = stream_input(kStreamInput, 2);
+    std::array<uint8_t, 4> const cut{0x00, 0x00, 0x00, 0x05};
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, output, 74));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, beyond, 75));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, cut, 76));
+    EXPECT_EQ(sends.size(), size_t{3});
+    if (sends.size() != 3) {
+        return;
+    }
+    // A refusal has the response's own format: the descriptor named, the
+    // reserved field cleared, and nothing said of a talker or of probing.
+    MvuGetStreamInputInfoExResponse expected{};
+    expected.descriptor_type = kStreamOutput;
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(std::ranges::equal(mvu_body_of(sends[0]), make_const_span(expected)));
+    expected.descriptor_type = kStreamInput;
+    expected.descriptor_index = 2;
+    EXPECT_EQ(mvu_header_of(sends[1]).common.status(), MVU_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_TRUE(std::ranges::equal(mvu_body_of(sends[1]), make_const_span(expected)));
+    EXPECT_EQ(mvu_header_of(sends[2]).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+    EXPECT_TRUE(mvu_body_of(sends[2]).empty());
+}
+
+TEST(nanoavb_entity_mvu, a_bind_stream_reaches_its_sink_as_the_acmp_command_and_is_answered_from_inside)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    auto const bind = bind_stream(kStreamInput, 1, MVU_BIND_STREAM_FLAG_STREAMING_WAIT);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind, 80));
+    EXPECT_EQ(inputs.commands.size(), size_t{1});
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (inputs.commands.size() != 1 || sends.size() != 1) {
+        return;
+    }
+    // Table 5.22
+    auto const& command = inputs.commands.front();
+    EXPECT_EQ(command.message_type(), statusbar::atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    EXPECT_EQ(command.controller_entity_id, kControllerA);
+    EXPECT_EQ(command.listener_entity_id, kEntity);
+    EXPECT_EQ(command.listener_unique_id.get(), 1);
+    EXPECT_EQ(command.talker_entity_id, kTalker);
+    EXPECT_EQ(command.talker_unique_id.get(), 4);
+    EXPECT_TRUE(command.is_streaming_wait());
+    // 5.5.3.6.3 step 3 comes before the probe of step 5: the response was
+    // on its way when the sink's treatment went on.
+    EXPECT_EQ(inputs.sends_when_answered.front(), size_t{1});
+
+    // Table 5.35: the command's fields, flags included; reserved is ours to clear.
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_TRUE(hdr.is_response());
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(hdr.command_type(), MVU_COMMAND_BIND_STREAM);
+    EXPECT_EQ(hdr.common.sequence_id.get(), 80);
+    EXPECT_EQ(hdr.common.controller_entity_id, kControllerA);
+    EXPECT_EQ(sends[0].dest, kMacA);
+    MvuBindStream answer{};
+    span_load(answer, mvu_body_of(sends[0]));
+    EXPECT_TRUE(answer.streaming_wait());
+    EXPECT_EQ(answer.descriptor_type.get(), kStreamInput);
+    EXPECT_EQ(answer.descriptor_index.get(), 1);
+    EXPECT_EQ(answer.talker_entity_id, kTalker);
+    EXPECT_EQ(answer.talker_stream_index.get(), 4);
+    EXPECT_EQ(answer.reserved.get(), 0);
+    EXPECT_EQ(mvu_body_of(sends[0]).size(), MvuBindStream::LENGTH);
+}
+
+TEST(nanoavb_entity_mvu, an_unbind_stream_reaches_its_sink_and_answers_with_the_stream_input)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    auto const unbind = stream_input(kStreamInput, 0, 0xFFFF);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, unbind, 81));
+    EXPECT_EQ(inputs.commands.size(), size_t{1});
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (inputs.commands.size() != 1 || sends.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(inputs.commands.front().message_type(), statusbar::atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);
+    EXPECT_EQ(inputs.commands.front().listener_unique_id.get(), 0);
+    // Table 5.41
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(mvu_header_of(sends[0]).command_type(), MVU_COMMAND_UNBIND_STREAM);
+    auto const expected = stream_input(kStreamInput, 0);
+    EXPECT_TRUE(std::ranges::equal(mvu_body_of(sends[0]), expected));
+}
+
+TEST(nanoavb_entity_mvu, a_sinks_refusal_of_a_bind_or_unbind_becomes_the_mvu_status)
+{
+    // Tables 5.28, 5.33 and 5.39: what ACMP calls LISTENER_UNKNOWN_ID and
+    // CONTROLLER_NOT_AUTHORIZED are NO_SUCH_DESCRIPTOR and ENTITY_LOCKED here.
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    auto const bind = bind_stream(kStreamInput, 9);
+    auto const unbind = stream_input(kStreamInput, 0);
+    inputs.acmp_status = statusbar::atdecc::ACMP_STATUS_LISTENER_UNKNOWN_ID;
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind, 82));
+    inputs.acmp_status = statusbar::atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED;
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind, 83));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, unbind, 84));
+    EXPECT_EQ(sends.size(), size_t{3});
+    if (sends.size() != 3) {
+        return;
+    }
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(mvu_header_of(sends[1]).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(mvu_header_of(sends[2]).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(mvu_body_of(sends[1]).size(), MvuBindStream::LENGTH);
+    EXPECT_EQ(mvu_body_of(sends[2]).size(), MvuStreamInput::LENGTH);
+}
+
+TEST(nanoavb_entity_mvu, a_bind_or_unbind_the_handler_can_refuse_never_reaches_a_sink)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+
+    // 5.4.4.6: a descriptor_type other than STREAM_INPUT is BAD_ARGUMENTS.
+    auto const bind_output = bind_stream(kStreamOutput, 0);
+    auto const unbind_output = stream_input(kStreamOutput, 0);
+    // Shorter than its format: an UNBIND_STREAM's six octets sent as a BIND_STREAM.
+    auto const short_bind = stream_input(kStreamInput, 0);
+    std::array<uint8_t, 2> const short_unbind{};
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_output, 85));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, unbind_output, 86));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, short_bind, 87));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, short_unbind, 88));
+    EXPECT_TRUE(inputs.commands.empty());
+    EXPECT_EQ(sends.size(), size_t{4});
+    if (sends.size() != 4) {
+        return;
+    }
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(mvu_body_of(sends[0]).size(), MvuBindStream::LENGTH);
+    EXPECT_EQ(mvu_header_of(sends[1]).common.status(), MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(std::ranges::equal(mvu_body_of(sends[1]), unbind_output));
+    EXPECT_EQ(mvu_header_of(sends[2]).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+    EXPECT_TRUE(mvu_body_of(sends[2]).empty());
+    EXPECT_EQ(mvu_header_of(sends[3]).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+}
+
+TEST(nanoavb_entity_mvu, a_bind_no_sink_answers_is_entity_misbehaving_and_not_silence)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+    inputs.acmp_status = std::nullopt;
+
+    auto const bind = bind_stream(kStreamInput, 0);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind, 89));
+    EXPECT_EQ(inputs.commands.size(), size_t{1});
+    EXPECT_EQ(sends.size(), size_t{1});
+    if (sends.size() == 1) {
+        EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_ENTITY_MISBEHAVING);
+    }
+}
+
+TEST(nanoavb_entity_mvu, the_stream_inputs_are_taken_away_only_by_whoever_attached_them)
+{
+    auto model = create_test_model();
+    AemCommandHandler handler{model};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    StreamInputs inputs;
+    inputs.attach(handler, sends);
+    auto const asked = stream_input(kStreamInput, 0);
+
+    int const someone_else = 0;
+    handler.detach_mvu_stream_inputs(&someone_else);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, asked, 90));
+    handler.detach_mvu_stream_inputs(&inputs);
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, asked, 91));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, asked, 92));
+    EXPECT_EQ(sends.size(), size_t{3});
+    if (sends.size() != 3) {
+        return;
+    }
+    EXPECT_EQ(mvu_header_of(sends[0]).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(mvu_header_of(sends[1]).common.status(), MVU_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(mvu_header_of(sends[2]).common.status(), MVU_STATUS_NOT_IMPLEMENTED);
+    EXPECT_TRUE(inputs.commands.empty());
 }
 
 TEST(nanoavb_entity_mvu, aem_commands_are_answered_as_before_beside_the_mvu_ones)

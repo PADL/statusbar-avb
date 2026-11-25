@@ -4,6 +4,7 @@
 #include "statusbar/nanoavb/nanoavb_milan_acmp.hpp"
 
 #include <algorithm>
+#include <utility>
 
 namespace statusbar::nanoavb {
 
@@ -13,6 +14,12 @@ namespace {
 {
     return message_type == ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND || message_type == ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND ||
         message_type == ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND;
+}
+
+/// The two commands BIND_STREAM and UNBIND_STREAM stand for (Milan v1.3 Table 5.22).
+[[nodiscard]] constexpr auto is_binding_command(uint8_t const message_type) noexcept -> bool
+{
+    return message_type == ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND || message_type == ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND;
 }
 
 /// A seed no two entities share and that is never zero (xorshift's fixed point).
@@ -105,9 +112,7 @@ void NanoAvbMilanAcmpListener::wire_env()
     // The machines' ways out read callbacks_ when they are used, so a
     // callback set or replaced later is the one that runs.
     env_.tx_command = [this](AcmpCommandResponse const& pdu) { return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false; };
-    env_.tx_response = [this](AcmpCommandResponse const& pdu) {
-        return callbacks_.tx_response ? callbacks_.tx_response(pdu) : false;
-    };
+    env_.tx_response = [this](AcmpCommandResponse const& pdu) { return answer_controller(pdu); };
     env_.start_srp = [this](uint16_t const index, atdecc::MilanSrpParameters const& srp, TimePoint const now) {
         if (callbacks_.on_connect) {
             callbacks_.on_connect(index, srp.stream_id, srp.stream_dest_mac, now);
@@ -124,6 +129,17 @@ void NanoAvbMilanAcmpListener::wire_env()
         }
     };
     env_.random_delay = [this]() { return draw_delay(); };
+}
+
+auto NanoAvbMilanAcmpListener::answer_controller(AcmpCommandResponse const& pdu) -> bool
+{
+    // One answer per command: whatever a sink sends a controller after it
+    // goes the ordinary way.
+    if (auto const* const respond = std::exchange(mvu_respond_, nullptr); respond != nullptr) {
+        (*respond)(pdu);
+        return true;
+    }
+    return callbacks_.tx_response ? callbacks_.tx_response(pdu) : false;
 }
 
 auto NanoAvbMilanAcmpListener::draw_delay() noexcept -> std::chrono::milliseconds
@@ -180,18 +196,39 @@ auto NanoAvbMilanAcmpListener::receive_controller_command(
     if (cmd.listener_entity_id != env_.my_id || !is_listener_command(cmd.message_type())) {
         return false;
     }
+    treat_controller_command(cmd, event_time, heard);
+    return true;
+}
+
+auto NanoAvbMilanAcmpListener::receive_mvu_binding_command(
+    AcmpCommandResponse const& cmd,
+    TimePoint const event_time,
+    Respond const& respond,
+    std::optional<atdecc::MilanHeardAdvertisement> const& heard) -> bool
+{
+    if (cmd.listener_entity_id != env_.my_id || !is_binding_command(cmd.message_type())) {
+        return false;
+    }
+    mvu_respond_ = &respond;
+    treat_controller_command(cmd, event_time, heard);
+    mvu_respond_ = nullptr;
+    return true;
+}
+
+void NanoAvbMilanAcmpListener::treat_controller_command(
+    AcmpCommandResponse const& cmd, TimePoint const event_time, std::optional<atdecc::MilanHeardAdvertisement> const& heard)
+{
     auto* found = mutable_sink(cmd.listener_unique_id.get());
     if (found == nullptr) {
-        // 5.5.3.1 step 1, Table 5.27
+        // 5.5.3.1 step 1 with Table 5.27, 5.5.3.2 step 1 with Table 5.28
         (void)env_.tx_response(atdecc::milan_unknown_sink_response(cmd));
-        return true;
+        return;
     }
     found->on_command(cmd, is_locked_out(cmd.controller_entity_id), event_time);
     if (heard.has_value() && cmd.message_type() == ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND) {
         auto const own = gptp_state_ ? gptp_state_() : atdecc::MilanGptpState{};
         found->on_advertisement_heard_earlier(heard->adp, own, heard->valid_until, event_time);
     }
-    return true;
 }
 
 auto NanoAvbMilanAcmpListener::receive_talker_response(AcmpCommandResponse const& resp, TimePoint const event_time) -> bool

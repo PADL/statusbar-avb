@@ -1518,6 +1518,94 @@ namespace {
     return response;
 }
 
+/// The response a command gets when the entity does not implement it
+/// (Table 5.16): the command's data goes back as it came, as an AEM
+/// response to an unimplemented command carries its command's.
+[[nodiscard]] auto mvu_not_implemented(std::span<uint8_t const> const data, std::span<uint8_t> const out_buffer) noexcept
+    -> AemCommandResponse
+{
+    size_t const echoed = std::min(data.size(), out_buffer.size());
+    span_copy(out_buffer.first(echoed), data.first(echoed));
+    return {.status = MVU_STATUS_NOT_IMPLEMENTED, .size = echoed};
+}
+
+/// A BIND_STREAM or UNBIND_STREAM command as read from its data: the ACMP
+/// command it equals (Table 5.22) and the data its response carries, which
+/// is the command's with the reserved field cleared.
+struct MvuBinding
+{
+    uint16_t descriptor_type{0};
+    atdecc::AcmpCommandResponse as_acmp{};
+    std::array<uint8_t, MvuBindStream::LENGTH> response{};
+    size_t response_size{0};
+
+    [[nodiscard]] auto response_data() const noexcept -> std::span<uint8_t const>
+    {
+        return std::span{response}.first(response_size);
+    }
+};
+
+[[nodiscard]] auto mvu_bind_stream(AecpMvuDu const& header, std::span<uint8_t const> const data) noexcept -> MvuBinding
+{
+    MvuBindStream bind{};
+    span_load(bind, data.first(MvuBindStream::LENGTH));
+    bind.reserved = 0;
+    MvuBinding binding{
+        .descriptor_type = bind.descriptor_type.get(),
+        .as_acmp = atdecc::milan_bind_command_from_mvu(header, bind),
+        .response_size = MvuBindStream::LENGTH};
+    span_store(std::span{binding.response}, bind);
+    return binding;
+}
+
+[[nodiscard]] auto mvu_unbind_stream(AecpMvuDu const& header, std::span<uint8_t const> const data) noexcept -> MvuBinding
+{
+    MvuStreamInput unbind{};
+    span_load(unbind, data.first(MvuStreamInput::LENGTH));
+    unbind.reserved = 0;
+    MvuBinding binding{
+        .descriptor_type = unbind.descriptor_type.get(),
+        .as_acmp = atdecc::milan_unbind_command_from_mvu(header, unbind),
+        .response_size = MvuStreamInput::LENGTH};
+    span_store(std::span{binding.response}, unbind);
+    return binding;
+}
+
+/// The binding command in @p data, nullopt when it is shorter than its format.
+[[nodiscard]] auto mvu_binding_for(AecpMvuDu const& header, std::span<uint8_t const> const data) noexcept
+    -> std::optional<MvuBinding>
+{
+    bool const bind = header.command_type() == MVU_COMMAND_BIND_STREAM;
+    if (data.size() < (bind ? MvuBindStream::LENGTH : MvuStreamInput::LENGTH)) {
+        return std::nullopt;
+    }
+    return bind ? mvu_bind_stream(header, data) : mvu_unbind_stream(header, data);
+}
+
+/// The STREAM_INPUT a GET_STREAM_INPUT_INFO_EX command names, its reserved
+/// field ignored (5.4.4.8).
+[[nodiscard]] auto mvu_stream_input_asked(std::span<uint8_t const> const data) noexcept -> MvuStreamInput
+{
+    MvuStreamInput asked{};
+    span_load(asked, data.first(MvuStreamInput::LENGTH));
+    asked.reserved = 0;
+    return asked;
+}
+
+/// A GET_STREAM_INPUT_INFO_EX response that refuses with @p status: the
+/// response's own format (Figure 5.12), so that a controller which checks a
+/// response's length before its status still reads it, with the descriptor
+/// @p asked named and every other field zero.
+[[nodiscard]] auto mvu_stream_input_refused(uint8_t const status, MvuStreamInput const& asked, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
+    MvuGetStreamInputInfoExResponse refused{};
+    refused.descriptor_type = asked.descriptor_type;
+    refused.descriptor_index = asked.descriptor_index;
+    span_store(out_buffer, refused);
+    return {.status = status, .size = MvuGetStreamInputInfoExResponse::LENGTH};
+}
+
 }  // namespace
 
 auto AemCommandHandler::mvu_command_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept
@@ -1547,26 +1635,100 @@ auto AemCommandHandler::process_mvu_packet(Eui48 const& src_mac, std::span<uint8
     if (!command) {
         return false;
     }
+    return is_mvu_binding_command(*command) ? answer_mvu_binding_command(src_mac, *command) : answer_mvu_command(src_mac, *command);
+}
+
+auto AemCommandHandler::answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool
+{
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
-    auto const response = handle_mvu_command(*command, out_buffer);
-    return send_mvu_response(src_mac, command->header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    auto const response = handle_mvu_command(command, out_buffer);
+    return send_mvu_response(src_mac, command.header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
 }
 
 auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
     -> AemCommandResponse
 {
-    if (command.header.command_type() != MVU_COMMAND_GET_MILAN_INFO) {
-        // Table 5.16 NOT_IMPLEMENTED; the command's data goes back as it came,
-        // as an AEM response to an unimplemented command carries its command's.
-        size_t const echoed = std::min(command.data.size(), out_buffer.size());
-        span_copy(out_buffer.first(echoed), command.data.first(echoed));
-        return {.status = MVU_STATUS_NOT_IMPLEMENTED, .size = echoed};
+    switch (command.header.command_type()) {
+        case MVU_COMMAND_GET_MILAN_INFO:
+            return handle_mvu_get_milan_info(command, out_buffer);
+        case MVU_COMMAND_GET_STREAM_INPUT_INFO_EX:
+            return handle_mvu_get_stream_input_info_ex(command, out_buffer);
+        default:
+            return mvu_not_implemented(command.data, out_buffer);
     }
+}
+
+auto AemCommandHandler::handle_mvu_get_milan_info(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
     if (command.data.size() < MVU_GET_MILAN_INFO_COMMAND_LENGTH) {
         return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
     }
     span_store(out_buffer, milan_info_response());
     return {.status = MVU_STATUS_SUCCESS, .size = MvuGetMilanInfoResponse::LENGTH};
+}
+
+auto AemCommandHandler::handle_mvu_get_stream_input_info_ex(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    if (!mvu_stream_inputs_.stream_input_info) {
+        return mvu_not_implemented(command.data, out_buffer);
+    }
+    if (command.data.size() < MvuStreamInput::LENGTH) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    return mvu_stream_input_info_ex(mvu_stream_input_asked(command.data), out_buffer);
+}
+
+auto AemCommandHandler::mvu_stream_input_info_ex(MvuStreamInput const& asked, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    if (asked.descriptor_type.get() != DESCRIPTOR_STREAM_INPUT) {
+        return mvu_stream_input_refused(MVU_STATUS_BAD_ARGUMENTS, asked, out_buffer);
+    }
+    auto const info = mvu_stream_inputs_.stream_input_info(asked.descriptor_index.get());
+    if (!info.has_value()) {
+        return mvu_stream_input_refused(MVU_STATUS_NO_SUCH_DESCRIPTOR, asked, out_buffer);
+    }
+    span_store(out_buffer, *info);
+    return {.status = MVU_STATUS_SUCCESS, .size = MvuGetStreamInputInfoExResponse::LENGTH};
+}
+
+auto AemCommandHandler::is_mvu_binding_command(MvuCommand const& command) const noexcept -> bool
+{
+    // With no Milan connection management attached the two are commands
+    // this entity does not implement, and are answered as any such command.
+    uint16_t const type = command.header.command_type();
+    return mvu_stream_inputs_.binding_command && (type == MVU_COMMAND_BIND_STREAM || type == MVU_COMMAND_UNBIND_STREAM);
+}
+
+auto AemCommandHandler::answer_mvu_binding_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool
+{
+    auto const binding = mvu_binding_for(command.header, command.data);
+    if (!binding.has_value()) {
+        return send_mvu_response(src_mac, command.header, MVU_STATUS_PAYLOAD_TOO_SHORT, {});
+    }
+    if (binding->descriptor_type != DESCRIPTOR_STREAM_INPUT) {
+        return send_mvu_response(src_mac, command.header, MVU_STATUS_BAD_ARGUMENTS, binding->response_data());
+    }
+    return give_mvu_binding_to_its_sink(src_mac, command.header, binding->as_acmp, binding->response_data());
+}
+
+auto AemCommandHandler::give_mvu_binding_to_its_sink(
+    Eui48 const& src_mac,
+    AecpMvuDu const& header,
+    atdecc::AcmpCommandResponse const& as_acmp,
+    std::span<uint8_t const> const response_data) const -> bool
+{
+    // The sink answers from inside its treatment (5.5.3.6.3 step 3 comes
+    // before the probe of step 5), and its ACMP status names the MVU one.
+    std::optional<bool> sent{};
+    MvuStreamInputCallbacks::Respond const respond = [&](atdecc::AcmpCommandResponse const& response) {
+        uint8_t const status = atdecc::mvu_status_for_binding_response(response.status());
+        sent = send_mvu_response(src_mac, header, status, response_data);
+    };
+    mvu_stream_inputs_.binding_command(as_acmp, respond);
+    return sent.has_value() ? *sent : send_mvu_response(src_mac, header, MVU_STATUS_ENTITY_MISBEHAVING, response_data);
 }
 
 auto AemCommandHandler::milan_info_response() const noexcept -> MvuGetMilanInfoResponse

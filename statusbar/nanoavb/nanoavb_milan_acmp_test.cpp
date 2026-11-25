@@ -443,6 +443,120 @@ TEST(nanoavb_milan_listener, a_bind_is_given_what_was_heard_of_its_talker_before
     EXPECT_EQ(waiting.state(0), MilanSinkState::PrbWAvail);
 }
 
+//
+// BIND_STREAM and UNBIND_STREAM (AECP MVU) - Milan v1.3 5.5.3.2
+//
+
+TEST(nanoavb_milan_listener, an_mvu_bind_is_saved_then_answered_to_its_caller_then_probed)
+{
+    // The same three steps of 5.5.3.6.3, with the answer handed to whoever
+    // brought the command where the ACMP response would have been sent.
+    ListenerRig rig;
+    std::vector<AcmpCommandResponse> answers{};
+    NanoAvbMilanAcmpListener::Respond const respond = [&](AcmpCommandResponse const& pdu) {
+        rig.log.emplace_back("mvu answer");
+        answers.push_back(pdu);
+    };
+    auto const bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 1);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(bind, at(0), respond));
+    EXPECT_EQ(rig.log.size(), 3U);
+    EXPECT_EQ(rig.log[0], std::string{"saved"});
+    EXPECT_EQ(rig.log[1], std::string{"mvu answer"});
+    EXPECT_EQ(rig.log[2], std::string{"probe"});
+    EXPECT_TRUE(rig.responses.empty());  // nothing on the ACMP multicast
+    EXPECT_EQ(answers.size(), 1U);
+    EXPECT_EQ(answers.front().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(rig.state(1), MilanSinkState::PrbWResp);
+    EXPECT_EQ(rig.listener.sink(1)->context().binding->controller_entity_id, CONTROLLER);
+}
+
+TEST(nanoavb_milan_listener, an_mvu_bind_runs_the_same_sink_as_an_acmp_one)
+{
+    // One machine: a sink bound over ACMP is bound again, to the same
+    // source, over MVU (5.5.3.6.6: answered, no new probe), and unbound over MVU.
+    ListenerRig rig;
+    std::vector<AcmpCommandResponse> answers{};
+    NanoAvbMilanAcmpListener::Respond const respond = [&](AcmpCommandResponse const& pdu) { answers.push_back(pdu); };
+    EXPECT_TRUE(rig.bind(0, at(0)));
+    EXPECT_EQ(rig.probes.size(), 1U);
+
+    auto const again = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(again, at(10), respond));
+    EXPECT_EQ(answers.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_EQ(rig.probes.size(), 1U);
+
+    auto const unbind = command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, Eui64{}, 0, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(unbind, at(20), respond));
+    EXPECT_EQ(answers.size(), 2U);
+    EXPECT_EQ(answers.back().status(), atdecc::ACMP_STATUS_SUCCESS);
+    EXPECT_FALSE(rig.listener.is_bound(0));
+    EXPECT_EQ(rig.responses.size(), 1U);  // the ACMP bind's, and no other
+}
+
+TEST(nanoavb_milan_listener, an_mvu_bind_is_refused_as_an_acmp_one_is)
+{
+    // A sink that does not exist (Table 5.28) and a controller the lock
+    // shuts out (Tables 5.33, 5.39): the caller gets the sink's ACMP status
+    // to name its own with, and nothing changes.
+    ListenerRig rig;
+    std::vector<AcmpCommandResponse> answers{};
+    NanoAvbMilanAcmpListener::Respond const respond = [&](AcmpCommandResponse const& pdu) { answers.push_back(pdu); };
+    auto const nowhere = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 3);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(nowhere, at(0), respond));
+    EXPECT_EQ(answers.back().status(), atdecc::ACMP_STATUS_LISTENER_UNKNOWN_ID);
+
+    rig.lock_holder = LOCK_HOLDER;
+    auto const bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(bind, at(1), respond));
+    EXPECT_EQ(answers.back().status(), atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
+    EXPECT_FALSE(rig.listener.is_bound(0));
+    EXPECT_EQ(answers.size(), 2U);
+    EXPECT_TRUE(rig.log.empty());  // nothing saved, sent or probed
+}
+
+TEST(nanoavb_milan_listener, only_a_bind_or_unbind_for_this_entity_is_an_mvu_binding_command)
+{
+    ListenerRig rig;
+    size_t answered = 0;
+    NanoAvbMilanAcmpListener::Respond const respond = [&](AcmpCommandResponse const&) { ++answered; };
+    EXPECT_FALSE(rig.listener.receive_mvu_binding_command(
+        command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, SOMEONE_ELSE, 0), at(0), respond));
+    // GET_RX_STATE has no MVU form: GET_STREAM_INPUT_INFO_EX is not a sink event.
+    EXPECT_FALSE(rig.listener.receive_mvu_binding_command(
+        command(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER, 1, LISTENER, 0), at(0), respond));
+    EXPECT_EQ(answered, 0U);
+    EXPECT_TRUE(rig.log.empty());
+}
+
+TEST(nanoavb_milan_listener, after_an_mvu_command_the_sink_answers_acmp_commands_on_acmp_again)
+{
+    // The caller's answer is for one command. A GET_RX_STATE that follows,
+    // and whatever the sink sends a controller later, go out as ACMP.
+    ListenerRig rig;
+    size_t answered = 0;
+    NanoAvbMilanAcmpListener::Respond const respond = [&](AcmpCommandResponse const&) { ++answered; };
+    auto const bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 2);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(bind, at(0), respond));
+    auto const query = command(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER, 1, LISTENER, 2);
+    EXPECT_TRUE(rig.listener.receive_controller_command(query, at(1)));
+    EXPECT_EQ(answered, 1U);
+    EXPECT_EQ(rig.responses.size(), 1U);
+    EXPECT_EQ(rig.responses.back().message_type(), atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE);
+    EXPECT_EQ(rig.responses.back().talker_entity_id, TALKER);
+}
+
+TEST(nanoavb_milan_listener, an_mvu_bind_is_given_what_was_heard_of_its_talker_too)
+{
+    // As with the ACMP command: the talker advertised before the bind, its
+    // first probe is refused, and the retry does not wait for another ADP.
+    ListenerRig rig;
+    NanoAvbMilanAcmpListener::Respond const respond = [](AcmpCommandResponse const&) {};
+    atdecc::MilanHeardAdvertisement const heard{.adp = available(TALKER, 1), .valid_until = at(10000)};
+    auto const bind = command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER, 1, LISTENER, 0);
+    EXPECT_TRUE(rig.listener.receive_mvu_binding_command(bind, at(0), respond, heard));
+    EXPECT_EQ(rig.listener.sink(0)->discovery_state(), atdecc::MilanDiscoveryState::TkDiscovered);
+}
+
 TEST(nanoavb_milan_listener, the_bindings_are_what_was_bound_and_survive_a_restart)
 {
     ListenerRig rig;

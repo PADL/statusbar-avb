@@ -169,6 +169,25 @@ struct AemCommandHandlerCallbacks
     RebootFn on_reboot;
 };
 
+/// What answers Milan's stream input commands over AECP MVU (Milan v1.3
+/// 5.4.4.6 to 5.4.4.8): the entity's Milan connection management, when it
+/// runs one. The handler reads the commands and writes the responses; what
+/// a sink does with them is asked here.
+struct MvuStreamInputCallbacks
+{
+    /// Takes the ACMP response a sink gives to a bind or unbind.
+    using Respond = statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64>;
+
+    /// A BIND_STREAM or UNBIND_STREAM command, as the BIND_RX or UNBIND_RX
+    /// command it equals (Table 5.22). @p respond is called once, at the
+    /// step where the sink would send its ACMP response (5.5.3.2).
+    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const& command, Respond const& respond), 64> binding_command;
+
+    /// The GET_STREAM_INPUT_INFO_EX response data of STREAM_INPUT @p index,
+    /// nullopt when the entity has no such stream input.
+    statusbar::sg14::inplace_function<std::optional<atdecc::MvuGetStreamInputInfoExResponse>(uint16_t index), 64> stream_input_info;
+};
+
 /// Parameters for building acquire/lock response packets
 /// Uses designated initializers for self-documenting call sites
 struct AcquireLockResponseParams
@@ -276,7 +295,9 @@ class AemCommandHandler
     /// What a Milan PAAD-AE says of itself in GET_MILAN_INFO (Milan v1.3
     /// 5.4.4.1), for the currently active Configuration. Set, the entity is a
     /// Milan device: it answers the MVU commands (GET_MILAN_INFO with these
-    /// fields, the rest NOT_IMPLEMENTED). Unset, it is a plain 1722.1 entity
+    /// fields, the stream input commands when attach_mvu_stream_inputs() has
+    /// given it something to answer them with, the rest NOT_IMPLEMENTED).
+    /// Unset, it is a plain 1722.1 entity
     /// and lets every MVU command pass unanswered, as 5.4.4.1 recommends of
     /// a Configuration that is not Milan.
     struct MilanInfo
@@ -288,6 +309,28 @@ class AemCommandHandler
     };
     void set_milan_info(std::optional<MilanInfo> const info) noexcept { milan_info_ = info; }
     [[nodiscard]] auto milan_info() const noexcept -> std::optional<MilanInfo> const& { return milan_info_; }
+
+    /// Give the handler what answers BIND_STREAM, UNBIND_STREAM and
+    /// GET_STREAM_INPUT_INFO_EX, on behalf of @p owner, an address that names
+    /// whoever attaches (a net handler passes itself). Without it the three
+    /// answer NOT_IMPLEMENTED, which is what an entity running IEEE 1722.1
+    /// connection management has to say of them. detach_mvu_stream_inputs()
+    /// takes them away again, and leaves alone those a later owner attached.
+    void attach_mvu_stream_inputs(void const* const owner, MvuStreamInputCallbacks callbacks)
+    {
+        mvu_stream_inputs_ = std::move(callbacks);
+        mvu_stream_inputs_owner_ = owner;
+    }
+    void detach_mvu_stream_inputs(void const* const owner) noexcept
+    {
+        if (mvu_stream_inputs_owner_ == owner) {
+            mvu_stream_inputs_ = {};
+            mvu_stream_inputs_owner_ = nullptr;
+        }
+    }
+
+    /// The time of the event being handled, as set_event_time() gave it.
+    [[nodiscard]] auto event_time() const noexcept -> sm::TimePoint { return event_time_; }
 
     /// Set only the GET_STREAM_INFO provider, without disturbing the others.
     /// The application owns the dynamic per-stream parameters.
@@ -834,10 +877,46 @@ class AemCommandHandler
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
         -> bool;
 
-    /// Dispatch one MVU command (Milan v1.3 5.4.4): GET_MILAN_INFO is answered
-    /// from milan_info_, every other command NOT_IMPLEMENTED with its data
-    /// given back. Writes the response's command-specific data into @p out_buffer.
+    /// Answer an MVU command that is not a bind or unbind: handle_mvu_command(), then the response.
+    [[nodiscard]] auto answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool;
+
+    /// Dispatch one MVU command that is answered from what the handler can
+    /// read (Milan v1.3 5.4.4): GET_MILAN_INFO from milan_info_,
+    /// GET_STREAM_INPUT_INFO_EX from the attached stream inputs, every other
+    /// command NOT_IMPLEMENTED with its data given back. Writes the
+    /// response's command-specific data into @p out_buffer.
     [[nodiscard]] auto handle_mvu_command(MvuCommand const& command, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+
+    /// GET_MILAN_INFO (5.4.4.1).
+    [[nodiscard]] auto handle_mvu_get_milan_info(MvuCommand const& command, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
+
+    /// GET_STREAM_INPUT_INFO_EX (5.4.4.8).
+    [[nodiscard]] auto handle_mvu_get_stream_input_info_ex(MvuCommand const& command, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
+
+    /// The answer to a GET_STREAM_INPUT_INFO_EX that names @p asked.
+    [[nodiscard]] auto mvu_stream_input_info_ex(MvuStreamInput const& asked, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
+
+    /// True for a BIND_STREAM or UNBIND_STREAM command that the attached
+    /// stream inputs take.
+    [[nodiscard]] auto is_mvu_binding_command(MvuCommand const& command) const noexcept -> bool;
+
+    /// BIND_STREAM and UNBIND_STREAM (5.4.4.6, 5.4.4.7): a command the
+    /// handler can refuse by itself is answered here, any other goes to its
+    /// sink as the ACMP command it equals, and the response is sent from
+    /// inside that treatment, where the sink would send its ACMP response.
+    [[nodiscard]] auto answer_mvu_binding_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool;
+
+    /// The second half of answer_mvu_binding_command(): @p as_acmp goes to
+    /// its sink, and the response to @p header, carrying @p response_data,
+    /// is sent when the sink answers.
+    [[nodiscard]] auto give_mvu_binding_to_its_sink(
+        Eui48 const& src_mac,
+        AecpMvuDu const& header,
+        atdecc::AcmpCommandResponse const& as_acmp,
+        std::span<uint8_t const> response_data) const -> bool;
 
     /// The GET_MILAN_INFO response data for milan_info_ (which must be set).
     [[nodiscard]] auto milan_info_response() const noexcept -> MvuGetMilanInfoResponse;
@@ -848,6 +927,8 @@ class AemCommandHandler
         Eui48 const& dest_mac, AecpMvuDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool;
 
     AemCommandHandlerCallbacks callbacks_;
+    MvuStreamInputCallbacks mvu_stream_inputs_{};
+    void const* mvu_stream_inputs_owner_{nullptr};  ///< see attach_mvu_stream_inputs
 
     // One of two code paths:
     //  (1) Legacy `EntityModel&` constructor: adapter_storage_ holds an

@@ -22,6 +22,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -391,6 +392,240 @@ TEST(nanoavb_components_acmp, an_earlier_handler_going_away_leaves_a_later_ones_
     first.reset();
     second.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_GET_TX_CONNECTION_COMMAND, ENTITY, REMOTE_TALKER));
     EXPECT_EQ(second.milan_sent.size(), 1U);
+}
+
+//
+// BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX through the handler
+//
+
+namespace {
+
+/// An MVU command for ENTITY as its octets on the wire: @p data behind the header.
+template <typename Data>
+auto mvu_frame(uint16_t const command, Data const& data, uint16_t const sequence_id = 1) -> std::vector<uint8_t>
+{
+    atdecc::AecpMvuDu du{};
+    du.init_command(command, static_cast<uint16_t>(Data::LENGTH));
+    du.common.target_entity_id = ENTITY;
+    du.common.controller_entity_id = CONTROLLER;
+    du.common.sequence_id = sequence_id;
+    std::vector<uint8_t> frame(atdecc::AecpMvuDu::LENGTH + Data::LENGTH);
+    span_store(std::span<uint8_t>{frame}.first(atdecc::AecpMvuDu::LENGTH), du);
+    span_store(std::span<uint8_t>{frame}.subspan(atdecc::AecpMvuDu::LENGTH), data);
+    return frame;
+}
+
+auto bind_stream_frame(uint16_t const sink, ieee::Eui64 const& talker) -> std::vector<uint8_t>
+{
+    atdecc::MvuBindStream bind{};
+    bind.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    bind.descriptor_index = sink;
+    bind.talker_entity_id = talker;
+    bind.talker_stream_index = 3;
+    return mvu_frame(atdecc::MVU_COMMAND_BIND_STREAM, bind);
+}
+
+auto stream_input_frame(uint16_t const command, uint16_t const sink) -> std::vector<uint8_t>
+{
+    atdecc::MvuStreamInput input{};
+    input.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    input.descriptor_index = sink;
+    return mvu_frame(command, input);
+}
+
+/// A Milan device's AEM handler and Milan pair behind one ATDECC handler,
+/// with what each sent kept in one list, in order: "mvu <command> <status>"
+/// for an MVU response and "acmp <message type>" for an ACMP PDU.
+struct MilanDeviceOnNoInterface
+{
+    std::unique_ptr<NanoAvbComponents> components{two_stream_components()};
+    std::vector<std::string> sent{};
+    std::vector<uint8_t> last_mvu{};
+    std::optional<AtdeccNetHandler> handler{};
+
+    explicit MilanDeviceOnNoInterface(bool const milan_acmp = true)
+    {
+        components->aem_handler.set_milan_info(AemCommandHandler::MilanInfo{});
+        if (milan_acmp) {
+            components->use_milan_acmp();
+        }
+        handler.emplace(
+            "no-such-interface-0",
+            components->adp_advertiser,
+            components->acmp_talker,
+            components->acmp_listener,
+            components->aem_handler);
+        handler->set_milan_acmp(components->milan_acmp_talker.get(), components->milan_acmp_listener.get());
+        record_what_is_sent(milan_acmp);
+    }
+
+    void record_what_is_sent(bool const milan_acmp)
+    {
+        components->aem_handler.set_send_response([this](ieee::Eui48 const&, std::span<uint8_t const> const response) {
+            note_mvu(response);
+            return true;
+        });
+        auto acmp = [this](atdecc::AcmpCommandResponse const& pdu) {
+            sent.push_back("acmp " + std::to_string(pdu.message_type()));
+            return true;
+        };
+        if (milan_acmp) {
+            components->milan_acmp_listener->set_senders(acmp, acmp);
+        }
+    }
+
+    void note_mvu(std::span<uint8_t const> const response)
+    {
+        atdecc::AecpMvuDu du{};
+        span_load(du, response.first(atdecc::AecpMvuDu::LENGTH));
+        sent.push_back(
+            "mvu " + std::string{atdecc::mvu_command_name(du.command_type())} + " " +
+            std::string{atdecc::mvu_status_name(du.common.status())});
+        last_mvu.assign(response.begin(), response.end());
+    }
+
+    void receive(std::vector<uint8_t> const& frame, int64_t const now_ns = ONE_SECOND_NS)
+    {
+        handler->dispatch_frame(now_ns, PEER_MAC, frame);
+    }
+
+    /// The stream input's info, as GET_STREAM_INPUT_INFO_EX answers it now.
+    auto info_of(uint16_t const sink) -> atdecc::MvuGetStreamInputInfoExResponse
+    {
+        receive(stream_input_frame(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, sink));
+        atdecc::MvuGetStreamInputInfoExResponse info{};
+        if (last_mvu.size() == atdecc::AecpMvuDu::LENGTH + atdecc::MvuGetStreamInputInfoExResponse::LENGTH) {
+            span_load(info, std::span<uint8_t const>{last_mvu}.subspan(atdecc::AecpMvuDu::LENGTH));
+        }
+        return info;
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_components_mvu, a_bind_stream_binds_its_sink_and_is_answered_before_the_probe)
+{
+    // Milan v1.3 5.5.3.2 and 5.5.3.6.3: the response of step 3 is an MVU
+    // one, to the controller, and the probe of step 5 follows it on ACMP.
+    MilanDeviceOnNoInterface device;
+    device.receive(bind_stream_frame(1, REMOTE_TALKER));
+    EXPECT_EQ(device.sent.size(), 2U);
+    if (device.sent.size() != 2) {
+        return;
+    }
+    EXPECT_EQ(device.sent[0], std::string{"mvu BIND_STREAM SUCCESS"});
+    EXPECT_EQ(device.sent[1], "acmp " + std::to_string(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND));
+    auto const& sink = *device.components->milan_acmp_listener->sink(1);
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::PrbWResp);
+    EXPECT_EQ(sink.context().binding->talker_entity_id, REMOTE_TALKER);
+    EXPECT_EQ(sink.context().binding->talker_unique_id, 3);
+    EXPECT_EQ(sink.context().binding->controller_entity_id, CONTROLLER);
+    EXPECT_FALSE(device.components->milan_acmp_listener->is_bound(0));
+}
+
+TEST(nanoavb_components_mvu, get_stream_input_info_ex_follows_a_sink_from_unbound_to_probing_and_back)
+{
+    MilanDeviceOnNoInterface device;
+    auto const unbound = device.info_of(1);
+    EXPECT_EQ(device.sent.back(), std::string{"mvu GET_STREAM_INPUT_INFO_EX SUCCESS"});
+    EXPECT_EQ(unbound.descriptor_type.get(), atdecc::aem::DESCRIPTOR_STREAM_INPUT);
+    EXPECT_EQ(unbound.descriptor_index.get(), 1);
+    EXPECT_EQ(unbound.talker_entity_id, ieee::Eui64{});
+    EXPECT_EQ(unbound.pbsta(), 0);  // PROBING_DISABLED
+
+    device.receive(bind_stream_frame(1, REMOTE_TALKER));
+    auto const probing = device.info_of(1);
+    EXPECT_EQ(probing.talker_entity_id, REMOTE_TALKER);
+    EXPECT_EQ(probing.talker_unique_id.get(), 3);
+    EXPECT_EQ(probing.pbsta(), 2);  // PROBING_ACTIVE
+    EXPECT_EQ(probing.acmpsta(), 0);
+    EXPECT_EQ(device.info_of(0).pbsta(), 0);  // the other sink is as it was
+
+    // Two probes go unanswered: the sink waits to retry, and says why (5.5.3.6.25).
+    device.handler->tick(ONE_SECOND_NS + 200'000'000);
+    device.handler->tick(ONE_SECOND_NS + 400'000'000);
+    auto const retrying = device.info_of(1);
+    EXPECT_EQ(retrying.pbsta(), 2);
+    EXPECT_EQ(retrying.acmpsta(), atdecc::ACMP_STATUS_LISTENER_TALKER_TIMEOUT);
+
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_UNBIND_STREAM, 1));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu UNBIND_STREAM SUCCESS"});
+    EXPECT_FALSE(device.components->milan_acmp_listener->is_bound(1));
+    auto const after = device.info_of(1);
+    EXPECT_EQ(after.talker_entity_id, ieee::Eui64{});
+    EXPECT_EQ(after.pbsta(), 0);
+}
+
+TEST(nanoavb_components_mvu, a_stream_input_the_entity_does_not_have_is_no_such_descriptor)
+{
+    // Table 5.28, and 5.4.4.8.
+    MilanDeviceOnNoInterface device;
+    device.receive(bind_stream_frame(2, REMOTE_TALKER));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu BIND_STREAM NO_SUCH_DESCRIPTOR"});
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_UNBIND_STREAM, 2));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu UNBIND_STREAM NO_SUCH_DESCRIPTOR"});
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, 2));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu GET_STREAM_INPUT_INFO_EX NO_SUCH_DESCRIPTOR"});
+    EXPECT_EQ(device.sent.size(), 3U);  // and nothing on ACMP
+}
+
+TEST(nanoavb_components_mvu, a_bind_stream_from_a_controller_the_lock_shuts_out_is_entity_locked)
+{
+    // Tables 5.33 and 5.39. The lock is asked of whoever wired the listener.
+    MilanDeviceOnNoInterface device;
+    device.components->milan_acmp_listener->set_locked_out([](ieee::Eui64 const& controller) { return controller == CONTROLLER; });
+    device.receive(bind_stream_frame(0, REMOTE_TALKER));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu BIND_STREAM ENTITY_LOCKED"});
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_UNBIND_STREAM, 0));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu UNBIND_STREAM ENTITY_LOCKED"});
+    EXPECT_FALSE(device.components->milan_acmp_listener->is_bound(0));
+    EXPECT_EQ(device.sent.size(), 2U);
+}
+
+TEST(nanoavb_components_mvu, a_bind_stream_finds_its_talker_discovered_when_adp_discovery_heard_it_first)
+{
+    // As with a BIND_RX_COMMAND: the talker's last advertisement goes with the bind.
+    MilanDeviceOnNoInterface device;
+    NanoAvbAdpDiscovery discovery{};
+    device.handler->set_adp_discovery(&discovery);
+    atdecc::AdpDu adp{};
+    adp.init_entity_available(REMOTE_TALKER, 5);
+    adp.available_index = 1;
+    std::array<uint8_t, atdecc::AdpDu::LENGTH> buf{};
+    span_store(std::span<uint8_t>{buf}, adp);
+    device.receive({buf.begin(), buf.end()}, ONE_SECOND_NS);
+
+    device.receive(bind_stream_frame(0, REMOTE_TALKER), 2 * ONE_SECOND_NS);
+    auto const& sink = *device.components->milan_acmp_listener->sink(0);
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::PrbWResp);
+    EXPECT_EQ(sink.discovery_state(), atdecc::MilanDiscoveryState::TkDiscovered);
+}
+
+TEST(nanoavb_components_mvu, an_entity_on_ieee_connection_management_does_not_implement_the_three)
+{
+    // It answers MVU (GET_MILAN_INFO) and has no sink machine behind it.
+    MilanDeviceOnNoInterface device{false};
+    device.receive(bind_stream_frame(0, REMOTE_TALKER));
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_UNBIND_STREAM, 0));
+    device.receive(stream_input_frame(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, 0));
+    EXPECT_EQ(device.sent.size(), 3U);
+    if (device.sent.size() != 3) {
+        return;
+    }
+    EXPECT_EQ(device.sent[0], std::string{"mvu BIND_STREAM NOT_IMPLEMENTED"});
+    EXPECT_EQ(device.sent[1], std::string{"mvu UNBIND_STREAM NOT_IMPLEMENTED"});
+    EXPECT_EQ(device.sent[2], std::string{"mvu GET_STREAM_INPUT_INFO_EX NOT_IMPLEMENTED"});
+    EXPECT_FALSE(device.components->acmp_listener.has_pending());
+}
+
+TEST(nanoavb_components_mvu, a_handler_that_goes_away_takes_the_stream_inputs_back)
+{
+    // The AEM handler outlives it and must not call into a handler that is gone.
+    MilanDeviceOnNoInterface device;
+    device.handler.reset();
+    auto const frame = stream_input_frame(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, 0);
+    EXPECT_TRUE(device.components->aem_handler.process_packet(PEER_MAC, frame, ENTITY));
+    EXPECT_EQ(device.sent.back(), std::string{"mvu GET_STREAM_INPUT_INFO_EX NOT_IMPLEMENTED"});
 }
 
 TEST(nanoavb_net_handlers, a_handler_whose_socket_did_not_open_can_still_be_reached)

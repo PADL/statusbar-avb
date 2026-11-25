@@ -327,10 +327,13 @@ class AtdeccNetHandler : public net::Pollable
     /// Hand ACMP to the Milan v1.3 talker and listener: every ACMP PDU goes
     /// to them and not to the IEEE 1722.1 pair, the listener also hears ADP
     /// (each bound sink discovers its own talker, 5.6.4) and is ticked, and
-    /// both send through this handler. Null pointers (the default) leave
-    /// ACMP with the IEEE 1722.1 pair. The two objects must outlive the
-    /// handler; its destructor takes its senders away again, and leaves
-    /// alone those a handler made after it has attached since.
+    /// both send through this handler. The AEM handler is given the
+    /// listener's sinks to answer BIND_STREAM, UNBIND_STREAM and
+    /// GET_STREAM_INPUT_INFO_EX with (5.4.4.6 to 5.4.4.8). Null pointers
+    /// (the default) leave ACMP with the IEEE 1722.1 pair, and those three
+    /// commands NOT_IMPLEMENTED. The two objects must outlive the handler;
+    /// its destructor takes back what it attached, and leaves alone what a
+    /// handler made after it has attached since.
     void set_milan_acmp(NanoAvbMilanAcmpTalker* talker, NanoAvbMilanAcmpListener* listener);
 
     ~AtdeccNetHandler() override;
@@ -379,8 +382,11 @@ class AtdeccNetHandler : public net::Pollable
     /// it is still good, for a Milan sink a controller binds to it.
     [[nodiscard]] auto heard_advertisement_of(Eui64 const& talker) const -> std::optional<atdecc::MilanHeardAdvertisement>;
     void trace_listener_command(atdecc::AcmpCommandResponse const& pdu, bool handled) const;
-    /// Take back the senders this handler gave the Milan pair.
+    /// Take back the senders this handler gave the Milan pair, and the
+    /// stream inputs it gave the AEM handler.
     void release_milan_acmp() noexcept;
+    /// Give the AEM handler the Milan listener's sinks for the MVU stream input commands.
+    void attach_mvu_stream_inputs();
     /// Send an ACMP PDU to the ACMP multicast address, in the 56-octet form.
     auto send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool;
     void tick_protocols(sm::TimePoint now);
