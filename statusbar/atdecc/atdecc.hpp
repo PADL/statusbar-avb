@@ -19,3 +19,4 @@
 #include "statusbar/atdecc/atdecc_milan_acmp_sink.hpp"
 #include "statusbar/atdecc/atdecc_milan_acmp_talker.hpp"
 #include "statusbar/atdecc/atdecc_milan_adp_discovery_sm.hpp"
+#include "statusbar/atdecc/atdecc_milan_mvu_stream_input.hpp"

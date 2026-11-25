@@ -10,6 +10,11 @@
 /// followed by a 16-bit u/command_type word and the command's own data. The
 /// one every PAAD-AE must answer is GET_MILAN_INFO (5.4.4.1), which is how a
 /// Milan controller tells a Milan device from any other ATDECC entity.
+///
+/// The stream input commands are here as wire formats only: BIND_STREAM
+/// and UNBIND_STREAM (5.4.4.6, 5.4.4.7), which bind a sink as ACMP's
+/// BIND_RX and UNBIND_RX commands do, and GET_STREAM_INPUT_INFO_EX
+/// (5.4.4.8). What they mean to a sink is in atdecc_milan_mvu_stream_input.hpp.
 
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -24,6 +29,8 @@ namespace statusbar::atdecc {
 
 using ieee::doublet_t;
 using ieee::Eui48;
+using ieee::Eui64;
+using ieee::octet_t;
 using ieee::quadlet_t;
 
 //
@@ -207,6 +214,120 @@ static_assert(offsetof(MvuGetMilanInfoResponse, features_flags) == 6);
 static_assert(offsetof(MvuGetMilanInfoResponse, certification_version) == 10);
 static_assert(offsetof(MvuGetMilanInfoResponse, specification_version) == 14);
 
+//
+// BIND_STREAM - 5.4.4.6, Figure 5.10
+//
+
+/// flags - Table 5.19: set, the STREAM_INPUT is bound in the stopped state.
+constexpr uint16_t MVU_BIND_STREAM_FLAG_STREAMING_WAIT = 0x0001;
+
+/// The command-specific data of a BIND_STREAM command, and of its response,
+/// which gives every field back as the command had it.
+struct MvuBindStream
+{
+    static constexpr size_t LENGTH = 18;
+
+    /// Bytes 30-31: Table 5.19.
+    doublet_t flags{0};
+    /// Bytes 32-33: always STREAM_INPUT.
+    doublet_t descriptor_type{0};
+    /// Bytes 34-35: the STREAM_INPUT to bind, ACMP's listener_unique_id (Table 5.22).
+    doublet_t descriptor_index{0};
+    /// Bytes 36-43: the talker to bind it to.
+    Eui64 talker_entity_id{};
+    /// Bytes 44-45: the talker's STREAM_OUTPUT, ACMP's talker_unique_id (Table 5.22).
+    doublet_t talker_stream_index{0};
+    /// Bytes 46-47: reserved, 0.
+    doublet_t reserved{0};
+
+    [[nodiscard]] constexpr auto streaming_wait() const noexcept -> bool
+    {
+        return flags.has_flag(MVU_BIND_STREAM_FLAG_STREAMING_WAIT);
+    }
+
+    auto operator<=>(MvuBindStream const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuBindStream) == 18, "MvuBindStream must be exactly 18 bytes");
+static_assert(offsetof(MvuBindStream, descriptor_type) == 2);
+static_assert(offsetof(MvuBindStream, descriptor_index) == 4);
+static_assert(offsetof(MvuBindStream, talker_entity_id) == 6);
+static_assert(offsetof(MvuBindStream, talker_stream_index) == 14);
+static_assert(offsetof(MvuBindStream, reserved) == 16);
+
+//
+// UNBIND_STREAM - 5.4.4.7, and the GET_STREAM_INPUT_INFO_EX command - 5.4.4.8: Figure 5.11
+//
+
+/// The command-specific data that names one STREAM_INPUT and nothing more:
+/// an UNBIND_STREAM command, its response, and a GET_STREAM_INPUT_INFO_EX
+/// command.
+struct MvuStreamInput
+{
+    static constexpr size_t LENGTH = 6;
+
+    /// Bytes 30-31: reserved, 0; a receiver ignores it.
+    doublet_t reserved{0};
+    /// Bytes 32-33: always STREAM_INPUT.
+    doublet_t descriptor_type{0};
+    /// Bytes 34-35: the STREAM_INPUT.
+    doublet_t descriptor_index{0};
+
+    auto operator<=>(MvuStreamInput const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuStreamInput) == 6, "MvuStreamInput must be exactly 6 bytes");
+static_assert(offsetof(MvuStreamInput, descriptor_type) == 2);
+static_assert(offsetof(MvuStreamInput, descriptor_index) == 4);
+
+//
+// GET_STREAM_INPUT_INFO_EX response - 5.4.4.8, Figure 5.12
+//
+
+/// What a STREAM_INPUT is bound to and how far its probing has come
+/// (5.3.8.6). An unbound input answers a zero talker and PROBING_DISABLED.
+struct MvuGetStreamInputInfoExResponse
+{
+    static constexpr size_t LENGTH = 18;
+
+    /// Bytes 30-31: reserved, 0.
+    doublet_t reserved{0};
+    /// Bytes 32-33: as in the command.
+    doublet_t descriptor_type{0};
+    /// Bytes 34-35: as in the command.
+    doublet_t descriptor_index{0};
+    /// Bytes 36-43: the talker the input is bound to.
+    Eui64 talker_entity_id{};
+    /// Bytes 44-45: the talker's STREAM_OUTPUT.
+    doublet_t talker_unique_id{0};
+    /// Byte 46: pbsta[7:5] | acmpsta[4:0]
+    octet_t pbsta_acmpsta{0};
+    /// Byte 47: reserved, 0.
+    octet_t reserved_end{0};
+
+    /// The Probing status, Table 5.5.
+    [[nodiscard]] constexpr auto pbsta() const noexcept -> uint8_t { return static_cast<uint8_t>(pbsta_acmpsta.get() >> 5U); }
+
+    /// The ACMP status of the last probe (IEEE 1722.1-2021 Table 8-3),
+    /// defined while the Probing status is PROBING_ACTIVE and 0 otherwise.
+    [[nodiscard]] constexpr auto acmpsta() const noexcept -> uint8_t { return static_cast<uint8_t>(pbsta_acmpsta.get() & 0x1FU); }
+
+    constexpr void set_status(uint8_t const pbsta, uint8_t const acmpsta) noexcept
+    {
+        pbsta_acmpsta = static_cast<uint8_t>(((pbsta & 0x07U) << 5U) | (acmpsta & 0x1FU));
+    }
+
+    auto operator<=>(MvuGetStreamInputInfoExResponse const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuGetStreamInputInfoExResponse) == 18, "MvuGetStreamInputInfoExResponse must be exactly 18 bytes");
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, descriptor_type) == 2);
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, descriptor_index) == 4);
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, talker_entity_id) == 6);
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, talker_unique_id) == 14);
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, pbsta_acmpsta) == 16);
+static_assert(offsetof(MvuGetStreamInputInfoExResponse, reserved_end) == 17);
+
 }  // namespace statusbar::atdecc
 
 template <>
@@ -215,4 +336,16 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::A
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMilanInfoResponse> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuBindStream> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuStreamInput> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetStreamInputInfoExResponse> : std::true_type
 {};

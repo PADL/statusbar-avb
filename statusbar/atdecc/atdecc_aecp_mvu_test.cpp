@@ -139,4 +139,79 @@ TEST(aecp_mvu, dotted_versions_read_and_print)
     EXPECT_EQ(mvu_version_to_dotted(0), "0.0.0.0");
 }
 
+TEST(aecp_mvu, a_bind_stream_is_laid_out_as_figure_5_10_has_it)
+{
+    MvuBindStream bind{};
+    bind.flags = MVU_BIND_STREAM_FLAG_STREAMING_WAIT;
+    bind.descriptor_type = 0x0005;  // STREAM_INPUT
+    bind.descriptor_index = 0x0102;
+    bind.talker_entity_id = kTarget;
+    bind.talker_stream_index = 0x0304;
+    std::array<uint8_t, MvuBindStream::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, bind);
+
+    // Octets 30 to 47 of the AECPDU: flags, descriptor, talker, its stream, reserved.
+    std::array<uint8_t, MvuBindStream::LENGTH> const golden{
+        0x00, 0x01, 0x00, 0x05, 0x01, 0x02, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x01, 0x03, 0x04, 0x00, 0x00};
+    EXPECT_TRUE(bytes == golden);
+    EXPECT_TRUE(bind.streaming_wait());
+
+    MvuBindStream back{};
+    span_load(back, make_const_span(bytes));
+    EXPECT_EQ(back, bind);
+    back.flags = 0xFFFE;  // every bit Table 5.19 reserves
+    EXPECT_FALSE(back.streaming_wait());
+}
+
+TEST(aecp_mvu, a_command_naming_a_stream_input_is_laid_out_as_figure_5_11_has_it)
+{
+    // UNBIND_STREAM, its response, and the GET_STREAM_INPUT_INFO_EX command.
+    MvuStreamInput input{};
+    input.descriptor_type = 0x0005;
+    input.descriptor_index = 0x0102;
+    std::array<uint8_t, MvuStreamInput::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, input);
+    std::array<uint8_t, MvuStreamInput::LENGTH> const golden{0x00, 0x00, 0x00, 0x05, 0x01, 0x02};
+    EXPECT_TRUE(bytes == golden);
+
+    MvuStreamInput back{};
+    span_load(back, make_const_span(bytes));
+    EXPECT_EQ(back, input);
+}
+
+TEST(aecp_mvu, a_stream_input_info_ex_response_is_laid_out_as_figure_5_12_has_it)
+{
+    MvuGetStreamInputInfoExResponse info{};
+    info.descriptor_type = 0x0005;
+    info.descriptor_index = 0x0102;
+    info.talker_entity_id = kTarget;
+    info.talker_unique_id = 0x0304;
+    info.set_status(2, 7);  // PROBING_ACTIVE, LISTENER_TALKER_TIMEOUT
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, info);
+
+    // pbsta is the three high bits of octet 46 and acmpsta its five low bits:
+    // 010 00111.
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> const golden{
+        0x00, 0x00, 0x00, 0x05, 0x01, 0x02, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x00, 0x01, 0x03, 0x04, 0x47, 0x00};
+    EXPECT_TRUE(bytes == golden);
+
+    MvuGetStreamInputInfoExResponse back{};
+    span_load(back, make_const_span(bytes));
+    EXPECT_EQ(back, info);
+    EXPECT_EQ(back.pbsta(), 2);
+    EXPECT_EQ(back.acmpsta(), 7);
+}
+
+TEST(aecp_mvu, the_two_statuses_of_a_stream_input_do_not_spill_into_each_other)
+{
+    MvuGetStreamInputInfoExResponse info{};
+    info.set_status(0xFF, 0);
+    EXPECT_EQ(info.pbsta(), 7);
+    EXPECT_EQ(info.acmpsta(), 0);
+    info.set_status(0, 0xFF);
+    EXPECT_EQ(info.pbsta(), 0);
+    EXPECT_EQ(info.acmpsta(), 31);
+}
+
 TEST_MAIN(statusbar_atdecc, atdecc_aecp_mvu_test)

@@ -25,6 +25,7 @@ statusbar_add_module(
   atdecc_milan_acmp_sink.cpp
   atdecc_milan_acmp_talker.cpp
   atdecc_milan_adp_discovery_sm.cpp
+  atdecc_milan_mvu_stream_input.cpp
   atdecc_aecp_aem_controller.cpp
   atdecc_error.cpp
   atdecc_jdks.cpp
@@ -44,6 +45,7 @@ statusbar_add_module(
   atdecc_milan_acmp_sink_test.cpp
   atdecc_milan_acmp_talker_test.cpp
   atdecc_milan_adp_discovery_sm_test.cpp
+  atdecc_milan_mvu_stream_input_test.cpp
   atdecc_adp_test.cpp
   atdecc_aecp_test.cpp
   atdecc_aecp_aa_test.cpp
