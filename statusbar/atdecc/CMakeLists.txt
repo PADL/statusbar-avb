@@ -21,6 +21,10 @@ statusbar_add_module(
   atdecc_acmp_listener_sm.cpp
   atdecc_acmp_talker_sm.cpp
   atdecc_acmp_controller_sm.cpp
+  atdecc_milan_acmp_listener_sm.cpp
+  atdecc_milan_acmp_sink.cpp
+  atdecc_milan_acmp_talker.cpp
+  atdecc_milan_adp_discovery_sm.cpp
   atdecc_aecp_aem_controller.cpp
   atdecc_error.cpp
   atdecc_jdks.cpp
@@ -36,6 +40,10 @@ statusbar_add_module(
   statusbar::tsn
   TESTS
   atdecc_acmp_sm_test.cpp
+  atdecc_milan_acmp_listener_sm_test.cpp
+  atdecc_milan_acmp_sink_test.cpp
+  atdecc_milan_acmp_talker_test.cpp
+  atdecc_milan_adp_discovery_sm_test.cpp
   atdecc_adp_test.cpp
   atdecc_aecp_test.cpp
   atdecc_aecp_aa_test.cpp

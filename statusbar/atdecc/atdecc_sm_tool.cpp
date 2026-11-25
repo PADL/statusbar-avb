@@ -27,6 +27,10 @@ constexpr auto state_machines = std::array{
         "adp_discovery_sm", "ADP Discovery", "IEEE 1722.1-2021 Clause 6.2.4"),
     make_sm_info<statusbar::atdecc::AemControllerStateMachine<>>(
         "aem_controller_sm", "AECP AEM Controller", "IEEE 1722.1-2021 Clause 9.2.1.2.5"),
+    make_sm_info<statusbar::atdecc::MilanSinkStateMachine<>>(
+        "milan_acmp_sink_sm", "Milan ACMP Listener Sink", "Milan v1.3 Section 5.5.3"),
+    make_sm_info<statusbar::atdecc::MilanDiscoveryStateMachine<>>(
+        "milan_adp_discovery_sm", "Milan Listener Discovery", "Milan v1.3 Section 5.6.4"),
 };
 
 int main(int argc, char* argv[])

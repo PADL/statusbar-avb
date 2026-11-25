@@ -15,3 +15,7 @@
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_jdks.hpp"
+#include "statusbar/atdecc/atdecc_milan_acmp_listener_sm.hpp"
+#include "statusbar/atdecc/atdecc_milan_acmp_sink.hpp"
+#include "statusbar/atdecc/atdecc_milan_acmp_talker.hpp"
+#include "statusbar/atdecc/atdecc_milan_adp_discovery_sm.hpp"
