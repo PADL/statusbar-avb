@@ -278,6 +278,25 @@ TEST(stream_spec_rate, mixed_audio_rates_rejected)
     EXPECT_FALSE(common_audio_sample_rate(crf_only).has_value());
 }
 
+TEST(stream_spec_rate, an_aaf_format_is_retimed_with_its_layout_kept)
+{
+    // The rate and its Table 18 frame change; sample format, depth and channels stay.
+    EXPECT_EQ(aaf_format_at_rate(0x0205022002006000ULL, 96'000U).value_or(0), AAF_96K_INT32_8CH);
+    EXPECT_EQ(aaf_format_at_rate(AAF_96K_INT32_8CH, 48'000U).value_or(0), 0x0205022002006000ULL);
+    uint64_t const int24_48k = 0x0205031800000000ULL | (uint64_t{32} << 22) | (uint64_t{6} << 12);
+    uint64_t const int24_96k = 0x0207031800000000ULL | (uint64_t{32} << 22) | (uint64_t{12} << 12);
+    EXPECT_EQ(aaf_format_at_rate(int24_48k, 96'000U).value_or(0), int24_96k);
+    EXPECT_EQ(aaf_format_at_rate(0x0205022002006000ULL, 44'100U).value_or(0), 0x0204022002006000ULL);  // 6, not 5
+    EXPECT_EQ(aaf_format_at_rate(0x0205022002000000ULL, 96'000U).value_or(0), 0x0207022002000000ULL);  // none named stays so
+}
+
+TEST(stream_spec_rate, a_word_not_aaf_or_a_rate_without_a_code_is_not_retimed)
+{
+    EXPECT_FALSE(aaf_format_at_rate(CRF_MILAN_48K, 96'000U).has_value());
+    EXPECT_FALSE(aaf_format_at_rate(AM824_48K_8CH, 96'000U).has_value());
+    EXPECT_FALSE(aaf_format_at_rate(0x0205022002006000ULL, 12'345U).has_value());
+}
+
 }  // namespace
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_spec_test)

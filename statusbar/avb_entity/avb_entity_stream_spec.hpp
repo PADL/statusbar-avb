@@ -227,6 +227,11 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 /// when nonzero.
 [[nodiscard]] auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t fallback_hz = 0) -> StatusValue<uint32_t>;
 
+/// The AAF format word @p word at @p rate_hz: its nsr, and a samples_per_frame it names set to
+/// the rate's aaf_table_samples_per_pdu(); sample format, depth and channels kept. nullopt for a
+/// word that is not AAF or a rate with no nsr code (IEEE 1722-2016 Table 11).
+[[nodiscard]] auto aaf_format_at_rate(uint64_t word, uint32_t rate_hz) noexcept -> std::optional<uint64_t>;
+
 /// First stream of @p kind in the table, or nullopt. Replaces the per-entity
 /// hardcoded index constants (AM824=0 / AAF=1 / CRF=2 style).
 [[nodiscard]] auto find_stream(StreamSpecs const& specs, StreamKind kind) noexcept -> std::optional<uint16_t>;
