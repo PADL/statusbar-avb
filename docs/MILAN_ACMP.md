@@ -125,7 +125,7 @@ takes each answer through a setter, and the entity kit supplies them:
 | Was its talker heard before the bind? | the `heard` argument of `receive_controller_command` and `receive_mvu_binding_command` | `AtdeccNetHandler`, from the ADP discovery it feeds |
 | Look again, SRP changed | `on_srp_changed()` | from `MsrpHandler`'s `on_remote_talker` |
 | Start and stop the reservation | `AcmpListenerCallbacks::on_connect`, `on_disconnect` | `ListenerStreams`: MSRP Listener attach with the same `TalkerMatch`, multicast join |
-| Save the bindings (5.5.2.4) | `set_on_bindings_changed` | the `listener.bindings` file, written before the controller is answered |
+| Save the bindings (5.5.2.4) | `set_on_bindings_changed` | the `listener.bindings` file, written before the controller is answered; then each input's stopped state (5.3.8.7) |
 
 ### The Listener declaration follows what was probed
 
@@ -148,9 +148,10 @@ StreamID, as before.
 ### Bindings across a restart
 
 5.3.8.3 wants the binding parameters (talker, source, controller,
-STREAMING_WAIT) in non-volatile memory. The kit writes them at every bind
-and unbind and, at start, puts each saved sink in PRB_W_AVAIL
-(5.5.3.6.2), where it waits for its talker's ADP.
+STREAMING_WAIT) in non-volatile memory. The kit writes them at every
+bind, unbind and change of the started/stopped state and, at start, puts
+each saved sink in PRB_W_AVAIL (5.5.3.6.2), where it waits for its
+talker's ADP.
 
 Where they are written: the file `listener.bindings` names, or with none
 named the file `listener-bindings` of the entity's state directory,
@@ -164,6 +165,47 @@ process and one status line at start says so.
 The file is the one the IEEE 1722.1 listener uses for its fast-connect
 goals, in a second form (`statusbar-listener-bindings v2`) with the two
 fields the first has no place for; each listener reads both forms.
+
+### A stopped stream input (5.3.8.7)
+
+A bound stream input is started or stopped. "A PAAD-AE having a stopped
+Stream Input shall discard the Stream AVTPDUs it receives."
+
+The state is a binding parameter, the STREAMING_WAIT of the sink's
+binding. Three things set it:
+
+| | Sets |
+|---|---|
+| A bind (BIND_RX_COMMAND, BIND_STREAM) | stopped when its STREAMING_WAIT flag is set, started when it is not |
+| STOP_STREAMING on the STREAM_INPUT (5.4.2.20) | stopped |
+| START_STREAMING on the STREAM_INPUT (5.4.2.19) | started |
+
+START_STREAMING and STOP_STREAMING go to the sink
+(`MilanSink::set_streaming_wait`), which saves the state as it saves a
+bind. They are not events of the sink machine: the sink goes on probing,
+or stays settled with its reservation, as it was. They have no effect on
+an input that is not bound, and an unbind takes the state away with the
+binding. The entity's lock refuses them from another controller.
+
+Whatever changed it, the kit hears of it through the bindings hook
+(`AvbEntityHost::set_on_milan_bindings_changed`) and sets the input
+(`ListenerStreams::set_stream_stopped`). At start the state comes back
+with the saved binding, before a frame can arrive.
+
+While an input is stopped:
+
+- each AVTPDU of its stream is discarded unread: nothing is decoded and
+  no consumer is called;
+- the sink, the MSRP Listener declaration and the group membership stay
+  as they are, so the talker goes on streaming (5.5.4.1) and a start
+  takes the next frame;
+- GET_STREAM_INFO reports STREAMING_WAIT (Table 5.8) and GET_RX_STATE
+  the same flag (Tables 5.42 to 5.44), and a change of the state sends a
+  GET_STREAM_INFO notification (Table 5.20).
+
+Under IEEE 1722.1 connection management the two commands stop and start
+an input the same way. Nothing binds an input stopped there, and the
+state is not saved.
 
 ### Binding over AECP MVU (5.4.4.6 to 5.4.4.8)
 
@@ -286,6 +328,12 @@ which is what the grace was for.
   still reads it.
 - The handler answers ENTITY_MISBEHAVING if a sink gives a bind or unbind
   no answer at all. No transition of Table 5.31 does that.
+- A discarded AVTPDU of a stopped input counts in FRAMES_RX and in no
+  other counter: it was received. An input that was locked counts
+  MEDIA_UNLOCKED when its first frame is discarded, on the receive
+  thread, so with no frame arriving it is counted when one does. After a
+  start the stream is taken as a new one: no SEQ_NUM_MISMATCH or
+  MEDIA_RESET for what went by unread.
 
 ## Not done
 
@@ -298,9 +346,10 @@ which is what the grace was for.
   sender, and no MVU sequence number per registered controller.
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
-- START_STREAMING and STOP_STREAMING on a STREAM_INPUT do not change the
-  started/stopped state saved with its binding (5.3.8.7); only a bind's
-  STREAMING_WAIT sets it.
+- START_STREAMING and STOP_STREAMING on a STREAM_OUTPUT are accepted
+  under the Milan profile and stop the talker, where 5.4.2.19 and
+  5.4.2.20 ask for NOT_SUPPORTED and 5.3.7.3 for an output that cannot
+  be stopped.
 - MVRP is declared for the Class A Domain's VLAN. A sink settled on
   another VLAN does not add that one (4.4.1).
 - A PROBE_TX_COMMAND is not checked against the interface it arrived on

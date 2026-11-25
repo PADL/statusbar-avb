@@ -5,6 +5,7 @@
 
 #include <format>
 #include <iterator>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -105,6 +106,15 @@ void tally_media_lock(
     c.have_prev_delta = true;
 }
 
+/// Forget the packet before this one: the next is the first of a stream.
+void forget_run(StreamInputCounters& c) noexcept
+{
+    c.have_prev = false;
+    c.have_prev_ts = false;
+    c.have_prev_delta = false;
+    c.locked_run = 0;
+}
+
 /// "{:+.1f} us" of a nanosecond value.
 auto us(double const ns) -> double
 {
@@ -166,6 +176,15 @@ void format_stream_input_timing_to(std::string& out, uint16_t const stream_index
     format_heading_lines_to(out, stream_index, c);
     format_margin_lines_to(out, c);
     format_histogram_to(out, c);
+}
+
+void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
+{
+    c.frames_rx.fetch_add(1, relaxed);
+    if (std::exchange(c.is_locked, false)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+    }
+    forget_run(c);
 }
 
 void tally_stream_input_packet(

@@ -295,6 +295,26 @@ struct ListenerStreams
     /// callback, told that handler's time.
     void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now);
 
+    /// The stopped state of STREAM_INPUT @p stream_index (Milan v1.3 5.3.8.7;
+    /// STOP_STREAMING, or a bind with STREAMING_WAIT): while it is set every
+    /// AVTPDU of the input's stream is discarded unread. Nothing is decoded,
+    /// no consumer is called, and the counters see it as
+    /// tally_discarded_stream_input_packet() has it. The connection, the MSRP
+    /// Listener declaration and the group membership stay as they are: a
+    /// stopped input is still bound and still reserves. Kept by stream index,
+    /// so it outlives close_rx() and open_stream(). Reactor thread; the RX
+    /// thread reads it for each frame.
+    void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+    {
+        if (stream_index < stream_stopped_.size()) {
+            stream_stopped_[stream_index].store(stopped, std::memory_order_release);
+        }
+    }
+    [[nodiscard]] auto stream_stopped(uint16_t const stream_index) const noexcept -> bool
+    {
+        return stream_index < stream_stopped_.size() && stream_stopped_[stream_index].load(std::memory_order_acquire);
+    }
+
     /// The group a listener joins for a talker destination: the address when
     /// it is multicast, nothing otherwise (8.2.1.13).
     [[nodiscard]] static auto group_to_join(ieee::Eui48 dest_mac) noexcept -> std::optional<ieee::Eui48>;
@@ -406,6 +426,8 @@ struct ListenerStreams
         StreamCrfFn fn{};
     };
     sg14::inplace_vector<PendingCrf, MAX_ENTITY_STREAMS> pending_crf_{};
+    /// Per-stream stopped states (see set_stream_stopped).
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
 };
 
 }  // namespace statusbar::avb_entity

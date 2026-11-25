@@ -994,6 +994,8 @@ TEST(avb_entity_kit_acmp, a_milan_binding_is_in_the_file_before_the_answer_and_s
     EXPECT_EQ(sink.context().binding->talker_entity_id, TALKER_ID);
     EXPECT_EQ(sink.context().binding->controller_entity_id, CONTROLLER_ID);
     EXPECT_TRUE(sink.context().binding->streaming_wait);
+    // 5.3.8.7: the stopped state is restored with the binding, before any frame can arrive.
+    EXPECT_TRUE(again.listener->listener()->stream_stopped(sink_index));
     again.run(8 * ROUNDS_PER_SECOND);
     EXPECT_TRUE(again.wire.empty());  // nothing is asked of a talker not yet heard from
 
@@ -1217,6 +1219,153 @@ TEST(avb_entity_kit_mvu, a_milan_model_held_to_ieee_1722_1_says_it_does_not_impl
         EXPECT_EQ(answer.common.status(), atdecc::MVU_STATUS_NOT_IMPLEMENTED);
     }
     EXPECT_TRUE(kit.stop(TimePoint{}));
+}
+
+//
+// A stopped stream input - Milan v1.3 5.3.8.7, 5.4.2.19, 5.4.2.20
+//
+
+namespace {
+
+/// START_STREAMING or STOP_STREAMING (@p command) for STREAM_INPUT @p index of @p kit, from @p controller: the status.
+auto streaming_command(KitUnderTest& kit, uint16_t const command, uint16_t const index, Eui64 const& controller = CONTROLLER_ID)
+    -> uint8_t
+{
+    atdecc::AemDu header{};
+    header.init_command(command, atdecc::aem::AemStreamingPayload::LENGTH);
+    header.controller_entity_id = controller;
+    atdecc::aem::AemStreamingPayload payload{};
+    payload.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    payload.descriptor_index = index;
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return kit->host().components().aem_handler.handle_command(header, make_const_span(payload), out).status;
+}
+
+/// Whether GET_STREAM_INFO reports STREAM_INPUT @p index of @p kit as STREAMING_WAIT.
+auto reports_streaming_wait(KitUnderTest& kit, uint16_t const index) -> bool
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetStreamInfoCommandPayload asked{};
+    asked.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT;
+    asked.descriptor_index = index;
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemStreamInfoPayload info{};
+    span_load(info, std::span<uint8_t const>{out}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
+    return (info.flags.get() & atdecc::aem::stream_info_flags::STREAMING_WAIT) != 0;
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_stopped, a_milan_input_bound_stopped_discards_until_it_is_started)
+{
+    // A bind with STREAMING_WAIT binds the input in the stopped state
+    // (Table 5.19 and its ACMP twin). The sink probes, settles and reserves
+    // all the same, and the talker streams: only the input's own taking of
+    // the frames is off (5.3.8.7, 5.5.4.1).
+    KitPair pair{"milan13"};
+    auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
+    auto const* const inputs = pair.listener->listener();
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_FALSE(reports_streaming_wait(pair.listener, pair.sink));
+
+    auto bind = controller_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink);
+    bind.flags = atdecc::acmp_flags::STREAMING_WAIT;
+    pair.controller_sends(bind);
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_TRUE(inputs->stream_stopped(pair.sink));
+    EXPECT_TRUE(reports_streaming_wait(pair.listener, pair.sink));
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::SettledRsvOk);
+    EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
+    EXPECT_TRUE(pair.talker_transmits());
+
+    // 5.4.2.19: START_STREAMING on a bound and stopped input starts it, and the state is saved with the binding.
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_START_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_FALSE(reports_streaming_wait(pair.listener, pair.sink));
+    EXPECT_FALSE(sink.context().binding->streaming_wait);
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::SettledRsvOk);
+
+    // 5.4.2.20, and back.
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(inputs->stream_stopped(pair.sink));
+    EXPECT_TRUE(sink.context().binding->streaming_wait);
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_TRUE(pair.last(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_RESPONSE)->is_streaming_wait());
+
+    // A bind without the flag starts it: the state is the binding's.
+    pair.bind();
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stopped, an_unbound_milan_input_is_not_stopped_and_a_command_for_it_has_no_effect)
+{
+    // "The started/stopped state is undefined when the Stream Input is not
+    // bound", and START and STOP_STREAMING have "no effect on a Stream Input
+    // that is not already bound": they are answered, and change nothing.
+    KitPair pair{"milan13"};
+    auto const* const inputs = pair.listener->listener();
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_FALSE(reports_streaming_wait(pair.listener, pair.sink));
+
+    // Bound and stopped, then unbound: the binding's state goes with the binding.
+    pair.bind();
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(inputs->stream_stopped(pair.sink));
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_FALSE(reports_streaming_wait(pair.listener, pair.sink));
+    // A new bind does not find the old state.
+    pair.bind();
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stopped, a_locked_milan_entity_refuses_another_controllers_stop_streaming)
+{
+    // 5.4.2.20: "it shall not accept a STOP_STREAMING command from a different controller".
+    KitPair pair{"milan13"};
+    pair.bind();
+    lock_entity(pair.listener, OTHER_CONTROLLER_ID);
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_FALSE(pair.listener->listener()->stream_stopped(pair.sink));
+    EXPECT_EQ(
+        streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink, OTHER_CONTROLLER_ID),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(pair.listener->listener()->stream_stopped(pair.sink));
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stopped, an_ieee_1722_1_input_is_stopped_and_started_by_the_two_commands)
+{
+    // Under IEEE 1722.1 connection management the state is the command's
+    // alone (7.4.35, 7.4.36): nothing binds an input stopped, nothing saves it.
+    KitPair pair{"classic"};
+    pair.bind();
+    auto const* const inputs = pair.listener->listener();
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(inputs->stream_stopped(pair.sink));
+    EXPECT_TRUE(reports_streaming_wait(pair.listener, pair.sink));
+    EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_START_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(inputs->stream_stopped(pair.sink));
+    EXPECT_FALSE(reports_streaming_wait(pair.listener, pair.sink));
+
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
 namespace {

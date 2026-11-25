@@ -105,6 +105,16 @@ void tally_stream_input_packet(
     uint32_t lock_tolerance_ns,
     uint32_t sample_rate_hz);
 
+/// One received packet of a stopped input, discarded unread (Milan v1.3
+/// 5.3.8.7: "a stopped Stream Input shall discard the Stream AVTPDUs it
+/// receives"). It counts as received, FRAMES_RX, and as nothing else. An
+/// input that was locked is no longer synchronized on the media clock
+/// (MEDIA_UNLOCKED, so that MEDIA_LOCKED equals it, 5.3.8.10), and what the
+/// detector knew of the stream is forgotten: a start then begins from the
+/// stream as it is, with no SEQ_NUM_MISMATCH or MEDIA_RESET for the packets
+/// nobody looked at. RX thread.
+void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept;
+
 /// Append the presentation-margin report for one STREAM_INPUT to @p out:
 /// late/early counts, margin and lateness statistics, and the margin histogram
 /// as an ASCII bar chart. Nothing is appended when no frame carried a usable

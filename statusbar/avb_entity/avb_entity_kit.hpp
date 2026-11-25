@@ -323,6 +323,19 @@ class AvbEntityKit
     [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
     /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
     void install_storage_hooks();
+    /// START_STREAMING or STOP_STREAMING was accepted for a stream.
+    [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
+    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_INPUT
+    /// @p index: to its Milan sink, or straight to the input under IEEE 1722.1.
+    void start_or_stop_input(uint16_t index, bool stopped);
+    /// Whether STREAM_INPUT @p index is to discard its frames: a Milan
+    /// sink bound with the stopped state (5.3.8.7), or an IEEE 1722.1 input
+    /// after STOP_STREAMING.
+    [[nodiscard]] auto input_stopped(uint16_t index) const noexcept -> bool;
+    /// The input's stopped state set, logged and notified (GET_STREAM_INFO), when it changes.
+    void set_input_stopped(uint16_t index, bool stopped);
+    /// Every stream input given the stopped state input_stopped() says.
+    void apply_input_stopped_states();
 
     // start()'s steps, in order.
     [[nodiscard]] auto bring_up_control_plane(net::MessageReactor& reactor, TimePoint now) -> Status;

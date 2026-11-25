@@ -183,18 +183,12 @@ void AvbEntityKit::install_storage_hooks()
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
-    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
-    // (the media thread treats it as a closed SRP gate); START reopens.
-    // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
-    // Table 7-145), so every subscribed controller is told by an unsolicited
-    // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
-    storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
-        if (type == DESCRIPTOR_STREAM_OUTPUT) {
-            talker_->set_stream_stopped(index, !streaming);
-            (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
-        }
-        return atdecc::AEM_STATUS_SUCCESS;
-    });
+    storage_handler_.set_on_streaming_changed(
+        [this](uint16_t type, uint16_t index, bool streaming) -> uint8_t { return on_streaming_changed(type, index, streaming); });
+    // Under Milan the started/stopped state of an input is its sink's
+    // (a bind's STREAMING_WAIT, START_STREAMING, STOP_STREAMING): each input
+    // takes or discards its frames as its sink's binding says.
+    host_.set_on_milan_bindings_changed([this]() { apply_input_stopped_states(); });
     // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
     // source; the media thread reads it per tick (media_rate()).
     storage_handler_.set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
@@ -203,6 +197,69 @@ void AvbEntityKit::install_storage_hooks()
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
+}
+
+auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
+{
+    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
+    // (the media thread treats it as a closed SRP gate); START reopens.
+    // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
+    // Table 7-145), so every subscribed controller is told by an unsolicited
+    // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
+    if (type == DESCRIPTOR_STREAM_OUTPUT) {
+        talker_->set_stream_stopped(index, !streaming);
+        (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
+    } else if (type == DESCRIPTOR_STREAM_INPUT) {
+        start_or_stop_input(index, !streaming);
+    }
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+void AvbEntityKit::start_or_stop_input(uint16_t const index, bool const stopped)
+{
+    // Milan v1.3 5.3.8.7: the started/stopped state of a stream input is
+    // its sink's, a binding parameter saved with the others, and a command
+    // for an input that is not bound has no effect (5.4.2.19, 5.4.2.20).
+    // What the sink took comes back through the bindings hook
+    // (apply_input_stopped_states).
+    if (host_.components().acmp_is_milan()) {
+        (void)host_.components().milan_acmp_listener->set_streaming_wait(index, stopped);
+        return;
+    }
+    set_input_stopped(index, stopped);
+}
+
+auto AvbEntityKit::input_stopped(uint16_t const index) const noexcept -> bool
+{
+    if (host_.components().acmp_is_milan()) {
+        auto const* const sink = host_.components().milan_acmp_listener->sink(index);
+        return sink != nullptr && sink->is_bound() && sink->context().binding->streaming_wait;
+    }
+    return !storage_handler_.is_streaming(DESCRIPTOR_STREAM_INPUT, index);
+}
+
+void AvbEntityKit::set_input_stopped(uint16_t const index, bool const stopped)
+{
+    if (listener_ == nullptr || listener_->stream_stopped(index) == stopped) {
+        return;
+    }
+    listener_->set_stream_stopped(index, stopped);
+    host_.ctl_log().status(
+        "acmp: listener stream {} {}",
+        index,
+        stopped ? logging::lit("STOPPED: its frames are discarded") : logging::lit("no longer STOPPED"));
+    // Table 5.20: the started/stopped state of a stream input is told.
+    (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+}
+
+void AvbEntityKit::apply_input_stopped_states()
+{
+    if (listener_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        set_input_stopped(spec.index, input_stopped(spec.index));
+    }
 }
 
 void AvbEntityKit::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)
@@ -484,7 +541,7 @@ void AvbEntityKit::wire_aem_stream_callbacks()
                     out);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return fill_listener_stream_info(host_, descriptor_index, out);
+                return fill_listener_stream_info(host_, descriptor_index, listener_->stream_stopped(descriptor_index), out);
             }
             return false;
         });
@@ -712,6 +769,8 @@ void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_grou
     bool const milan = host_.components().acmp_is_milan();
     host_.enable_listener_binding_persistence(
         state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
+    // The started/stopped state is restored with the binding (5.3.8.7).
+    apply_input_stopped_states();
 }
 
 void AvbEntityKit::finish_start()

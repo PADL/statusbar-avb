@@ -197,6 +197,16 @@ class AvbEntityHost
     /// is written anywhere the configuration did not name.
     void enable_listener_binding_persistence(std::string path);
 
+    /// Called after any Milan sink's binding parameters changed (a bind, an
+    /// unbind, a started/stopped change), once they are saved where they are
+    /// saved at all, and before the controller is answered. For what follows
+    /// a binding beside its file: the kit's stopped state of each stream
+    /// input. Reactor thread.
+    void set_on_milan_bindings_changed(statusbar::sg14::inplace_function<void(), 64> fn)
+    {
+        on_milan_bindings_changed_ = std::move(fn);
+    }
+
     // --- Logging -----------------------------------------------------------------
     //
     // The host owns two SPSC log channels, one per producer thread context:
@@ -363,6 +373,8 @@ class AvbEntityHost
     void enable_milan_binding_persistence();
     void load_milan_bindings();
     void save_milan_bindings();
+    /// A Milan sink's binding parameters changed: save them, tell the kit.
+    void milan_bindings_changed();
 
     // Generic SM-callback wiring (no stream specifics): split by SM group.
     void wire_callbacks();
@@ -419,6 +431,7 @@ class AvbEntityHost
     bool propagation_delay_override_{false};
     uint32_t propagation_delay_override_ns_{0};
     std::string listener_bindings_path_{};  ///< see enable_listener_binding_persistence
+    statusbar::sg14::inplace_function<void(), 64> on_milan_bindings_changed_{};
     bool running_{false};
     bool adp_held_{false};  ///< see hold_adp()
     bool adp_owed_{false};  ///< a Link Up under the hold has not started ADP yet

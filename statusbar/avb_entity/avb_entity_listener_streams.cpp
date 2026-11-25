@@ -505,6 +505,10 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::N
     if (slot == nullptr) {
         return;
     }
+    if (stream_stopped(slot->spec.index)) {
+        tally_discarded_stream_input_packet(slot->counters);  // Milan v1.3 5.3.8.7
+        return;
+    }
     if (slot->am824) {
         receive_am824_frame(*slot, frame, now);
     } else if (slot->aaf) {

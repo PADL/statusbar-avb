@@ -125,9 +125,13 @@ template <typename ListenerSink>
 /// Fill the GET_STREAM_INFO response for a STREAM_INPUT (listener) index
 /// from the ACMP listener sink state: the connected talker's stream_id /
 /// dest MAC when bound, plus the descriptor's current_format — so a
-/// controller can read what an input is connected to.
+/// controller can read what an input is connected to. @p stopped is the
+/// input's stopped state (ListenerStreams::stream_stopped), reported as
+/// STREAMING_WAIT: "1 if the Stream Input is bound and stopped" (Milan v1.3
+/// Table 5.8), and IEEE 1722.1-2021 Table 7-145's stream "stopped with
+/// STOP_STREAMING command".
 [[nodiscard]] inline auto fill_listener_stream_info(
-    AvbEntityHost const& host, uint16_t const descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+    AvbEntityHost const& host, uint16_t const descriptor_index, bool const stopped, atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
     auto const sink = host.components().listener_sink(descriptor_index);
     if (!sink.has_value()) {
@@ -137,7 +141,7 @@ template <typename ListenerSink>
         ? atdecc::aem::stream_info_flags::STREAM_FORMAT_VALID
         : 0U;
     flags |= copy_connected_sink_identity(*sink, out);
-    out.flags = ieee::quadlet_t{flags};
+    out.flags = ieee::quadlet_t{flags | (stopped ? atdecc::aem::stream_info_flags::STREAMING_WAIT : 0U)};
     return true;
 }
 

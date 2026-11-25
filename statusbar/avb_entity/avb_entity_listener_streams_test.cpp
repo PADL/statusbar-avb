@@ -461,6 +461,96 @@ TEST(listener_consume, a_timed_consumer_is_handed_the_same_times_as_nanoseconds)
     EXPECT_EQ(timed_calls, 16);
 }
 
+namespace {
+
+using AafFrame = std::array<uint8_t, avtp::AafPdu::HEADER_LENGTH + (12 * 8 * 4)>;
+
+/// One AAF packet of @p format for STREAM_1, twelve samples presented at @p presentation.
+auto aaf_frame_of(StreamFormatFields const& format, avtp::Nanoseconds const presentation) -> AafFrame
+{
+    avtp::AafStreamOutputContext talker{
+        tsn::StreamId{},
+        format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(format.sample_rate_hz),
+        format.channels,
+        format.bit_depth,
+        0};
+    avtp::AafPdu pdu{};
+    AafFrame frame{};
+    auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    EXPECT_EQ(avtp::aaf_stream_serialize(talker, pdu, payload, 12, presentation, [](uint8_t, std::span<float>) {}), payload.size());
+    span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+    return frame;
+}
+
+}  // namespace
+
+TEST(listener_stopped, a_stopped_input_discards_its_frames_and_a_started_one_takes_them_again)
+{
+    // Milan v1.3 5.3.8.7: "A PAAD-AE having a stopped Stream Input shall
+    // discard the Stream AVTPDUs it receives."
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    constexpr avtp::Nanoseconds NOW{1'795'000'000'000'000'000};
+    auto const frame = aaf_frame_of(ls.slot_for(0)->spec.format, NOW + avtp::Nanoseconds{2'000'000});
+    int calls = 0;
+    ls.set_consume(0, [&](uint8_t, std::span<float const>, uint64_t, uint64_t) { ++calls; });
+    auto const& slot = *ls.slot_for(0);
+
+    EXPECT_FALSE(ls.stream_stopped(0));
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(calls, 8);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 1U);
+    EXPECT_EQ(slot.counters.timestamp_valid.load(), 1U);
+
+    // Stopped: nothing is decoded and no consumer is called. The frame is
+    // counted as received and as nothing else.
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(ls.stream_stopped(0));
+    for (int i = 0; i < 3; ++i) {
+        ls.on_stream_rx_frame(frame, NOW);
+    }
+    EXPECT_EQ(calls, 8);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(slot.rx_samples.load(), uint64_t{12});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 4U);
+    EXPECT_EQ(slot.counters.timestamp_valid.load(), 1U);
+    // It is still connected: stopping is not unbinding.
+    EXPECT_TRUE(ls.frame_is_for_listener(0, frame));
+
+    ls.set_stream_stopped(0, false);
+    ls.on_stream_rx_frame(frame, NOW);
+    EXPECT_EQ(calls, 16);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{2});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 5U);
+    EXPECT_EQ(slot.counters.seq_num_mismatch.load(), 0U);  // the same frame again, and no error: the run began afresh
+}
+
+TEST(listener_stopped, the_stopped_state_is_kept_by_stream_index_and_outlives_the_slots)
+{
+    // The entity's stop and start close and open the slots; an input that
+    // was stopped is stopped still. One input's state is not another's.
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(ls.stream_stopped(0));
+    EXPECT_FALSE(ls.stream_stopped(1));
+    ls.close_rx();
+    EXPECT_TRUE(ls.stream_stopped(0));
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(ls.stream_stopped(0));
+    // An index past the entity's streams is never stopped, and setting it does nothing.
+    ls.set_stream_stopped(60000, true);
+    EXPECT_FALSE(ls.stream_stopped(60000));
+}
+
 TEST(listener_consume, a_timed_consumer_is_kept_pending_and_through_a_close_like_the_other)
 {
     auto donor = make_donor();

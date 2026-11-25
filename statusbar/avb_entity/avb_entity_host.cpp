@@ -672,6 +672,7 @@ void AvbEntityHost::enable_fast_connect_persistence()
 
 void AvbEntityHost::enable_milan_binding_persistence()
 {
+    components_.milan_acmp_listener->set_on_bindings_changed([this]() { milan_bindings_changed(); });
     if (listener_bindings_path_.empty()) {
         // Milan v1.3 5.3.8.3 wants the binding parameters in non-volatile
         // memory: listener.bindings, or the entity's state directory. With
@@ -680,7 +681,16 @@ void AvbEntityHost::enable_milan_binding_persistence()
         return;
     }
     load_milan_bindings();
-    components_.milan_acmp_listener->set_on_bindings_changed([this]() { save_milan_bindings(); });
+}
+
+void AvbEntityHost::milan_bindings_changed()
+{
+    if (!listener_bindings_path_.empty()) {
+        save_milan_bindings();
+    }
+    if (on_milan_bindings_changed_) {
+        on_milan_bindings_changed_();
+    }
 }
 
 void AvbEntityHost::load_milan_bindings()

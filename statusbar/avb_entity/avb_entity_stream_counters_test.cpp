@@ -15,6 +15,7 @@
 #include <string>
 
 using statusbar::avb_entity::StreamInputCounters;
+using statusbar::avb_entity::tally_discarded_stream_input_packet;
 using statusbar::avb_entity::tally_stream_input_packet;
 
 namespace {
@@ -117,6 +118,74 @@ TEST(stream_counters, jittered_step_does_not_lock)
         feed(c, i, ts, /*tv=*/true, /*ts_sparse=*/false);
     }
     EXPECT_EQ(c.media_locked.load(), 0U);
+}
+
+// --- A stopped input: Milan v1.3 5.3.8.7 -------------------------------------
+
+TEST(stream_counters, a_discarded_packet_counts_as_received_and_as_nothing_else)
+{
+    StreamInputCounters c;
+    for (int i = 0; i < 5; ++i) {
+        tally_discarded_stream_input_packet(c);
+    }
+    EXPECT_EQ(c.frames_rx.load(), 5U);
+    EXPECT_EQ(c.media_locked.load(), 0U);
+    EXPECT_EQ(c.media_unlocked.load(), 0U);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(c.timestamp_valid.load(), 0U);
+    EXPECT_EQ(c.timestamp_not_valid.load(), 0U);
+    EXPECT_EQ(c.late_timestamp.load(), 0U);
+    EXPECT_EQ(c.margin.count(), 0U);
+}
+
+TEST(stream_counters, stopping_a_locked_input_unlocks_it_once)
+{
+    // 5.3.8.10: MEDIA_LOCKED is MEDIA_UNLOCKED, or one more while the input
+    // is synchronized. A stopped input is not.
+    StreamInputCounters c;
+    for (uint8_t i = 0; i < 14; ++i) {
+        feed(c, i, static_cast<uint32_t>(i) * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    EXPECT_EQ(c.media_locked.load(), 1U);
+    for (int i = 0; i < 100; ++i) {
+        tally_discarded_stream_input_packet(c);
+    }
+    EXPECT_EQ(c.media_locked.load(), 1U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.frames_rx.load(), 114U);
+}
+
+TEST(stream_counters, a_started_input_begins_from_the_stream_as_it_is)
+{
+    // A hundred packets went by unread while the input was stopped: the
+    // first one read after the start is no sequence error, no media reset,
+    // and the input locks again as a new stream does.
+    StreamInputCounters c;
+    for (uint8_t i = 0; i < 14; ++i) {
+        feed(c, i, static_cast<uint32_t>(i) * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    for (int i = 0; i < 100; ++i) {
+        tally_discarded_stream_input_packet(c);
+    }
+    for (uint8_t i = 114; i < 130; ++i) {
+        tally_stream_input_packet(
+            c,
+            i,
+            static_cast<uint32_t>(i) * 125'000U,
+            true,
+            false,
+            /*mr=*/true,
+            true,
+            SAMPLES_PER_PKT,
+            false,
+            GPTP_OFF,
+            LOCK_TOL_NS,
+            FS);
+    }
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(c.media_reset.load(), 0U);  // mr differs from before the stop: nobody was looking
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
 }
 
 // --- Presentation margin: how late is late ----------------------------------
