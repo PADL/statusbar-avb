@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstring>
 #include <span>
+#include <utility>
 
 namespace statusbar::nanoavb {
 
@@ -1544,6 +1545,42 @@ namespace {
     return response;
 }
 
+/// The header of an MVU notification of @p command_type, carrying @p body_size
+/// octets of data, from @p entity_id to @p controller_id: a response with the
+/// u bit set (5.4.3.2.2).
+[[nodiscard]] auto mvu_unsolicited_header(
+    Eui64 const& entity_id,
+    Eui64 const& controller_id,
+    uint16_t const sequence_id,
+    uint16_t const command_type,
+    size_t const body_size) noexcept -> AecpMvuDu
+{
+    AecpMvuDu header{};
+    header.init_response(command_type, MVU_STATUS_SUCCESS, static_cast<uint16_t>(body_size), /*unsolicited=*/true);
+    header.common.target_entity_id = entity_id;
+    header.common.controller_entity_id = controller_id;
+    header.common.sequence_id = doublet_t{sequence_id};
+    return header;
+}
+
+/// The header of an unsolicited AEM response (u bit set) to @p controller_id from @p entity_id,
+/// with @p sequence_id, for @p command_type and a body of @p body_size octets.
+[[nodiscard]] auto aem_unsolicited_header(
+    Eui64 const& entity_id,
+    Eui64 const& controller_id,
+    uint16_t const sequence_id,
+    uint16_t const command_type,
+    size_t const body_size) noexcept -> AemDu
+{
+    AemDu header{};
+    header.target_entity_id = entity_id;
+    header.controller_entity_id = controller_id;
+    header.sequence_id = doublet_t{sequence_id};
+    header.init_response(
+        command_type, AEM_STATUS_SUCCESS, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body_size), /*unsolicited=*/true);
+    return header;
+}
+
 /// The response a command gets when the entity does not implement it
 /// (Table 5.16): the command's data goes back as it came, as an AEM
 /// response to an unimplemented command carries its command's.
@@ -1661,7 +1698,18 @@ auto AemCommandHandler::process_mvu_packet(Eui48 const& src_mac, std::span<uint8
     if (!command) {
         return false;
     }
-    return is_mvu_binding_command(*command) ? answer_mvu_binding_command(src_mac, *command) : answer_mvu_command(src_mac, *command);
+    our_entity_id_ = our_entity_id;  // the target_entity_id of the notifications it raises
+    return dispatch_mvu_command(src_mac, *command);
+}
+
+auto AemCommandHandler::dispatch_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool
+{
+    // As handle_command() does for AEM: the requester is left out of the fan-out (5.4.5.2).
+    Eui64 const outer_requester = std::exchange(requester_, command.header.common.controller_entity_id);
+    bool const sent =
+        is_mvu_binding_command(command) ? answer_mvu_binding_command(src_mac, command) : answer_mvu_command(src_mac, command);
+    requester_ = outer_requester;
+    return sent;
 }
 
 auto AemCommandHandler::answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool
@@ -1771,29 +1819,53 @@ auto AemCommandHandler::send_mvu_response(
     Eui48 const& dest_mac, AecpMvuDu const& cmd_header, uint8_t const status, std::span<uint8_t const> const response_body) const
     -> bool
 {
-    if (!callbacks_.send_response) {
+    return send_mvu_pdu(dest_mac, mvu_response_header(cmd_header, status, response_body.size()), response_body);
+}
+
+auto AemCommandHandler::send_mvu_pdu(Eui48 const& dest_mac, AecpMvuDu const& header, std::span<uint8_t const> const body) const
+    -> bool
+{
+    if (!callbacks_.send_response || body.size() > MAX_AEM_RESPONSE_SIZE) {
         return false;
     }
-    std::array<uint8_t, AecpMvuDu::LENGTH + MAX_AEM_RESPONSE_SIZE> response_buffer{};
-    auto const bytes = std::span{response_buffer};
-    span_store(bytes, mvu_response_header(cmd_header, status, response_body.size()));
-    span_copy(bytes.subspan(AecpMvuDu::LENGTH, response_body.size()), response_body);
-    return callbacks_.send_response(dest_mac, bytes.first(AecpMvuDu::LENGTH + response_body.size()));
+    std::array<uint8_t, AecpMvuDu::LENGTH + MAX_AEM_RESPONSE_SIZE> buffer{};
+    auto const bytes = std::span{buffer};
+    span_store(bytes, header);
+    span_copy(bytes.subspan(AecpMvuDu::LENGTH, body.size()), body);
+    return callbacks_.send_response(dest_mac, bytes.first(AecpMvuDu::LENGTH + body.size()));
+}
+
+void AemCommandHandler::emit_mvu_unsolicited(uint16_t const command_type, std::span<uint8_t const> const body)
+{
+    if (!milan_info_ || !callbacks_.send_response) {
+        return;  // a plain 1722.1 entity has no MVU to notify with; nothing is sent, no id spent
+    }
+    for (auto& reg : unsolicited_registrations_) {
+        if (reg.controller_entity_id == requester_) {
+            continue;
+        }
+        auto const header =
+            mvu_unsolicited_header(our_entity_id_, reg.controller_entity_id, reg.mvu_sequence_id++, command_type, body.size());
+        (void)send_mvu_pdu(reg.controller_mac, header, body);
+    }
 }
 
 auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemCommandResponse
 {
-    // Idempotent: if this controller is already registered, return success.
+    // The source MAC (set by process_packet) is where its notifications are unicast; its
+    // sequence ids start at zero (Milan v1.3 Section 5.4.2.21). Registering again is idempotent
+    // from the same station, and starts afresh from another one.
+    UnsolicitedRegistration const fresh{.controller_entity_id = header.controller_entity_id, .controller_mac = current_src_mac_};
     auto const existing = unsolicited_registrations_.find_if(
         [&header](UnsolicitedRegistration const& r) { return r.controller_entity_id == header.controller_entity_id; });
     if (existing < unsolicited_registrations_.capacity()) {
+        auto& reg = unsolicited_registrations_[existing];
+        if (reg.controller_mac != current_src_mac_) {
+            reg = fresh;
+        }
         return {.status = AEM_STATUS_SUCCESS, .size = 0};
     }
-
-    // Stash the source MAC (set by process_packet) so unsolicited notifications
-    // can be unicast back to this controller.
-    if (!unsolicited_registrations_.add(
-            UnsolicitedRegistration{.controller_entity_id = header.controller_entity_id, .controller_mac = current_src_mac_})) {
+    if (!unsolicited_registrations_.add(fresh)) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
@@ -1831,23 +1903,15 @@ auto AemCommandHandler::unsolicited_registration_count() const noexcept -> size_
 }
 
 void AemCommandHandler::send_unsolicited_to(
-    Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const command_type, std::span<uint8_t const> body)
+    Eui48 const& dest_mac,
+    Eui64 const& controller_id,
+    uint16_t const sequence_id,
+    uint16_t const command_type,
+    std::span<uint8_t const> body)
 {
-    // Frame an unsolicited AEM response: our id as target, the controller's id,
-    // a fresh sequence_id, and the U-bit set.
-    AemDu hdr{};
-    hdr.target_entity_id = our_entity_id_;
-    hdr.controller_entity_id = controller_id;
-    hdr.sequence_id = doublet_t{unsolicited_sequence_id_++};
-    hdr.init_response(
-        command_type,
-        AEM_STATUS_SUCCESS,
-        static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + body.size()),
-        /*unsolicited=*/true);
-
     std::array<uint8_t, AemDu::LENGTH + MAX_AEM_RESPONSE_SIZE> buffer{};
     auto buffer_span = std::span{buffer};
-    span_store(buffer_span, hdr);
+    span_store(buffer_span, aem_unsolicited_header(our_entity_id_, controller_id, sequence_id, command_type, body.size()));
     if (!body.empty()) {
         span_copy(buffer_span.subspan(AemDu::LENGTH), body);
     }
@@ -1883,15 +1947,16 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         return;
     }
 
-    for (auto const& reg : unsolicited_registrations_) {
+    for (auto& reg : unsolicited_registrations_) {
         // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
         // and every registered controller "without sending the unsolicited
         // response back to the ATDECC Controller which executed the command",
-        // under either profile (Milan v1.3 5.4.5.3 asks the same).
+        // under either profile (Milan v1.3 5.4.5.3 asks the same). Each
+        // registration's sequence id advances whether or not the send succeeds (5.4.5.1).
         if (reg.controller_entity_id == requester_) {
             continue;
         }
-        send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, command_type, body);
+        send_unsolicited_to(reg.controller_mac, reg.controller_entity_id, reg.sequence_id++, command_type, body);
     }
 
     // IEEE 1722.1 7.5.2: the acquiring controller is implicitly registered,
@@ -1900,7 +1965,7 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
         auto const registered = unsolicited_registrations_.find_if(
             [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == acquiring_controller_; });
         if (registered >= unsolicited_registrations_.capacity()) {
-            send_unsolicited_to(acquiring_controller_mac_, acquiring_controller_, command_type, body);
+            send_unsolicited_to(acquiring_controller_mac_, acquiring_controller_, unsolicited_sequence_id_++, command_type, body);
         }
     }
 
@@ -1909,7 +1974,7 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     // unsolicited notifications — observes the identify. No specific controller,
     // so controller_entity_id is left zero.
     if (targets_identify_control(command_type, body)) {
-        send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, command_type, body);
+        send_unsolicited_to(atdecc::ATDECC_IDENTIFY_MULTICAST_MAC, Eui64{}, unsolicited_sequence_id_++, command_type, body);
         if (callbacks_.identify_changed) {
             // SET_CONTROL body: descriptor_type(2) + descriptor_index(2) + values.
             // The IDENTIFY control is LINEAR_UINT8: byte 4 is the new value.

@@ -420,8 +420,9 @@ class AemCommandHandler
     /// Check if there is a pending acquire waiting for CONTROLLER_AVAILABLE
     [[nodiscard]] auto has_pending_acquire() const noexcept -> bool { return pending_acquire_.active; }
 
-    /// Maximum number of unsolicited notification registrations
-    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 8;
+    /// Maximum number of unsolicited notification registrations (Milan v1.3
+    /// Section 5.3.4.2: at least 16 per AVB interface).
+    static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 16;
 
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
@@ -486,6 +487,13 @@ class AemCommandHandler
     /// notification it framed itself; apply_local_descriptor_value() is the usual
     /// entry point. No-op if no send_response callback is wired.
     void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// Emit an unsolicited MVU response (u bit set) carrying @p command_type and @p body to
+    /// every registered controller, each with its own MVU sequence id, which advances whether
+    /// or not the send succeeds (Milan v1.3 Sections 5.4.5.1, 5.4.5.2). The controller whose
+    /// MVU command is being dispatched is left out. No-op for an entity without milan_info()
+    /// or a send_response callback.
+    void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
 
     /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
     /// @p descriptor_index) to the registered controllers. IEEE 1722.1 7.5.2 has
@@ -852,9 +860,14 @@ class AemCommandHandler
     [[nodiscard]] auto handle_deregister_unsolicited(AemDu const& header) -> AemCommandResponse;
 
     /// Frame one unsolicited AEM response (U-bit set) for @p command_type / @p body,
-    /// addressed to @p controller_id, and send it to @p dest_mac via the callback.
+    /// addressed to @p controller_id with @p sequence_id, and send it to @p dest_mac
+    /// via the callback.
     void send_unsolicited_to(
-        Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t command_type, std::span<uint8_t const> body);
+        Eui48 const& dest_mac,
+        Eui64 const& controller_id,
+        uint16_t sequence_id,
+        uint16_t command_type,
+        std::span<uint8_t const> body);
 
     /// True if (@p command_type, @p body) is a SET_CONTROL targeting the configured
     /// IDENTIFY control — i.e. the change must also go to the IDENTIFY multicast.
@@ -887,6 +900,10 @@ class AemCommandHandler
     /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
         -> bool;
+
+    /// Answer a Milan command addressed to this entity, its controller the requester that the
+    /// notifications its dispatch raises leave out.
+    [[nodiscard]] auto dispatch_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool;
 
     /// Answer an MVU command that is not a bind or unbind: handle_mvu_command(), then the response.
     [[nodiscard]] auto answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) const -> bool;
@@ -936,6 +953,10 @@ class AemCommandHandler
     /// @p response_body as the command-specific data, through send_response.
     [[nodiscard]] auto send_mvu_response(
         Eui48 const& dest_mac, AecpMvuDu const& cmd_header, uint8_t status, std::span<uint8_t const> response_body) const -> bool;
+
+    /// Send @p header followed by @p body to @p dest_mac through send_response; false
+    /// without the callback or for a body longer than MAX_AEM_RESPONSE_SIZE.
+    [[nodiscard]] auto send_mvu_pdu(Eui48 const& dest_mac, AecpMvuDu const& header, std::span<uint8_t const> body) const -> bool;
 
     AemCommandHandlerCallbacks callbacks_;
     MvuStreamInputCallbacks mvu_stream_inputs_{};
@@ -1065,7 +1086,9 @@ class AemCommandHandler
     struct UnsolicitedRegistration
     {
         Eui64 controller_entity_id{};
-        Eui48 controller_mac{};  ///< Source MAC of the REGISTER command, for unicast notifications
+        Eui48 controller_mac{};       ///< Source MAC of the REGISTER command, for unicast notifications
+        uint16_t sequence_id{0};      ///< of its next AEM notification (Milan v1.3 Section 5.3.4.2)
+        uint16_t mvu_sequence_id{0};  ///< of its next MVU notification
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
 
@@ -1075,8 +1098,8 @@ class AemCommandHandler
     // has been received (e.g. an IDENTIFY button press at startup).
     Eui64 our_entity_id_{};
 
-    // Monotonic sequence_id for unsolicited notifications (IEEE 1722.1 9.2.1.2.4);
-    // increments once per emitted notification.
+    // Sequence_id of the unsolicited notifications that go to no registration: an
+    // acquirer that never registered, the IDENTIFY multicast (IEEE 1722.1 9.2.1.2.4).
     uint16_t unsolicited_sequence_id_{0};
 
     // The CONTROL descriptor index of the entity's IDENTIFY control, if it has one.

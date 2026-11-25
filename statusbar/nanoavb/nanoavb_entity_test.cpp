@@ -3667,6 +3667,240 @@ TEST(nanoavb_entity_mvu, aem_commands_are_answered_as_before_beside_the_mvu_ones
     }
 }
 
+//
+// Registered controllers - Milan v1.3 Sections 5.3.4.2, 5.4.5.1, 5.4.5.2
+//
+
+namespace {
+
+/// The unsolicited AEM responses for @p command sent to @p dest, their sequence ids in order.
+auto unsolicited_sequence_ids(std::vector<CapturedSend> const& sends, uint16_t const command, Eui48 const& dest)
+    -> std::vector<uint16_t>
+{
+    std::vector<uint16_t> ids;
+    for (auto const& s : sends) {
+        auto const hdr = header_of(s);
+        if (s.dest == dest && hdr.is_response() && hdr.is_unsolicited() && hdr.command_code() == command) {
+            ids.push_back(hdr.sequence_id.get());
+        }
+    }
+    return ids;
+}
+
+/// The unsolicited MVU responses for @p command sent to @p dest, their sequence ids in order.
+auto mvu_unsolicited_sequence_ids(std::vector<CapturedSend> const& sends, uint16_t const command, Eui48 const& dest)
+    -> std::vector<uint16_t>
+{
+    std::vector<uint16_t> ids;
+    for (auto const& s : sends) {
+        if (s.bytes.size() < AecpMvuDu::LENGTH) {
+            continue;
+        }
+        auto const hdr = mvu_header_of(s);
+        if (s.dest == dest && hdr.is_mvu() && hdr.is_response() && hdr.is_unsolicited() && hdr.command_type() == command) {
+            ids.push_back(hdr.common.sequence_id.get());
+        }
+    }
+    return ids;
+}
+
+// CONTROL 0 := 0x0102
+std::array<uint8_t, 6> const kSetControl0{0x00, DESCRIPTOR_CONTROL, 0x00, 0x00, 0x01, 0x02};
+
+}  // namespace
+
+TEST(nanoavb_entity_registered_controllers, requester_is_left_out_and_sequence_ids_are_per_controller)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_profile(AemCommandHandler::Profile::milan13);
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // B sets a control twice: A is told each time, B (the requester) never.
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_CONTROL, kSetControl0, 1);
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_SET_CONTROL, kSetControl0, 2);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 0);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+
+    // Then A sets it: B's first notification carries B's own sequence id 0.
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, kSetControl0, 3);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{0}));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacA), 2);
+
+    // A change of the entity's own has no requester: both, each with its next id.
+    sends.clear();
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{2}));
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{1}));
+}
+
+TEST(nanoavb_entity_registered_controllers, sequence_id_advances_when_the_send_fails)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    bool fail = false;
+    handler.set_send_response([&](Eui48 const& dest, std::span<uint8_t const> resp) {
+        sends.push_back({dest, std::vector<uint8_t>(resp.begin(), resp.end())});
+        return !fail;
+    });
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    fail = true;
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    fail = false;
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+}
+
+TEST(nanoavb_entity_registered_controllers, sixteen_controllers_register_and_are_each_notified)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    EXPECT_EQ(AemCommandHandler::MAX_UNSOLICITED_REGISTRATIONS, size_t{16});
+    for (uint8_t i = 0; i < 16; ++i) {
+        register_controller(handler, kEntity, Eui64{0xC0, 0, 0, 0, 0, 0, 1, i}, Eui48{0x02, 0, 0, 0, 1, i});
+        EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_SUCCESS);
+    }
+    register_controller(handler, kEntity, Eui64{0xC0, 0, 0, 0, 0, 0, 2, 0}, Eui48{0x02, 0, 0, 0, 2, 0});
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_NO_RESOURCES);
+    sends.clear();
+
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{16});
+    for (uint8_t i = 0; i < 16; ++i) {
+        EXPECT_TRUE(
+            (unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, Eui48{0x02, 0, 0, 0, 1, i}) == std::vector<uint16_t>{0}));
+    }
+}
+
+TEST(nanoavb_entity_registered_controllers, re_registration_from_a_new_mac_starts_the_sequence_again)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    register_controller(handler, kEntity, kControllerA, kMacA);  // the same station: kept
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+    register_controller(handler, kEntity, kControllerA, kMacB);  // moved
+    EXPECT_EQ(handler.unsolicited_registration_count(), size_t{1});
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{0, 1}));
+}
+
+TEST(nanoavb_entity_registered_controllers, mvu_sequence_ids_are_per_controller_and_apart_from_the_aem_ones)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    auto const info = StreamInputs::info_of(1);
+    EXPECT_TRUE(info.has_value());
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> body{};
+    span_store(std::span<uint8_t>{body}, info.value_or(MvuGetStreamInputInfoExResponse{}));
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+
+    // Milan v1.3 Section 5.4.5.2: the MVU ids count from zero apart from the AEM ones.
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA) == std::vector<uint16_t>{0, 1}));
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacB) == std::vector<uint16_t>{0, 1}));
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacA) == std::vector<uint16_t>{1}));
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_CONTROL, kMacB) == std::vector<uint16_t>{0}));
+
+    auto const hdr = mvu_header_of(sends[0]);
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(hdr.common.target_entity_id, kEntity);
+    EXPECT_EQ(hdr.common.controller_entity_id, sends[0].dest == kMacA ? kControllerA : kControllerB);
+    EXPECT_EQ(size_t{hdr.common.control_data_length()}, AecpMvuDu::MVU_DATA_LENGTH + body.size());
+    EXPECT_TRUE(std::ranges::equal(mvu_body_of(sends[0]), body));
+}
+
+// As emit_unsolicited() does: with nothing to send through, no controller's MVU id is spent.
+TEST(nanoavb_entity_registered_controllers, an_mvu_notification_without_a_sender_spends_no_id)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> const body{};
+    handler.set_send_response({});
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    capture_sends(handler, sends);
+    sends.clear();
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA) == std::vector<uint16_t>{0}));
+}
+
+TEST(nanoavb_entity_registered_controllers, an_mvu_notification_raised_by_a_command_leaves_out_its_controller)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> body{};
+    handler.attach_mvu_stream_inputs(
+        &sends,
+        MvuStreamInputCallbacks{
+            .binding_command =
+                [&](statusbar::atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond) {
+                    respond(command);
+                    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+                },
+            .stream_input_info = [](uint16_t const index) { return StreamInputs::info_of(index); }});
+    sends.clear();
+
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 7));
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA).empty());
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacB) == std::vector<uint16_t>{0}));
+
+    // Once the command is answered there is no requester: both are told.
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(sends, MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacB) == std::vector<uint16_t>{0, 1}));
+}
+
+TEST(nanoavb_entity_registered_controllers, a_plain_entity_sends_no_mvu_notification)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    sends.clear();
+    std::array<uint8_t, MvuGetStreamInputInfoExResponse::LENGTH> const body{};
+    handler.emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, body);
+    EXPECT_TRUE(sends.empty());
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;

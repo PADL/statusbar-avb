@@ -344,13 +344,14 @@ which is what the grace was for.
 
 ## Not done
 
-- MVU unsolicited notifications (5.4.5.2, 5.4.5.3). A BIND_STREAM or
-  UNBIND_STREAM answered SUCCESS is to be followed by one to the other
-  registered controllers, and Table 5.21 asks for a
+- MVU unsolicited notifications from connection management (5.4.5.3). A
+  BIND_STREAM or UNBIND_STREAM answered SUCCESS is to be followed by one to
+  the other registered controllers, and Table 5.21 asks for a
   GET_STREAM_INPUT_INFO_EX notification whenever the talker, the Probing
   status, the ACMP status or the Talker attribute's registration changes.
-  The entity sends AEM notifications only: it has no MVU notification
-  sender, and no MVU sequence number per registered controller.
+  `AemCommandHandler::emit_mvu_unsolicited()` sends them (each registered
+  controller with its own MVU sequence id, 5.4.5.2; the controller whose
+  command raised one left out); nothing calls it for these yet.
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
 - MVRP is declared for the Class A Domain's VLAN. A sink settled on
