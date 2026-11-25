@@ -23,6 +23,7 @@
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
+#include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/gptp/gptp_format.hpp"
@@ -236,10 +237,25 @@ inline void add_saved_state_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudio
 {
     specs.add<std::string>(
         "listener.bindings",
-        "Persist listener fast-connect bindings to this file (kit phase 5b): controller-made input connections are "
-        "remembered and fast-connected (IEEE 1722.1 8.2.2.1.1) after an entity or talker restart. Empty = off.",
+        "The file the stream inputs' connections are saved in. IEEE 1722.1 ACMP: each successful connect is remembered "
+        "and fast-connected again (IEEE 1722.1 8.2.2.1.1) after an entity or talker restart; empty = off. Milan: the "
+        "binding parameters of Milan v1.3 5.3.8.3, written at every bind and unbind; empty = the listener-bindings "
+        "file of the entity's state directory (state.dir).",
         entity.listener_bindings_path,
         [&entity](auto v) { entity.listener_bindings_path = std::string{v}; });
+    // The installed tools save under the directory the package creates; an entity built from a bare
+    // configuration (a test, an embedding program) saves nothing it was not told to.
+    if (entity.state_dir.empty()) {
+        entity.state_dir = std::string{DEFAULT_ENTITY_STATE_DIR};
+    }
+    specs.add<std::string>(
+        "state.dir",
+        "Directory for saved power-on state. An entity keeps its own in <state.dir>/<entity ID as 16 hex digits>/, one "
+        "file per kind: listener-bindings under the Milan profile, maap-range under stream.address_mode=maap. A key "
+        "that names a file (listener.bindings, stream.maap_range_file) is used as given. Where the directory is not "
+        "there, or with an empty value, nothing is saved that no key names. The package creates the default.",
+        entity.state_dir,
+        [&entity](auto v) { entity.state_dir = std::string{v}; });
 }
 
 /// The TX capture and the histogram files.

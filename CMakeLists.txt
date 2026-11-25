@@ -113,6 +113,16 @@ if(NOT STATUSBAR_AGGREGATE_BUILD)
             ${CMAKE_CURRENT_SOURCE_DIR}/packaging/etc/tone-generator.toml
       DESTINATION /etc/statusbar-avb
       COMPONENT runtime)
+
+    # ---- state directory (runtime component) ----
+    # Where the entities of this machine keep what must outlast a restart, each
+    # in a directory of its own named by its entity ID
+    # (statusbar/avb_entity/avb_entity_state_dir.hpp). Shipped empty; the postrm
+    # removes what the entities wrote there on a purge.
+    install(
+      DIRECTORY
+      DESTINATION /var/lib/statusbar-avb
+      COMPONENT runtime)
   endif()
 
   # ---- Python helpers (runtime component) ----

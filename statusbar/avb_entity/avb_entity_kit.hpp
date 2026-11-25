@@ -52,6 +52,8 @@
 #include <memory_resource>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 
 namespace statusbar::avb_entity {
@@ -310,6 +312,14 @@ class AvbEntityKit
     void apply_srp_profile(bool milan);
     /// Each stream output's stream id and static destination address into ACMP's picture.
     void seed_talker_streams();
+    /// The file a kind of saved state goes in: @p named when the
+    /// configuration names one; else, when @p wanted, the file @p name of
+    /// the entity's state directory (avb_entity_state_dir.hpp); else empty.
+    [[nodiscard]] auto state_file(std::string const& named, std::string_view name, bool wanted) -> std::string;
+    /// The entity's own state directory, made at the first call that needs
+    /// it; empty when the machine has no state directory or it may not be
+    /// written, which one status line then says.
+    [[nodiscard]] auto entity_state_dir() -> std::string const&;
     [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
     /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
     void install_storage_hooks();
@@ -389,6 +399,8 @@ class AvbEntityKit
     /// MAAP dynamic-address acquisition (active only in "maap"
     /// stream_address_mode; ready() defaults true for static MACs).
     MaapAddressAcquirer maap_{};
+    /// entity_state_dir()'s answer once asked for; unset before.
+    std::optional<std::string> entity_state_dir_{};
     bool link_up_{false};
 
     /// CRF-input media-clock recovery: fed by the CRF stream input's

@@ -15,6 +15,7 @@
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
@@ -564,7 +565,11 @@ struct KitPair
     uint16_t sink{0};
 
     explicit KitPair(std::string_view const profile, std::string bindings_path = {})
-        : listener{make_io_config(LISTENER_ID, profile, std::move(bindings_path))}
+        : KitPair{profile, make_io_config(LISTENER_ID, profile, std::move(bindings_path))}
+    {}
+    /// The listener from @p listener_config, the talker a plain one of @p profile.
+    KitPair(std::string_view const profile, AvbEntityAudioIOConfig listener_config)
+        : listener{std::move(listener_config)}
         , talker{make_io_config(TALKER_ID, profile)}
     {
         bring_up(listener);
@@ -1009,6 +1014,116 @@ TEST(avb_entity_kit_acmp, without_a_bindings_file_a_milan_binding_lasts_a_stop_a
 
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+namespace {
+
+/// An empty state directory of the test's own, and the listener's directory inside it.
+struct StateDir
+{
+    std::filesystem::path state;
+    std::filesystem::path entity;
+
+    explicit StateDir(char const* const name)
+        : state{std::filesystem::temp_directory_path() / name}
+        , entity{state / entity_state_dir_name(LISTENER_ID)}
+    {
+        std::filesystem::remove_all(state);
+        std::filesystem::create_directories(state);
+    }
+    StateDir(StateDir const&) = delete;
+    auto operator=(StateDir const&) -> StateDir& = delete;
+    ~StateDir() { std::filesystem::remove_all(state); }
+
+    [[nodiscard]] auto bindings() const -> std::string { return (entity / entity_state_file::LISTENER_BINDINGS).string(); }
+
+    /// The listener's configuration under @p profile with this state directory.
+    [[nodiscard]] auto listener_config(std::string_view const profile, std::string bindings_path = {}) const
+        -> AvbEntityAudioIOConfig
+    {
+        auto config = make_io_config(LISTENER_ID, profile, std::move(bindings_path));
+        config.state_dir = state.string();
+        return config;
+    }
+};
+
+}  // namespace
+
+TEST(avb_entity_kit_state, a_milan_kit_saves_its_bindings_in_its_own_state_directory_and_starts_bound_from_them)
+{
+    // Milan v1.3 5.3.8.3 with no file named: <state>/<entity ID>/listener-bindings.
+    using atdecc::MilanSinkState;
+    StateDir const dir{"statusbar_state_dir_functional_test"};
+    uint16_t sink_index = 0;
+    {
+        KitPair pair{"milan13", dir.listener_config("milan13")};
+        sink_index = pair.sink;
+        EXPECT_EQ(dir.entity.filename().string(), std::string{"000102030405060a"});
+        EXPECT_TRUE(std::filesystem::is_directory(dir.entity));
+        pair.bind();
+        auto const saved = load_saved_listener_bindings(dir.bindings());
+        EXPECT_TRUE(saved.has_value());
+        EXPECT_EQ(saved->size(), 1U);
+        EXPECT_EQ(saved->front().talker_entity_id, TALKER_ID);
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+    KitPair again{"milan13", dir.listener_config("milan13")};
+    auto const& sink = *again.listener->host().components().milan_acmp_listener->sink(sink_index);
+    EXPECT_EQ(sink.state(), MilanSinkState::PrbWAvail);
+    EXPECT_EQ(sink.context().binding->talker_entity_id, TALKER_ID);
+    EXPECT_TRUE(again.listener.stop(again.now));
+    EXPECT_TRUE(again.talker.stop(again.now));
+}
+
+TEST(avb_entity_kit_state, a_named_bindings_file_is_used_and_the_state_directory_left_alone)
+{
+    StateDir const dir{"statusbar_state_dir_named_functional_test"};
+    auto const named = (dir.state / "named-bindings.txt").string();
+    KitPair pair{"milan13", dir.listener_config("milan13", named)};
+    pair.bind();
+    EXPECT_EQ(load_saved_listener_bindings(named)->size(), 1U);
+    EXPECT_FALSE(std::filesystem::exists(dir.entity));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_state, an_ieee_1722_1_kit_saves_no_connection_it_was_not_given_a_file_for)
+{
+    // Its fast-connect memory changes what a restart does, so it stays a thing asked for by name.
+    StateDir const dir{"statusbar_state_dir_classic_functional_test"};
+    KitPair pair{"classic", dir.listener_config("classic")};
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_FALSE(std::filesystem::exists(dir.bindings()));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_state, where_the_state_directory_is_not_there_a_milan_kit_makes_none_and_keeps_its_bindings)
+{
+    using atdecc::MilanSinkState;
+    StateDir const dir{"statusbar_state_dir_absent_functional_test"};
+    std::filesystem::remove_all(dir.state);
+    KitPair pair{"milan13", dir.listener_config("milan13")};
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(pair.listener->host().components().milan_acmp_listener->sink(pair.sink)->state(), MilanSinkState::SettledRsvOk);
+    EXPECT_FALSE(std::filesystem::exists(dir.state));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_state, a_maap_kit_has_its_state_directory_for_the_range_it_defends)
+{
+    // The interface does not exist, so no block is acquired here; the place its range would be saved is the entity's.
+    StateDir const dir{"statusbar_state_dir_maap_functional_test"};
+    auto config = dir.listener_config("classic");
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_TRUE(std::filesystem::is_directory(dir.entity));
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

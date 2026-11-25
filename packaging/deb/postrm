@@ -4,6 +4,10 @@
 # Reload systemd after the unit file is removed so a stale statusbar-avb-entity
 # unit does not linger in the manager's view. The package never enables the
 # unit, so there is no enablement symlink to clean up.
+#
+# A purge also removes the state directory with what the entities saved in it
+# (their bindings, their MAAP ranges). A plain remove leaves it, as it leaves
+# the conffiles: the state comes back with a reinstall.
 set -e
 
 case "$1" in
@@ -13,5 +17,9 @@ case "$1" in
         fi
         ;;
 esac
+
+if [ "$1" = purge ]; then
+    rm -rf /var/lib/statusbar-avb
+fi
 
 exit 0

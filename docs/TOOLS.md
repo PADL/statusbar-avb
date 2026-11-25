@@ -79,7 +79,11 @@ TALKER_DEST_MAC_FAIL for an address still being probed; with
 `--stream.maap_range_file=<path>` the block defended is saved there and
 probed first at the next start, so a restart keeps its destination
 addresses and a bridge still holding the StreamIDs does not refuse the
-new Talker Advertise for tens of seconds).
+new Talker Advertise for tens of seconds; with no file named it is
+`maap-range` in the entity's state directory). `--state.dir=<dir>`
+(default `/var/lib/statusbar-avb`, made by the package) is where each
+entity keeps its saved state, in `<dir>/<entity ID as 16 hex digits>/`:
+see "Saved state" in `ENTITY_CONSTRUCTION_KIT.md`.
 
 ## ATDECC — control & inspection
 

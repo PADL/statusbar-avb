@@ -148,17 +148,22 @@ StreamID, as before.
 ### Bindings across a restart
 
 5.3.8.3 wants the binding parameters (talker, source, controller,
-STREAMING_WAIT) in non-volatile memory. With `listener.bindings = <file>`
-the kit writes them at every bind and unbind and, at start, puts each
-saved sink in PRB_W_AVAIL (5.5.3.6.2), where it waits for its talker's
-ADP. The file is the one the IEEE 1722.1 listener uses for its
-fast-connect goals, in a second form (`statusbar-listener-bindings v2`)
-with the two fields the first has no place for; each listener reads both
-forms. With the key unset the bindings last as long as the process: no
-file is written that the configuration did not name, and one status line
-at start says so. A Milan device's configuration therefore names the
-file, and `stream.maap_range_file` beside it so that a restart keeps its
-stream addresses.
+STREAMING_WAIT) in non-volatile memory. The kit writes them at every bind
+and unbind and, at start, puts each saved sink in PRB_W_AVAIL
+(5.5.3.6.2), where it waits for its talker's ADP.
+
+Where they are written: the file `listener.bindings` names, or with none
+named the file `listener-bindings` of the entity's state directory,
+`<state.dir>/<entity ID as sixteen hex digits>/` (see "Saved state" in
+`ENTITY_CONSTRUCTION_KIT.md`). The entity tools default `state.dir` to
+`/var/lib/statusbar-avb`, which the package creates, so an installed
+Milan device saves its bindings with nothing configured. Where there is
+no state directory and no file named, the bindings last as long as the
+process and one status line at start says so.
+
+The file is the one the IEEE 1722.1 listener uses for its fast-connect
+goals, in a second form (`statusbar-listener-bindings v2`) with the two
+fields the first has no place for; each listener reads both forms.
 
 ## The talker
 

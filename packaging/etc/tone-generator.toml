@@ -39,6 +39,16 @@ amplitude = 0.1
 [gate]
 talker_on_listener = true
 
+# Saved power-on state. The entity keeps what must outlast a restart in
+# <dir>/<its entity ID as 16 hex digits>/, one file per kind:
+#   listener-bindings   its stream inputs' bindings, under the Milan profile
+#   maap-range          the MAAP block it defended, under
+#                       stream.address_mode = "maap"
+# The package creates the default directory. dir = "" saves nothing there;
+# listener.bindings and stream.maap_range_file name a file of your own.
+# [state]
+# dir = "/var/lib/statusbar-avb"
+
 # ----------------------------------------------------------------------------
 # Optional overrides -- intentionally left at their (correct) built-in defaults.
 # The entity_id is the modified-EUI-64 of the NIC MAC and the entity_model_id is

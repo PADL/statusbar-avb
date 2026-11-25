@@ -9,6 +9,7 @@
 
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
@@ -513,7 +514,37 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
             }
         },
         now,
-        config_.stream_maap_range_file);
+        state_file(config_.stream_maap_range_file, entity_state_file::MAAP_RANGE, true));
+}
+
+auto AvbEntityKit::state_file(std::string const& named, std::string_view const name, bool const wanted) -> std::string
+{
+    if (!named.empty() || !wanted || entity_state_dir().empty()) {
+        return named;
+    }
+    return entity_state_file_path(entity_state_dir(), name);
+}
+
+auto AvbEntityKit::entity_state_dir() -> std::string const&
+{
+    if (entity_state_dir_.has_value()) {
+        return *entity_state_dir_;
+    }
+    entity_state_dir_.emplace();
+    if (config_.state_dir.empty()) {
+        return *entity_state_dir_;
+    }
+    auto made = ensure_entity_state_dir(config_.state_dir, host_.components().acmp_listener.entity_id());
+    if (made.has_value()) {
+        *entity_state_dir_ = std::move(*made);
+        host_.ctl_log().status("state: saved in {}", logging::embed<56>(*entity_state_dir_));
+    } else {
+        host_.ctl_log().status(
+            "state: no directory for this entity under {} (error {}); nothing is saved that no key names",
+            logging::embed<48>(config_.state_dir),
+            made.error().value());
+    }
+    return *entity_state_dir_;
 }
 
 auto AvbEntityKit::start(net::MessageReactor& reactor, TimePoint const now) -> Status
@@ -676,7 +707,11 @@ void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_grou
     }
     // Persisted listener bindings (kit phase 5b): a restarted entity takes
     // its inputs up again without a controller (see AvbEntityHost).
-    host_.enable_listener_binding_persistence(config_.listener_bindings_path);
+    // Under Milan they are saved without being asked (Milan v1.3 5.3.8.3):
+    // with no file named, in the entity's state directory.
+    bool const milan = host_.components().acmp_is_milan();
+    host_.enable_listener_binding_persistence(
+        state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
 }
 
 void AvbEntityKit::finish_start()

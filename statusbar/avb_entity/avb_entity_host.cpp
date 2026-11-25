@@ -674,8 +674,9 @@ void AvbEntityHost::enable_milan_binding_persistence()
 {
     if (listener_bindings_path_.empty()) {
         // Milan v1.3 5.3.8.3 wants the binding parameters in non-volatile
-        // memory. Where that is on this machine is the configuration's to say.
-        ctl_log().status("acmp: listener.bindings is not set; Milan bindings are kept until the process ends");
+        // memory: listener.bindings, or the entity's state directory. With
+        // neither they last as long as the process.
+        ctl_log().status("acmp: no listener.bindings file and no state directory; Milan bindings are kept until the process ends");
         return;
     }
     load_milan_bindings();

@@ -311,10 +311,42 @@ Everything not listed here is the same under both.
 | A bind or connect from a controller other than the one holding the lock | accepted: ACMP does not ask | refused CONTROLLER_NOT_AUTHORIZED (5.5.2.4, 5.5.2.5) |
 | When a talker stream is put on the wire (`stream.gate_talker_on_listener`) | an ACMP connection, the stream started and MSRP Listener Ready, held five seconds past the last Listener Ready seen | the stream started and MSRP Listener Ready, with no grace: a Milan talker has no connections (5.5.4.1) and hears of no disconnect |
 | Which Talker attribute a stream input's Listener declaration follows | any of the stream's StreamID (IEEE 802.1Q 35.1.2.2) | the one on the destination address and VLAN the talker's PROBE_TX_RESPONSE gave (5.3.8.5) |
-| `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, the bindings last as long as the process |
+| `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, they go to `listener-bindings` in the entity's state directory (below); with no state directory either, they last as long as the process |
 | When a stream output's Talker attribute is declared | once the entity is ready and its stream addresses are final | only while a listener wants the stream: a PROBE_TX_COMMAND for it arrived in the last 15 s, or a Listener attribute for its StreamID is registered on the port; withdrawn when neither holds, and while MAAP reports the address lost (4.3.3.1). `MsrpHandler::set_talker_waits_for_listener` |
 | Talker presentation offset when `presentation_offset_ns` is 0 (the default) | 1 ms | 2 ms (5.3.7.6); a value other than 0 is used as given under either |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
+
+### Saved state
+
+What an entity must find again after a restart is kept in files, in one
+place per entity. A machine has one state directory (`state.dir`); each
+entity keeps its own inside it in a directory named by its entity ID,
+sixteen lowercase hex digits with no separators, so that entities of
+different programs on one machine never share a file
+(`avb_entity_state_dir.hpp`):
+
+```
+/var/lib/statusbar-avb/2ccf67fffe0a0b0c/listener-bindings
+/var/lib/statusbar-avb/2ccf67fffe0a0b0c/maap-range
+```
+
+| File | Written | By default |
+|---|---|---|
+| `listener-bindings` | the stream inputs' bindings (Milan v1.3 5.3.8.3) | under the Milan profile. The IEEE 1722.1 listener's fast-connect memory changes what a restart does, so it is saved only where `listener.bindings` names a file |
+| `maap-range` | the MAAP block the entity defended, probed first at the next start | under `stream.address_mode = "maap"`, either profile |
+
+A key that names a file (`listener.bindings`, `stream.maap_range_file`)
+is used as given and the state directory is left alone for that kind. A
+new kind of saved state is a new file name in the entity's directory,
+not a new path key.
+
+The entity tools default `state.dir` to `/var/lib/statusbar-avb`, which
+the package creates and a purge removes. The entity makes only its own
+directory there: where the state directory is not there or may not be
+written, one status line says so and nothing is saved that no key names.
+`AvbEntityAudioIOConfig::state_dir` itself defaults to empty, so an
+entity built from a bare configuration (a test, an embedding program)
+writes nothing it was not told to.
 
 A Milan model is also a Milan *device*, whichever profile it is held to:
 with `entity.milan = true` the entity answers the Milan vendor-unique (MVU)

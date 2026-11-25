@@ -37,6 +37,16 @@ freq_hz = 440.0
 [gate]
 talker_on_listener = true
 
+# Saved power-on state. The entity keeps what must outlast a restart in
+# <dir>/<its entity ID as 16 hex digits>/, one file per kind:
+#   listener-bindings   its stream inputs' bindings, under the Milan profile
+#   maap-range          the MAAP block it defended, under
+#                       stream.address_mode = "maap"
+# The package creates the default directory. dir = "" saves nothing there;
+# listener.bindings and stream.maap_range_file name a file of your own.
+# [state]
+# dir = "/var/lib/statusbar-avb"
+
 # ----------------------------------------------------------------------------
 # Optional, SITE-SPECIFIC settings -- intentionally not shipped. Uncomment and
 # fill in per deployment.
