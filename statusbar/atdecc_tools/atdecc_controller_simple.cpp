@@ -971,79 +971,108 @@ void ControllerSimple::handle_read_descriptor_response(
     }
     AemReadDescriptorCommandPayload sent_cmd{};
     span_load(sent_cmd, sent_payload.subspan(0, AemReadDescriptorCommandPayload::LENGTH));
-    uint16_t const desc_type = sent_cmd.descriptor_type.get();
-    uint16_t const desc_index = sent_cmd.descriptor_index.get();
+    ReadDescriptorAnswer const answer{
+        .type = sent_cmd.descriptor_type.get(),
+        .index = sent_cmd.descriptor_index.get(),
+        .status = status,
+        .payload = (data.size() >= AemReadDescriptorResponsePayload::LENGTH)
+            ? data.subspan(AemReadDescriptorResponsePayload::LENGTH)
+            : std::span<uint8_t const>{}};
+    record_descriptor_answer(target, answer);
+    follow_descriptor_answer(target, answer);
+}
 
-    auto const desc_payload = (data.size() >= AemReadDescriptorResponsePayload::LENGTH)
-        ? data.subspan(AemReadDescriptorResponsePayload::LENGTH)
-        : std::span<uint8_t const>{};
-
+void ControllerSimple::record_descriptor_answer(Eui64 const& target, ReadDescriptorAnswer const& answer)
+{
     // Every READ_DESCRIPTOR response clears its entry from the unified queue.
     // (The per-entity dedup set (EntityRecord::requested_descriptors) keeps the (type, index) pair
     // so we don't re-enqueue.)
-    clear_descriptor_read(target, desc_type, desc_index);
+    clear_descriptor_read(target, answer.type, answer.index);
 
     // Cache the response so a later detail fetch can seed its builder
     // without re-issuing reads that the dedup set would skip.
     auto& rec = entities_[target];
-    {
-        auto& entry = rec.descriptor_cache[{desc_type, desc_index}];
-        entry.success = (status == AEM_STATUS_SUCCESS);
-        entry.data.assign(desc_payload.begin(), desc_payload.end());
-    }
+    auto& entry = rec.descriptor_cache[{answer.type, answer.index}];
+    entry.success = answer.succeeded();
+    entry.data.assign(answer.payload.begin(), answer.payload.end());
+    feed_detail_builder(rec, answer);
+}
 
+void ControllerSimple::feed_detail_builder(EntityRecord& rec, ReadDescriptorAnswer const& answer)
+{
     // Feed the detail builder if one is in progress for this entity.
     // When complete, emit an EntityDetailReadyEvent and remove the builder.
-    if (rec.detail_builder.has_value()) {
-        rec.detail_builder->receive(desc_type, desc_index, status == AEM_STATUS_SUCCESS, desc_payload);
-        if (rec.detail_builder->is_complete()) {
-            pending_events_.emplace_back(EntityDetailReadyEvent{rec.detail_builder->build()});
-            rec.detail_builder.reset();
+    if (!rec.detail_builder.has_value()) {
+        return;
+    }
+    rec.detail_builder->receive(answer.type, answer.index, answer.succeeded(), answer.payload);
+    if (rec.detail_builder->is_complete()) {
+        pending_events_.emplace_back(EntityDetailReadyEvent{rec.detail_builder->build()});
+        rec.detail_builder.reset();
+    }
+}
+
+void ControllerSimple::follow_descriptor_answer(Eui64 const& target, ReadDescriptorAnswer const& answer)
+{
+    if (answer.type == DESCRIPTOR_STREAM_INPUT || answer.type == DESCRIPTOR_STREAM_OUTPUT) {
+        handle_stream_descriptor_response(target, answer.status, answer.type, answer.index, answer.payload);
+        return;
+    }
+    if (answer.type == DESCRIPTOR_STRINGS) {
+        handle_strings_descriptor_response(target, answer.status, answer.index, answer.payload);
+        return;
+    }
+    if (!answer.succeeded()) {
+        return;
+    }
+    if (answer.type == DESCRIPTOR_ENTITY) {
+        follow_entity_descriptor(target, answer.payload);
+        return;
+    }
+    if (answer.type == DESCRIPTOR_CONFIGURATION) {
+        handle_configuration_descriptor_response(target, answer.payload);
+        return;
+    }
+    enqueue_owned_descriptor_reads(target, answer.payload);
+}
+
+void ControllerSimple::follow_entity_descriptor(Eui64 const& target, std::span<uint8_t const> const desc_payload)
+{
+    if (desc_payload.size() < DescriptorEntity::LENGTH) {
+        return;
+    }
+    DescriptorEntity desc{};
+    span_load(desc, desc_payload);
+    entities_[target].name = std::string{desc.entity_name.as_string_view()};
+    // Enqueue the CONFIGURATION descriptor read at the entity's
+    // current_configuration index. The unified queue defers it to the
+    // next tick so we don't re-enter the AEM state machine.
+    enqueue_descriptor_read(target, DESCRIPTOR_CONFIGURATION, desc.current_configuration.get());
+}
+
+void ControllerSimple::enqueue_owned_descriptor_reads(Eui64 const& target, std::span<uint8_t const> const desc_payload)
+{
+    // Every descriptor chases what it owns. IEEE 1722.1-2021 7.2.2 has
+    // descriptor_counts list the top level descriptors only, and real devices
+    // (the GALAXY, JOYNED interfaces) do just that: LOCALE is counted but not
+    // the STRINGS behind it, a unit but not its stream ports, nor their
+    // clusters and maps. Those are reached through the base index and count
+    // their owner gives, so a counts-driven crawl alone never sees the string
+    // table that carries most of such a device's naming, nor its channels.
+    // The unified queue dedupes against models that count them as well, and
+    // only a read that is new is taken from the configuration's budget.
+    auto& rec = entities_[target];
+    rec.owned.descriptor(desc_payload, [this, &target, &rec](uint16_t const type, uint16_t const index) {
+        if (rec.read_budget > 0 && enqueue_descriptor_read(target, type, index)) {
+            --rec.read_budget;
         }
-    }
-
-    if (desc_type == DESCRIPTOR_ENTITY && status == AEM_STATUS_SUCCESS && desc_payload.size() >= DescriptorEntity::LENGTH) {
-        DescriptorEntity desc{};
-        span_load(desc, desc_payload);
-        rec.name = std::string{desc.entity_name.as_string_view()};
-        // Enqueue the CONFIGURATION descriptor read at the entity's
-        // current_configuration index. The unified queue defers it to the
-        // next tick so we don't re-enter the AEM state machine.
-        enqueue_descriptor_read(target, DESCRIPTOR_CONFIGURATION, desc.current_configuration.get());
-        return;
-    }
-
-    if (desc_type == DESCRIPTOR_CONFIGURATION && status == AEM_STATUS_SUCCESS) {
-        handle_configuration_descriptor_response(target, desc_payload);
-        return;
-    }
-
-    if (desc_type == DESCRIPTOR_STREAM_INPUT || desc_type == DESCRIPTOR_STREAM_OUTPUT) {
-        handle_stream_descriptor_response(target, status, desc_type, desc_index, desc_payload);
-        return;
-    }
-
-    if (desc_type == DESCRIPTOR_STRINGS) {
-        handle_strings_descriptor_response(target, status, desc_index, desc_payload);
-        return;
-    }
-
-    // LOCALE chases its STRINGS. Real devices (the GALAXY, JOYNED
-    // interfaces) list LOCALE in descriptor_counts but not the STRINGS
-    // behind it — the standard reaches those only through base_strings —
-    // so a counts-driven crawl alone never sees the string table that
-    // carries most of their naming (localized_description with empty
-    // object_names). The unified queue dedupes against models that do
-    // count their STRINGS.
-    if (desc_type == DESCRIPTOR_LOCALE && status == AEM_STATUS_SUCCESS && desc_payload.size() >= DescriptorLocale::LENGTH) {
-        DescriptorLocale locale{};
-        span_load_padded(locale, desc_payload);
-        auto const base = locale.base_strings.get();
-        auto const count = std::min<uint16_t>(locale.number_of_strings.get(), MAX_DESCRIPTORS_PER_TYPE);
-        for (uint16_t i = 0; i < count; ++i) {
-            enqueue_descriptor_read(target, DESCRIPTOR_STRINGS, uint16_t(base + i));
-        }
-        return;
+    });
+    if ((rec.owned.exhausted() || rec.read_budget == 0) && !std::exchange(rec.told_owned_cut_short, true)) {
+        std::print(
+            stderr,
+            "[atdecc] entity {}: its descriptors name more owned descriptors than are followed (cap: {} per configuration)\n",
+            ieee::to_string(target).view(),
+            MAX_DESCRIPTORS_PER_CONFIGURATION);
     }
 }
 
@@ -1088,8 +1117,11 @@ auto ControllerSimple::enqueue_configuration_reads(Eui64 const& target, Descript
     EntityDescriptorCounts counts{};
     // One budget for the whole configuration: the per-type bound alone let
     // one CONFIGURATION enqueue 108 x 60000 reads (and as many set inserts)
-    // synchronously inside a single response callback.
-    size_t budget = MAX_DESCRIPTORS_PER_CONFIGURATION;
+    // synchronously inside a single response callback. What the counts leave
+    // of it is for the descriptors their owners name
+    // (enqueue_owned_descriptor_reads).
+    size_t& budget = entities_[target].read_budget;
+    budget = MAX_DESCRIPTORS_PER_CONFIGURATION;
     // Walk the descriptor_counts table in declaration order, enqueueing
     // a READ_DESCRIPTOR for every (type, index) the entity advertises.
     // The unified queue dedupes against EntityRecord::requested_descriptors.
@@ -1321,15 +1353,16 @@ void ControllerSimple::enqueue_stream_format_query(Eui64 const& target, uint16_t
     }
 }
 
-void ControllerSimple::enqueue_descriptor_read(Eui64 const& target, uint16_t desc_type, uint16_t desc_index)
+auto ControllerSimple::enqueue_descriptor_read(Eui64 const& target, uint16_t desc_type, uint16_t desc_index) -> bool
 {
     // Dedupe against the per-entity already-requested set.
     auto& seen = entities_[target].requested_descriptors;
     if (!seen.insert(std::make_pair(desc_type, desc_index)).second) {
-        return;  // already requested (in queue, in flight, or already received)
+        return false;  // already requested (in queue, in flight, or already received)
     }
     descriptor_read_queue_.push_back(
         PendingDescriptorRead{.target = target, .descriptor_type = desc_type, .descriptor_index = desc_index, .last_sent_ns = 0});
+    return true;
 }
 
 void ControllerSimple::clear_descriptor_read(Eui64 const& target, uint16_t desc_type, uint16_t desc_index)

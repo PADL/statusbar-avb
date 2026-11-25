@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <span>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 using namespace statusbar;
@@ -42,6 +43,29 @@ auto read_response(uint16_t type, uint16_t index, size_t body_size) -> std::vect
     return data;
 }
 
+/// A successful READ_DESCRIPTOR response carrying @p descriptor.
+template <class T>
+auto response_with(T const& descriptor) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> data(AemReadDescriptorResponsePayload::LENGTH + sizeof(T), 0);
+    span_store(std::span{data}.subspan(AemReadDescriptorResponsePayload::LENGTH), descriptor);
+    return data;
+}
+
+/// A CONFIGURATION whose descriptor_counts are @p entries of (type, count).
+auto configuration_listing(std::vector<std::pair<uint16_t, uint16_t>> const& entries) -> std::vector<uint8_t>
+{
+    DescriptorConfiguration cfg{};
+    cfg.descriptor_counts_count = ieee::doublet_t{static_cast<uint16_t>(entries.size())};
+    for (size_t i = 0; i < entries.size(); ++i) {
+        cfg.descriptor_counts[i].descriptor_type = ieee::doublet_t{entries[i].first};
+        cfg.descriptor_counts[i].count = ieee::doublet_t{entries[i].second};
+    }
+    return response_with(cfg);
+}
+
+using Reads = std::vector<std::pair<uint16_t, uint16_t>>;
+
 struct Walk
 {
     std::vector<std::tuple<Eui64, uint16_t, uint16_t>> issued;
@@ -51,6 +75,42 @@ struct Walk
     Walk()
         : e{ENTITY_A, 0, hooks()}
     {}
+
+    /// Issue what is queued: the (type, index) of each read that went out.
+    auto pump() -> Reads
+    {
+        auto const before = issued.size();
+        e.pump();
+        Reads reads;
+        for (auto i = before; i < issued.size(); ++i) {
+            reads.emplace_back(std::get<1>(issued[i]), std::get<2>(issued[i]));
+        }
+        return reads;
+    }
+
+    void answer(std::vector<uint8_t> const& response)
+    {
+        e.on_response(ENTITY_A, AEM_COMMAND_READ_DESCRIPTOR, AEM_STATUS_SUCCESS, response);
+    }
+
+    /// Discover the entity and read it down to a CONFIGURATION listing @p entries.
+    void read_to_configuration(std::vector<std::pair<uint16_t, uint16_t>> const& entries)
+    {
+        DiscoveredEntity entity{};
+        entity.adpdu.entity_id = ENTITY_A;
+        e.on_entity(entity, 0);
+        (void)pump();
+        answer(one_configuration_entity());
+        (void)pump();
+        answer(configuration_listing(entries));
+    }
+
+    static auto one_configuration_entity() -> std::vector<uint8_t>
+    {
+        auto ent = read_response(DESCRIPTOR_ENTITY, 0, DescriptorEntity::LENGTH);
+        put_be16(ent, AemReadDescriptorResponsePayload::LENGTH + 308, 1);
+        return ent;
+    }
 
     auto hooks() -> EnumeratorHooks
     {
@@ -127,6 +187,56 @@ TEST(atdecc_enumerator, counts_only_the_reads_it_issued)
     EXPECT_TRUE(w.e.finished(4));
     EXPECT_EQ(w.printed, 2);
     EXPECT_EQ(w.e.entity_count(), 1U);
+}
+
+// IEEE 1722.1-2021 7.2.2: descriptor_counts lists the top level descriptors.
+// A unit's stream ports, a port's clusters and map and a LOCALE's STRINGS are
+// named by their owners, and the walk goes on from each descriptor it reads.
+TEST(atdecc_enumerator, follows_each_descriptor_to_the_ones_it_owns)
+{
+    Walk w;
+    w.read_to_configuration({{DESCRIPTOR_AUDIO_UNIT, 1}, {DESCRIPTOR_LOCALE, 1}});
+    EXPECT_TRUE(w.pump() == (Reads{{DESCRIPTOR_AUDIO_UNIT, 0}, {DESCRIPTOR_LOCALE, 0}}));
+
+    DescriptorAudioUnit unit{};
+    unit.number_of_stream_output_ports = ieee::doublet_t{1};
+    w.answer(response_with(unit));
+    DescriptorLocale locale{};
+    locale.number_of_strings = ieee::doublet_t{2};
+    w.answer(response_with(locale));
+    EXPECT_TRUE(w.pump() == (Reads{{DESCRIPTOR_STREAM_PORT_OUTPUT, 0}, {DESCRIPTOR_STRINGS, 0}, {DESCRIPTOR_STRINGS, 1}}));
+    EXPECT_FALSE(w.e.finished(1));
+
+    w.answer(read_response(DESCRIPTOR_STRINGS, 0, 8));
+    w.answer(read_response(DESCRIPTOR_STRINGS, 1, 8));
+    DescriptorStreamPort port{};
+    port.descriptor_type = ieee::doublet_t{DESCRIPTOR_STREAM_PORT_OUTPUT};
+    port.number_of_clusters = ieee::doublet_t{2};
+    port.number_of_maps = ieee::doublet_t{1};
+    w.answer(response_with(port));
+    EXPECT_TRUE(w.pump() == (Reads{{DESCRIPTOR_AUDIO_CLUSTER, 0}, {DESCRIPTOR_AUDIO_CLUSTER, 1}, {DESCRIPTOR_AUDIO_MAP, 0}}));
+
+    // The clusters and the map own nothing: answered, the walk is finished.
+    w.answer(read_response(DESCRIPTOR_AUDIO_CLUSTER, 0, 8));
+    w.answer(read_response(DESCRIPTOR_AUDIO_CLUSTER, 1, 8));
+    EXPECT_FALSE(w.e.finished(2));
+    w.answer(read_response(DESCRIPTOR_AUDIO_MAP, 0, 8));
+    EXPECT_TRUE(w.pump().empty());
+    EXPECT_TRUE(w.e.finished(2));
+    EXPECT_EQ(w.printed, 10);
+}
+
+// An entity that lists its stream ports in the counts as well has each read once.
+TEST(atdecc_enumerator, what_the_counts_list_and_an_owner_names_is_read_once)
+{
+    Walk w;
+    w.read_to_configuration({{DESCRIPTOR_AUDIO_UNIT, 1}, {DESCRIPTOR_STREAM_PORT_OUTPUT, 1}});
+    EXPECT_TRUE(w.pump() == (Reads{{DESCRIPTOR_AUDIO_UNIT, 0}, {DESCRIPTOR_STREAM_PORT_OUTPUT, 0}}));
+
+    DescriptorAudioUnit unit{};
+    unit.number_of_stream_output_ports = ieee::doublet_t{1};
+    w.answer(response_with(unit));
+    EXPECT_TRUE(w.pump().empty());
 }
 
 // A read the controller cannot send now stays queued and is not counted out.

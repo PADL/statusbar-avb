@@ -215,6 +215,31 @@ auto configuration_body(std::vector<std::pair<uint16_t, uint16_t>> const& entrie
     return body;
 }
 
+/// @p descriptor as its octets on the wire.
+template <class T>
+auto octets(T const& descriptor) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> body(sizeof(T), 0);
+    span_store(std::span{body}, descriptor);
+    return body;
+}
+
+/// Whether the backend was asked to read descriptor (@p type, @p index) of ENTITY_A.
+auto was_read(FakeControllerService& fake, uint16_t const type, uint16_t const index) -> bool
+{
+    return std::ranges::any_of(fake.calls(), [&](auto const& c) {
+        return c.op == "read_descriptor" && c.target == ENTITY_A && c.a == type && c.b == index;
+    });
+}
+
+/// An AUDIO_UNIT that owns @p ports stream port outputs, from index 0.
+auto audio_unit_with_output_ports(uint16_t const ports) -> std::vector<uint8_t>
+{
+    aem::DescriptorAudioUnit unit{};
+    unit.number_of_stream_output_ports = ieee::doublet_t{ports};
+    return octets(unit);
+}
+
 auto count_detail_ready(std::vector<atdecc_tools::ControllerEvent> const& events) -> int
 {
     int n = 0;
@@ -524,6 +549,78 @@ TEST(controller_service_seam, a_configuration_enqueues_at_most_the_per_configura
     respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, body);
 
     EXPECT_EQ(h.ctrl->queued_descriptor_reads() - before, ControllerSimple::MAX_DESCRIPTORS_PER_CONFIGURATION);
+}
+
+// IEEE 1722.1-2021 7.2.2: descriptor_counts lists the top level descriptors.
+// What a unit, a stream port or a LOCALE owns is named by its owner and is
+// read from there.
+TEST(controller_service_seam, a_descriptor_read_enqueues_the_descriptors_it_owns)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    auto& sink = h.fake->sink();
+    auto const counts = configuration_body({{aem::DESCRIPTOR_AUDIO_UNIT, 1}, {aem::DESCRIPTOR_LOCALE, 1}});
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, counts);
+
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_AUDIO_UNIT, 0, AEM_STATUS_SUCCESS, audio_unit_with_output_ports(2));
+    h.ctrl->tick(1'000'000'000);  // the two ports are asked for before one of them answers
+    aem::DescriptorStreamPort port{};
+    port.descriptor_type = ieee::doublet_t{aem::DESCRIPTOR_STREAM_PORT_OUTPUT};
+    port.descriptor_index = ieee::doublet_t{1};
+    port.base_cluster = ieee::doublet_t{8};
+    port.number_of_clusters = ieee::doublet_t{2};
+    port.base_map = ieee::doublet_t{1};
+    port.number_of_maps = ieee::doublet_t{1};
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 1, AEM_STATUS_SUCCESS, octets(port));
+    aem::DescriptorLocale locale{};
+    locale.base_strings = ieee::doublet_t{3};
+    locale.number_of_strings = ieee::doublet_t{1};
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_LOCALE, 0, AEM_STATUS_SUCCESS, octets(locale));
+
+    h.ctrl->tick(2'000'000'000);
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 0));
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 1));
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_AUDIO_CLUSTER, 8));
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_AUDIO_CLUSTER, 9));
+    EXPECT_FALSE(was_read(*h.fake, aem::DESCRIPTOR_AUDIO_CLUSTER, 10));
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_AUDIO_MAP, 1));
+    EXPECT_TRUE(was_read(*h.fake, aem::DESCRIPTOR_STRINGS, 3));
+}
+
+TEST(controller_service_seam, an_owned_descriptor_the_counts_listed_too_is_asked_for_once)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    auto& sink = h.fake->sink();
+    auto const counts = configuration_body({{aem::DESCRIPTOR_AUDIO_UNIT, 1}, {aem::DESCRIPTOR_STREAM_PORT_OUTPUT, 2}});
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, counts);
+    auto const before = h.ctrl->queued_descriptor_reads();
+
+    // The unit answers: its own read leaves the queue and its two ports, queued from the counts, add nothing.
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_AUDIO_UNIT, 0, AEM_STATUS_SUCCESS, audio_unit_with_output_ports(2));
+    EXPECT_EQ(h.ctrl->queued_descriptor_reads(), before - 1);
+
+    // A third port, which the counts did not list, is one more read.
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_AUDIO_UNIT, 0, AEM_STATUS_SUCCESS, audio_unit_with_output_ports(3));
+    EXPECT_EQ(h.ctrl->queued_descriptor_reads(), before);
+}
+
+TEST(controller_service_seam, owned_descriptors_are_read_within_what_the_counts_left_of_the_budget)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);
+    auto& sink = h.fake->sink();
+    // The counts take all of the budget but two reads.
+    auto const left = uint16_t{2};
+    auto const second = static_cast<uint16_t>(ControllerSimple::MAX_DESCRIPTORS_PER_CONFIGURATION - 60000 - left);
+    auto const counts = configuration_body({{aem::DESCRIPTOR_CONTROL, 60000}, {aem::DESCRIPTOR_MATRIX_SIGNAL, second}});
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_CONFIGURATION, 0, AEM_STATUS_SUCCESS, counts);
+    auto const before = h.ctrl->queued_descriptor_reads();
+
+    aem::DescriptorLocale locale{};
+    locale.number_of_strings = ieee::doublet_t{0xFFFF};
+    respond_read_descriptor(sink, ENTITY_A, aem::DESCRIPTOR_LOCALE, 0, AEM_STATUS_SUCCESS, octets(locale));
+    EXPECT_EQ(h.ctrl->queued_descriptor_reads() - before, size_t{left});
 }
 
 // A GET_STREAM_FORMAT response is keyed on the request it answers. Entities

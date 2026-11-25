@@ -105,6 +105,15 @@ see "Saved state" in `ENTITY_CONSTRUCTION_KIT.md`.
 | `statusbar-aemxml` | Compile and convert AEM entity models (Python): `json2bin` builds the descriptor-storage blob the entity tools load from a declarative `examples/*.json` model; `json2xml`, `xml2json`, `xml2bin`, `bin2xml`, `bin2json`, `validate`, `dump`, `upgrade` (2013 → 2021 AEMXML schema) and `downgrade`. | all |
 | `statusbar-aemxml-cross-check` | Python: compile an example model to a blob, read it back with the C++ `statusbar-descriptor-storage` reader (`--tool=` or `--build-dir=`) and check the two agree. | all |
 
+The controller and `statusbar-atdecc-monitor --enumerate` read an entity's
+model the same way: ENTITY, its CONFIGURATION, every descriptor the
+configuration's descriptor_counts list, and from each descriptor read the
+ones it owns. IEEE 1722.1-2021 7.2.2 has the counts list the top level
+descriptors only, so a unit's stream ports, a port's clusters and maps, a
+LOCALE's STRINGS and a PTP_INSTANCE's PTP_PORTs are found through the base
+index and count their owner gives (`atdecc_aem_children.hpp`). An entity
+that counts them as well has each read once.
+
 ```sh
 statusbar-atdecc-ctl --interface=eth0 --command=list
 statusbar-atdecc-ctl --interface=eth0 --command=connect --talker=node-a:0 --listener=node-d:0 --trace

@@ -7,8 +7,11 @@
 ///
 /// Walks the whole AEM model of each discovered entity (optionally one
 /// --target): ENTITY -> CONFIGURATION -> every (type, index) listed in the
-/// configuration's descriptor_counts, handing each descriptor read for the
-/// first time to a hook, then reports completion so the tool can exit.
+/// configuration's descriptor_counts, and from each descriptor read to the
+/// ones it owns (IEEE 1722.1-2021 7.2.2 has the counts list the top level
+/// only: a unit's stream ports, a port's clusters and maps and a LOCALE's
+/// STRINGS are reached from their owners). Each descriptor read for the first
+/// time goes to a hook; completion is reported so the tool can exit.
 ///
 /// Network-free: reads go out through a hook and responses and timeouts are
 /// told to it, so its in-flight accounting is testable without a controller.
@@ -16,6 +19,7 @@
 #include "statusbar/atdecc/atdecc_adp_discovery.hpp"
 #include "statusbar/atdecc/atdecc_adp_format.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aem_children.hpp"
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/buffer/buffer.hpp"
@@ -171,6 +175,9 @@ class Enumerator
     {
         bool seen_entity{false};
         bool seen_config{false};
+        /// From each descriptor read to the ones it owns.
+        atdecc::aem::DescriptorChildWalk owned;
+        bool told_cut_short{false};
     };
     using ReadKey = std::tuple<ieee::Eui64, uint16_t, uint16_t>;
 
@@ -220,6 +227,21 @@ class Enumerator
             expand_entity(state, target, body);
         } else if (dtype == atdecc::aem::DESCRIPTOR_CONFIGURATION) {
             expand_configuration(state, target, body);
+        } else {
+            expand_owned(state, target, body);
+        }
+    }
+
+    /// Queue the reads of what the descriptor in @p body owns. What the
+    /// counts listed as well is queued once: enqueue() knows it.
+    void expand_owned(TargetState& state, ieee::Eui64 const& target, std::span<uint8_t const> body)
+    {
+        state.owned.descriptor(body, [this, &target](uint16_t const type, uint16_t const index) { enqueue(target, type, index); });
+        if (state.owned.exhausted() && !std::exchange(state.told_cut_short, true)) {
+            std::println(
+                stderr,
+                "[enum] entity {}: its descriptors name more owned descriptors than are followed; the walk is cut short",
+                ieee::to_string(target).view());
         }
     }
 

@@ -17,6 +17,7 @@
 
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
+#include "statusbar/atdecc/atdecc_aem_children.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc_tools/atdecc_aem_validate.hpp"
 #include "statusbar/atdecc_tools/atdecc_controller_model.hpp"
@@ -44,7 +45,8 @@ class ControllerSimple : public net::Pollable
 {
   public:
     /// The most READ_DESCRIPTORs one CONFIGURATION descriptor can enqueue, over
-    /// all its descriptor types together. Above the largest real model (a
+    /// all its descriptor types together and the descriptors those own (a
+    /// unit's stream ports, a port's clusters). Above the largest real model (a
     /// 55k-CONTROL processor proxy) and far below what a corrupt or hostile
     /// descriptor_counts table (108 types x 60000) could otherwise demand in
     /// one response callback.
@@ -184,8 +186,31 @@ class ControllerSimple : public net::Pollable
 
     /// Enqueue a READ_DESCRIPTOR work item. Deduplicates against the queue
     /// and against the per-entity already-read set. The actual send happens
-    /// from tick().
-    void enqueue_descriptor_read(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index);
+    /// from tick(). False when the descriptor had been asked for already.
+    auto enqueue_descriptor_read(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index) -> bool;
+    /// A READ_DESCRIPTOR answer: which descriptor was asked for (taken from the
+    /// request, which an entity's error answer may not echo), the status, and
+    /// the descriptor's octets.
+    struct ReadDescriptorAnswer
+    {
+        uint16_t type;
+        uint16_t index;
+        uint8_t status;
+        std::span<uint8_t const> payload;
+
+        [[nodiscard]] auto succeeded() const noexcept -> bool { return status == statusbar::atdecc::AEM_STATUS_SUCCESS; }
+    };
+    struct EntityRecord;
+    /// Take the answer off the read queue, cache it, and give it to a detail build in progress.
+    void record_descriptor_answer(ieee::Eui64 const& target, ReadDescriptorAnswer const& answer);
+    void feed_detail_builder(EntityRecord& rec, ReadDescriptorAnswer const& answer);
+    /// What the answer leads to: the type's own handling, or the reads of what the descriptor owns.
+    void follow_descriptor_answer(ieee::Eui64 const& target, ReadDescriptorAnswer const& answer);
+    /// An ENTITY descriptor: take its name and read its current CONFIGURATION.
+    void follow_entity_descriptor(ieee::Eui64 const& target, std::span<uint8_t const> desc_payload);
+    /// Queue the reads of what the descriptor in @p desc_payload owns, within
+    /// what is left of its configuration's budget.
+    void enqueue_owned_descriptor_reads(ieee::Eui64 const& target, std::span<uint8_t const> desc_payload);
     /// Remove a queued READ_DESCRIPTOR (called when the response arrives).
     void clear_descriptor_read(ieee::Eui64 const& target, uint16_t desc_type, uint16_t desc_index);
     /// Send the next eligible READ_DESCRIPTOR from the queue (one per tick).
@@ -318,6 +343,13 @@ class ControllerSimple : public net::Pollable
         // Set once the CONFIGURATION descriptor is read; optional so a legitimate
         // {0,0} (controller-only entity) is distinguished from "not yet read".
         std::optional<EntityDescriptorCounts> descriptor_counts;
+        // READ_DESCRIPTORs the configuration may still enqueue: set to
+        // MAX_DESCRIPTORS_PER_CONFIGURATION when it is read, taken from by its
+        // descriptor_counts and then by each descriptor an owner names.
+        size_t read_budget{0};
+        // From each descriptor read to the ones it owns.
+        statusbar::atdecc::aem::DescriptorChildWalk owned;
+        bool told_owned_cut_short{false};
     };
     std::map<ieee::Eui64, EntityRecord> entities_;
 
