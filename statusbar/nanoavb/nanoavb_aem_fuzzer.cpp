@@ -7,6 +7,7 @@
 
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/atdecc/atdecc_utf8.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/gptp/gptp_messages.hpp"
 #include "statusbar/gptp/gptp_tlv.hpp"
@@ -90,7 +91,7 @@ constexpr auto mvu(uint16_t const type) -> Command
 }
 
 /// The commands this handler serves, every one the AEM additions bring among them.
-constexpr std::array<Command, 34> COMMANDS{
+constexpr std::array<Command, 36> COMMANDS{
     aem(AEM_COMMAND_GET_AS_PATH),
     aem(AEM_COMMAND_SET_MAX_TRANSIT_TIME),
     aem(AEM_COMMAND_GET_MAX_TRANSIT_TIME),
@@ -120,6 +121,8 @@ constexpr std::array<Command, 34> COMMANDS{
     aem(AEM_COMMAND_SET_CLOCK_SOURCE),
     aem(AEM_COMMAND_GET_DYNAMIC_INFO),
     mvu(MVU_COMMAND_GET_MILAN_INFO),
+    mvu(MVU_COMMAND_SET_SYSTEM_UNIQUE_ID),
+    mvu(MVU_COMMAND_GET_SYSTEM_UNIQUE_ID),
     mvu(MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO),
     mvu(MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO),
     mvu(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX),
@@ -343,6 +346,29 @@ void check_mcr(Sent const& s)
     require(s.body().size() == expected);
 }
 
+/// A SYSTEM_UNIQUE_ID response carries the id in force, system_unique_id() octet for octet (74, the
+/// reserved ones zero), or nothing for a command too short.
+void check_system_unique_id(AemCommandHandler const& aem, Sent const& s)
+{
+    AecpMvuDu du{};
+    span_load(du, std::span<uint8_t const>{s.frame});
+    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> in_force{};
+    span_store(std::span{in_force}, aem.system_unique_id());
+    bool const short_command = du.common.status() == MVU_STATUS_PAYLOAD_TOO_SHORT;
+    require(short_command ? s.body().empty() : (std::ranges::equal(s.body(), in_force) && in_force[0] == 0 && in_force[1] == 0));
+}
+
+/// An MVU frame of the commands whose responses the checks above know.
+void check_mvu(Rig const& rig, Sent const& s)
+{
+    if (s.type() == MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO || s.type() == MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO) {
+        check_mcr(s);
+    }
+    if (s.type() == MVU_COMMAND_GET_SYSTEM_UNIQUE_ID || s.type() == MVU_COMMAND_SET_SYSTEM_UNIQUE_ID) {
+        check_system_unique_id(rig.aem, s);
+    }
+}
+
 /// A GET_AUDIO_MAP answered SUCCESS counts what it carries, no more than a partition.
 void check_audio_map(Rig const& rig, Sent const& s)
 {
@@ -395,9 +421,8 @@ void check_sent(Rig const& rig, size_t const first, Kind const kind, uint16_t co
     for (auto const& s : std::span{rig.sent}.subspan(first)) {
         check_frame(rig, s);
         bool const same = s.is_mvu() == (kind == Kind::mvu) && s.type() == type;
-        if (s.is_mvu() &&
-            (s.type() == MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO || s.type() == MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO)) {
-            check_mcr(s);
+        if (s.is_mvu()) {
+            check_mvu(rig, s);
         }
         if (!s.is_mvu() && s.is_response()) {
             check_audio_map(rig, s);
@@ -413,8 +438,8 @@ void check_sent(Rig const& rig, size_t const first, Kind const kind, uint16_t co
 }
 
 /// The handler's state: the mapping store sorted, unique, within capacity, and every mapping in it
-/// still holding against the model (Milan v1.3 Sections 5.4.2.7, 5.4.2.13); the registrations and
-/// the deferred commands within their capacities.
+/// still holding against the model (Milan v1.3 Sections 5.4.2.7, 5.4.2.13); the system name in force
+/// well-formed UTF-8 (Section 5.4.4.2); the registrations and the deferred commands within their capacities.
 void check_state(AemCommandHandler const& aem, DynamicAudioMaps const& maps)
 {
     require(maps.size() <= DynamicAudioMaps::MAX_MAPPINGS && aem.mappings_hold());
@@ -424,6 +449,7 @@ void check_state(AemCommandHandler const& aem, DynamicAudioMaps const& maps)
         require(!previous || previous->first < port || (previous->first == port && cluster_order(previous->second, m)));
         previous = std::pair{port, m};
     });
+    require(atdecc::utf8_well_formed(aem.system_unique_id().system_name.as_string_view()));
     require(aem.unsolicited_registration_count() <= AemCommandHandler::MAX_UNSOLICITED_REGISTRATIONS);
     require(aem.pending_command_count() <= AemCommandHandler::MAX_PENDING_COMMANDS);
 }

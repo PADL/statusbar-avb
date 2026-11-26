@@ -2679,6 +2679,10 @@ auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<
     switch (command.header.command_type()) {
         case MVU_COMMAND_GET_MILAN_INFO:
             return handle_mvu_get_milan_info(command, out_buffer);
+        case MVU_COMMAND_SET_SYSTEM_UNIQUE_ID:
+            return handle_mvu_set_system_unique_id(command, out_buffer);
+        case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID:
+            return handle_mvu_get_system_unique_id(command, out_buffer);
         case MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO:
             return handle_mvu_set_mcr_info(command, out_buffer);
         case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
@@ -2698,6 +2702,62 @@ auto AemCommandHandler::handle_mvu_get_milan_info(MvuCommand const& command, std
     }
     span_store(out_buffer, milan_info_response());
     return {.status = MVU_STATUS_SUCCESS, .size = MvuGetMilanInfoResponse::LENGTH};
+}
+
+auto AemCommandHandler::handle_mvu_get_system_unique_id(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    if (command.data.size() < MVU_GET_SYSTEM_UNIQUE_ID_COMMAND_LENGTH) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    span_store(out_buffer, system_unique_id());
+    return {.status = MVU_STATUS_SUCCESS, .size = MvuSystemUniqueIdPayload::LENGTH};
+}
+
+auto AemCommandHandler::handle_mvu_set_system_unique_id(MvuCommand const& command, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
+    auto const request = load_payload<MvuSystemUniqueIdPayload>(command.data);
+    if (!request) {
+        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
+    }
+    uint8_t const status = system_unique_id_set_status(command.header.common.controller_entity_id, *request);
+    if (status == MVU_STATUS_SUCCESS) {
+        apply_system_unique_id(*request);
+    }
+    span_store(out_buffer, system_unique_id());
+    return {.status = status, .size = MvuSystemUniqueIdPayload::LENGTH};
+}
+
+void AemCommandHandler::apply_system_unique_id(MvuSystemUniqueIdPayload const& request) noexcept
+{
+    AtdeccString const name{request.system_name.as_string_view()};  // the octets past its end zeroed
+    mvu_changed_ = request.system_unique_id.get() != system_unique_id_ || std::is_neq(name <=> system_name_);
+    system_unique_id_ = request.system_unique_id.get();
+    system_name_ = name;
+    if (mvu_changed_ && on_system_unique_id_changed_) {
+        on_system_unique_id_changed_(system_unique_id());
+    }
+}
+
+auto AemCommandHandler::restore_system_unique_id(uint64_t const id, AtdeccString const& name) noexcept -> bool
+{
+    if (!atdecc::utf8_well_formed(name.as_string_view())) {
+        return false;
+    }
+    system_unique_id_ = id;
+    system_name_ = AtdeccString{name.as_string_view()};
+    return true;
+}
+
+auto AemCommandHandler::system_unique_id_set_status(Eui64 const& controller, MvuSystemUniqueIdPayload const& request) const
+    -> uint8_t
+{
+    // The lock first, as for SET_MEDIA_CLOCK_REFERENCE_INFO: a locked-out controller learns nothing of its arguments.
+    if (exclusive_access_status(controller)) {
+        return MVU_STATUS_ENTITY_LOCKED;
+    }
+    return atdecc::utf8_well_formed(request.system_name.as_string_view()) ? MVU_STATUS_SUCCESS : MVU_STATUS_BAD_ARGUMENTS;
 }
 
 auto AemCommandHandler::handle_mvu_get_mcr_info(MvuCommand const& command, std::span<uint8_t> const out_buffer) const
