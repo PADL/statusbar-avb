@@ -13,7 +13,9 @@
 #include "statusbar/stats/stats_atomic_time_stats.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -149,6 +151,56 @@ void interrupt_stream_input(StreamInputCounters& c) noexcept;
 /// SEQ_NUM_MISMATCH, MEDIA_RESET or timestamp step from the old stream's last
 /// packet). Either thread; safe to call twice.
 void restart_stream_input(StreamInputCounters& c) noexcept;
+
+/// Milan v1.3 Table 5.6 STREAM_INPUT counters, made from StreamInputCounters'
+/// running ones by observation interval: an interval counter counts the
+/// intervals in which its running counter moved; MEDIA_LOCKED, MEDIA_UNLOCKED
+/// and STREAM_INTERRUPTED count events since the last reset, answered live
+/// (current()). Reactor thread.
+struct StreamInputIntervals
+{
+    /// Where each value is: bit value 1 << i of counters_valid is values[i]
+    /// (Milan v1.3 Table 5.13).
+    enum Index : uint8_t
+    {
+        MEDIA_LOCKED = 0,
+        MEDIA_UNLOCKED = 1,
+        STREAM_INTERRUPTED = 2,
+        SEQ_NUM_MISMATCH = 3,
+        MEDIA_RESET = 4,
+        TIMESTAMP_UNCERTAIN = 5,
+        UNSUPPORTED_FORMAT = 8,
+        LATE_TIMESTAMP = 9,
+        EARLY_TIMESTAMP = 10,
+        FRAMES_RX = 11,
+    };
+    /// The counters_valid bits of Milan v1.3 Table 5.13.
+    static constexpr uint32_t VALID = 0x0000'0F3FU;
+    static constexpr size_t COUNT = 12;
+
+    /// The values as of the last fold, or zero since a reset.
+    std::array<uint32_t, COUNT> values{};
+    /// The running counters at the last fold (interval counters) or reset
+    /// (event counters), by the same index.
+    std::array<uint32_t, COUNT> last{};
+    /// values as the last fold left them.
+    std::array<uint32_t, COUNT> folded{};
+
+    /// The values GET_COUNTERS answers now: the interval counters as of the
+    /// last fold, the event counters of @p c as they stand, since the last
+    /// reset (Table 5.6 counts those "each time"), MEDIA_UNLOCKED never ahead of MEDIA_LOCKED.
+    [[nodiscard]] auto current(StreamInputCounters const& c) const noexcept -> std::array<uint32_t, COUNT>;
+    /// End one observation interval of @p c: an input still locked that
+    /// received nothing in it has lost its stream (interrupt_stream_input) and
+    /// one that resumes starts a new run; each interval counter whose running
+    /// counter moved counts one, and values becomes current(). True when a
+    /// value differs from the last fold's. The caller drops the lock of an
+    /// input that is stopped on purpose first.
+    [[nodiscard]] auto fold(StreamInputCounters& c) noexcept -> bool;
+    /// Zero every value: the input became bound (Milan v1.3 Section 5.3.8.10).
+    /// An input that was not bound has no stream, so it is not locked.
+    void reset(StreamInputCounters const& c) noexcept;
+};
 
 /// Append the presentation-margin report for one STREAM_INPUT to @p out:
 /// late/early counts, margin and lateness statistics, and the margin histogram
