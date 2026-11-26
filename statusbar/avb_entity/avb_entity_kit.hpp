@@ -431,6 +431,13 @@ class AvbEntityKit
     using InputMappingsFn =
         sg14::inplace_function<uint8_t(uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings), 32>;
     void set_on_input_mappings_changed(InputMappingsFn fn) noexcept { on_input_mappings_changed_ = std::move(fn); }
+    /// A dynamic mappings change by other than ATDECC on STREAM_PORT_INPUT @p port_index: as a
+    /// REMOVE_AUDIO_MAPPINGS of @p remove then an ADD_AUDIO_MAPPINGS of @p add, all or nothing,
+    /// through the hook; local_change_refusal() first. Notified and saved. Reactor thread.
+    [[nodiscard]] auto request_audio_mappings(
+        uint16_t port_index,
+        std::span<nanoavb::DynamicAudioMapping const> add,
+        std::span<nanoavb::DynamicAudioMapping const> remove) -> uint8_t;
     /// STREAM_PORT_INPUT @p port_index's dynamic mappings, in cluster order.
     [[nodiscard]] auto input_mappings(uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The channels of STREAM_OUTPUT @p stream_index the model's static AUDIO_MAPs name (1 + the
@@ -1046,6 +1053,18 @@ class AvbEntityKit
     void wire_controller_hooks();
     void wire_storage_hooks();
     void wire_dynamic_mappings();
+    /// The kit's DynamicAudioMaps installed in the AEM handler, and the model's dynamic ports found.
+    void install_dynamic_maps();
+    /// The ports of @p port_type with dynamic mappings (no AUDIO_MAP), in index order.
+    [[nodiscard]] auto dynamic_ports(uint16_t port_type) const -> std::vector<uint16_t>;
+    /// The AEM handler's mappings hook: a STREAM_PORT_INPUT's to the entity's hook, else NOT_SUPPORTED.
+    [[nodiscard]] auto change_input_mappings(
+        uint16_t port_type, uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings) -> uint8_t;
+    /// @p mappings seeded on the (emptied) port, then through the entity's hook when @p apply.
+    [[nodiscard]] auto seed_mappings(
+        uint16_t port_type, uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings, bool apply) -> uint8_t;
+    /// A copy of the mappings the port holds now.
+    [[nodiscard]] auto held_mappings(uint16_t port_type, uint16_t port_index) const -> nanoavb::DynamicAudioMaps::Mappings;
     /// The AEM GET_COUNTERS and GET_STREAM_INFO fills.
     void wire_aecp_queries();
     /// The GET_STREAM_INFO answer for a stream: the talker's or the
@@ -1225,6 +1244,13 @@ class AvbEntityKit
     /// The STREAM_PORT_INPUTs with dynamic mappings, and the STREAM_PORT_OUTPUTs.
     std::vector<uint16_t> dynamic_input_ports_{};
     std::vector<uint16_t> dynamic_output_ports_{};
+    /// The stream ports' dynamic mappings, both directions: the store the AEM handler changes
+    /// (nanoavb::AemCommandHandler::set_dynamic_audio_maps).
+    nanoavb::DynamicAudioMaps audio_maps_{};
+    /// @p mappings put on dynamic port (@p port_type, @p port_index), through the input hook
+    /// when @p apply, else kept only; the AEM status, the port as it was unless SUCCESS.
+    [[nodiscard]] auto put_mappings(
+        uint16_t port_type, uint16_t port_index, std::span<nanoavb::DynamicAudioMapping const> mappings, bool apply) -> uint8_t;
     /// Every dynamic input port back to its default (start, before the saved
     /// formats: the saved mappings follow them).
     void reset_input_mappings();
