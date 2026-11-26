@@ -270,11 +270,11 @@ struct AvbEntityAudioIOConfig
     bool signal_presence{false};
 
     /// Each CLOCK_DOMAIN's Default Media Clock Reference Priority (Milan v1.3 Section 7.6.1.1), by
-    /// index; the last also serves the domains after it, extras are ignored. Empty keeps the MVU
-    /// handler's MVU_MCR_PRIO_NETWORK_INTERFACE (192). Read at start().
+    /// index; the last also serves the domains after it, extras are ignored. Empty keeps the AEM
+    /// handler's MVU_MCR_PRIO_DEFAULT (128). Read at start().
     std::vector<uint8_t> default_mcr_priorities{};
 
-    /// Stream destination address source. "static" (default) uses the
+    /// Stream destination address source. "static" uses the
     /// *_talker_dest_mac fields above. "maap" acquires a contiguous block of
     /// addresses from the IEEE 1722 dynamic pool via MAAP at start() and assigns
     /// one per talker stream (block+0=AM824, +1=AAF, +2=CRF), then defends them for

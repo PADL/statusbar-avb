@@ -59,17 +59,17 @@ statusbar_add_module(
   nanoavb_entity_test.cpp
   nanoavb_gptp_sm_test.cpp
   nanoavb_msrp_sm_test.cpp
-  nanoavb_mvu_handler_test.cpp
-  nanoavb_audio_map_test.cpp
   nanoavb_sm_test.cpp
   nanoavb_srp_test.cpp
   nanoavb_srp_port_test.cpp
   nanoavb_controller_test.cpp
   nanoavb_integration_test.cpp
-  nanoavb_local_port_test.cpp)
+  nanoavb_local_port_test.cpp
+  FUNCTIONAL_TESTS
+  nanoavb_components_functional_test.cpp)
 
-add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_mvu_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_audio_mappings_fuzzer.cpp)
+add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_aem_fuzzer.cpp)
 add_avb_fuzzer(${CMAKE_CURRENT_LIST_DIR}/nanoavb_local_port_fuzzer.cpp)
 
 add_executable(nanoavb_example nanoavb_example.cpp)

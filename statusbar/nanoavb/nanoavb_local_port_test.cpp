@@ -354,7 +354,7 @@ TEST(nanoavb_local_port, two_clients_each_get_their_own_responses)
     EXPECT_EQ(aem_header(to_b.front()).sequence_id.get(), uint16_t{2});
 }
 
-TEST(nanoavb_local_port, get_milan_info_reaches_the_mvu_handler)
+TEST(nanoavb_local_port, get_milan_info_is_answered_over_the_local_port)
 {
     Bench bench;
     auto client = open_client(bench.path);
