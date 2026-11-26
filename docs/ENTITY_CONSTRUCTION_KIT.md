@@ -454,6 +454,17 @@ cluster channels, and an output port's stream channels (each STREAM_OUTPUT
 counted at the most channels any format it lists has, so the partition is
 fixed for the configuration), in order, into maps of the size the table
 above gives, and answers map_index P with the mappings of partition P.
+On an input port, ADD_AUDIO_MAPPINGS accepts a command whose every mapping
+names a cluster channel of the port and a channel of a stream input's
+current format at the audio unit's rate (unless the port converts rates),
+no cluster channel mapped from two stream channels; REMOVE_AUDIO_MAPPINGS
+removes what it lists, a mapping listed twice ignored, one not held
+refusing the whole command. Anything else is BAD_ARGUMENTS, past the
+store's capacity NO_RESOURCES, with nothing changed. A change goes to the
+entity's `set_on_audio_mappings_changed` hook first, all of the port's
+mappings at once, and is kept only when the hook answers SUCCESS; without
+the hook both commands answer NOT_IMPLEMENTED. The response echoes the
+command and a change is notified as it, after it.
 
 Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while

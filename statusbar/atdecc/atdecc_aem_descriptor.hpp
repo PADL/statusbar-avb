@@ -1061,6 +1061,11 @@ struct DescriptorStreamPort
 static_assert(sizeof(DescriptorStreamPort) == 20, "DescriptorStreamPort must be exactly 20 bytes");
 static_assert(offsetof(DescriptorStreamPort, base_map) == 18);
 
+/// STREAM_PORT port_flags (Table 7-15).
+constexpr uint16_t PORT_FLAG_CLOCK_SYNC_SOURCE = 0x0001;       ///< the port is a clock synchronization source
+constexpr uint16_t PORT_FLAG_ASYNC_SAMPLE_RATE_CONV = 0x0002;  ///< the port converts sample rates asynchronously
+constexpr uint16_t PORT_FLAG_SYNC_SAMPLE_RATE_CONV = 0x0004;   ///< the port converts sample rates synchronously
+
 //
 // Signal Source triple - Clause 7.2.14 onward
 //

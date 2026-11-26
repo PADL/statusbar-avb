@@ -153,6 +153,12 @@ using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<
 /// or IN_PROGRESS when it needs time, to finish with complete_pending_command() as a deferred SET.
 using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
 
+/// Put stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in cluster
+/// order) in force in the data plane: SUCCESS once in force, any other AEM status refuses and leaves
+/// the port as it was. Called on the reactor thread before the response; it must not change mappings itself.
+using AudioMappingsChangedFn = statusbar::sg14::
+    inplace_function<uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings), 64>;
+
 /// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
 /// applied (see set_identify_control_index). @p active is true when the new
 /// value is non-zero (a controller is identifying this entity), false when
@@ -204,6 +210,10 @@ struct AemCommandHandlerCallbacks
     /// GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
     GetPresentationOffsetFn get_presentation_offset;
     SetPresentationOffsetFn set_presentation_offset;
+
+    /// Put a stream port's dynamic mappings in force. Optional; if unset,
+    /// ADD_AUDIO_MAPPINGS and REMOVE_AUDIO_MAPPINGS reply NOT_IMPLEMENTED.
+    AudioMappingsChangedFn on_audio_mappings_changed;
 };
 
 /// What answers Milan's stream input commands over AECP MVU (Milan v1.3
@@ -415,6 +425,8 @@ class AemCommandHandler
     /// handler alone changes it. Without one (the default) GET_AUDIO_MAP, ADD_AUDIO_MAPPINGS and
     /// REMOVE_AUDIO_MAPPINGS answer NOT_IMPLEMENTED. @p maps must outlive the handler, or be withdrawn.
     void set_dynamic_audio_maps(DynamicAudioMaps* maps) noexcept { audio_maps_ = maps; }
+    /// Install the data plane's hook for the dynamic mappings (AudioMappingsChangedFn).
+    void set_on_audio_mappings_changed(AudioMappingsChangedFn fn) { callbacks_.on_audio_mappings_changed = std::move(fn); }
     /// The store of the dynamic mappings in force, nullptr without one.
     [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const* { return audio_maps_; }
     /// Whether STREAM_PORT_INPUT or STREAM_PORT_OUTPUT (@p port_type, @p port_index) of the current
@@ -957,6 +969,61 @@ class AemCommandHandler
     /// Port (@p port_type, @p port_index)'s model in @p port when its mappings are dynamic; else
     /// NOT_SUPPORTED (not a stream port, or AUDIO_MAP descriptors) or NO_SUCH_DESCRIPTOR.
     [[nodiscard]] auto dynamic_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// ADD_AUDIO_MAPPINGS (@p add) or REMOVE_AUDIO_MAPPINGS (7.4.45, 7.4.46) on a dynamic stream port.
+    [[nodiscard]] auto handle_audio_mappings(bool add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// ADD (@p add) or REMOVE_AUDIO_MAPPINGS @p cmd, its body @p command_data, on mappable @p port.
+    [[nodiscard]] auto change_audio_mappings(
+        bool add,
+        AemAudioMappingsCommandHeader const& cmd,
+        PortModel const& port,
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// The set a controller's ADD (@p add) or REMOVE of @p listed leaves @p port (index @p port_index)
+    /// at, in the store's next() (cluster order), or the status to refuse with: BAD_ARGUMENTS for a
+    /// REMOVE of a mapping not held (7.4.46.1).
+    [[nodiscard]] auto next_mappings(
+        bool add, uint16_t port_index, PortModel const& port, std::span<DynamicAudioMapping const> listed) -> uint8_t;
+    /// Put the store's next() in force for a controller's ADD (@p add) or REMOVE @p cmd on @p port_type
+    /// and answer it (the command echoed), notifying the other controllers when it changed the port.
+    [[nodiscard]] auto commit_mappings_command(
+        bool add,
+        uint16_t port_type,
+        AemAudioMappingsCommandHeader const& cmd,
+        std::span<uint8_t const> command_data,
+        std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// SUCCESS when @p mapping names a cluster channel of the port and a stream of its direction and,
+    /// with @p check_channel, a channel of its current format at the unit's rate; else BAD_ARGUMENTS.
+    [[nodiscard]] auto check_mapping(
+        uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const -> uint8_t;
+    /// SUCCESS when @p stream_channel is a channel of @p stream_format and, on an input port that does
+    /// not convert rates, the format is at its audio unit's rate; else BAD_ARGUMENTS.
+    [[nodiscard]] auto check_stream_channel(
+        uint16_t port_index, PortModel const& port, uint64_t stream_format, uint16_t stream_channel) const -> uint8_t;
+    /// Whether the audio unit holding stream port (@p port_type, @p port_index) runs at base rate
+    /// @p rate (true: no such unit).
+    [[nodiscard]] auto unit_rate_is(uint16_t port_type, uint16_t port_index, uint32_t rate) const -> bool;
+    /// dynamic_port() for a port a controller's ADD or REMOVE may change (with the store and the
+    /// data plane's hook); else the status they refuse with.
+    [[nodiscard]] auto mappable_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// Append @p mappings, checked as an ADD's, to the set in the store's next(): BAD_ARGUMENTS for
+    /// a cluster channel mapped from two stream channels, NO_RESOURCES past the store's capacity.
+    [[nodiscard]] auto add_mappings(uint16_t port_index, PortModel const& port, std::span<DynamicAudioMapping const> mappings)
+        -> uint8_t;
+    /// add_mappings() for one mapping.
+    [[nodiscard]] auto add_mapping(uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping) -> uint8_t;
+    /// @p current without @p listed (each checked against the model, one not held ignored) in the
+    /// store's next(), or the status to refuse with.
+    [[nodiscard]] auto remove_mappings(
+        uint16_t port_index,
+        PortModel const& port,
+        std::span<DynamicAudioMapping const> current,
+        std::span<DynamicAudioMapping const> listed) -> uint8_t;
+    /// Whether the store's next() fits as the port's beside the other ports' and, with @p apply, the
+    /// hook puts it in force (NOT_IMPLEMENTED without one): SUCCESS, or the status to refuse with.
+    [[nodiscard]] auto admit_mappings(uint16_t port_type, uint16_t port_index, bool apply) -> uint8_t;
+    /// admit_mappings(), then keep the store's next() as the port's.
+    [[nodiscard]] auto admit_and_keep(uint16_t port_type, uint16_t port_index, bool apply) -> uint8_t;
     /// Descriptor (@p type, @p index) of the current configuration, nullopt when there is none.
     template <typename T>
     [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
