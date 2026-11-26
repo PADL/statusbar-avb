@@ -2364,4 +2364,45 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+//
+// AVTP tu - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1
+//
+
+TEST(avb_entity_kit_tu, the_talker_follows_the_announced_grandmaster_whatever_the_callbacks)
+{
+    // A start knows no grandmaster: tu. One announced opens the 0.25 s window, after an
+    // integrator replaced the gPTP callbacks whole, as the tools do; the receipt timeout sets tu again.
+    KitPair pair{"classic"};
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    auto& talker = pair.talker->talker();
+    auto* const slot = talker.slot_for(AAF_STREAM);
+    EXPECT_TRUE(slot != nullptr);
+    constexpr int64_t LATER_NS = 1'000'000'000;  // past the window
+    auto send = [&](int64_t const ahead_ns) {    // what transmit_* stores and counts
+        talker.count_sent(*slot, talker.timestamp_uncertain(net::monotonic_ns() + ahead_ns), false);
+    };
+    send(0);
+    send(LATER_NS);
+
+    auto& announces = pair.talker->host().net_handlers()->gptp_handler();
+    announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{});
+    gptp::AnnounceMessage announce{};
+    announce.init(1);
+    announce.grandmaster_identity = gptp::ClockIdentity{Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55}};
+    announces.observe_announce(2'000'000'000, announce);
+    send(0);
+    send(LATER_NS);
+    send(LATER_NS);
+    auto counters = counters_of(output);
+    EXPECT_EQ(counters.counters[4].get(), 3U);  // TIMESTAMP_UNCERTAIN: none, none, the window
+    EXPECT_EQ(counters.counters[7].get(), 5U);  // FRAMES_TX
+
+    announces.tick(10'000'000'000);  // the Announces stopped
+    send(LATER_NS);
+    counters = counters_of(output);
+    EXPECT_EQ(counters.counters[4].get(), 4U);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

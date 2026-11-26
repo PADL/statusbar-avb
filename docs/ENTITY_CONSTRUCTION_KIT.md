@@ -367,6 +367,22 @@ input's are; under the Milan profile GET_COUNTERS answers STREAM_START and
 STREAM_STOP as they stand and the interval counters as of the last fold,
 zero once the stream has started since.
 
+### tu and mr on the talker's AVTPDUs
+
+Every AVTPDU the talker sends, AM824, AAF and CRF alike, carries tu (IEEE
+1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2) while no gPTP
+grandmaster is in force, and for 0.25 s after one comes into force
+(`TalkerStreams::TU_AFTER_GM_CHANGE_NS`, Milan v1.3 Annex B.1.1): another
+grandmaster, or the first after none. A start knows none until the first
+Announce. The kit follows the Announce handler's grandmaster through its
+own observer (`GptpAnnounceHandler::set_on_grandmaster_changed`), which an
+integrator replacing the `GptpAnnounceCallbacks` leaves in place, and
+tells its talker (`notify_grandmaster_changed`, `notify_grandmaster_lost`).
+The window is timed on the steady clock, as gPTP time may step at the
+change. The reactor thread writes the state, one `itc::SeqlockValue`, and
+the media thread reads it for each AVTPDU without a lock. A
+`TalkerStreams` used without the kit sends tu clear until it is told.
+
 ### The format of a stream input
 
 A stream input starts on the format its model authors and takes any other

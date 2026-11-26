@@ -987,7 +987,27 @@ auto AvbEntityKit::bring_up_control_plane(net::MessageReactor& reactor, TimePoin
         return status;
     }
     restore_control_state(now);
+    follow_grandmaster();
     return success();
+}
+
+void AvbEntityKit::follow_grandmaster()
+{
+    // AVTP tu (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2) from the Announce
+    // handler's own observer, which an integrator's GptpAnnounceCallbacks do not replace.
+    auto& announces = host_.net_handlers()->gptp_handler();
+    announces.set_on_grandmaster_changed(
+        [this, &announces](int64_t) { notify_talker_of_grandmaster(announces.has_grandmaster()); });
+    notify_talker_of_grandmaster(announces.has_grandmaster());
+}
+
+void AvbEntityKit::notify_talker_of_grandmaster(bool const in_force) noexcept
+{
+    if (in_force) {
+        talker_->notify_grandmaster_changed(net::monotonic_ns());  // the steady clock the media thread reads
+        return;
+    }
+    talker_->notify_grandmaster_lost();
 }
 
 void AvbEntityKit::restore_control_state(TimePoint const now)
