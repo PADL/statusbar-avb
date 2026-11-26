@@ -5647,6 +5647,7 @@ struct StreamInfoOffsetStore
     std::array<uint32_t, 2> offsets{2'000'000, 2'000'000};
     uint8_t set_status{AEM_STATUS_SUCCESS};  ///< what the next set answers
     int sets{0};
+    int calls{0};  ///< every call of the set hook, whatever it answered
 
     void install(AemCommandHandler& handler)
     {
@@ -5655,6 +5656,7 @@ struct StreamInfoOffsetStore
                 return index < offsets.size() ? std::optional<uint32_t>{offsets.at(index)} : std::nullopt;
             },
             [this](uint16_t const index, uint32_t const ns) -> uint8_t {
+                ++calls;
                 if (set_status == AEM_STATUS_SUCCESS) {
                     offsets.at(index) = ns;
                     ++sets;
@@ -6024,6 +6026,43 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_
         EXPECT_EQ(solicited_status(sends), int{AEM_STATUS_SUCCESS});
         EXPECT_EQ(store.offsets[0], ns);
     }
+}
+
+// IEEE 1722.1-2021 Table 7-141, as SET_MAX_TRANSIT_TIME: a hook that needs time answers IN_PROGRESS,
+// the SET is held, a retransmit is answered from its slot, and complete_pending_command() answers it.
+TEST(nanoavb_entity_presentation_offset, a_set_stream_info_whose_hook_needs_time_is_deferred_and_completed)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_stream_info_layout(StreamInfoLayout::milan_v1_2);
+    handler.set_entity_id(kEntity);
+    StreamInfoOffsetStore store;
+    store.set_status = AEM_STATUS_IN_PROGRESS;
+    store.install(handler);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    auto const body = set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 1, stream_info_flags::MSRP_ACC_LAT_VALID, 3'000'000);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body, 7);
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(solicited_status(sends), int{AEM_STATUS_IN_PROGRESS});
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_INFO, body, 7);
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_EQ(store.calls, 1);  // the retransmit did not run the hook again
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    store.offsets[1] = 3'000'000;
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_STREAM_INFO, DESCRIPTOR_STREAM_OUTPUT, 1, AEM_STATUS_SUCCESS));
+    EXPECT_EQ(handler.pending_command_count(), size_t{0});
+    EXPECT_EQ(solicited_status(sends), int{AEM_STATUS_SUCCESS});
+    EXPECT_TRUE(std::ranges::equal(body_of(*solicited(sends)), body));
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_INFO, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_INFO, kMacA), 0);
 }
 
 TEST(nanoavb_entity_presentation_offset, the_2021_layout_sets_it_by_max_transit_time_only)

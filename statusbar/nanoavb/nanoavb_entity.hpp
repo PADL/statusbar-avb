@@ -1076,7 +1076,7 @@ class AemCommandHandler
     [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
     /// SET_STREAM_INFO's answer @p r: a failure answers the values in force (Clause 7.4.15.1), or
-    /// @p r itself when they cannot be read.
+    /// @p r itself when they cannot be read; SUCCESS and IN_PROGRESS (a deferred SET) pass as they are.
     [[nodiscard]] auto stream_info_set_answer(
         AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// SET_STREAM_INFO's checks of @p cmd before its sub-commands: BAD_ARGUMENTS for
@@ -1086,6 +1086,15 @@ class AemCommandHandler
     /// @p response (the echoed command) already in the output buffer.
     [[nodiscard]] auto set_stream_info(AemStreamInfoPayload const& cmd, uint32_t current, std::span<uint8_t const> response)
         -> AemCommandResponse;
+    /// What SET_STREAM_INFO answers for presentation offset @p offset before the hook runs, its echo
+    /// @p size octets: BAD_ARGUMENTS past the range, IN_PROGRESS for a repeat of one deferred,
+    /// NO_RESOURCES with no pending slot free; nullopt to run the hook.
+    [[nodiscard]] auto stream_info_offset_answered_before_hook(uint32_t offset, size_t size) const
+        -> std::optional<AemCommandResponse>;
+    /// STREAM_OUTPUT @p index's offset @p offset (@p current in force) given to the hook: deferred on
+    /// IN_PROGRESS (Clause 7.4.15.1, Table 7-141), a change notified as @p response, the echo.
+    [[nodiscard]] auto apply_stream_info_offset(
+        uint16_t index, uint32_t offset, uint32_t current, std::span<uint8_t const> response) -> AemCommandResponse;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.
