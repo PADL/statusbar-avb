@@ -75,10 +75,10 @@ struct AafStreamFormat
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
-/// An AAF format word's ut ("up to") bit, octet 1 bit 4 (IEEE 1722-2016 Figure I.12): its
-/// channels_per_frame is a maximum, every count from 1 to it supported.
-inline constexpr uint64_t AAF_FORMAT_UP_TO = uint64_t{1} << 52U;
-inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNELS_MASK};
+/// The "up to" bit of an AAF format code (octet 1, bit 4).
+inline constexpr uint64_t AAF_STREAM_FORMAT_UT_BIT = 0x0010'0000'0000'0000ULL;
+/// The channels_per_frame field of an AAF format code.
+inline constexpr uint64_t AAF_STREAM_FORMAT_CHANNELS_MASK = uint64_t{AafStreamFormat::CHANNELS_MASK};
 
 /// Whether the AAF formats-list entry @p listed describes the AAF format
 /// @p wanted, whose ut bit is clear. An entry with its ut bit set describes
@@ -88,9 +88,8 @@ inline constexpr uint64_t AAF_FORMAT_CHANNELS = uint64_t{AafStreamFormat::CHANNE
 /// specified"). An entry with the bit clear describes itself.
 [[nodiscard]] constexpr auto aaf_stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
 {
-    bool const aaf = stream_format_bytes(wanted)[0] == AvtpSubtype::aaf;
-    if (listed == wanted) {
-        return !aaf || (wanted & AAF_FORMAT_UP_TO) == 0;
+    if ((listed & AAF_STREAM_FORMAT_UT_BIT) == 0) {
+        return listed == wanted;
     }
     uint64_t const apart = AAF_STREAM_FORMAT_UT_BIT | AAF_STREAM_FORMAT_CHANNELS_MASK;
     uint16_t const channels = AafStreamFormat::from_u64(wanted).channels_per_frame();

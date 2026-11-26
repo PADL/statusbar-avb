@@ -17,11 +17,11 @@ namespace {
 
 using atdecc::aem::DescriptorStream;
 
-/// The StreamSpec of STREAM descriptor @p desc at @p index: its current_format (an authored up-to
-/// word at its widest), clock domain and interface.
+/// The StreamSpec of STREAM descriptor @p desc at @p index: its current_format, clock domain and
+/// interface.
 auto stream_spec_of(uint16_t const index, atdecc::aem::DescriptorStream const& desc) noexcept -> StreamSpec
 {
-    uint64_t const word = avtp::stream_format_widest(desc.current_format.to_uint64());
+    uint64_t const word = desc.current_format.to_uint64();
     return StreamSpec{
         .index = index,
         .format_word = word,
