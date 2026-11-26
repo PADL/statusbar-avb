@@ -150,6 +150,28 @@ TEST(gptp_announce_handler, replacing_the_callbacks_keeps_the_path_trace_observe
     EXPECT_EQ(changes, 1);
 }
 
+TEST(gptp_announce_handler, the_grandmaster_observer_is_told_each_change_whatever_the_callbacks)
+{
+    // A change to another grandmaster, the loss at the receipt timeout and the return, each once,
+    // with has_grandmaster() already saying which; the callbacks replaced in between do not silence it.
+    std::vector<std::pair<int64_t, bool>> told;
+    GptpAnnounceHandler handler{"no-such-interface-0"};
+    handler.set_on_grandmaster_changed([&](int64_t const now_ns) { told.emplace_back(now_ns, handler.has_grandmaster()); });
+    gptp::ClockIdentity const gm_b{0x00, 0x1C, 0xAB, 0xFF, 0xFE, 0x00, 0x76, 0x05};
+
+    handler.observe_announce(ONE_SECOND_NS, announce_from(kGmA));
+    handler.observe_announce(2 * ONE_SECOND_NS, announce_from(kGmA));  // the same: not a change
+    handler.set_callbacks(GptpAnnounceCallbacks{.grandmaster_lost = [](int64_t) {}});
+    handler.observe_announce(3 * ONE_SECOND_NS, announce_from(gm_b));
+    handler.tick(6 * ONE_SECOND_NS);
+    handler.tick(7 * ONE_SECOND_NS);  // still none: not a change
+    handler.observe_announce(8 * ONE_SECOND_NS, announce_from(gm_b));
+
+    std::vector<std::pair<int64_t, bool>> const expected{
+        {ONE_SECOND_NS, true}, {3 * ONE_SECOND_NS, true}, {6 * ONE_SECOND_NS, false}, {8 * ONE_SECOND_NS, true}};
+    EXPECT_TRUE(told == expected);
+}
+
 TEST(maap_net_handler, retire_releases_the_range_and_finishes_the_port)
 {
     using S = avtp::maap_sm::Def::State;

@@ -139,6 +139,9 @@ void GptpAnnounceHandler::observe_grandmaster(int64_t const now_ns, gptp::Announ
     if (callbacks_.grandmaster_id_changed) {
         callbacks_.grandmaster_id_changed(now_ns, grandmaster_identity_, announce);
     }
+    if (on_grandmaster_changed_) {
+        on_grandmaster_changed_(now_ns);
+    }
 }
 
 auto GptpAnnounceHandler::announce_receipt_timeout_ns() const noexcept -> int64_t
@@ -164,6 +167,9 @@ void GptpAnnounceHandler::tick(int64_t const now_ns)
     grandmaster_identity_ = {};
     if (callbacks_.grandmaster_lost) {
         callbacks_.grandmaster_lost(now_ns);
+    }
+    if (on_grandmaster_changed_) {
+        on_grandmaster_changed_(now_ns);
     }
     set_path_trace(now_ns, AsPath{});
 }
