@@ -275,21 +275,22 @@ MVU_MCR_FLAGS: tuple[tuple[str, int], ...] = (
     ("media_clock_domain", 0x02),
 )
 
-# offsets relative to MVU_HEADER_LENGTH; a 64-octet name that Milan 1.3 added
-# after the fixed part is optional (OPTIONAL_NAME) so 1.2 frames still decode
+# offsets relative to MVU_HEADER_LENGTH; a field that Milan 1.3 appended after
+# the Milan 1.2 fixed part (a 64-octet name, GET_MILAN_INFO's
+# specification_version) is an optional tail (OPTIONAL_TAIL) so 1.2 frames
+# still decode
 MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
     "MvuReserved": _struct(
         "MvuReserved", "GET_MILAN_INFO / GET_SYSTEM_UNIQUE_ID command", [_RSV2]
     ),
     "MvuGetMilanInfoResponse": _struct(
         "MvuGetMilanInfoResponse",
-        "GET_MILAN_INFO response (Milan 1.3 Figure 5.6)",
+        "GET_MILAN_INFO response (Milan 1.2 Figure 5.4, 1.3 Figure 5.6)",
         [
             _RSV2,
             ("protocol_version", 4, "u32", "protocol_version"),
             ("features_flags", 4, "u32", "features_flags (Table 5.17)"),
             ("certification_version", 4, "u32", "certification_version"),
-            ("specification_version", 4, "u32", "specification_version"),
         ],
     ),
     "MvuSystemUniqueId": _struct(
@@ -351,6 +352,31 @@ MVU_PAYLOAD_STRUCTS: dict[str, dict] = {
             ("pbsta_acmpsta", 1, "u8", "pbsta | acmpsta"),
             ("reserved_1", 1, "u8", "reserved"),
         ],
+    ),
+}
+#: Probing status (Milan 1.3 Table 5.5)
+MVU_PROBING_STATUS: dict[int, str] = {
+    0: "PROBING_DISABLED",
+    1: "PROBING_PASSIVE",
+    2: "PROBING_ACTIVE",
+    3: "PROBING_COMPLETED",
+}
+#: (struct, member) -> the sub-fields packed into one member of an MVU struct,
+#: ((sub-field, mask, kind, value table, doc), ...). Figure 5.12 puts the
+#: Probing status in the three high bits of one octet and the ACMP status in
+#: its five low bits (5.3.8.6: a 3-bit and a 5-bit integer).
+MVU_PACKED_MEMBERS: dict[
+    tuple[str, str], tuple[tuple[str, int, str, str | None, str], ...]
+] = {
+    ("MvuStreamInputInfoExResponse", "pbsta_acmpsta"): (
+        ("pbsta", 0xE0, "u8", "mvu_probing_status", "Probing status (Table 5.5)"),
+        (
+            "acmpsta",
+            0x1F,
+            "u8",
+            "acmp_status",
+            "ACMP status of the last probe (5.3.8.6)",
+        ),
     ),
 }
 # struct -> (field, octets, kind, doc) of its optional tail
