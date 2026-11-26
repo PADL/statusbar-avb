@@ -1523,21 +1523,21 @@ TEST(talker_outside, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
         last_gptp_ns,
         std::pmr::get_default_resource()};
     EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
-    auto const mr_of = [](auto const& h) { return h.has_value() && h->mr; };
-    EXPECT_FALSE(mr_of(talker.outside_header(0)));
+    auto const mr_for = [](auto const& h) { return h.has_value() && h->mr; };
+    EXPECT_FALSE(mr_for(talker.outside_header(0)));
     (void)talker.notify_sent_outside(0, {.pdus = 4, .tu_pdus = 0, .next_sequence = 4, .last_mr = false});
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 4, .last_mr = false})));
+    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 4, .last_mr = false})));
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());  // waits for the first toggle's hold
     auto const* const c = talker.tx_counters(0);
     // 20 AVTPDUs latched before the outside sender applied the new mr: no toggle yet, no hold run down.
-    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 20, .tu_pdus = 0, .next_sequence = 24, .last_mr = false})));
+    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 20, .tu_pdus = 0, .next_sequence = 24, .last_mr = false})));
     EXPECT_EQ(c->mr_toggles.load(), 0U);
     // The wire shows it: the toggle counted, one AVTPDU of the hold known; six more leave one to go.
-    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 29, .last_mr = true})));
+    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 29, .last_mr = true})));
     EXPECT_EQ(c->mr_toggles.load(), 1U);
-    EXPECT_TRUE(mr_of(talker.notify_sent_outside(0, {.pdus = 6, .tu_pdus = 0, .next_sequence = 35, .last_mr = true})));
-    EXPECT_FALSE(mr_of(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 0, .next_sequence = 36, .last_mr = true})));
+    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 6, .tu_pdus = 0, .next_sequence = 35, .last_mr = true})));
+    EXPECT_FALSE(mr_for(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 0, .next_sequence = 36, .last_mr = true})));
     EXPECT_EQ(c->mr_toggles.load(), 1U);
     EXPECT_EQ(c->pdus.load(), 36U);
 }

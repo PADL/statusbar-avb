@@ -1073,7 +1073,7 @@ constexpr PduOffsets CRF_OFFSETS{
 }
 
 /// The AVTPDU header's place in @p result.
-[[nodiscard]] auto pdu_header_of(StreamFrameTemplate& result, size_t const pdu_header) noexcept -> std::span<uint8_t>
+[[nodiscard]] auto pdu_header_for(StreamFrameTemplate& result, size_t const pdu_header) noexcept -> std::span<uint8_t>
 {
     return std::span{result.bytes}.subspan(result.length - pdu_header, pdu_header);
 }
@@ -1116,7 +1116,7 @@ auto aaf_frame_template(avtp::AafStreamOutputContext const& ctx, uint16_t const 
     }
     // serialize_aaf_raw()'s header from a serializer of the stream at sequence 0, presented at 0, tu and mr clear.
     avtp::AafStreamOutputContext twin{ctx.stream_id, ctx.format, ctx.sample_rate, ctx.channel_count, ctx.bit_depth, 0};
-    store_aaf_raw_header(twin, pdu_header_of(*result, avtp::AafPdu::HEADER_LENGTH), frames, 0, HeaderFlags{});
+    store_aaf_raw_header(twin, pdu_header_for(*result, avtp::AafPdu::HEADER_LENGTH), frames, 0, HeaderFlags{});
     return result;
 }
 
@@ -1130,7 +1130,7 @@ auto crf_frame_template(avtp::CrfStreamOutputContext const& ctx, ieee::EthernetF
     // serialize_crf_raw()'s header at sequence 0, tu and mr clear.
     avtp::CrfStreamOutputContext const twin{
         ctx.stream_id, ctx.type, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, ctx.timestamps_per_packet};
-    store_crf_header(twin, pdu_header_of(*result, avtp::CrfPdu::HEADER_LENGTH), HeaderFlags{});
+    store_crf_header(twin, pdu_header_for(*result, avtp::CrfPdu::HEADER_LENGTH), HeaderFlags{});
     return result;
 }
 
