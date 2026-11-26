@@ -2320,6 +2320,40 @@ TEST(avb_entity_kit_input_vlan, an_input_probed_without_a_vlan_joins_its_talker_
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
+
+TEST(avb_entity_kit_input_vlan, an_input_probed_without_a_vlan_follows_its_talker_to_another_vlan)
+{
+    // Settled on a probe answer naming VLAN 0, the input follows the Talker Advertise when it is
+    // declared again on another VLAN (4 after 3): the new VID joined, then the old one left.
+    VlanRecorder vlans;
+    KitPair pair{"milan13"};
+    listener_on_vlans(pair, vlans);
+    auto const link = [](uint16_t const vid) { return net::vlan::vlan_link_name("no-such-interface-0", vid); };
+    Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x12};
+    uint64_t const stream = 0x0200000000000889ULL;
+    bind_answered(pair, stream, group, 0);
+    auto const advertise_on = [&](uint16_t const vid) {
+        bridge_declares(pair.listener, pair.now, [&](srp::msrp::MsrpParticipant& bridge, TimePoint const now) {
+            srp::msrp::TalkerAdvertiseFirstValue fv{};
+            (void)tsn::load_unchecked(Eui64{}.from_uint64(stream).span(), &fv.stream_id);
+            fv.destination_address = group;
+            fv.vlan_identifier = vid;
+            fv.max_frame_size = 416;
+            fv.max_interval_frames = 1;
+            (void)bridge.declare_talker_advertise(fv, now);
+        });
+    };
+    advertise_on(3);
+    EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
+    advertise_on(4);
+    EXPECT_TRUE(
+        vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "add " + link(4), "del " + link(3)}));
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, ANSWERED_TALKER_ID, 0, LISTENER_ID, pair.sink));
+    EXPECT_TRUE(vlans.requests.back() == "del " + link(4));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
 #endif
 
 //
