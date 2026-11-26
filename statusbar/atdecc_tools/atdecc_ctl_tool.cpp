@@ -99,9 +99,9 @@ struct Config
     bool trace{false};         // connect/disconnect: print a per-leg ACMP handshake verdict
 };
 
-auto build_arg_specs(Config& config) -> args::ArgumentSpecs
+/// Options: the command, where it runs and the entities it names.
+void add_target_specs(args::ArgumentSpecs& specs, Config& config)
 {
-    args::ArgumentSpecs specs;
     specs.add_choice(
         "command",
         "Action: list, validate, connect, disconnect, get-rx-state, get-tx-state, set-clock-source, get-clock-source, "
@@ -136,12 +136,23 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add<std::string>("entity", "Target entity NAME (clock-source / identify / list detail)", "", [&](auto v) {
         config.entity = std::string{v};
     });
+}
+
+/// Options: identify's state, the file of batch and supervise, the discovery
+/// window and the clock source.
+void add_op_specs(args::ArgumentSpecs& specs, Config& config)
+{
     specs.add_choice("state", "identify: desired state", {"on", "off"}, "on", [&](auto v) { config.state = std::string{v}; });
     specs.add<std::string>(
         "file", "Batch/supervise TOML file (command=batch|supervise)", "", [&](auto v) { config.file = std::string{v}; });
     specs.add<int64_t>("discover-ms", "Discovery window in ms", 1500, [&](auto v) { config.discover_ms = v; });
     specs.add<int64_t>("clock-domain", "CLOCK_DOMAIN index (clock-source ops)", 0, [&](auto v) { config.clock_domain = v; });
     specs.add<int64_t>("clock-source", "CLOCK_SOURCE index (set-clock-source)", 0, [&](auto v) { config.clock_source = v; });
+}
+
+/// Options of the signal selector commands.
+void add_signal_selector_specs(args::ArgumentSpecs& specs, Config& config)
+{
     specs.add<int64_t>(
         "descriptor", "SIGNAL_SELECTOR descriptor index (signal-selector ops)", 0, [&](auto v) { config.descriptor = v; });
     specs.add<std::string>(
@@ -150,6 +161,11 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         });
     specs.add<int64_t>("signal-index", "set-signal-selector: source signal_index", 0, [&](auto v) { config.signal_index = v; });
     specs.add<int64_t>("signal-output", "set-signal-selector: source signal_output", 0, [&](auto v) { config.signal_output = v; });
+}
+
+/// Options of supervise, and --trace.
+void add_supervise_and_trace_specs(args::ArgumentSpecs& specs, Config& config)
+{
     specs.add<int64_t>("interval-ms", "deprecated/ignored (supervise is now connection-state based)", 700, [&](auto v) {
         config.interval_ms = v;
     });
@@ -161,6 +177,15 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
         "trace", "connect/disconnect: print a per-leg ACMP handshake verdict (RX -> relay -> talker -> listener)", [&](auto v) {
             config.trace = v;
         });
+}
+
+auto build_arg_specs(Config& config) -> args::ArgumentSpecs
+{
+    args::ArgumentSpecs specs;
+    add_target_specs(specs, config);
+    add_op_specs(specs, config);
+    add_signal_selector_specs(specs, config);
+    add_supervise_and_trace_specs(specs, config);
     return specs;
 }
 
