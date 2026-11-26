@@ -317,7 +317,7 @@ auto ListenerStreams::received_format(ListenerStreamSlot const& slot) noexcept -
 void ListenerStreams::offer_aaf_to_sink(ListenerStreamSlot const& slot, std::span<uint8_t const> const audio)
 {
     // The accepted audio to the RX sink, which decides whether to consume it, at the width the input was opened with.
-    if (audio_sink_ == nullptr) {
+    if (audio_sink_ == nullptr || !slot.aaf.has_value()) {
         return;
     }
     uint16_t const width = slot.spec.format.channels;
