@@ -2119,6 +2119,27 @@ TEST(avb_entity_kit_format, the_format_of_an_input_is_saved_and_restored_at_the_
     EXPECT_TRUE(again.talker.stop(again.now));
 }
 
+TEST(avb_entity_kit_format, a_classic_input_restores_its_saved_format_at_the_next_start)
+{
+    // IEEE 1722.1 ACMP with a state directory: the fast-connect goals are restored from the
+    // entity's state, and the input's format from the stream-formats file all the same.
+    StateDir const dir{"statusbar_state_dir_classic_format_functional_test"};
+    auto const file = (dir.entity / entity_state_file::STREAM_FORMATS).string();
+    {
+        KitPair pair{"classic", dir.listener_config("classic")};
+        EXPECT_EQ(set_stream_format(aaf_input_of(pair), aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(load_stream_formats(file).has_value());
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+    KitPair again{"classic", dir.listener_config("classic")};
+    auto const input = aaf_input_of(again);
+    EXPECT_EQ(reported_stream_format(input), aaf_96k_of(2));
+    EXPECT_EQ(again.listener->listener()->stream_format(AAF_STREAM), aaf_96k_of(2));
+    EXPECT_TRUE(again.listener.stop(again.now));
+    EXPECT_TRUE(again.talker.stop(again.now));
+}
+
 TEST(avb_entity_kit_format, a_saved_format_the_model_does_not_describe_is_left_and_the_input_keeps_its_own)
 {
     // The model changed since the format was saved: 48 kHz is not this input's.

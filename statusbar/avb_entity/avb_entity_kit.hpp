@@ -1097,9 +1097,10 @@ class AvbEntityKit
     [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor) -> Status;
     /// The listener's RX handler: kept for the RT timer, else in the reactor; a refusal kept in stream_rx_error().
     void attach_listener_rx(net::MessageReactor& reactor);
-    /// A classic listener's saved fast-connect goals, or the host's saved bindings with their
-    /// started state, and (without kit_data_plane) the inputs' saved formats.
+    /// restore_bindings(), then (without kit_data_plane) the inputs' saved formats, whichever ACMP runs.
     void restore_listener_bindings();
+    /// A classic listener's saved fast-connect goals, or the host's saved bindings with their started state.
+    void restore_bindings();
     /// One RX slot per listener stream, the CRF recovery input and the static RX groups.
     [[nodiscard]] auto open_listener_streams() -> Status;
 #if defined(__linux__)
