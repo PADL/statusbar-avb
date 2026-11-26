@@ -443,7 +443,8 @@ STREAM_INPUT; a stream channel may feed several.
 `SrpPort` (`nanoavb_srp_port.hpp`) is MSRP and MVRP on one interface without
 an ATDECC entity: the two handlers, their net handlers (`nanoavb_srp_net.hpp`,
 the same ones `NanoAvbNetHandlers` adds) and one SR class's Domain
-(`SrpPortConfig::domain`: Class A by default, `CLASS_B_DOMAIN` for Class B). It serves an
+(`SrpPortConfig::domain`: Class A by default, `CLASS_B_DOMAIN` for Class B; the
+handler's `set_single_sr_class`, so that class alone is declared). It serves an
 end station that only declares Talker Advertise and Listener attributes (IEEE
 802.1Q-2022 Clause 35.2.4) and adopts the bridge's Domain as below:
 
@@ -492,19 +493,22 @@ talker's attribute is registered).
   supports (IEEE 802.1Q Clauses 35.2.1.4, 35.2.2.9) and converts inbound
   Talker Advertise declarations into Talker Failed with failure_code 8
   ("Egress port is not AVB-capable"), so a remote talker's stream can never
-  reserve a path to the entity. Only Class A (SRclassID 6, priority 3) is
-  declared, on the VID in use: Milan v1.2 Section 4.2.7.2.1 declares "an MSRP
-  Domain for Class A", and the entity has no Class B streams (every STREAM_*
-  descriptor sets CLASS_A, Section 5.3.3.4). `declare_domain()` declares it,
-  from the talker advertise hook and at a restart, whether or not gPTP is up.
+  reserve a path to the entity. `declare_domain()` declares Class B
+  (SRclassID 5, priority 2) and Class A (SRclassID 6, the Domain's priority)
+  on the VID in use, the default Domain vector a bridge declares, from the
+  talker advertise hook and at a restart, whether or not gPTP is up. A port
+  that runs one SR class (`set_single_sr_class(true)`, as `SrpPort` does)
+  declares the configured Domain's class alone (Clause 35.2.1.4).
 - **Domain adoption.** With `set_adopt_domain(true)` (`atdecc.profile =
-  "milan13"`) a peer's Domain for our SR class with other parameters is
-  adopted, its SRclassPriority and SRclassVID both (Milan v1.3 Section
-  4.2.7.2.1), and `on_domain_adopted` moves the MVRP join, the ACMP
-  stream_vlan_id and the stream frames. A talker's priority is its SR
-  class's (IEEE 802.1Q-2022 Clause 35.2.2.8.5): `talker_advertise()`
-  declares at the Domain's priority, two LeaveAll periods after the Talker
-  Advertise at the old priority or VID leaves (Clause 35.2.2.8). The VID is the same at every position
+  "milan13"`) a peer's Class A Domain (the port's own class under
+  `set_single_sr_class`) with other parameters is adopted, its
+  SRclassPriority and SRclassVID both (Milan v1.3 Section 4.2.7.2.1), and
+  `on_domain_adopted` moves the MVRP join, the ACMP stream_vlan_id and the
+  stream frames. A talker's priority is its SR class's (IEEE 802.1Q-2022
+  Clause 35.2.2.8.5): `talker_advertise()` declares the priority its caller
+  gives, and the kit and `SrpPort` give the Domain's, re-advertising at an
+  adoption two LeaveAll periods after the Talker Advertise at the old
+  priority or VID leaves (Clause 35.2.2.8). The VID is the same at every position
   of a Domain vector (a bridge's default `{5,2,VID},{6,3,VID}`); the
   participant hands over the per-position value.
 - **Waiting listener.** Under every profile
