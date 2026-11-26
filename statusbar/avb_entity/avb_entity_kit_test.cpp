@@ -11,10 +11,12 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
@@ -944,8 +946,97 @@ TEST(avb_entity_kit_admission, a_milan_stream_closes_at_the_listener_leave)
     kit->notify_listener_ready(talker_sid(kit, 0), false, ADMIT_T0 + std::chrono::seconds{1});
     EXPECT_TRUE(recorder.told == (std::vector<V>{V{0}, V{}}));
     EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0 + std::chrono::seconds{1}).empty());
+    EXPECT_FALSE(kit->admission_deadline().has_value());  // no grace: nothing to wait for
     kit->set_on_admission_changed({});
 }
+
+// A classic stream's grace runs out with no MSRP or ACMP event: the kit arms its deadline at the
+// grace's end, re-evaluates admission there, tells the hook, and disarms.
+TEST(avb_entity_kit_admission, the_deadline_is_armed_at_the_grace_end_and_disarmed_after)
+{
+    using V = std::vector<uint16_t>;
+    using std::chrono::nanoseconds;
+    constexpr auto grace = TalkerGate::GRACE;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    EXPECT_FALSE(kit->admission_deadline().has_value());  // registered: no grace runs
+
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + nanoseconds{10});
+    auto const ends = ADMIT_T0 + nanoseconds{10} + grace;
+    EXPECT_TRUE(kit->admission_deadline() == ends);
+    kit->on_admission_timer(ends - nanoseconds{1});
+    EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});  // still within the grace
+    EXPECT_TRUE(kit->talker_should_transmit(1, ends - nanoseconds{1}));
+    kit->on_admission_timer(ends);
+    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
+    EXPECT_FALSE(kit->talker_should_transmit(1, ends));
+    EXPECT_FALSE(kit->admission_deadline().has_value());
+    kit->on_admission_timer(ends + 10 * grace);
+    EXPECT_EQ(recorder.told.size(), size_t{2});
+
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ends + 11 * grace);  // registered again: back in
+    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}, V{1}}));
+    kit->set_on_admission_changed({});
+}
+
+// The loop does not sleep past a grace's end: its wait is cut to what is left of the deadline on
+// the gate's clock, as it is for an MRP timer, and is 0 from the deadline until the timer runs.
+TEST(avb_entity_kit_admission, the_loop_wakes_for_the_admission_deadline)
+{
+    using std::chrono::milliseconds;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    auto const control = kit->next_control_deadline_ns();
+    int64_t const now_ns = control.has_value() ? *control - 1'000'000'000 : 0;  // no other deadline within 100 ms
+    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ADMIT_T0), 100);                // nothing armed
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + milliseconds{50});
+    auto const ends = ADMIT_T0 + milliseconds{50} + TalkerGate::GRACE;
+    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{50}), 50);
+    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{150}), 100);
+    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 0);
+    kit->on_admission_timer(ends);
+    EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 100);  // disarmed
+}
+
+// Two streams' graces that end apart: the timer at the first end closes that stream and arms the
+// second end, where the second closes and the deadline is disarmed.
+TEST(avb_entity_kit_admission, the_timer_at_one_grace_end_arms_the_next)
+{
+    using V = std::vector<uint16_t>;
+    using std::chrono::seconds;
+    constexpr auto grace = TalkerGate::GRACE;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{seconds{1}}));
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    kit->notify_listener_ready(talker_sid(kit, 2), false, ADMIT_T0 + seconds{2});
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + seconds{3});
+    EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{2} + grace);
+    kit->on_admission_timer(ADMIT_T0 + seconds{2} + grace);
+    EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});
+    EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{3} + grace);
+    kit->on_admission_timer(ADMIT_T0 + seconds{3} + grace);
+    EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
+    EXPECT_FALSE(kit->admission_deadline().has_value());
+    kit->set_on_admission_changed({});
+}
+
+// An entity that forwards poll_timeout_ms() forwards both admission calls, or its loop would wake
+// at once from the deadline on: the runner calls on_admission_timer() only where they exist.
+template <typename Entity>
+concept ForwardsAdmission = requires(Entity& entity) { entity.on_admission_timer(*entity.admission_deadline()); };
+static_assert(ForwardsAdmission<AvbEntityAudioIO>);
+static_assert(ForwardsAdmission<AvbEntityToneGenerator>);
 
 // With the gate off every talker stream transmits from the start: that is the set in force, so
 // nothing is told until a stream leaves it, which none does.

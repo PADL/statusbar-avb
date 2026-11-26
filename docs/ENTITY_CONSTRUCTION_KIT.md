@@ -428,8 +428,19 @@ gate admits, and `set_on_admission_changed()` installs the hook told the
 set each time it changes. It is re-evaluated at each gate input: a
 Listener Ready registered or withdrawn (`notify_listener_ready()`, which
 the host's MSRP hook calls with the RAW instant it read) and an ACMP
-connection count changing. The hook is not told the set in force when it
-is installed; a later install replaces an earlier one. STOP_STREAMING
+connection count changing. A classic stream's grace can run out with no
+event at all, so each evaluation also arms one deadline, on the gate's
+clock, at the earliest `grace_ends()` of a stream still admitted whose
+Listener was withdrawn (`admission_deadline()`; none under Milan, which
+has no grace).
+`on_admission_timer(now)` evaluates the set again once it is reached.
+The entity runner calls it each reactor cycle while a deadline is armed,
+reading the gate's clock only then, and `poll_timeout_ms()` counts the
+deadline among the ones it does not sleep past. From the deadline until
+`on_admission_timer()` runs it answers 0, so an entity that forwards
+`poll_timeout_ms()` forwards both admission calls, and an entity with a
+loop of its own calls the timer as the runner does. The hook is not told the set in force when it is
+installed; a later install replaces an earlier one. STOP_STREAMING
 stops the talker's slot, not the gate: the reservation stands, so the
 stream stays in the set.
 

@@ -591,6 +591,7 @@ auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
 
 void AvbEntityKit::notify_admission(RawTimePoint const now)
 {
+    arm_admission_deadline(now);
     auto const admitted = admitted_talker_streams(now);
     if (std::ranges::equal(admitted, admitted_)) {
         return;
@@ -598,6 +599,23 @@ void AvbEntityKit::notify_admission(RawTimePoint const now)
     admitted_ = admitted;
     if (on_admission_changed_) {
         on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
+}
+
+void AvbEntityKit::arm_admission_deadline(RawTimePoint const now) noexcept
+{
+    admission_deadline_.reset();
+    for (auto const& spec : talker_specs_) {
+        if (auto const ends = gate_.grace_ends(spec.index); ends && now < *ends && gate_.admitted(spec.index, now)) {
+            admission_deadline_ = std::min(admission_deadline_.value_or(*ends), *ends);
+        }
+    }
+}
+
+void AvbEntityKit::on_admission_timer(RawTimePoint const now)
+{
+    if (admission_deadline_ && now >= *admission_deadline_) {
+        notify_admission(now);
     }
 }
 
@@ -1270,6 +1288,21 @@ void AvbEntityKit::close_streams() noexcept
         listener_->close_rx();
     }
     stream_port_.close();
+}
+
+auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns, RawTimePoint const raw_now) const noexcept -> int
+{
+    int const control_ms = avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
+    if (!admission_deadline_) {
+        return control_ms;
+    }
+    using RawClock = RawTimePoint::clock;
+    return avtp::MaapHandler::poll_timeout_ms(RawClock::to_ns(*admission_deadline_), RawClock::to_ns(raw_now), control_ms);
+}
+
+auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
+{
+    return poll_timeout_ms(max_ms, now_ns, admission_deadline_ ? net::rx_clock_now() : RawTimePoint{});
 }
 
 auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<int64_t>

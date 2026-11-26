@@ -136,6 +136,13 @@ class AvbEntityToneGenerator
     }
     /// See AvbEntityKit::poll_counters.
     void poll_counters(int64_t const now_ns) { kit_.poll_counters(now_ns); }
+    /// See AvbEntityKit::admission_deadline.
+    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<AvbEntityKit::RawTimePoint>
+    {
+        return kit_.admission_deadline();
+    }
+    /// See AvbEntityKit::on_admission_timer.
+    void on_admission_timer(AvbEntityKit::RawTimePoint const now) { kit_.on_admission_timer(now); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;

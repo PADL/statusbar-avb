@@ -148,13 +148,14 @@ class AvbEntityKit
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
 
     /// How long the loop driving the reactor may wait this cycle: @p max_ms,
-    /// or less when a MAAP probe or announce or an MRP timer falls due
-    /// sooner, told the reactor-clock @p now_ns the loop read. Reactor
-    /// thread only.
-    [[nodiscard]] auto poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
-    {
-        return avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
-    }
+    /// or less when a MAAP probe or announce, an MRP timer or the admission
+    /// deadline falls due sooner, told the reactor-clock @p now_ns the loop
+    /// read and the gate's clock @p raw_now. From the admission deadline on it
+    /// answers 0 until on_admission_timer() runs: an entity that forwards this
+    /// must forward admission_deadline() and on_admission_timer() too. Reactor thread only.
+    [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns, TalkerGate::RawTimePoint raw_now) const noexcept -> int;
+    /// As above, reading the gate's clock only while an admission deadline is armed.
+    [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns) const noexcept -> int;
 
     /// The earliest of the MAAP deadline, the MSRP and MVRP timers and the end
     /// of the counters' observation interval. An MRP jointimer is 200 ms, so a
@@ -198,15 +199,23 @@ class AvbEntityKit
     /// As above, at the gate's clock's now, read once.
     [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
     /// The hook told the admitted set each time it changes: the reactor thread calls it, at a gate
-    /// input. It is not called for the set in force at install (admitted_talker_streams() has it);
-    /// a later install replaces an earlier one, an empty function removes it. The span is the kit's,
-    /// valid only during the call. It must not throw, install a hook or feed a gate input.
+    /// input or at the admission deadline. It is not called for the set in force at install
+    /// (admitted_talker_streams() has it); a later install replaces an earlier one, an empty function
+    /// removes it. The span is the kit's, valid only during the call. It must not throw, install a
+    /// hook or feed a gate input.
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
     /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
     /// known at the RAW instant @p now (the host's hook reads it once). Stamps the gate, then
     /// re-evaluates admission.
     void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
+    /// The earliest instant the grace of a stream still admitted runs out (TalkerGate::grace_ends),
+    /// armed at each evaluation of admission; nullopt while no such grace runs.
+    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<RawTimePoint> { return admission_deadline_; }
+    /// Reactor thread, each loop cycle while admission_deadline() is armed: at or past it (@p now on
+    /// the gate's clock), re-evaluate admission, so a grace that runs out with no MSRP or ACMP
+    /// event still leaves the set and is told to the hook. Before it, nothing.
+    void on_admission_timer(RawTimePoint now);
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
     /// 1.0 for gPTP-locked, or its GPS tracker ratio) unless the CRF-input
@@ -327,9 +336,11 @@ class AvbEntityKit
     void wire_acmp_callbacks();
     /// Talker stream @p idx's IEEE 1722.1 ACMP connection count to the gate, then admission re-evaluated.
     void publish_talker_connections(uint16_t idx);
-    /// Recompute the admitted set at @p now after a gate input changed; tell on_admission_changed_
-    /// when it differs from the one last told.
+    /// Recompute the admitted set at @p now after a gate input changed, or at the admission
+    /// deadline; tell on_admission_changed_ when it differs from the one last told.
     void notify_admission(RawTimePoint now);
+    /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
+    void arm_admission_deadline(RawTimePoint now) noexcept;
     /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
     void wire_ieee_acmp_callbacks();
     /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
@@ -608,6 +619,7 @@ class AvbEntityKit
     /// The admitted set last told (notify_admission), and the hook told it.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
+    std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
     /// The end of the counters' observation interval (poll_counters), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).

@@ -19,8 +19,9 @@
 /// on_timeout, state_string, print_state, components(), net_handlers(),
 /// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors, and
 /// optionally poll_timeout_ms(max_ms, now_ns), which bounds each reactor
-/// wait by the entity's next control-plane deadline, and poll_counters(now_ns),
-/// called each reactor cycle to end its counters' observation interval.
+/// wait by the entity's next control-plane deadline, poll_counters(now_ns),
+/// called each reactor cycle to end its counters' observation interval, and
+/// admission_deadline() with on_admission_timer(now), called at the deadline.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
@@ -34,6 +35,7 @@
 #include "statusbar/logging/logging_collector.hpp"
 #include "statusbar/logging/logging_sink.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_link_monitor.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient.hpp"
@@ -433,6 +435,18 @@ void entity_poll_counters(Entity& entity)
     }
 }
 
+/// Re-evaluate @p entity's talker admission once its deadline is armed (AvbEntityKit::on_admission_timer),
+/// for an entity that has one; the gate's clock is read only while it is.
+template <typename Entity>
+void entity_admission_timer(Entity& entity)
+{
+    if constexpr (requires { entity.on_admission_timer(*entity.admission_deadline()); }) {
+        if (entity.admission_deadline().has_value()) {
+            entity.on_admission_timer(net::rx_clock_now());
+        }
+    }
+}
+
 /// Tell @p entity how well the media timer's clock link is known, when it
 /// asks to be told (on_link_quality). One seqlock read; media thread.
 template <typename Entity>
@@ -566,6 +580,7 @@ auto run_entity_main_loop(
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(entity_poll_timeout_ms(entity, REACTOR_POLL_MS));
         entity_poll_counters(entity);
+        entity_admission_timer(entity);
         if (hooks.poll) {
             hooks.poll();
         }
