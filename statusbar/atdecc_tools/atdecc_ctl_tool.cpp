@@ -633,54 +633,30 @@ void connect_leg(
     (void)pump(reactor, ctrl, 500, [] { return false; }, [](auto const&) {});
 }
 
-}  // namespace
-
-int main(int argc, char* argv[])
+/// The ENTITY_DISCOVER every run starts with, and supervise repeats between
+/// its passes.
+auto discover_action() -> ControllerAction
 {
-    using namespace statusbar;
+    ControllerAction discover{};
+    discover.kind = ControllerActionKind::DiscoverAll;
+    return discover;
+}
 
-    Config config;
-    auto specs = build_arg_specs(config);
-    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-atdecc-ctl");
-    if (!cli_result) {
-        return config::handled_builtin_command(cli_result) ? 0 : 1;
-    }
-    if (config.interface_name.empty()) {
-        std::println(stderr, "Error: --interface is required");
-        return 1;
-    }
+/// DISCOVER phase: announce + read every entity's ENTITY descriptor (the
+/// controller auto-enqueues that on ENTITY_AVAILABLE, populating names).
+auto discover_entities(MessageReactor& reactor, ControllerSimple& ctrl, Config const& config) -> std::vector<EntityDisplayInfo>
+{
+    ctrl.dispatch(discover_action(), elapsed_ns());
+    (void)pump(reactor, ctrl, config.discover_ms, [] { return false; }, [](auto const&) {});
+    return ctrl.get_display_entities();
+}
 
-    // Controller entity ID derived from our own NIC MAC (tool-id discriminated).
-    atdecc_tools::CommonConfig cc;
-    cc.interface_name = config.interface_name;
-    auto id_result = atdecc_tools::resolve_controller_id(cc, atdecc_tools::TOOL_ID_CONTROLLER);
-    if (!id_result) {
-        std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
-        return 1;
-    }
-
-    std::string backend_error;
-    auto service = atdecc_tools::make_controller_service(config.backend, config.interface_name, *id_result, backend_error);
-    if (service == nullptr) {
-        std::println(stderr, "Error: {}", backend_error);
-        return 1;
-    }
-    auto pollable = std::make_unique<ControllerSimple>(std::move(service));
-    auto* ctrl = pollable.get();
-
-    auto& stop = statusbar::itc::install_stop_signal();
-    MessageReactor reactor{stop, elapsed_ns, 10};
-    reactor.add(std::move(pollable));
-
-    // DISCOVER phase: announce + read every entity's ENTITY descriptor (the
-    // controller auto-enqueues that on ENTITY_AVAILABLE, populating names).
-    atdecc_tools::ControllerAction discover{};
-    discover.kind = atdecc_tools::ControllerActionKind::DiscoverAll;
-    ctrl->dispatch(discover, elapsed_ns());
-    (void)pump(reactor, *ctrl, config.discover_ms, [] { return false; }, [](auto const&) {});
-
-    auto const snap = ctrl->get_display_entities();
-
+/// The commands that ask and change nothing: list, validate, get-rx-state and
+/// get-tx-state. nullopt when @p config names none of them.
+auto run_query_command(
+    Config const& config, MessageReactor& reactor, ControllerSimple* ctrl, std::vector<EntityDisplayInfo> const& snap)
+    -> std::optional<int>
+{
     // ----- list -----
     if (config.command == "list") {
         if (!config.entity.empty()) {
@@ -904,6 +880,14 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    return std::nullopt;
+}
+
+/// The commands that are one operation, named on the command line: connect,
+/// disconnect, the clock source, the signal selector and identify. nullopt
+/// when @p config names none of them.
+auto run_op_command(Config const& config, MessageReactor& reactor, ControllerSimple* ctrl) -> std::optional<int>
+{
     // ----- single-op commands -----
     if (config.command == "connect" || config.command == "disconnect") {
         auto const t = atdecc_tools::parse_endpoint(config.talker);
@@ -984,6 +968,14 @@ int main(int argc, char* argv[])
         return execute_op(reactor, *ctrl, op) ? 0 : 1;
     }
 
+    return std::nullopt;
+}
+
+/// The commands that take their operations from a TOML file: batch and
+/// supervise. Anything else is no command.
+auto run_file_command(Config const& config, MessageReactor& reactor, ControllerSimple* ctrl, itc::StopToken& stop) -> int
+{
+    auto const discover = discover_action();
     // ----- batch -----
     if (config.command == "batch") {
         if (config.file.empty()) {
@@ -1084,4 +1076,80 @@ int main(int argc, char* argv[])
 
     std::println(stderr, "Error: unknown command '{}'", config.command);
     return 1;
+}
+
+/// Discover, then run the one command @p config names.
+auto run_command(Config const& config, MessageReactor& reactor, ControllerSimple* ctrl, itc::StopToken& stop) -> int
+{
+    auto const snap = discover_entities(reactor, *ctrl, config);
+    if (auto const rc = run_query_command(config, reactor, ctrl, snap)) {
+        return *rc;
+    }
+    if (auto const rc = run_op_command(config, reactor, ctrl)) {
+        return *rc;
+    }
+    return run_file_command(config, reactor, ctrl, stop);
+}
+
+/// The controller with the entity ID @p id on the backend @p config names;
+/// null, with the reason printed, when the backend cannot be had.
+auto make_controller_as(Config const& config, Eui64 const& id) -> std::unique_ptr<ControllerSimple>
+{
+    std::string backend_error;
+    auto service = atdecc_tools::make_controller_service(config.backend, config.interface_name, id, backend_error);
+    if (service == nullptr) {
+        std::println(stderr, "Error: {}", backend_error);
+        return nullptr;
+    }
+    return std::make_unique<ControllerSimple>(std::move(service));
+}
+
+/// The controller on the interface @p config names; null, with the reason
+/// printed, when the interface or the backend cannot be had.
+auto make_controller(Config const& config) -> std::unique_ptr<ControllerSimple>
+{
+    // Controller entity ID derived from our own NIC MAC (tool-id discriminated).
+    atdecc_tools::CommonConfig cc;
+    cc.interface_name = config.interface_name;
+    auto id_result = atdecc_tools::resolve_controller_id(cc, atdecc_tools::TOOL_ID_CONTROLLER);
+    if (!id_result) {
+        std::println(stderr, "Error: cannot open interface '{}': {}", config.interface_name, id_result.error().message());
+        return nullptr;
+    }
+    return make_controller_as(config, *id_result);
+}
+
+/// Run @p config's command with @p pollable as its controller, on a reactor
+/// of its own that a stop signal ends.
+auto run_with_controller(Config const& config, std::unique_ptr<ControllerSimple> pollable) -> int
+{
+    auto* ctrl = pollable.get();
+    auto& stop = statusbar::itc::install_stop_signal();
+    MessageReactor reactor{stop, elapsed_ns, 10};
+    reactor.add(std::move(pollable));
+    return run_command(config, reactor, ctrl, stop);
+}
+
+/// Open the controller @p config asks for and run its command.
+auto run_controller(Config const& config) -> int
+{
+    auto pollable = make_controller(config);
+    return pollable ? run_with_controller(config, std::move(pollable)) : 1;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[])
+{
+    Config config;
+    auto specs = build_arg_specs(config);
+    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-atdecc-ctl");
+    if (!cli_result) {
+        return config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+    if (config.interface_name.empty()) {
+        std::println(stderr, "Error: --interface is required");
+        return 1;
+    }
+    return run_controller(config);
 }
