@@ -1112,12 +1112,20 @@ TEST(avtp_stream_header, tv_accessor)
     EXPECT_FALSE(header.tv());
 }
 
-TEST(avtp_stream_header, tu_accessor)
+TEST(avtp_stream_header, tu_is_bit_0_of_octet_3_and_set_alone)
 {
     AvtpStreamHeader header{};
     EXPECT_FALSE(header.tu());
-    // tu is read from reserved_tu byte, bit 0
-    // It doesn't have a public setter, but we can verify the getter
+    header.set_mr(true);
+    header.set_tu(true);
+    EXPECT_TRUE(header.tu());
+    std::array<uint8_t, sizeof(AvtpStreamHeader)> wire{};
+    span_store(std::span{wire}, header);
+    EXPECT_EQ(wire[3], 0x01U);  // tu: bit 0 of octet 3 (IEEE 1722-2016 Clause 4.4.4.7)
+    EXPECT_TRUE(header.mr());   // mr, in octet 1, untouched
+    header.set_tu(false);
+    EXPECT_FALSE(header.tu());
+    EXPECT_TRUE(header.mr());
 }
 
 TEST(avtp_stream_header, tag_accessor)
