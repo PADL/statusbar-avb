@@ -608,6 +608,28 @@ plane receives the stream's frames as `frame_is_for_listener()` would,
 discards those of a stopped input, and discards an AAF AVTPDU not of the
 format in force itself, as the kit's own path does (4.4.2.2).
 
+**Counters.** `ListenerStreams::notify_offload_received()` adds a
+`StreamInputCounts`, the per-AVTPDU counts `tally_stream_input_packet()`
+keeps and the media lock as the data plane checks it, to the input's
+counters (`add_stream_input_counts()`), so GET_COUNTERS and the
+observation interval go on, and the AVTPDUs accepted and refused and the
+sample frames to its telemetry. A lock gained counts MEDIA_LOCKED, a lock
+lost MEDIA_UNLOCKED and STREAM_INTERRUPTED, as at a packet. A stopped
+input is not synchronized: its lock is dropped with no interruption
+(Milan v1.3 5.3.8.7). An input with no stream leaves its lock to the
+reactor, which drops it as it releases the stream, as an interruption
+when the talker went (5.3.8.10, Table 5.6), so a report made from the
+input hook as the stream goes changes nothing of that. Neither gains a
+lock, and nothing of theirs reaches the telemetry. A report with AVTPDUs or a lock clears a pending
+restart (a disconnect, a silent interval), as the RX thread's next AVTPDU
+does, and gains no lock in that report. One thread reports a stream, in
+the RX thread's place: the port receives none of it. It never reports
+across `open_stream()` or `close_rx()`, which change the slots it walks. The interval reads
+the counts as it reads the kit's own, so an interval with no AVTPDU
+reported is silence: report each input at least twice an observation
+interval (`COUNTERS_INTERVAL_NS`). The presentation margin statistics stay
+the kit's own path's.
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one

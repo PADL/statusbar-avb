@@ -200,6 +200,42 @@ void restart_stream_input(StreamInputCounters& c) noexcept
     unlock_stream_input(c);
 }
 
+namespace {
+
+/// @p c's media lock as a data plane beside the port checks it, @p locked: none gained in a report that cleared
+/// the reactor's pending restart (@p restarted), as the RX thread's run starts afresh there.
+void follow_media_lock(StreamInputCounters& c, bool const locked, bool const restarted) noexcept
+{
+    if (!locked) {
+        interrupt_stream_input(c);
+        return;
+    }
+    if (!restarted && !c.is_locked.load()) {
+        c.media_locked.fetch_add(1, relaxed);
+        (void)c.is_locked.exchange(true);
+    }
+}
+
+}  // namespace
+
+void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
+{  // NOLINT(statusbar-block-statements) one line per counter of StreamInputCounters
+    c.frames_rx.fetch_add(counts.frames_rx, relaxed);
+    c.seq_num_mismatch.fetch_add(counts.seq_num_mismatch, relaxed);
+    c.media_reset.fetch_add(counts.media_reset, relaxed);
+    c.timestamp_uncertain.fetch_add(counts.timestamp_uncertain, relaxed);
+    c.timestamp_valid.fetch_add(counts.timestamp_valid, relaxed);
+    c.timestamp_not_valid.fetch_add(counts.timestamp_not_valid, relaxed);
+    c.unsupported_format.fetch_add(counts.unsupported_format, relaxed);
+    c.late_timestamp.fetch_add(counts.late_timestamp, relaxed);
+    c.early_timestamp.fetch_add(counts.early_timestamp, relaxed);
+    // As at a packet: a pending restart is cleared by any report that says something of the stream.
+    bool const restarted = (counts.frames_rx != 0 || counts.media_locked) && c.restart_run.exchange(false);
+    if (counts.media_locked) {
+        follow_media_lock(c, *counts.media_locked, restarted);
+    }
+}
+
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
 {
     c.frames_rx.fetch_add(1, relaxed);

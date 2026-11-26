@@ -52,6 +52,13 @@ auto kind_lit(ListenerStreamSlot const* slot)
     }
 }
 
+/// @p counts with no media lock in them.
+auto without_lock(StreamInputCounts counts) noexcept -> StreamInputCounts
+{
+    counts.media_locked.reset();
+    return counts;
+}
+
 }  // namespace
 
 auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
@@ -1031,6 +1038,41 @@ auto ListenerStreams::input_state(uint16_t const stream_index) const noexcept ->
     }
     return InputState{
         .stream_id = slot->rx_stream_id.load(), .stopped = stream_stopped(stream_index), .format = stream_format(stream_index)};
+}
+
+auto ListenerStreams::notify_offload_received(
+    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    if (stream_stopped(stream_index) || slot->rx_stream_id.load() == 0) {
+        count_offload_idle(*slot, counts);  // nothing delivered
+        return true;
+    }
+    add_stream_input_counts(slot->counters, counts);
+    count_offload_delivered(*slot, counts, samples);
+    return true;
+}
+
+void ListenerStreams::count_offload_idle(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
+{
+    add_stream_input_counts(slot.counters, without_lock(counts));
+    // A stopped input is not synchronized and loses no lock as an interruption (Milan v1.3 5.3.8.7). One with no
+    // stream is left to the reactor, which drops its lock as it releases the stream (5.3.8.10, Table 5.6).
+    if (stream_stopped(slot.spec.index)) {
+        unlock_stream_input(slot.counters);
+    }
+}
+
+void ListenerStreams::count_offload_delivered(
+    ListenerStreamSlot& slot, StreamInputCounts const& counts, uint64_t const samples) noexcept
+{
+    uint32_t const bad = std::min(counts.unsupported_format, counts.frames_rx);
+    slot.rx_bad.add(bad);
+    slot.rx_packets.add(counts.frames_rx - bad);
+    slot.rx_samples.add(samples);
 }
 
 void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept

@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 
 namespace statusbar::avb_entity {
@@ -151,6 +152,28 @@ void interrupt_stream_input(StreamInputCounters& c) noexcept;
 /// SEQ_NUM_MISMATCH, MEDIA_RESET or timestamp step from the old stream's last
 /// packet). Either thread; safe to call twice.
 void restart_stream_input(StreamInputCounters& c) noexcept;
+
+/// What a data plane beside the stream port received of one STREAM_INPUT since it last said, in
+/// StreamInputCounters' terms: the AVTPDUs, of them those tally_stream_input_packet() would count in each
+/// counter, and the media lock as it checks it now.
+struct StreamInputCounts
+{
+    uint32_t frames_rx{0};
+    uint32_t seq_num_mismatch{0};
+    uint32_t media_reset{0};
+    uint32_t timestamp_uncertain{0};
+    uint32_t timestamp_valid{0};
+    uint32_t timestamp_not_valid{0};
+    uint32_t unsupported_format{0};
+    uint32_t late_timestamp{0};
+    uint32_t early_timestamp{0};
+    std::optional<bool> media_locked{};  ///< nullopt: it does not check the lock
+};
+
+/// Add @p counts to @p c, a lock gained or lost counted as tally_stream_input_packet() counts it (a loss is an
+/// interruption, interrupt_stream_input()). A report with AVTPDUs or a lock clears a pending restart_run and gains
+/// no lock. The one thread that reports the stream, in the RX thread's place.
+void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept;
 
 /// Milan v1.3 Table 5.6 STREAM_INPUT counters, made from StreamInputCounters'
 /// running ones by observation interval: an interval counter counts the
