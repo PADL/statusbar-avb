@@ -589,6 +589,43 @@ struct AemAvbInfoPayload
 static_assert(sizeof(AemAvbInfoPayload) == 20, "AemAvbInfoPayload must be 20 bytes");
 
 //
+// GET_AS_PATH - Clause 7.4.41
+//
+/// GET_AS_PATH command payload (Clause 7.4.41.1)
+struct AemGetAsPathCommandPayload
+{
+    static constexpr size_t LENGTH = 4;
+
+    /// Bytes 0-1: AVB_INTERFACE descriptor index
+    doublet_t descriptor_index{0};
+
+    /// Bytes 2-3: Reserved
+    doublet_t reserved{0};
+
+    auto operator<=>(AemGetAsPathCommandPayload const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemGetAsPathCommandPayload) == 4, "AemGetAsPathCommandPayload must be 4 bytes");
+
+/// GET_AS_PATH response payload, fixed portion (Clause 7.4.41.2)
+struct AemAsPathResponseHeader
+{
+    static constexpr size_t LENGTH = 4;
+
+    /// Bytes 0-1: AVB_INTERFACE descriptor index
+    doublet_t descriptor_index{0};
+
+    /// Bytes 2-3: Number of clock identities in the path
+    doublet_t count{0};
+
+    // Followed by count 8-byte clock identities, the grandmaster first
+
+    auto operator<=>(AemAsPathResponseHeader const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemAsPathResponseHeader) == 4, "AemAsPathResponseHeader must be 4 bytes");
+
+//
 // GET_COUNTERS - Clause 7.4.42
 //
 /// GET_COUNTERS command payload
@@ -1388,6 +1425,14 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemAvbInfoPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemGetAsPathCommandPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemAsPathResponseHeader> : std::true_type
 {};
 
 template <>

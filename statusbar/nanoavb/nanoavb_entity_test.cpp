@@ -4406,6 +4406,119 @@ TEST(nanoavb_entity_notification_order, a_notification_longer_than_an_aecpdu_fol
     EXPECT_EQ(body_of(*long_one).size(), MAX_AEM_RESPONSE_SIZE);
 }
 
+//
+// GET_AS_PATH - IEEE 1722.1-2021 Clause 7.4.41
+//
+
+namespace {
+
+Eui64 const kPathGm{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x01};
+Eui64 const kPathBridge{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x02};
+
+/// A GET_AS_PATH command body for AVB_INTERFACE @p index.
+auto as_path_command(uint16_t const index) -> std::array<uint8_t, AemGetAsPathCommandPayload::LENGTH>
+{
+    std::array<uint8_t, AemGetAsPathCommandPayload::LENGTH> body{};
+    span_store(body, AemGetAsPathCommandPayload{.descriptor_index = index});
+    return body;
+}
+
+/// The path a GET_AS_PATH response @p body carries, as many identities as its count says.
+auto path_in(std::span<uint8_t const> const body) -> std::vector<Eui64>
+{
+    AemAsPathResponseHeader header{};
+    span_load(header, body);
+    std::vector<Eui64> path(header.count.get());
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_load(path[i], body.subspan(AemAsPathResponseHeader::LENGTH + (i * Eui64::LENGTH)));
+    }
+    return path;
+}
+
+/// Answers AVB_INTERFACE 0 with @p path.
+void serve_as_path(AemCommandHandler& handler, AsPath const& path)
+{
+    handler.set_get_as_path([&path](uint16_t const index, AsPath& out) -> bool {
+        out = path;
+        return index == 0;
+    });
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_get_as_path, not_implemented_without_a_callback)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, as_path_command(0));
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends.front()).status(), AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(handler.notify_as_path_changed(0), AEM_STATUS_NOT_IMPLEMENTED);
+    EXPECT_EQ(sends.size(), size_t{1});
+}
+
+TEST(nanoavb_entity_get_as_path, the_path_is_answered_grandmaster_first)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    AsPath path{};
+    path.push_back(kPathGm);
+    path.push_back(kPathBridge);
+    serve_as_path(handler, path);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, as_path_command(0));
+    EXPECT_EQ(sends.size(), size_t{1});
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(body_of(sends.back()).size(), AemAsPathResponseHeader::LENGTH + (2 * Eui64::LENGTH));
+    EXPECT_TRUE(path_in(body_of(sends.back())) == (std::vector<Eui64>{kPathGm, kPathBridge}));
+}
+
+TEST(nanoavb_entity_get_as_path, another_interface_or_a_short_command_is_refused)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    AsPath const path{};
+    serve_as_path(handler, path);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, as_path_command(1));
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    std::array<uint8_t, 2> const short_command{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_AS_PATH, short_command);
+    EXPECT_EQ(header_of(sends.back()).status(), AEM_STATUS_BAD_ARGUMENTS);
+}
+
+TEST(nanoavb_entity_get_as_path, a_changed_path_is_notified_to_every_registered_controller)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    AsPath path{};
+    path.push_back(kPathGm);
+    serve_as_path(handler, path);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    EXPECT_EQ(handler.notify_as_path_changed(0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AS_PATH, kMacA), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AS_PATH, kMacB), 1);
+    EXPECT_TRUE(path_in(body_of(sends.front())) == (std::vector<Eui64>{kPathGm}));
+    // The grandmaster lost: an empty path, notified too.
+    path.clear();
+    EXPECT_EQ(handler.notify_as_path_changed(0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(body_of(sends.back()).size(), AemAsPathResponseHeader::LENGTH);
+    EXPECT_EQ(handler.notify_as_path_changed(1), AEM_STATUS_NO_SUCH_DESCRIPTOR);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_AS_PATH, kMacA), 2);
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;

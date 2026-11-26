@@ -135,6 +135,11 @@ constexpr size_t MAX_AS_PATH_LENGTH = 32;
 /// The clock identities of an AS path, grandmaster first (IEEE 802.1AS-2020 Clause 10.3.9.23).
 using AsPath = statusbar::sg14::inplace_vector<Eui64, MAX_AS_PATH_LENGTH>;
 
+/// Fill @p path with the gPTP path of AVB_INTERFACE @p descriptor_index (IEEE 1722.1-2021
+/// Clause 7.4.41), empty while no grandmaster is known, and return true; false for an
+/// index that is not one of this entity's interfaces (answered NO_SUCH_DESCRIPTOR).
+using GetAsPathFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AsPath& path), 64>;
+
 /// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
 /// applied (see set_identify_control_index). @p active is true when the new
 /// value is non-zero (a controller is identifying this entity), false when
@@ -169,6 +174,10 @@ struct AemCommandHandlerCallbacks
     /// Provide the live gPTP/MSRP state for GET_AVB_INFO. Optional; if unset,
     /// GET_AVB_INFO replies NOT_IMPLEMENTED.
     GetAvbInfoFn get_avb_info;
+
+    /// Provide the gPTP path for GET_AS_PATH. Optional; if unset, GET_AS_PATH
+    /// replies NOT_IMPLEMENTED.
+    GetAsPathFn get_as_path;
 
     /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
     /// is none). Optional.
@@ -349,6 +358,7 @@ class AemCommandHandler
     void set_get_stream_info(GetStreamInfoFn fn) { callbacks_.get_stream_info = std::move(fn); }
     void set_identify_changed(IdentifyChangedFn fn) { callbacks_.identify_changed = std::move(fn); }
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
+    void set_get_as_path(GetAsPathFn fn) { callbacks_.get_as_path = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
@@ -546,6 +556,11 @@ class AemCommandHandler
     /// propagation-delay change). Reads the state through the get_avb_info
     /// callback; same return values as notify_counters_changed().
     [[nodiscard]] auto notify_avb_info_changed(uint16_t descriptor_index) -> uint8_t;
+
+    /// Push an unsolicited GET_AS_PATH response for AVB_INTERFACE @p descriptor_index
+    /// (IEEE 1722.1-2021 Clauses 7.4.41, 7.5.2: the gPTP path changed). Reads it through
+    /// the get_as_path callback; same return values as notify_counters_changed().
+    [[nodiscard]] auto notify_as_path_changed(uint16_t descriptor_index) -> uint8_t;
 
     /// Push an unsolicited GET_STREAM_INFO response for a stream descriptor
     /// (talker advertise/failure, listener connection changes). Reads the
@@ -776,6 +791,11 @@ class AemCommandHandler
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.
     [[nodiscard]] auto handle_get_avb_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// Handle GET_AS_PATH (7.4.41) through the get_as_path callback: descriptor_index,
+    /// count, then the path's clock identities.
+    [[nodiscard]] auto handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
 
     /// Handle REBOOT (7.4.43) through the on_reboot callback; echoes the
