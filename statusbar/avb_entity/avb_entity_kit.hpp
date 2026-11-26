@@ -993,8 +993,8 @@ class AvbEntityKit
     void configure_milan();
     /// The talker streams' ACMP identities, address validity and presentation offsets.
     void configure_talker_streams();
-    /// Record STREAM_OUTPUT @p index's avb_interface_index (Milan PROBE_TX check).
-    void notify_talker_interface(uint16_t index);
+    /// Warn when STREAM_OUTPUT @p index names an AVB_INTERFACE other than the entity's one (0).
+    void check_talker_interface(uint16_t index);
     /// The AEM and SRP behaviour the configured atdecc_profile selects (classic or milan13).
     void configure_profile();
     /// MVRP/MSRP for the configured Class A VLAN, and following a Domain's VID.
@@ -1188,8 +1188,6 @@ class AvbEntityKit
     std::shared_ptr<AvbEntityKit* const> declaration_timer_token_{};
     /// The registered Listener per talker stream (refresh_talker_listener).
     std::array<srp::msrp::ListenerDeclaration, MAX_ENTITY_STREAMS> talker_listener_{};
-    /// Each STREAM_OUTPUT's avb_interface_index (Milan PROBE_TX check).
-    std::array<uint16_t, MAX_ENTITY_STREAMS> talker_interface_{};
     /// Per talker stream presentation time offset (written on the reactor,
     /// read by the data plane and GET_STREAM_INFO).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> presentation_offset_ns_{};
