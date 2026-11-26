@@ -96,6 +96,114 @@ struct EntityToolOptions
     std::string stream_input_margin_csv_path{};
 };
 
+/// Who the entity is: its IDs, its interface, its name.
+inline void add_identity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    specs.add<ieee::Eui64>("entity.id", "Entity ID (EUI-64)", entity.entity_id, [&entity](auto v) { entity.entity_id = v; });
+    specs.add<ieee::Eui64>(
+        "entity.model_id", "Entity Model ID (EUI-64)", entity.entity_model_id, [&entity](auto v) { entity.entity_model_id = v; });
+    specs.add_device(
+        "interface", "Network interface (required, e.g. eth0)", "", [&entity](auto v) { entity.interface_name = std::string{v}; });
+    specs.add<std::string>("entity.name", "Entity name (shown in ATDECC controllers)", entity.entity_name, [&entity](auto v) {
+        entity.entity_name = v;
+    });
+}
+
+/// The local ATDECC socket for controllers on this host.
+inline void add_local_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    specs.add<std::string>(
+        "atdecc.socket",
+        "Serve local ATDECC controllers on an AF_UNIX datagram socket at this path (one AVTPDU per datagram, as "
+        "la_avdecc's local protocol interface): statusbar-atdecc-monitor --socket=PATH reaches the entity without raw "
+        "sockets. Empty = off.",
+        entity.atdecc_socket_path,
+        [&entity](auto v) { entity.atdecc_socket_path = std::string{v}; });
+    specs.add<std::string>(
+        "atdecc.socket_mode", "File mode of the atdecc.socket socket, in octal (default 0660).", "0660", [&entity](auto v) {
+            std::string_view const text{v};
+            unsigned mode = 0;
+            auto const [end, ec] = std::from_chars(text.data(), text.data() + text.size(), mode, 8);
+            if (ec != std::errc{} || end != text.data() + text.size() || mode > 0777U) {
+                std::println(
+                    stderr,
+                    "warning: atdecc.socket_mode '{}' is not an octal mode; keeping {:04o}",
+                    text,
+                    entity.atdecc_socket_mode);
+                return;
+            }
+            entity.atdecc_socket_mode = static_cast<int>(mode);
+        });
+}
+
+/// The ATDECC wire version and profile.
+inline void add_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    specs.add<std::string>(
+        "atdecc.version",
+        "ATDECC wire version: '2016' truncates descriptors to their 1722.1-2013/2016 lengths; '2021' emits full "
+        "2021 descriptors. Default empty: the profile decides, 2021 under milan13 and 2016 otherwise.",
+        entity.atdecc_version,
+        [&entity](auto v) { entity.atdecc_version = std::string{v}; });
+    specs.add<bool>(
+        "atdecc.identify_bypasses_lock",
+        "Let any controller's SET_CONTROL of the IDENTIFY control through while another controller holds the "
+        "entity acquired or locked. Default off: IEEE 1722.1-2021 7.4.25.2 and Milan v1.3 refuse it like any "
+        "other SET_CONTROL (ENTITY_ACQUIRED / ENTITY_LOCKED).",
+        entity.identify_bypasses_lock,
+        [&entity](auto v) { entity.identify_bypasses_lock = v; });
+    specs.add<std::string>(
+        "atdecc.profile",
+        "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
+        "is notified, 7.5.2); 'milan13' applies Milan v1.3 (a SET to the value already in force is not notified, "
+        "5.4.5.3). Default empty: the model decides, milan13 when entity.milan is set, classic otherwise.",
+        entity.atdecc_profile,
+        [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
+    add_local_atdecc_arg_specs(specs, entity);
+}
+
+/// What a Milan model reports of itself.
+inline void add_milan_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
+{
+    specs.add<bool>(
+        "entity.milan",
+        "The model is a Milan PAAD-AE: answer GET_MILAN_INFO (Milan v1.3 5.4.4.1) and the other MVU commands, and "
+        "take milan13 as the profile unless atdecc.profile says otherwise. Default off: a plain 1722.1 entity, which "
+        "leaves every MVU command unanswered.",
+        entity.milan,
+        [&entity](auto v) { entity.milan = v; });
+    specs.add<uint32_t>(
+        "milan.features_flags",
+        "GET_MILAN_INFO features_flags (Milan v1.3 Table 5.17): REDUNDANCY 1, TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, "
+        "TALKER_SIGNAL_PRESENCE 8. Default 0. MVU_BINDING (4) is set by the entity under the Milan profile and cleared "
+        "under any other, whatever is given here.",
+        entity.milan_features_flags,
+        [&entity](auto v) { entity.milan_features_flags = v; });
+    specs.add<std::string>(
+        "milan.certification_version",
+        "The Milan certification passed, as dotted numbers ('1.2', '1.3.0.0'). Default 0.0.0.0: none.",
+        entity.milan_certification_version,
+        [&entity](auto v) { entity.milan_certification_version = std::string{v}; });
+    specs.add<std::string>(
+        "milan.specification_version",
+        "The Milan specification supported, as dotted numbers. Default 1.3.0.0.",
+        entity.milan_specification_version,
+        [&entity](auto v) { entity.milan_specification_version = std::string{v}; });
+    specs.add<std::string>(
+        "mcr.default_priority",
+        "Default Media Clock Reference Priority of each CLOCK_DOMAIN by index, 0-255, comma-separated; the last also "
+        "serves the domains after it (Milan v1.3 Section 7.6.1.1: 192 audio interfaces, 224 signal routers). Empty = "
+        "128.",
+        "",
+        [&entity](auto v) {
+            if (auto parsed = parse_default_mcr_priorities(v)) {
+                entity.default_mcr_priorities = std::move(*parsed);
+                return;
+            }
+            std::println(stderr, "warning: mcr.default_priority '{}' is not a list of 0-255; keeping 128", std::string_view{v});
+        });
+}
+
 /// The xdp backend's options beyond its queue: bind and attach modes, pin
 /// path and launch time.
 inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
@@ -129,86 +237,6 @@ inline void add_xdp_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig
         "sets the PHC (StreamPort::set_phc_clock)",
         entity.stream_launch_time,
         [&entity](auto v) { entity.stream_launch_time = v; });
-}
-
-/// Register the CLI arguments every entity tool shares: entity identity,
-/// interface, ATDECC wire version, VLAN, stream addressing, SRP
-/// workarounds, the talker gate, stream destination MACs, presentation
-/// offset, media pacing, listener bindings, TX pcap, histogram CSVs and
-/// the verbosity/stats/PTP-strictness flags. Tools add their own specs
-/// (and the PTP specs) around this.
-inline void add_common_entity_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
-{  // NOLINT(statusbar-block-statements) one option after another; pre-dates the gate
-    specs.add<ieee::Eui64>("entity.id", "Entity ID (EUI-64)", entity.entity_id, [&entity](auto v) { entity.entity_id = v; });
-    specs.add<ieee::Eui64>(
-        "entity.model_id", "Entity Model ID (EUI-64)", entity.entity_model_id, [&entity](auto v) { entity.entity_model_id = v; });
-    specs.add_device(
-        "interface", "Network interface (required, e.g. eth0)", "", [&entity](auto v) { entity.interface_name = std::string{v}; });
-    specs.add<std::string>("entity.name", "Entity name (shown in ATDECC controllers)", entity.entity_name, [&entity](auto v) {
-        entity.entity_name = v;
-    });
-}
-
-/// The ATDECC wire version and profile.
-inline void add_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
-{
-    specs.add<std::string>(
-        "atdecc.version",
-        "ATDECC wire version: '2016' truncates descriptors to their 1722.1-2013/2016 lengths; '2021' emits full "
-        "2021 descriptors. Default empty: the profile decides, 2021 under milan13 and 2016 otherwise.",
-        entity.atdecc_version,
-        [&entity](auto v) { entity.atdecc_version = std::string{v}; });
-    specs.add<bool>(
-        "atdecc.identify_bypasses_lock",
-        "Let any controller's SET_CONTROL of the IDENTIFY control through while another controller holds the "
-        "entity acquired or locked. Default off: IEEE 1722.1-2021 7.4.25.2 and Milan v1.3 refuse it like any "
-        "other SET_CONTROL (ENTITY_ACQUIRED / ENTITY_LOCKED).",
-        entity.identify_bypasses_lock,
-        [&entity](auto v) { entity.identify_bypasses_lock = v; });
-    specs.add<bool>(
-        "atdecc.acquire_shared",
-        "Grant an ACQUIRE_ENTITY without shutting the other controllers out: the acquirer is answered SUCCESS and "
-        "reported as the owner, and any controller's SET and LOCK_ENTITY still goes through. For a controller that "
-        "insists on acquiring the entity while another sets its controls. Default off: IEEE 1722.1-2021 7.4.1 "
-        "answers the others ENTITY_ACQUIRED. No effect under the Milan profile, which grants no acquisition.",
-        entity.acquire_shared,
-        [&entity](auto v) { entity.acquire_shared = v; });
-    specs.add<std::string>(
-        "atdecc.profile",
-        "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
-        "is notified, 7.5.2); 'milan13' applies Milan v1.3 (a SET to the value already in force is not notified, "
-        "5.4.5.3). Default empty: the model decides, milan13 when entity.milan is set, classic otherwise.",
-        entity.atdecc_profile,
-        [&entity](auto v) { entity.atdecc_profile = std::string{v}; });
-}
-
-/// What a Milan model reports of itself.
-inline void add_milan_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity)
-{
-    specs.add<bool>(
-        "entity.milan",
-        "The model is a Milan PAAD-AE: answer GET_MILAN_INFO (Milan v1.3 5.4.4.1) and the other MVU commands, and "
-        "take milan13 as the profile unless atdecc.profile says otherwise. Default off: a plain 1722.1 entity, which "
-        "leaves every MVU command unanswered.",
-        entity.milan,
-        [&entity](auto v) { entity.milan = v; });
-    specs.add<uint32_t>(
-        "milan.features_flags",
-        "GET_MILAN_INFO features_flags (Milan v1.3 Table 5.17): REDUNDANCY 1, TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING 2, "
-        "TALKER_SIGNAL_PRESENCE 8. Default 0. MVU_BINDING (4) is set by the entity under the Milan profile and cleared "
-        "under any other, whatever is given here.",
-        entity.milan_features_flags,
-        [&entity](auto v) { entity.milan_features_flags = v; });
-    specs.add<std::string>(
-        "milan.certification_version",
-        "The Milan certification passed, as dotted numbers ('1.2', '1.3.0.0'). Default 0.0.0.0: none.",
-        entity.milan_certification_version,
-        [&entity](auto v) { entity.milan_certification_version = std::string{v}; });
-    specs.add<std::string>(
-        "milan.specification_version",
-        "The Milan specification supported, as dotted numbers. Default 1.3.0.0.",
-        entity.milan_specification_version,
-        [&entity](auto v) { entity.milan_specification_version = std::string{v}; });
 }
 
 /// The VLAN, the stream packet backend and where the stream addresses come from.
@@ -323,48 +351,6 @@ inline void add_saved_state_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudio
 /// The TX capture and the histogram files.
 inline void add_capture_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOConfig& entity, EntityToolOptions& tool)
 {
-    specs.add<std::string>(
-        "persistent_state",
-        "Keep the entity's Milan non-volatile settings (names, formats, rate, clock source, presentation offsets, "
-        "listener bindings, system unique id, media clock reference) in this TOML file across restarts; imports "
-        "listener.bindings once. Empty = off.",
-        entity.persistent_state_path,
-        [&entity](auto v) { entity.persistent_state_path = std::string{v}; });
-    specs.add<std::string>(
-        "atdecc.socket",
-        "Serve local ATDECC controllers on an AF_UNIX datagram socket at this path (one AVTPDU per datagram, as "
-        "la_avdecc's local protocol interface): statusbar-atdecc-monitor --socket=PATH reaches the entity without raw "
-        "sockets. Empty = off.",
-        entity.atdecc_socket_path,
-        [&entity](auto v) { entity.atdecc_socket_path = std::string{v}; });
-    specs.add<std::string>(
-        "atdecc.socket_mode", "File mode of the atdecc.socket socket, in octal (default 0660).", "0660", [&entity](auto v) {
-            std::string_view const text{v};
-            unsigned mode = 0;
-            auto const [end, ec] = std::from_chars(text.data(), text.data() + text.size(), mode, 8);
-            if (ec != std::errc{} || end != text.data() + text.size() || mode > 0777U) {
-                std::println(
-                    stderr,
-                    "warning: atdecc.socket_mode '{}' is not an octal mode; keeping {:04o}",
-                    text,
-                    entity.atdecc_socket_mode);
-                return;
-            }
-            entity.atdecc_socket_mode = static_cast<int>(mode);
-        });
-    specs.add<std::string>(
-        "mcr.default_priority",
-        "Default Media Clock Reference Priority of each CLOCK_DOMAIN by index, 0-255, comma-separated; the last also "
-        "serves the domains after it (Milan v1.3 Section 7.6.1.1: 192 audio interfaces, 224 signal routers). Empty = "
-        "192.",
-        "",
-        [&entity](auto v) {
-            if (auto parsed = parse_default_mcr_priorities(v)) {
-                entity.default_mcr_priorities = std::move(*parsed);
-                return;
-            }
-            std::println(stderr, "warning: mcr.default_priority '{}' is not a list of 0-255; keeping 192", std::string_view{v});
-        });
     specs.add<std::string>(
         "tx_pcap.path",
         "Diagnostic: record our OWN transmitted stream frames (AAF/AM824/CRF, normally invisible because the TX "
