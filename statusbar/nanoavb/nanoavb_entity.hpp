@@ -449,6 +449,15 @@ class AemCommandHandler
         uint16_t port_index,
         std::span<DynamicAudioMapping const> add,
         std::span<DynamicAudioMapping const> remove) -> uint8_t;
+    /// Whether every mapping held still names a cluster channel of its port and a channel of its
+    /// stream's current format at its unit's rate, as an ADD of it would be checked; the handler
+    /// keeps it so by refusing a stream format or rate that would break one (mappings_refusal()).
+    [[nodiscard]] auto mappings_hold() const -> bool;
+    /// The status SET_STREAM_FORMAT or SET_SAMPLING_RATE @p command_body is refused with because a
+    /// mapping held would not hold after it: BAD_ARGUMENTS for a stream channel or rate a format
+    /// leaves (Milan v1.3 Sections 5.4.2.7, 5.4.2.27), NOT_SUPPORTED for a rate (Section 5.4.2.13).
+    [[nodiscard]] auto mappings_refusal(uint16_t command_type, std::span<uint8_t const> command_body) const
+        -> std::optional<uint8_t>;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -597,7 +606,7 @@ class AemCommandHandler
     /// command body (descriptor_type + descriptor_index + value). Returns the
     /// AEM status from the handler's symbol-keyed set hook; notifications are
     /// emitted only on AEM_STATUS_SUCCESS. local_change_refusal(), with nothing
-    /// applied, while it refuses.
+    /// applied, while it refuses; mappings_refusal() for a stream format or rate.
     [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
 
     /// ENTITY_LOCKED while a controller holds the lock under milan13, else nullopt: a locked
@@ -1024,6 +1033,15 @@ class AemCommandHandler
     /// dynamic_port() for a port a controller's ADD or REMOVE may change (with the store and the
     /// data plane's hook); else the status they refuse with.
     [[nodiscard]] auto mappable_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// SET_STREAM_FORMAT @p cmd's refusal: a mapping of its stream whose channel or rate it leaves.
+    [[nodiscard]] auto format_change_refusal(AemStreamFormatPayload const& cmd) const -> std::optional<uint8_t>;
+    /// SET_SAMPLING_RATE @p cmd's refusal: a mapping on a port of its unit, not converting rates,
+    /// whose stream runs at another rate.
+    [[nodiscard]] auto rate_change_refusal(AemSamplingRatePayload const& cmd) const -> std::optional<uint8_t>;
+    /// Whether stream port (@p port_type, @p port_index) converts rates (Table 7-15).
+    [[nodiscard]] auto port_converts(uint16_t port_type, uint16_t port_index) const -> bool;
+    /// The rate of the current format of the stream @p stream_index of @p port_type's direction (0: none).
+    [[nodiscard]] auto stream_rate(uint16_t port_type, uint16_t stream_index) const -> uint32_t;
     /// dynamic_port() when the entity has a store, else NOT_IMPLEMENTED.
     [[nodiscard]] auto stored_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
     /// Append @p mappings, checked as an ADD's, to the set in the store's next(): BAD_ARGUMENTS for an
@@ -1121,8 +1139,8 @@ class AemCommandHandler
 
     /// What a value SET is answered without its hook running: IN_PROGRESS
     /// again for the retransmit of a deferred command, NO_RESOURCES when no
-    /// pending slot is left for it, or unchanged_set_answer(); nullopt when
-    /// the hook is to run.
+    /// pending slot is left for it, mappings_refusal(), or
+    /// unchanged_set_answer(); nullopt when the hook is to run.
     [[nodiscard]] auto answered_before_hook(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> std::optional<AemCommandResponse>;
