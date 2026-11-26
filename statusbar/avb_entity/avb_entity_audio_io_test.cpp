@@ -43,6 +43,8 @@ namespace {
 /// The media wake the gate is told in these tests: any instant, the grace
 /// window is measured from it.
 constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
+/// The reactor's time these tests tell the entity: any instant will do, none is read from a clock.
+constexpr auto SM_NOW = sm::TimePoint{std::chrono::seconds{100}};
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -275,7 +277,7 @@ TEST(audio_io_audio, process_audio_drives_both_formats)
     size_t callback_buffer_size = 0;
     (*result)->set_audio_callback([&](std::span<float> samples, size_t /*count*/) { callback_buffer_size = samples.size(); });
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->process_audio(now, RAW_NOW);  // not started: serialize is skipped, audio engine still runs
     EXPECT_EQ(callback_buffer_size, AvbEntityAudioIO::SAMPLES_PER_PACKET * 8U);
     EXPECT_FALSE((*result)->is_running());

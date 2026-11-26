@@ -5,6 +5,7 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -41,9 +42,10 @@ struct TestHarness
     }
 };
 
-auto now() -> TimePoint
+/// The instant these tests tell the machine: any will do, none is read from a clock.
+constexpr auto now() -> TimePoint
 {
-    return Clock::now();
+    return TimePoint{std::chrono::seconds{100}};
 }
 
 }  // namespace

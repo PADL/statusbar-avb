@@ -28,6 +28,8 @@ using namespace statusbar::ieee;
 namespace {
 
 constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
+/// The reactor's time these tests tell the entity: any instant will do, none is read from a clock.
+constexpr auto SM_NOW = sm::TimePoint{std::chrono::seconds{100}};
 
 /// Helper to check approximate equality for floats
 constexpr bool approx_equal(float a, float b, float tolerance = 1e-5f)
@@ -307,7 +309,7 @@ TEST(stereo_io_sm, link_up_transitions_from_start)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     // Initial state is Start
     EXPECT_EQ(entity.state_string(), "Start");
@@ -323,7 +325,7 @@ TEST(stereo_io_sm, link_down_after_up)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     entity.on_link_up(now);
     auto state_after_up = entity.state_string();
@@ -339,7 +341,7 @@ TEST(stereo_io_sm, timeout_does_not_crash)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     // on_timeout should not crash regardless of current state
     entity.on_timeout(now);
@@ -352,7 +354,7 @@ TEST(stereo_io_sm, gptp_announce_no_grandmaster)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     // gPTP announce without grandmaster is a no-op (safe from any state)
     entity.on_gptp_announce(now, false);
@@ -370,7 +372,7 @@ TEST(stereo_io_audio, process_audio_does_not_crash)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     // Process audio without starting entity - should not crash
     entity.process_audio(now, RAW_NOW);
@@ -391,7 +393,7 @@ TEST(stereo_io_audio, process_audio_no_input_no_callback)
     bool callback_invoked = false;
     entity.set_audio_callback([&](std::span<float> /*samples*/, size_t /*count*/) { callback_invoked = true; });
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     entity.process_audio(now, RAW_NOW);
 
     EXPECT_FALSE(callback_invoked);
@@ -527,7 +529,7 @@ TEST(stereo_io_sm, multiple_link_toggles)
     config.entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
     AvbEntityStereoIO entity{config};
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
 
     // Toggle link multiple times
     for (int i = 0; i < 5; ++i) {

@@ -34,6 +34,8 @@ using namespace statusbar::ieee;
 namespace {
 
 constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
+/// The reactor's time these tests tell the entity: any instant will do, none is read from a clock.
+constexpr auto SM_NOW = sm::TimePoint{std::chrono::seconds{100}};
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
 {
@@ -188,7 +190,7 @@ TEST(am824_io_audio, process_audio_callback_receives_correct_size)
         callback_sample_count = sample_count;
     });
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->process_audio(now, RAW_NOW);
 
     // Buffer should be SAMPLES_PER_PACKET * channels (6 * 8 = 48)
@@ -219,7 +221,7 @@ TEST(am824_io_sm, link_up_transitions_state)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     EXPECT_EQ((*result)->state_string(), "Start");
 
     (*result)->on_link_up(now);
@@ -233,7 +235,7 @@ TEST(am824_io_sm, link_down_after_up)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->on_link_up(now);
     auto state_after_up = (*result)->state_string();
     (*result)->on_link_down(now);
@@ -248,7 +250,7 @@ TEST(am824_io_sm, timeout_does_not_crash)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->on_timeout(now);
     EXPECT_FALSE((*result)->is_running());
 }
@@ -260,7 +262,7 @@ TEST(am824_io_sm, gptp_announce_no_grandmaster)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     // gPTP announce without grandmaster is a no-op (safe from any state)
     (*result)->on_gptp_announce(now, false);
     EXPECT_FALSE((*result)->is_running());
@@ -274,7 +276,7 @@ TEST(am824_io_sm, multiple_link_toggles)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     for (int i = 0; i < 5; ++i) {
         (*result)->on_link_up(now);
         (*result)->on_link_down(now);
@@ -293,7 +295,7 @@ TEST(am824_io_audio, process_audio_does_not_crash)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->process_audio(now, RAW_NOW);
     EXPECT_FALSE((*result)->is_running());
 }
@@ -305,7 +307,7 @@ TEST(am824_io_audio, process_audio_multiple_times)
     auto result = AvbEntityAm824IO::create(std::move(config));
     EXPECT_TRUE(result.has_value());
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     for (int i = 0; i < 10; ++i) {
         (*result)->process_audio(now, RAW_NOW);
     }
@@ -460,7 +462,7 @@ TEST(am824_io_audio, callback_receives_filtered_data)
         (void)count;
     });
 
-    auto const now = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto const now = SM_NOW;
     (*result)->process_audio(now, RAW_NOW);
 
     // process_audio now drives a per-channel sine source through the (flat)
