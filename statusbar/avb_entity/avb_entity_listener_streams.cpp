@@ -73,7 +73,7 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
                 return failure(std::errc::invalid_argument);
             }
             auto& slot = new_slot(spec);
-            slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
+            make_aaf_context(slot, spec.format);
             bind_pending_consume(slot);
             return success();
         }
@@ -97,6 +97,55 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
         default:
             return failure(std::errc::not_supported);
     }
+}
+
+void ListenerStreams::make_aaf_context(ListenerStreamSlot& slot, StreamFormatFields const& format)
+{
+    auto const rate = avtp::aaf_sample_rate_from_hz(format.sample_rate_hz);
+    slot.aaf.emplace(format.aaf_format, rate.value_or(avtp::AafSampleRate::user_specified), format.channels, format.bit_depth);
+    slot.aaf->samples_per_pdu = format.aaf_samples_per_frame;
+}
+
+auto ListenerStreams::can_take_stream_format(uint16_t const stream_index, uint64_t const format_word) const noexcept -> bool
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || stream_index >= stream_format_.size()) {
+        return false;
+    }
+    return format_word == slot->spec.format_word || aaf_input_can_take(slot->spec.format, format_word);
+}
+
+auto ListenerStreams::set_stream_format(uint16_t const stream_index, uint64_t const format_word) noexcept -> bool
+{
+    if (!can_take_stream_format(stream_index, format_word)) {
+        return false;
+    }
+    // The opened word is kept as 0: a slot opened from fields alone has no
+    // word of its own to be decoded again.
+    bool const as_opened = format_word == slot_for(stream_index)->spec.format_word;
+    stream_format_[stream_index].store(as_opened ? 0 : format_word, std::memory_order_release);
+    return true;
+}
+
+auto ListenerStreams::stream_format(uint16_t const stream_index) const noexcept -> uint64_t
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || stream_index >= stream_format_.size()) {
+        return 0;
+    }
+    uint64_t const set = stream_format_[stream_index].load(std::memory_order_acquire);
+    return set != 0 ? set : slot->spec.format_word;
+}
+
+void ListenerStreams::follow_stream_format(ListenerStreamSlot& slot)
+{
+    uint64_t const wanted =
+        slot.spec.index < stream_format_.size() ? stream_format_[slot.spec.index].load(std::memory_order_acquire) : 0;
+    if (wanted == slot.rx_format_word) {
+        return;
+    }
+    make_aaf_context(slot, wanted != 0 ? decode_stream_format(wanted) : slot.spec.format);
+    slot.rx_format_word = wanted;
 }
 
 auto ListenerStreams::new_slot(StreamSpec const& spec) -> ListenerStreamSlot&
@@ -409,6 +458,18 @@ auto ListenerStreams::find_slot_for_frame(std::span<uint8_t const> frame) -> Lis
 
 namespace {
 
+/// What one AAF AVTPDU gave the consumers: its samples per channel and their time.
+struct AafDelivery
+{
+    uint64_t samples{0};
+    avtp::Nanoseconds pts{};
+    avtp::Nanoseconds period{};
+};
+
+/// One channel's worth of silence, as long as the longest lane an AVTPDU
+/// that fits the receive buffer can hold.
+constexpr std::array<float, 1024> SILENT_LANE{};
+
 /// One decoded channel to the slot's consumers. A consumer registered in
 /// unsigned nanoseconds (set_consume) is handed the same counts in that type.
 void offer_audio(
@@ -423,6 +484,17 @@ void offer_audio(
     }
     if (slot.consume) {
         slot.consume(ch, samples, static_cast<uint64_t>(pts.count()), static_cast<uint64_t>(period.count()));
+    }
+}
+
+/// The channels of the opened input that a stream of @p carried channels
+/// does not carry, to the slot's consumers as silence of the AVTPDU's length
+/// and time (ListenerStreams::set_stream_format).
+void offer_silent_channels(ListenerStreamSlot& slot, uint16_t const carried, AafDelivery const& delivery)
+{
+    std::span<float const> const silence{SILENT_LANE.data(), std::min<size_t>(delivery.samples, SILENT_LANE.size())};
+    for (uint16_t ch = carried; !silence.empty() && ch < slot.spec.format.channels; ++ch) {
+        offer_audio(slot, static_cast<uint8_t>(ch), silence, delivery.pts, delivery.period);
     }
 }
 
@@ -521,30 +593,62 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, avtp::N
 auto ListenerStreams::deliver_aaf_audio(
     ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds const now) -> uint64_t
 {
-    uint64_t samples_this = 0;
-    avtp::aaf_stream_deserialize(
+    AafDelivery delivery{};
+    avtp::aaf_stream_deserialize<MAX_AAF_INPUT_CHANNELS>(
         *slot.aaf,
         pdu,
         audio,
         now,
-        [&samples_this, &slot](uint8_t ch, std::span<float> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
-            samples_this = s.size();
+        [&delivery, &slot](uint8_t ch, std::span<float> s, avtp::Nanoseconds pts, avtp::Nanoseconds period) {
+            delivery = AafDelivery{.samples = s.size(), .pts = pts, .period = period};
             offer_audio(slot, ch, s, pts, period);
         });
+    offer_silent_channels(slot, slot.aaf->channel_count, delivery);
     slot.rx_packets.add(1);
-    slot.rx_samples.add(samples_this);
-    return samples_this;
+    slot.rx_samples.add(delivery.samples);
+    return delivery.samples;
+}
+
+auto ListenerStreams::accepted_aaf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+    -> std::optional<avtp::AafPdu>
+{
+    follow_stream_format(slot);
+    auto const pdu = avtp::aaf_parse_header(frame);
+    if (pdu && avtp::aaf_pdu_is_of_format(*slot.aaf, *pdu, avtp::aaf_get_audio_payload(*pdu, frame).size())) {
+        return pdu;
+    }
+    slot.rx_bad.add(1);
+    update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, now);
+    return std::nullopt;
+}
+
+void ListenerStreams::offer_aaf_to_sink(ListenerStreamSlot const& slot, std::span<uint8_t const> const audio)
+{
+    // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
+    // to the AM824 path above; the sink ignores it unless AAF is its source.
+    if (audio_sink_ == nullptr) {
+        return;
+    }
+    uint16_t const width = slot.spec.format.channels;
+    if (slot.aaf->channel_count == width) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, audio);
+        return;
+    }
+    std::array<uint8_t, SINK_SCRATCH_OCTETS> widened{};
+    size_t const octets =
+        avtp::aaf_frames_to_width(audio, avtp::aaf_bytes_per_sample(slot.aaf->format), slot.aaf->channel_count, width, widened);
+    if (octets != 0) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, std::span{widened}.first(octets));
+    }
 }
 
 void ListenerStreams::receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
 {
-    auto const pdu = avtp::aaf_parse_header(frame);
+    auto const pdu = accepted_aaf_pdu(slot, frame, now);
     if (!pdu) {
-        slot.rx_bad.add(1);
-        update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, now);
         return;
     }
-    std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(frame);
+    std::span<uint8_t const> const audio = avtp::aaf_get_audio_payload(*pdu, frame);
     uint64_t const samples_this = deliver_aaf_audio(slot, *pdu, audio, now);
     update_stream_input_counters(
         slot,
@@ -557,12 +661,7 @@ void ListenerStreams::receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint
         samples_this,
         /*ts_sparse=*/false,  // AAF timestamps every packet: tv=0 is a real fault
         now);
-
-    // Hand the accepted audio to the RX sink (today the WAN tunnel). Symmetric
-    // to the AM824 path above; the sink ignores it unless AAF is its source.
-    if (audio_sink_ != nullptr) {
-        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, audio);
-    }
+    offer_aaf_to_sink(slot, audio);
 }
 
 auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>

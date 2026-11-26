@@ -84,6 +84,10 @@ struct ListenerStreamSlot
     std::optional<avtp::Am824StreamInputContext> am824{};
     std::optional<avtp::AafStreamInputContext> aaf{};
     std::optional<avtp::CrfStreamInputContext> crf{};
+    /// The format word the aaf context was last made for: 0 for the format
+    /// the slot was opened with (spec.format), else the one a
+    /// set_stream_format() named and the RX thread took up. RX thread.
+    uint64_t rx_format_word{0};
 
     /// Per-stream RX consumer (kit phase 2): receives each decoded channel
     /// (floats + reconstructed 64-bit PTS) on the reactor/RX thread. Empty =
@@ -236,8 +240,23 @@ struct ListenerStreams
     [[nodiscard]] auto deliver_am824_audio(
         ListenerStreamSlot& slot, avtp::Am824Pdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds now) -> uint64_t;
 
-    /// The same three steps for an AAF frame; a frame that is not AAF is counted as bad.
+    /// The same three steps for an AAF frame; a frame that is not AAF, or
+    /// not of the input's format, is counted as bad and discarded.
     void receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
+    /// The frame's AAF header when the frame is of the format the input now
+    /// receives, taken up first if a set_stream_format() changed it. Any
+    /// other frame is discarded: counted bad and as UNSUPPORTED_FORMAT, and
+    /// nullopt (Milan v1.3 4.4.2.2).
+    [[nodiscard]] auto accepted_aaf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now)
+        -> std::optional<avtp::AafPdu>;
+    /// Make the slot's AAF context again when the format set for its input
+    /// is not the one the context was made for. RX thread.
+    void follow_stream_format(ListenerStreamSlot& slot);
+    /// The slot's AAF context for @p format, new: no stream state carried over.
+    static void make_aaf_context(ListenerStreamSlot& slot, StreamFormatFields const& format);
+    /// The accepted audio to the raw sink, as frames of the channel count
+    /// the input was opened with (see set_stream_format).
+    void offer_aaf_to_sink(ListenerStreamSlot const& slot, std::span<uint8_t const> audio);
     [[nodiscard]] auto deliver_aaf_audio(
         ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds now) -> uint64_t;
 
@@ -314,6 +333,32 @@ struct ListenerStreams
     {
         return stream_index < stream_stopped_.size() && stream_stopped_[stream_index].load(std::memory_order_acquire);
     }
+
+    /// The format STREAM_INPUT @p stream_index receives from now on, as a
+    /// SET_STREAM_FORMAT named it (Milan v1.3 5.3.8.1). An AAF input takes
+    /// any format aaf_input_can_take() accepts: another channel count, the
+    /// rest as it was opened. Every input takes the format word it was
+    /// opened with, which changes nothing. True when taken; false, with the
+    /// input as it was, for an input that is not open or a format it cannot
+    /// be brought to.
+    ///
+    /// The input keeps the width it was opened with towards what it feeds.
+    /// Its consumers are handed every channel a narrower stream does not
+    /// carry as silence, and the raw audio sink gets frames of the opened
+    /// channel count: zero in the channels the stream lacks, and without
+    /// the channels beyond that count.
+    ///
+    /// Kept by stream index, so it outlives close_rx() and open_stream().
+    /// Reactor thread; the RX thread takes the change up at the next AVTPDU
+    /// of the input. A caller changes the format of an input that is not
+    /// receiving (5.4.2.7 refuses the command for a bound input), so no
+    /// stream is cut over in the middle.
+    [[nodiscard]] auto set_stream_format(uint16_t stream_index, uint64_t format_word) noexcept -> bool;
+    /// Whether set_stream_format() would take @p format_word for the input.
+    [[nodiscard]] auto can_take_stream_format(uint16_t stream_index, uint64_t format_word) const noexcept -> bool;
+    /// The format word the input receives: the one set, else the one it was
+    /// opened with; 0 for an input that is not open.
+    [[nodiscard]] auto stream_format(uint16_t stream_index) const noexcept -> uint64_t;
 
     /// The group a listener joins for a talker destination: the address when
     /// it is multicast, nothing otherwise (8.2.1.13).
@@ -428,6 +473,11 @@ struct ListenerStreams
     sg14::inplace_vector<PendingCrf, MAX_ENTITY_STREAMS> pending_crf_{};
     /// Per-stream stopped states (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
+    /// Per-stream format words (see set_stream_format); 0 = as opened.
+    std::array<std::atomic<uint64_t>, MAX_ENTITY_STREAMS> stream_format_{};
+    /// Room for one AVTPDU's audio widened for the sink: 24 samples of 16
+    /// channels of 32 bits, the largest Milan frame an input here is opened for.
+    static constexpr size_t SINK_SCRATCH_OCTETS = 2048;
 };
 
 }  // namespace statusbar::avb_entity
