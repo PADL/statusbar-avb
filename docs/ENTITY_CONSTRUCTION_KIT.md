@@ -397,7 +397,11 @@ thread is the one that asks: it counts the requests, and the media thread
 compares that count with the one it last followed, so neither side waits
 or writes the other's state. A stream opened again after a stop starts
 with mr clear, and a restart asked of the run that stopped is not carried
-into the next. MEDIA_RESET counts each toggle sent.
+into the next. MEDIA_RESET counts each toggle sent. The kit asks for a
+restart on each stream output of clock domain 0 when SET_CLOCK_SOURCE
+makes another source active there (the source in force named again is
+none), and on each stream output a SET_SAMPLING_RATE re-times, once the
+entity's data plane has accepted the rate.
 
 ### The format of a stream input
 

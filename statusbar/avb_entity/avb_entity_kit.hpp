@@ -405,6 +405,11 @@ class AvbEntityKit
     [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
     /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
     void install_storage_hooks();
+    /// SET_CLOCK_SOURCE accepted: domain 0's active source is @p source, its streams' media clock
+    /// restarted when that is another. SUCCESS.
+    [[nodiscard]] auto change_clock_source(uint16_t domain, uint16_t source) -> uint8_t;
+    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream outputs.
+    void restart_media_clock(uint16_t domain);
     /// START_STREAMING or STOP_STREAMING was accepted for a stream.
     [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
     /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_OUTPUT
