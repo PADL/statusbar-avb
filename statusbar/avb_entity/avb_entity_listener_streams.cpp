@@ -760,7 +760,7 @@ void ListenerStreams::update_stream_input_counters(
 
 auto ListenerStreams::fill_stream_input_counters(
     uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
-{
+{  // NOLINT(statusbar-block-statements) one line per STREAM_INPUT counter, read top to bottom
     auto const* slot = slot_for(descriptor_index);
     if (slot == nullptr) {
         return false;
@@ -775,6 +775,7 @@ auto ListenerStreams::fill_stream_input_counters(
     };
     set(0, c.media_locked.load(relaxed));
     set(1, c.media_unlocked.load(relaxed));
+    set(2, c.stream_interrupted.load(relaxed));
     set(3, c.seq_num_mismatch.load(relaxed));
     set(4, c.media_reset.load(relaxed));
     set(5, c.timestamp_uncertain.load(relaxed));
@@ -958,15 +959,18 @@ void ListenerStreams::log_attached(
     }
 }
 
-void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
+void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now, StreamInputLoss const why)
 {
     bool settled = false;
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
         settled = slot->connection.settled;
         slot->rx_stream_id.publish(0);  // no frame is this input's any more
         // With no stream it is not synchronized: a held lock is dropped here (Milan
-        // v1.3 5.3.8.10), and the next stream's first AVTPDU is compared with
-        // nothing. After the id, see update_stream_input_counters.
+        // v1.3 5.3.8.10), as an interruption unless the stream was released. After
+        // the id, see update_stream_input_counters.
+        if (why == StreamInputLoss::talker_lost) {
+            interrupt_stream_input(slot->counters);
+        }
         restart_stream_input(slot->counters);
         release_connection(slot->connection, now);
     }

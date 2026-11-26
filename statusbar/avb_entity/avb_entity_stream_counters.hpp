@@ -29,6 +29,9 @@ struct StreamInputCounters
 {
     std::atomic<uint32_t> media_locked{0};
     std::atomic<uint32_t> media_unlocked{0};
+    /// Each media lock lost for a reason other than a controller's unbind:
+    /// playback interrupted (Milan v1.3 Table 5.6).
+    std::atomic<uint32_t> stream_interrupted{0};
     std::atomic<uint32_t> seq_num_mismatch{0};
     std::atomic<uint32_t> media_reset{0};
     std::atomic<uint32_t> timestamp_uncertain{0};
@@ -135,6 +138,11 @@ void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept;
 /// case, the input stream is not synchronized on the media clock), or
 /// MEDIA_LOCKED=MEDIA_UNLOCKED+1". Either thread.
 void unlock_stream_input(StreamInputCounters& c) noexcept;
+
+/// The input lost the media lock for a reason other than a controller's
+/// unbind (a step out of tolerance, its talker's stream gone): if it was locked,
+/// MEDIA_UNLOCKED and STREAM_INTERRUPTED count once (Milan v1.3 Table 5.6). Either thread.
+void interrupt_stream_input(StreamInputCounters& c) noexcept;
 
 /// The input lost its stream: unlock_stream_input(), and the RX thread's next
 /// AVTPDU is the first of a stream, compared with none before it (no

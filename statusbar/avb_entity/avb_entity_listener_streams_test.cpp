@@ -134,13 +134,13 @@ TEST(listener_connection, a_settled_sink_hands_what_it_probed_to_msrp_and_a_conn
     EXPECT_TRUE(ls.slot_for(0)->connection.settled);
     EXPECT_TRUE(followed(STREAM_1).has_value());
     EXPECT_TRUE(followed(STREAM_1).has_value() && followed(STREAM_1)->vlan_id == 2 && followed(STREAM_1)->dest_address == GROUP);
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     EXPECT_FALSE(ls.slot_for(0)->connection.settled);
 
     ls.on_listener_connected(0, STREAM_2, GROUP, sm::TimePoint{});
     EXPECT_FALSE(ls.slot_for(0)->connection.settled);
     EXPECT_FALSE(followed(STREAM_2).has_value());
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
 }
 
 // The disconnect works from what the slot recorded at connect time, not from
@@ -161,7 +161,7 @@ TEST(listener_connection, a_disconnect_withdraws_what_the_connect_declared)
     EXPECT_TRUE(declared.has_value());
     EXPECT_TRUE(declared.has_value() && *declared != nanoavb::ListenerReservationState::Idle);
 
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     EXPECT_FALSE(ls.slot_for(0)->connection.stream_id.is_set());
     auto const withdrawn = srp_state_of(donor->components(), STREAM_1);
     EXPECT_TRUE(withdrawn.has_value() && *withdrawn == nanoavb::ListenerReservationState::Idle);
@@ -203,7 +203,7 @@ TEST(listener_connection, the_same_stream_connected_twice_is_withdrawn_by_one_di
     auto const held = srp_state_of(donor->components(), STREAM_1);
     EXPECT_TRUE(held.has_value() && *held != nanoavb::ListenerReservationState::Idle);
 
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     auto const gone = srp_state_of(donor->components(), STREAM_1);
     EXPECT_TRUE(gone.has_value() && *gone == nanoavb::ListenerReservationState::Idle);
     EXPECT_FALSE(ls.slot_for(0)->connection.stream_id.is_set());
@@ -236,7 +236,7 @@ TEST(listener_connection, the_drain_matches_frames_by_the_published_connection)
     EXPECT_FALSE(ls.frame_is_for_listener(1, frame));  // no such input
     EXPECT_FALSE(ls.frame_is_for_listener(0, std::span<uint8_t const>{frame}.first(11)));
 
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     EXPECT_FALSE(ls.frame_is_for_listener(0, frame));
 }
 
@@ -289,7 +289,7 @@ TEST(listener_connection, a_connect_for_an_index_without_a_slot_declares_nothing
     ls.on_listener_connected(7, STREAM_1, GROUP, sm::TimePoint{});
     EXPECT_FALSE(srp_state_of(donor->components(), STREAM_1).has_value());
     EXPECT_EQ(ls.slot_for(7), nullptr);
-    ls.on_listener_disconnected(7, sm::TimePoint{});  // and nothing to undo
+    ls.on_listener_disconnected(7, sm::TimePoint{}, StreamInputLoss::released);  // and nothing to undo
 }
 
 TEST(listener_consume, pending_binds_on_open_unknown_stays_inert)
@@ -979,12 +979,12 @@ TEST(listener_lock, an_input_that_loses_its_stream_is_no_longer_locked)
     EXPECT_EQ(counters.media_locked.load(), 1U);
     EXPECT_EQ(counters.media_unlocked.load(), 0U);
 
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     EXPECT_EQ(counters.media_locked.load(), 1U);
     EXPECT_EQ(counters.media_unlocked.load(), 1U);
     EXPECT_FALSE(counters.is_locked.load());
     // A second disconnect, of an input that has none, counts nothing.
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     EXPECT_EQ(counters.media_unlocked.load(), 1U);
 
     // Connected again, the stream locks it again: one apart, as before.
@@ -1039,7 +1039,7 @@ TEST(listener_lock, the_stream_after_a_disconnect_follows_nothing_of_the_last)
     for (auto const& frame : aaf_run(first, 14, FORMAT_NOW)) {
         ls.on_stream_rx_frame(frame, FORMAT_NOW);
     }
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
 
     ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
     auto second = aaf_talker();
@@ -1068,7 +1068,7 @@ TEST(listener_lock, an_avtpdu_in_flight_at_a_disconnect_is_not_compared_with_the
     for (size_t i = 0; i < 14; ++i) {
         ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
     }
-    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
     ls.receive_aaf_frame(slot, frames[14], FORMAT_NOW);
 
     ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
@@ -1079,6 +1079,59 @@ TEST(listener_lock, an_avtpdu_in_flight_at_a_disconnect_is_not_compared_with_the
     EXPECT_EQ(slot.counters.seq_num_mismatch.load(), 0U);
     EXPECT_EQ(slot.counters.media_reset.load(), 0U);
     EXPECT_EQ(slot.counters.frames_rx.load(), 29U);
+}
+
+TEST(listener_counters, an_input_whose_talker_goes_is_interrupted_and_a_released_one_is_not)
+{
+    // Milan v1.3 Table 5.6: STREAM_INTERRUPTED for any reason other than a
+    // controller's unbind, a Talker attribute withdrawn among them.
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto const& counters = ls.slot_for(0)->counters;
+    auto talker = aaf_talker();
+    avtp::Nanoseconds start = FORMAT_NOW;
+    for (auto const why : {StreamInputLoss::released, StreamInputLoss::talker_lost}) {
+        ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+        for (auto const& frame : aaf_run(talker, 14, start)) {
+            ls.on_stream_rx_frame(frame, FORMAT_NOW);
+        }
+        EXPECT_TRUE(counters.is_locked.load());
+        ls.on_listener_disconnected(0, sm::TimePoint{}, why);
+        start += avtp::Nanoseconds{14 * 125'000};
+    }
+    EXPECT_EQ(counters.media_locked.load(), 2U);
+    EXPECT_EQ(counters.media_unlocked.load(), 2U);
+    EXPECT_EQ(counters.stream_interrupted.load(), 1U);
+}
+
+TEST(listener_counters, get_counters_reports_an_interrupted_stream)
+{
+    // An AVTPDU lost from a locked stream breaks the timestamp step: the lock
+    // goes and STREAM_INTERRUPTED (bit 2, Milan v1.3 Table 5.13) counts it.
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{5'000, 96'000, donor->components(), gptp, nullptr};  // a 5 us step tolerance
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto talker = aaf_talker();
+    auto const frames = aaf_run(talker, 40, FORMAT_NOW);
+    for (size_t i = 0; i < frames.size(); ++i) {
+        if (i != 20) {
+            ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
+        }
+    }
+
+    uint32_t valid = 0;
+    std::array<uint32_t, 32> out{};
+    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
+    EXPECT_EQ(valid & 0x0000'0FFFU, 0x0000'0FFFU);
+    EXPECT_EQ(out[0], 2U);  // MEDIA_LOCKED: before the loss and again after
+    EXPECT_EQ(out[1], 1U);  // MEDIA_UNLOCKED
+    EXPECT_EQ(out[2], 1U);  // STREAM_INTERRUPTED
+    EXPECT_EQ(out[3], 1U);  // SEQ_NUM_MISMATCH
+    EXPECT_EQ(out[11], 39U);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

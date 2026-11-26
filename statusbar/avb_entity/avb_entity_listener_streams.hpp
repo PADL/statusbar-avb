@@ -70,6 +70,13 @@ struct ListenerConnection
     bool settled{false};
 };
 
+/// Why a stream input lost its stream (ListenerStreams::on_listener_disconnected).
+enum class StreamInputLoss : uint8_t
+{
+    released,     ///< a controller's unbind, bind elsewhere or disconnect, or a restart
+    talker_lost,  ///< its talker's stream went: STREAM_INTERRUPTED (Milan v1.3 Table 5.6)
+};
+
 struct ListenerStreamSlot
 {
     StreamSpec spec{};
@@ -311,8 +318,8 @@ struct ListenerStreams
     /// Our listener disconnected: withdraw the MSRP reservation and leave the
     /// group the slot's ListenerConnection records, not what the ACMP state
     /// machine holds (cleared by then). Wired as the acmp_listener disconnect
-    /// callback, told that handler's time.
-    void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now);
+    /// callback, told that handler's time; @p why counts STREAM_INTERRUPTED or not.
+    void on_listener_disconnected(uint16_t stream_index, sm::TimePoint now, StreamInputLoss why);
 
     /// The stopped state of STREAM_INPUT @p stream_index (Milan v1.3 5.3.8.7;
     /// STOP_STREAMING, or a bind with STREAMING_WAIT): while it is set every

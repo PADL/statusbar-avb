@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 
+using statusbar::avb_entity::interrupt_stream_input;
 using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
 using statusbar::avb_entity::tally_discarded_stream_input_packet;
@@ -119,6 +120,45 @@ TEST(stream_counters, jittered_step_does_not_lock)
         feed(c, i, ts, /*tv=*/true, /*ts_sparse=*/false);
     }
     EXPECT_EQ(c.media_locked.load(), 0U);
+}
+
+// --- STREAM_INTERRUPTED: Milan v1.3 Table 5.6 --------------------------------
+
+TEST(stream_counters, a_lock_lost_to_a_step_out_of_tolerance_is_an_interruption)
+{
+    // A locked stream whose timestamps break their step (lost AVTPDUs) loses
+    // the lock while it is received: MEDIA_UNLOCKED and STREAM_INTERRUPTED.
+    StreamInputCounters c;
+    uint32_t ts = 0;
+    uint8_t seq = 0;
+    for (; seq < 14; ++seq, ts += 125'000U) {
+        feed(c, seq, ts, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    ts += 125'000U;  // one AVTPDU lost
+    feed(c, ++seq, ts, /*tv=*/true, /*ts_sparse=*/false);
+    EXPECT_FALSE(c.is_locked.load());
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+
+    // Locked again, then stopped (a controller's STOP_STREAMING) and restarted
+    // (a disconnect): the lock goes each time, and neither is an interruption.
+    for (int i = 0; i < 14; ++i) {
+        ts += 125'000U;
+        feed(c, ++seq, ts, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    tally_discarded_stream_input_packet(c);
+    for (int i = 0; i < 14; ++i) {
+        ts += 125'000U;
+        feed(c, ++seq, ts, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    EXPECT_EQ(c.media_locked.load(), 3U);
+    restart_stream_input(c);
+    EXPECT_EQ(c.media_unlocked.load(), 3U);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    // Of an input that is not locked, nothing is counted.
+    interrupt_stream_input(c);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
 }
 
 // --- A stopped input: Milan v1.3 5.3.8.7 -------------------------------------
