@@ -2419,6 +2419,30 @@ TEST(aem_stream_info_payload, is_stream_format_valid)
     EXPECT_TRUE(payload.is_stream_format_valid());
 }
 
+TEST(aem_stream_info_payload, the_ieee_2021_form_puts_the_ip_fields_after_the_first_48_octets)
+{
+    // IEEE 1722.1-2021 Clause 7.4.15.1: ip_flags at octet 46, then ports and addresses to octet 84.
+    aem::AemStreamInfoPayload payload{};
+    payload.ip_flags = uint16_t{0x0102};
+    aem::AemStreamInfoIpExtension tail{};
+    tail.source_port = uint16_t{0x1388};
+    tail.destination_port = uint16_t{0x1389};
+    tail.source_ip_address = ip::IPv6Address{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 10, 0, 0, 1};
+    tail.destination_ip_address = ip::IPv6Address{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0xFF, 239, 1, 2, 3};
+    std::array<uint8_t, aem::AEM_STREAM_INFO_2021_LENGTH> wire{};
+    span_store(std::span{wire}.first(aem::AemStreamInfoPayload::LENGTH), payload);
+    span_store(std::span{wire}.subspan(aem::AemStreamInfoPayload::LENGTH), tail);
+    EXPECT_EQ(wire.size(), size_t{84});
+    EXPECT_EQ(wire[46], 0x01);
+    EXPECT_EQ(wire[47], 0x02);
+    EXPECT_EQ(wire[48], 0x13);
+    EXPECT_EQ(wire[51], 0x89);
+    EXPECT_EQ(wire[62], 0xFF);
+    EXPECT_EQ(wire[67], 1);
+    EXPECT_EQ(wire[80], 239);
+    EXPECT_EQ(wire[83], 3);
+}
+
 TEST(aem_avb_info_payload, is_as_capable)
 {
     aem::AemAvbInfoPayload payload{};

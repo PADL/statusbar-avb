@@ -993,11 +993,8 @@ auto AemCommandHandler::notify_as_path_changed(uint16_t const descriptor_index) 
 
 auto AemCommandHandler::notify_stream_info_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
 {
-    AemGetCountersCommandPayload const cmd{.descriptor_type = descriptor_type, .descriptor_index = descriptor_index};
-    std::array<uint8_t, AemGetCountersCommandPayload::LENGTH> request{};
-    span_store(request, cmd);
-    std::array<uint8_t, AemStreamInfoPayload::LENGTH> out{};
-    auto const r = handle_get_stream_info(AemDu{}, request, out);
+    std::array<uint8_t, AEM_STREAM_INFO_2021_LENGTH> out{};
+    auto const r = answer_stream_info({.descriptor_type = descriptor_type, .descriptor_index = descriptor_index}, out);
     if (r.status == AEM_STATUS_SUCCESS) {
         emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, std::span<uint8_t const>{out}.first(r.size));
     }
@@ -1429,36 +1426,39 @@ auto AemCommandHandler::handle_get_counters(
 auto AemCommandHandler::handle_get_stream_info(
     AemDu const& /*header*/, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    // No stream-info provider wired => this entity does not implement
-    // GET_STREAM_INFO. Checked before argument validation so an entity without
-    // streams answers NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    // An entity without streams answers NOT_IMPLEMENTED rather than BAD_ARGUMENTS.
+    auto const cmd = load_payload<AemGetStreamInfoCommandPayload>(command_data);
+    if (!cmd && callbacks_.get_stream_info) {
+        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
+    }
+    return answer_stream_info(cmd.value_or(AemGetStreamInfoCommandPayload{}), out_buffer);
+}
+
+auto AemCommandHandler::answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{
     if (!callbacks_.get_stream_info) {
         return {.status = AEM_STATUS_NOT_IMPLEMENTED, .size = 0};
     }
-    // GET_STREAM_INFO command payload (AemGetStreamInfoCommandPayload):
-    //   descriptor_type(2) + descriptor_index(2)
-    if (command_data.size() < AemGetStreamInfoCommandPayload::LENGTH) {
-        return {.status = AEM_STATUS_BAD_ARGUMENTS, .size = 0};
-    }
-
-    AemGetStreamInfoCommandPayload cmd{};
-    span_load(cmd, command_data.first(AemGetStreamInfoCommandPayload::LENGTH));
-    uint16_t const descriptor_type = cmd.descriptor_type;
-    uint16_t const descriptor_index = cmd.descriptor_index;
-
     // Echo descriptor_type/index back; the app fills the rest plus the flag bits.
-    AemStreamInfoPayload resp{};
-    resp.descriptor_type = ieee::doublet_t{descriptor_type};
-    resp.descriptor_index = ieee::doublet_t{descriptor_index};
-    if (!callbacks_.get_stream_info(descriptor_type, descriptor_index, resp)) {
+    AemStreamInfoPayload resp{.descriptor_type = cmd.descriptor_type, .descriptor_index = cmd.descriptor_index};
+    if (!callbacks_.get_stream_info(cmd.descriptor_type.get(), cmd.descriptor_index.get(), resp)) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
+    return store_stream_info(resp, out_buffer);
+}
 
-    if (out_buffer.size() < AemStreamInfoPayload::LENGTH) {
+auto AemCommandHandler::store_stream_info(AemStreamInfoPayload const& resp, std::span<uint8_t> const out_buffer) const
+    -> AemCommandResponse
+{
+    // The IEEE 1722.1-2021 form's IP fields stay zero: the streams are AVTP over Ethernet.
+    size_t const size = stream_info_length();
+    if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
+    std::ranges::fill(out_buffer.first(size), uint8_t{0});
     span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
-    return {.status = AEM_STATUS_SUCCESS, .size = AemStreamInfoPayload::LENGTH};
+    return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
 
 //
