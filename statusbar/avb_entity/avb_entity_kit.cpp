@@ -2375,6 +2375,14 @@ void AvbEntityKit::attach_listener_rx(net::MessageReactor& reactor)
 
 void AvbEntityKit::restore_listener_bindings()
 {
+    restore_bindings();
+    if (!config_.kit_data_plane) {
+        restore_input_formats();  // each input's format, saved when a controller last set it (Section 5.3.8.1)
+    }
+}
+
+void AvbEntityKit::restore_bindings()
+{
     // A Milan listener's bindings are saved and restored by the host, in the entity's state
     // directory (Milan v1.3 Section 5.3.8.3); a classic one's fast-connect goals in the persistent
     // state when there is one.
@@ -2389,9 +2397,6 @@ void AvbEntityKit::restore_listener_bindings()
     // Sections 5.3.8.10, 5.3.8.7): its unbind is then no interruption.
     follow_inputs_bound();
     apply_input_stopped_states();
-    if (!config_.kit_data_plane) {
-        restore_input_formats();  // each input's format, saved when a controller last set it (Section 5.3.8.1)
-    }
 }
 
 auto AvbEntityKit::open_listener_streams() -> Status
