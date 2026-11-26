@@ -600,7 +600,7 @@ struct ListenerStreams
     /// One frame decoded where the port holds it, then released: false when none was queued.
     [[nodiscard]] auto receive_in_place(int64_t gptp_now_ns, net::RxTimePoint rx_now) -> bool;
     /// One frame out of the port into rx_buf_: the AVTPDU length, 0 for a
-    /// frame that was not AVTP (taken and released all the same), nullopt
+    /// frame that was not AVTP (read and released all the same), nullopt
     /// when nothing was queued. Holds the port guard for exactly that - the
     /// decode happens outside it. @p rx_now is the RX clock drain_rx was told.
     [[nodiscard]] auto take_rx_frame(net::RxTimePoint rx_now) -> std::optional<size_t>;

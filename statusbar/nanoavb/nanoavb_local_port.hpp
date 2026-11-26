@@ -58,7 +58,7 @@ class AtdeccLocalPort final : public net::Pollable
         std::string path{};  ///< absolute
         /// The socket file's mode (like the control socket's unix_mode).
         int mode{0660};
-        /// Forget a controller not heard from for this long; 0 never does.
+        /// Forget a controller nothing was received from for this long; 0 never does.
         int64_t idle_timeout_ns{0};
     };
 
@@ -126,7 +126,7 @@ class AtdeccLocalPort final : public net::Pollable
     {
         net::SocketAddress address{};  ///< empty: the peer of an adopted connected socket
         ieee::Eui48 mac{};
-        int64_t last_heard_ns{0};
+        int64_t last_received_ns{0};
         uint32_t send_failures{0};  ///< consecutive sends that failed for want of buffer
         bool gone{false};
     };
@@ -142,8 +142,8 @@ class AtdeccLocalPort final : public net::Pollable
     [[nodiscard]] auto receive_datagram(net::SocketAddress& address) -> ssize_t;
     /// Hand a received datagram of @p size octets to receive_ with its sender's MAC.
     void deliver(net::SocketAddress const& address, size_t size, int64_t now_ns);
-    /// The client at @p address (added if new), heard from at @p now_ns.
-    [[nodiscard]] auto heard_from(net::SocketAddress const& address, int64_t now_ns) -> Client&;
+    /// The client at @p address (added if new), received from at @p now_ns.
+    [[nodiscard]] auto received_from(net::SocketAddress const& address, int64_t now_ns) -> Client&;
 
     [[nodiscard]] auto find_client(net::SocketAddress const& address) -> Client*;
     [[nodiscard]] auto add_client(net::SocketAddress const& address, int64_t now_ns) -> Client*;

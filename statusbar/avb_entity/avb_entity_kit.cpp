@@ -248,11 +248,9 @@ void AvbEntityKit::configure_profile()
 {  // NOLINT(statusbar-block-statements) one setting per difference between the profiles
     // IDENTIFY honours acquire and lock unless the configuration says otherwise.
     host_.components().aem_handler.set_identify_bypasses_exclusive_access(config_.identify_bypasses_lock);
-    // Where 1722.1 and Milan differ, the profile decides: the AEM handler's
-    // answers, and on the SRP side the MRP timers (Table 4.3), the Class A
-    // Domain adopted from the wire (4.2.7.2.1) and the instant leave
-    // (4.2.7.2.2). A Milan model also has GET_MILAN_INFO to answer, whichever
-    // profile it is held to.
+    // Where 1722.1 and Milan differ, the profile decides: the AEM handler's answers and, for SRP, the MRP
+    // timers (Table 4.3), Domain adoption (4.2.7.2.1) and instant leave (4.2.7.2.2). A Milan model also
+    // answers GET_MILAN_INFO, whichever profile it is held to.
     bool const milan = milan_profile();
     host_.components().aem_handler.set_profile(
         milan ? nanoavb::AemCommandHandler::Profile::milan13 : nanoavb::AemCommandHandler::Profile::classic);
@@ -314,11 +312,9 @@ void AvbEntityKit::wire_storage_hooks()
         }
         return atdecc::AEM_STATUS_SUCCESS;
     });
-    // Kit phase 5: a controller's STOP_STREAMING gates the talker slot
-    // (the media thread treats it as a closed SRP gate); START reopens.
-    // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
-    // Table 7-145), so every subscribed controller is told by an unsolicited
-    // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
+    // A controller's STOP_STREAMING gates the talker slot and START reopens it. It shows in GET_STREAM_INFO
+    // as STREAMING_WAIT (IEEE 1722.1-2021 Table 7-145), notified unsolicited to every subscribed controller
+    // (Clause 7.5.2) beside the command's own echo.
     storage_handler_.set_on_streaming_changed([this](uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t {
         return on_streaming_changed(type, index, streaming);
     });
@@ -2527,10 +2523,9 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
-    // Stopping the control plane runs no withdraw hook: withdraw here, so a
-    // restart starts undeclared, inactive, unconnected and with every gate closed. Then the
-    // MAAP range (Table B.7 Release!: no longer defended, its port off the
-    // reactor), then the control plane; start() builds all three again.
+    // Stopping the control plane runs no withdraw hook: withdraw here, so a restart starts undeclared,
+    // inactive, unconnected and gated; then the MAAP range (Table B.7 Release!, its port off the reactor),
+    // then the control plane. start() builds all three again.
     withdraw_talker_streams(now);
     drop_listener_connections(now);
     maap_.stop(now);

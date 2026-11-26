@@ -583,7 +583,7 @@ TEST(nanoavb_local_port, idle_timeout_and_a_full_table_forget_clients)
         EXPECT_TRUE(send(clients.back(), discover));
         (*port)->on_ready(static_cast<int64_t>(i));
     }
-    // The least recently heard made room for the last.
+    // The least recently received from made room for the last.
     EXPECT_EQ((*port)->client_count(), AtdeccLocalPort::MAX_CLIENTS);
     EXPECT_EQ(gone.size(), size_t{1});
     EXPECT_TRUE(gone.front() == LOCAL_CONTROLLER_MAC);

@@ -404,7 +404,7 @@ void TalkerStreams::transmit_am824(
     if (!slot.am824 || port_ == nullptr) {
         return;
     }
-    // The wire takes the presentation time as unsigned nanoseconds (and keeps 32 bits of it).
+    // The wire carries the presentation time as unsigned nanoseconds (and keeps 32 bits of it).
     auto const presentation_ns = static_cast<uint64_t>(realtime::GptpClock0::to_ns(presentation));
     bool const tu = timestamp_uncertain(net::monotonic_ns());
     (void)send_serialized(slot, *slot.am824, MAX_AUDIO_PAYLOAD, 0, [&](std::span<uint8_t> const frame) {

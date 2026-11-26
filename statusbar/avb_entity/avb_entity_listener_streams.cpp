@@ -1281,7 +1281,7 @@ void ListenerStreams::on_listener_connected(
     ieee::Eui48 const dest_mac,
     sm::TimePoint const now,
     std::optional<nanoavb::TalkerMatch> const& only)
-{  // NOLINT(statusbar-block-statements) the CONNECT's bookkeeping: count, attach, take, publish, log
+{  // NOLINT(statusbar-block-statements) the CONNECT's bookkeeping: rebind, attach, connect, publish, log
     auto* slot = slot_for(stream_index);
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for

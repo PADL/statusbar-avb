@@ -152,12 +152,9 @@ class AvbEntityKit
 #endif
 
     // --- Event handlers (drive the shared SM stack) ---------------------------
-    /// A link up: the control plane's Link Up and MAAP's PortOperational! (IEEE 1722-2025 B.3.5.9);
-    /// an unshaped port's speed and MTU read again, a change declared again in each talker's
-    /// AccumulatedLatency (IEEE 802.1Q-2022 Clause 35.2.2.8.6) and notified. MAAP goes first and the
-    /// host holds ADP while the block is probed, so the first ENTITY_AVAILABLE waits until it is
-    /// defended. A Link Up while the link is already up reaches neither MAAP nor the hold, or it
-    /// would restart the probe sequence the first began. A Link Down, or stop(), ends the link-up state.
+    /// A link up: the control plane's Link Up and MAAP's PortOperational! (IEEE 1722-2025 B.3.5.9), ADP held
+    /// until the block is defended; an unshaped port's speed and MTU read again (IEEE 802.1Q-2022 35.2.2.8.6).
+    /// Idempotent while the link is up (the probe is not restarted); a Link Down, or stop(), ends that state.
     void on_link_up(TimePoint time);
     void on_link_down(TimePoint time)
     {

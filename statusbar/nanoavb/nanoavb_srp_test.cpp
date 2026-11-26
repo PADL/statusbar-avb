@@ -595,7 +595,7 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
             listener_out.clear();
         }
     };
-    auto const heard = [&] {
+    auto const registered = [&] {
         auto const* rec = talker.find_listener(sid);
         return rec != nullptr && rec->registrar_is_registered() ? rec->substate : ListenerDeclaration::Ignore;
     };
@@ -604,7 +604,7 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
     EXPECT_TRUE(attached.has_value());
     EXPECT_EQ(*attached, ListenerReservationState::Waiting);
     run(12);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);  // nothing declared
+    EXPECT_TRUE(registered() == ListenerDeclaration::Ignore);  // nothing declared
 
     statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
     fv.stream_id = sid;
@@ -614,7 +614,7 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
     (void)talker.declare_talker_advertise(fv, now);
     run(12);
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Ready);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ready);
+    EXPECT_TRUE(registered() == ListenerDeclaration::Ready);
     EXPECT_TRUE(listener.peer_talker_advertise(sid) != nullptr);
     EXPECT_TRUE(hooks > 0);
 
@@ -625,7 +625,7 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
     run(12);
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Waiting);
     EXPECT_TRUE(listener.peer_talker_advertise(sid) == nullptr);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(registered() == ListenerDeclaration::Ignore);
     EXPECT_TRUE(hooks > before);
 
     // A Talker Failed: Asking Failed.
@@ -635,14 +635,14 @@ TEST(nanoavb_srp_msrp, milan_listener_declares_only_for_a_registered_talker)
     (void)talker.declare_talker_failed(failed, now);
     run(12);
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::AskingFailed);
-    EXPECT_TRUE(heard() == ListenerDeclaration::AskingFailed);
+    EXPECT_TRUE(registered() == ListenerDeclaration::AskingFailed);
     EXPECT_TRUE(listener.peer_talker_failed(sid) != nullptr);
 
     // Withdrawn while Waiting or declared: Idle, nothing left declared.
     EXPECT_TRUE(listener.listener_withdraw(sid, now).has_value());
     run(12);
     EXPECT_EQ(listener.get_listener_stream(sid)->state, ListenerReservationState::Idle);
-    EXPECT_TRUE(heard() == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(registered() == ListenerDeclaration::Ignore);
 }
 
 // Kit phase 5d: listener_attach holds the listener Waiting, with nothing
@@ -1622,7 +1622,7 @@ struct WaitingBench
         return sid;
     }
 
-    /// The talker advertises `sid` (heard by the listener on the next run()).
+    /// The talker advertises `sid` (received by the listener on the next run()).
     void advertise(statusbar::tsn::StreamId const& sid)
     {
         statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
@@ -1656,7 +1656,7 @@ struct WaitingBench
     }
 
     /// What the talker has registered of the listener's declaration for `sid`.
-    auto heard(statusbar::tsn::StreamId const& sid) const -> ListenerDeclaration
+    auto registered(statusbar::tsn::StreamId const& sid) const -> ListenerDeclaration
     {
         auto const* rec = talker.find_listener(sid);
         return rec != nullptr && rec->registrar_is_registered() ? rec->substate : ListenerDeclaration::Ignore;
@@ -1681,8 +1681,8 @@ struct WaitingBench
 }  // namespace
 
 // A listener attached Waiting (listener_waits_for_talker) stays attached across withdraw_all(): a
-// stopped handler declares nothing for a talker heard meanwhile, and the next run (declare_domain)
-// forgets the last run's registrations, hears the talker again and declares the Listener.
+// stopped handler declares nothing for a talker received meanwhile, and the next run (declare_domain)
+// forgets the last run's registrations, receives the talker again and declares the Listener.
 TEST(nanoavb_srp_msrp, a_waiting_listener_survives_withdraw_all_and_declares_in_the_next_run)
 {
     using ListenerDeclaration = WaitingBench::ListenerDeclaration;
@@ -1690,23 +1690,23 @@ TEST(nanoavb_srp_msrp, a_waiting_listener_survives_withdraw_all_and_declares_in_
     auto const sid = WaitingBench::stream(11);
     b.attach_and_stop(sid);
 
-    // Stopped: the talker's Advertise heard now declares nothing.
+    // Stopped: the talker's Advertise received now declares nothing.
     b.advertise(sid);
     b.run(12);
     EXPECT_TRUE(b.listener.peer_talker_advertise(sid) != nullptr);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ignore);
 
-    // The next run: the last run's registrations are forgotten, the talker heard again, the Listener declared.
+    // The next run: the last run's registrations are forgotten, the talker received again, the Listener declared.
     EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
     EXPECT_TRUE(b.listener.peer_talker_advertise(sid) == nullptr);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
     b.run(12);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ready);
 }
 
-// A talker heard while stopped, then powered off before the next run, is not declared for: the run's
+// A talker received while stopped, then powered off before the next run, is not declared for: the run's
 // start forgets what the last run registered, and the talker never advertises again.
 TEST(nanoavb_srp_msrp, a_talker_gone_while_stopped_is_not_declared_for_at_resume)
 {
@@ -1740,16 +1740,16 @@ TEST(nanoavb_srp_msrp, a_run_begun_with_listener_attach_follows_the_waiting_list
     EXPECT_EQ(*b.listener.listener_attach(other, b.now), ListenerReservationState::Waiting);
     b.run(12);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);  // not resumed by the attach
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ignore);
     EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
     b.run(12);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ready);
     EXPECT_EQ(b.state(other), ListenerReservationState::Waiting);
 }
 
-// A peer's Domain heard while withdrawn resumes nothing: no VID is adopted and no Listener declared
-// until the next declare_domain(), which hears the Domain again and adopts it then.
+// A peer's Domain received while withdrawn resumes nothing: no VID is adopted and no Listener declared
+// until the next declare_domain(), which receives the Domain again and adopts it then.
 TEST(nanoavb_srp_msrp, a_peer_domain_while_withdrawn_declares_nothing)
 {
     using ListenerDeclaration = WaitingBench::ListenerDeclaration;
@@ -1766,13 +1766,13 @@ TEST(nanoavb_srp_msrp, a_peer_domain_while_withdrawn_declares_nothing)
     b.run(12);
     EXPECT_EQ(b.listener.domain().sr_class_vid, 2);  // not adopted while withdrawn
     EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ignore);
 
     EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
     b.run(12);
     EXPECT_EQ(b.listener.domain().sr_class_vid, 7);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Ready);
-    EXPECT_TRUE(b.heard(sid) == ListenerDeclaration::Ready);
+    EXPECT_TRUE(b.registered(sid) == ListenerDeclaration::Ready);
 }
 
 // A talker that turns its Talker Advertise into a Talker Failed sends the Advertise's Lv and the Failed in

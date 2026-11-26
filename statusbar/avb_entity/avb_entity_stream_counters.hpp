@@ -180,7 +180,7 @@ struct StreamOutputIntervals
     /// when that starts or stops it.
     [[nodiscard]] auto set_streaming(bool on, StreamOutputTotals const& totals) noexcept -> bool;
 
-    /// End one observation interval at @p totals, taking the latest presence. True when a value changed.
+    /// End one observation interval at @p totals, using the latest presence. True when a value changed.
     [[nodiscard]] auto fold(StreamOutputTotals const& totals) noexcept -> bool;
     /// Report what set_presence or narrow_presence gave since the last fold; true when that changed what is reported.
     [[nodiscard]] auto fold_presence() noexcept -> bool;

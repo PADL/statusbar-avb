@@ -375,11 +375,11 @@ auto AtdeccLocalPort::next_mac() -> ieee::Eui48
 auto AtdeccLocalPort::add_client(SocketAddress const& address, int64_t const now_ns) -> Client*
 {
     if (clients_.size() == MAX_CLIENTS) {
-        auto* oldest = std::ranges::min_element(clients_, {}, &Client::last_heard_ns);
+        auto* oldest = std::ranges::min_element(clients_, {}, &Client::last_received_ns);
         oldest->gone = true;
         reap();
     }
-    auto& client = clients_.emplace_back(Client{.address = address, .mac = next_mac(), .last_heard_ns = now_ns});
+    auto& client = clients_.emplace_back(Client{.address = address, .mac = next_mac(), .last_received_ns = now_ns});
     if (logger_) {
         logger_->status("local ATDECC controller joined ({} connected)", client_count());
     }
@@ -456,20 +456,20 @@ void AtdeccLocalPort::deliver(SocketAddress const& address, size_t const size, i
         return;
     }
     ieee::Eui48 const mac =
-        heard_from(unnamed ? SocketAddress{} : address, now_ns).mac;  // the receiver may add no clients, but copy anyway
+        received_from(unnamed ? SocketAddress{} : address, now_ns).mac;  // the receiver may add no clients, but copy anyway
     ++counters_.rx_frames;
     if (receive_) {
         receive_(now_ns, mac, std::span<uint8_t const>{buffer_.data(), size});
     }
 }
 
-auto AtdeccLocalPort::heard_from(SocketAddress const& address, int64_t const now_ns) -> Client&
+auto AtdeccLocalPort::received_from(SocketAddress const& address, int64_t const now_ns) -> Client&
 {
     Client* client = find_client(address);
     if (client == nullptr) {
         client = add_client(address, now_ns);
     }
-    client->last_heard_ns = now_ns;
+    client->last_received_ns = now_ns;
     return *client;
 }
 
@@ -477,7 +477,7 @@ void AtdeccLocalPort::tick(int64_t const now_ns)
 {
     if (config_.idle_timeout_ns > 0) {
         for (auto& client : clients_) {
-            if (now_ns - client.last_heard_ns > config_.idle_timeout_ns) {
+            if (now_ns - client.last_received_ns > config_.idle_timeout_ns) {
                 client.gone = true;
             }
         }

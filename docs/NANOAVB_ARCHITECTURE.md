@@ -256,7 +256,7 @@ end, shaped like `RawnetContext`.
   address it came from (an entity that restarts learns it again from its
   next one). It is forgotten when a send to it fails with
   ECONNREFUSED/ENOENT (its socket closed), when the table (16) is full and
-  it is the least recently heard, or after an optional idle timeout (off by
+  it is the one least recently received from, or after an optional idle timeout (off by
   default: local controllers need not send anything
   while idle). Forgetting is deferred to the next reactor point outside
   the entity's own processing, and drops the unsolicited-notification
@@ -550,7 +550,7 @@ Announce interval +50% (1 s nominal, 1.5 s max) and Table 4.2 an
 announceReceiptTimeout up to 4.5 s, so a compliant but slow sender is not
 declared lost. The log interval is clamped to [-3, 4] (125 ms to 16 s). The
 grandmaster state feeds the talker's AVTP `tu` bit (Milan v1.2 Section
-4.3.5.2, Annex B.1.1). The socket hears the host's own transmissions, so a
+4.3.5.2, Annex B.1.1). The socket receives the host's own transmissions, so a
 local ptp4l that is grandmaster keeps `has_grandmaster()` true with its own
 Announces. `path_trace()` is the last Announce's path trace TLV (IEEE
 802.1AS-2020 Clause 10.6.3.3), served by GET_AS_PATH (IEEE 1722.1-2021 Clause

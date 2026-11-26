@@ -687,9 +687,8 @@ class NanoAvbNetHandlers
     /// add_to_reactor(). Call before it. An empty path opens none.
     void set_local_port_config(AtdeccLocalPort::Config config) { local_port_config_ = std::move(config); }
 
-    /// Create handlers, transfer ownership to reactor, and store raw pointers.
-    /// The ATDECC handler joins the reactor even when its raw socket would not
-    /// open, so a local port still reaches the entity (and its timers run).
+    /// Create handlers, transfer ownership to reactor, and store raw pointers. The ATDECC handler
+    /// joins the reactor when its raw socket or the local port opened: a local port alone still reaches it.
     /// @param reactor The message reactor to register handlers with
     void add_to_reactor(net::MessageReactor& reactor);
 
