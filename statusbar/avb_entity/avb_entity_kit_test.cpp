@@ -657,17 +657,35 @@ struct RateControllers
         return word.get();
     }
 
+    void register_a()
+    {
+        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
+        sent.clear();
+    }
+
     void register_b()
     {
         (void)command(RATE_CONTROLLER_B, RATE_MAC_B, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
         sent.clear();
     }
 
-    /// The unsolicited SET_STREAM_FORMATs in sent: (type, index, format).
-    [[nodiscard]] auto format_notifications() const -> std::vector<std::tuple<uint16_t, uint16_t, uint64_t>>
+    /// The unsolicited @p command responses in sent to @p dest.
+    [[nodiscard]] auto notifications_to(Eui48 const& dest, uint16_t const command) const -> size_t
+    {
+        return static_cast<size_t>(std::ranges::count_if(sent, [&](SentFrame const& f) {
+            return f.dest == dest && f.header().is_unsolicited() && f.header().command_code() == command;
+        }));
+    }
+
+    /// The unsolicited SET_STREAM_FORMATs in sent, to @p dest or to anyone: (type, index, format).
+    [[nodiscard]] auto format_notifications(std::optional<Eui48> const dest = {}) const
+        -> std::vector<std::tuple<uint16_t, uint16_t, uint64_t>>
     {
         std::vector<std::tuple<uint16_t, uint16_t, uint64_t>> found;
         for (auto const& f : sent) {
+            if (dest && f.dest != *dest) {
+                continue;
+            }
             if (f.header().is_unsolicited() && f.header().command_code() == atdecc::AEM_COMMAND_SET_STREAM_FORMAT) {
                 atdecc::aem::AemStreamFormatPayload payload{};
                 span_load(payload, f.body());
@@ -715,6 +733,7 @@ TEST(avb_entity_kit_rate, a_unit_rate_hook_retimes_the_units_streams_notified_af
     RateControllers controllers{kit};
     UnitRateRecorder data_plane;
     data_plane.install(kit);
+    controllers.register_a();
     controllers.register_b();
 
     EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
@@ -726,17 +745,19 @@ TEST(avb_entity_kit_rate, a_unit_rate_hook_retimes_the_units_streams_notified_af
         EXPECT_EQ(streams.size(), size_t{2});
         EXPECT_TRUE(std::ranges::all_of(streams, [](auto const& s) { return s.from == AAF_48K_8CH && s.to == AAF_96K_8CH; }));
     }
-    // The response first, to A; then, to B alone, the rate's notification and each stream's.
+    // The response first, to A; the rate's notification to B alone; then each stream's to both, A
+    // included: a change beyond what it requested (Milan v1.3 Section 5.4.5.3).
     EXPECT_FALSE(controllers.sent.empty());
     EXPECT_FALSE(controllers.sent.front().header().is_unsolicited());
-    EXPECT_TRUE(std::ranges::all_of(
-        controllers.sent.begin() + 1, controllers.sent.end(), [](SentFrame const& f) { return f.dest == RATE_MAC_B; }));
-    EXPECT_EQ(controllers.sent.size(), size_t{4});
+    EXPECT_EQ(controllers.sent.front().dest, RATE_MAC_A);
+    EXPECT_EQ(controllers.sent.size(), size_t{6});
+    EXPECT_EQ(controllers.notifications_to(RATE_MAC_A, atdecc::AEM_COMMAND_SET_SAMPLING_RATE), size_t{0});
+    EXPECT_EQ(controllers.notifications_to(RATE_MAC_B, atdecc::AEM_COMMAND_SET_SAMPLING_RATE), size_t{1});
     using Notice = std::tuple<uint16_t, uint16_t, uint64_t>;
-    EXPECT_TRUE(
-        controllers.format_notifications() ==
-        (std::vector<Notice>{
-            {atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0, AAF_96K_8CH}, {atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0, AAF_96K_8CH}}));
+    std::vector<Notice> const retimed{
+        {atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0, AAF_96K_8CH}, {atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0, AAF_96K_8CH}};
+    EXPECT_TRUE(controllers.format_notifications(RATE_MAC_A) == retimed);
+    EXPECT_TRUE(controllers.format_notifications(RATE_MAC_B) == retimed);
 
     // The descriptors report what the data plane runs.
     EXPECT_EQ(controllers.rate(), 96'000U);

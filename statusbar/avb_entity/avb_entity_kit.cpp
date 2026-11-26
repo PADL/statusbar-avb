@@ -985,7 +985,8 @@ void AvbEntityKit::notify_after_response(RetimedFormats const& retimed)
 
 void AvbEntityKit::notify_retimed()
 {
-    // As each stream's own SET_STREAM_FORMAT would be notified (IEEE 1722.1-2021 Clause 7.5.2).
+    // Framed as each stream's own SET_STREAM_FORMAT (IEEE 1722.1-2021 Clause 7.5.2), and sent to
+    // every registered controller, the requester included (Milan v1.3 Section 5.4.5.3).
     for (auto const& r : std::exchange(retimed_notices_, {})) {
         std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> body{};
         span_store(

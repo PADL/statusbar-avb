@@ -632,7 +632,9 @@ held on a stream at the old rate (5.4.2.13). The hook moves the data
 plane, all or none, and answers for a talker that cannot change while it
 streams. On SUCCESS GET_STREAM_FORMAT and READ_DESCRIPTOR follow, and
 each re-timed stream is notified as a SET_STREAM_FORMAT after the
-response (`AemCommandHandler::call_after_response()`). The kit's own
+response (`AemCommandHandler::call_after_response()`) to every registered
+controller, the requester included: a change beyond what it requested
+(Milan v1.3 5.4.5.3). The kit's own
 `TalkerStreams` and `ListenerStreams`, its stream specs, `sample_rate()`
 and the TSpecs it declares keep the rate they were built with: the media
 thread reads them, and they have no way to change rate. An entity whose
@@ -690,7 +692,8 @@ registered controller except the one that sent it (7.5.2, 5.4.5.3), and
 after the command's response, with those its hooks raise (four held at
 most, the command's own last; one of the command's type past those is not
 sent, each controller's sequence id spent so it sees the gap, 5.4.5.1), and
-after those what a hook left with `AemCommandHandler::call_after_response()`;
+after those what a hook left with `AemCommandHandler::call_after_response()`,
+which notifies every registered controller, the requester included (5.4.5.3);
 SET_CONTROL of the IDENTIFY control honours acquire and
 lock like any other control (7.4.25.2, 5.4.2.17). The last one has a knob,
 `atdecc.identify_bypasses_lock`, off by default, for installations that
