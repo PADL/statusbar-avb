@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <string>
 
+using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
 using statusbar::avb_entity::tally_discarded_stream_input_packet;
 using statusbar::avb_entity::tally_stream_input_packet;
@@ -190,6 +191,45 @@ TEST(stream_counters, an_unlocked_input_locks_again_on_a_steady_stream)
     unlock_stream_input(c);
     feed(c, 14, 14U * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
     EXPECT_TRUE(c.is_locked.load());
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+}
+
+TEST(stream_counters, a_restarted_inputs_next_avtpdu_is_the_first_of_a_stream)
+{
+    // The input lost its stream (a disconnect) and another came: the first
+    // AVTPDU follows no sequence_num and no mr of the old stream, and the
+    // input locks again on a run of the new stream's, not on the old one's.
+    StreamInputCounters c;
+    for (uint8_t i = 0; i < 14; ++i) {
+        feed(c, i, static_cast<uint32_t>(i) * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    restart_stream_input(c);
+    restart_stream_input(c);  // safe to call twice
+    EXPECT_FALSE(c.is_locked.load());
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+
+    uint32_t const start = 7'000'000;
+    for (uint8_t i = 0; i < 14; ++i) {
+        tally_stream_input_packet(
+            c,
+            static_cast<uint8_t>(200U + i),
+            start + (i * 125'000U),
+            true,
+            false,
+            /*mr=*/true,
+            true,
+            SAMPLES_PER_PKT,
+            false,
+            GPTP_OFF,
+            LOCK_TOL_NS,
+            FS);
+        if (i == 0) {
+            EXPECT_EQ(c.media_locked.load(), 1U);  // no lock from the old stream's run
+        }
+    }
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(c.media_reset.load(), 0U);
     EXPECT_EQ(c.media_locked.load(), 2U);
     EXPECT_EQ(c.media_unlocked.load(), 1U);
 }

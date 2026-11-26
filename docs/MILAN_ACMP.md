@@ -344,7 +344,10 @@ which is what the grace was for.
 - An input that loses its stream (an unbind, or a sink that leaves its
   settled state) counts MEDIA_UNLOCKED at once if it was locked: with no
   stream it is not synchronized, and MEDIA_LOCKED equals MEDIA_UNLOCKED
-  again (5.3.8.10). The same holds for an IEEE 1722.1 disconnect.
+  again (5.3.8.10). The same holds for an IEEE 1722.1 disconnect. The
+  next stream's first AVTPDU is then compared with nothing before it: no
+  SEQ_NUM_MISMATCH or MEDIA_RESET against the stream that went, and the
+  input locks on a run of the new stream's packets.
 
 ## Not done
 

@@ -1015,13 +1015,70 @@ TEST(listener_lock, an_avtpdu_taken_up_as_the_stream_is_lost_leaves_no_lock)
     }
     EXPECT_TRUE(slot.counters.is_locked.load());
 
-    // What on_listener_disconnected does, with the last AVTPDU arriving after it.
+    // What on_listener_disconnected does to the lock, the last AVTPDU read before it and counted after.
     slot.rx_stream_id.publish(0);
     unlock_stream_input(slot.counters);
     ls.receive_aaf_frame(slot, frames[14], FORMAT_NOW);
 
     EXPECT_FALSE(slot.counters.is_locked.load());
     EXPECT_EQ(slot.counters.media_locked.load(), slot.counters.media_unlocked.load());
+}
+
+TEST(listener_lock, the_stream_after_a_disconnect_follows_nothing_of_the_last)
+{
+    // A disconnect ends the stream; the next one, from a talker that numbers
+    // its AVTPDUs from zero, is no SEQ_NUM_MISMATCH of the first, and locks
+    // the input on a run of its own.
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto const& counters = ls.slot_for(0)->counters;
+    auto first = aaf_talker();
+    for (auto const& frame : aaf_run(first, 14, FORMAT_NOW)) {
+        ls.on_stream_rx_frame(frame, FORMAT_NOW);
+    }
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto second = aaf_talker();
+    for (auto const& frame : aaf_run(second, 14, FORMAT_NOW + avtp::Nanoseconds{40'000'000})) {
+        ls.on_stream_rx_frame(frame, FORMAT_NOW);
+    }
+    EXPECT_EQ(counters.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(counters.media_locked.load(), 2U);
+    EXPECT_EQ(counters.media_unlocked.load(), 1U);
+    EXPECT_EQ(counters.frames_rx.load(), 28U);
+}
+
+TEST(listener_lock, an_avtpdu_in_flight_at_a_disconnect_is_not_compared_with_the_next_stream)
+{
+    // The receive thread counts an AVTPDU of the old stream after the reactor
+    // thread disconnected the input: the next stream, numbered from zero,
+    // still starts afresh, with no SEQ_NUM_MISMATCH against that AVTPDU.
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto& slot = *ls.slot_for(0);
+    auto first = aaf_talker();
+    auto const frames = aaf_run(first, 15, FORMAT_NOW);
+    for (size_t i = 0; i < 14; ++i) {
+        ls.on_stream_rx_frame(frames[i], FORMAT_NOW);
+    }
+    ls.on_listener_disconnected(0, sm::TimePoint{});
+    ls.receive_aaf_frame(slot, frames[14], FORMAT_NOW);
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto second = aaf_talker();
+    for (auto const& frame : aaf_run(second, 14, FORMAT_NOW + avtp::Nanoseconds{40'000'000})) {
+        ls.on_stream_rx_frame(frame, FORMAT_NOW);
+    }
+    EXPECT_EQ(slot.counters.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(slot.counters.media_reset.load(), 0U);
+    EXPECT_EQ(slot.counters.frames_rx.load(), 29U);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
