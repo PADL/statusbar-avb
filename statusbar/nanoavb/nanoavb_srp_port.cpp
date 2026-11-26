@@ -20,6 +20,7 @@ SrpPort::SrpPort(SrpPortConfig config)
     , vid_{config_.domain.sr_class_vid}
 {
     msrp_.set_domain(config_.domain);
+    msrp_.set_single_sr_class(true);  // the port's SR class is config_.domain's alone
     msrp_.set_listener_waits_for_talker(true);
     wire();
 }

@@ -254,16 +254,86 @@ struct DomainBench
 
 }  // namespace
 
-TEST(nanoavb_srp_msrp, declares_class_a_domain_only)
+namespace {
+
+/// Whether @p seen holds a Domain of SRclassID @p id at @p prio on @p vid.
+auto saw_domain(std::vector<statusbar::srp::msrp::DomainFirstValue> const& seen, uint8_t id, uint8_t prio, uint16_t vid) -> bool
 {
+    return std::ranges::any_of(seen, [&](statusbar::srp::msrp::DomainFirstValue const& fv) {
+        return fv.sr_class_id.get() == id && fv.sr_class_priority.get() == prio && fv.sr_class_vid.get() == vid;
+    });
+}
+
+/// The priority a bridge registered for @p stream_id's Talker Advertise; -1 when none is registered.
+auto registered_priority(statusbar::srp::msrp::MsrpParticipant const& bridge, statusbar::tsn::StreamId const& stream_id) -> int
+{
+    auto const* talker = bridge.find_talker_advertise(stream_id);
+    return talker != nullptr ? int{talker->get_priority()} : -1;
+}
+
+}  // namespace
+
+TEST(nanoavb_srp_msrp, declares_class_b_and_class_a_domains)
+{
+    // IEEE 802.1Q-2022 Clause 35.2.2.9: Class B at its default priority 2, Class A at the Domain's.
     DomainBench b{};
     (void)b.station.declare_domain(b.now);
     b.run(4);
-    EXPECT_FALSE(b.seen_by_bridge.empty());
-    for (auto const& fv : b.seen_by_bridge) {
-        EXPECT_EQ(fv.sr_class_id.get(), 6);
-        EXPECT_EQ(fv.sr_class_priority.get(), 3);
-        EXPECT_EQ(fv.sr_class_vid.get(), 2);
+    EXPECT_TRUE(saw_domain(b.seen_by_bridge, statusbar::srp::msrp::SR_CLASS_B, 2, 2));
+    EXPECT_TRUE(saw_domain(b.seen_by_bridge, statusbar::srp::msrp::SR_CLASS_A, 3, 2));
+}
+
+TEST(nanoavb_srp_msrp, a_single_sr_class_port_declares_its_domain_alone)
+{
+    DomainBench b{};
+    b.station.set_domain(CLASS_B_DOMAIN);
+    b.station.set_single_sr_class(true);
+    (void)b.station.declare_domain(b.now);
+    b.run(4);
+    EXPECT_TRUE(saw_domain(b.seen_by_bridge, statusbar::srp::msrp::SR_CLASS_B, 2, 2));
+    EXPECT_TRUE(std::ranges::all_of(
+        b.seen_by_bridge, [](auto const& fv) { return fv.sr_class_id.get() == statusbar::srp::msrp::SR_CLASS_B; }));
+}
+
+TEST(nanoavb_srp_msrp, a_single_sr_class_port_adopts_a_domain_of_its_class_only)
+{
+    // Milan v1.3 Section 4.2.7.2.1 for the port's own class: a Class B port follows a Class B
+    // Domain on another VID and leaves a Class A one alone; the default port follows Class A alone.
+    for (bool const single : {false, true}) {
+        DomainBench b{};
+        b.station.set_domain(CLASS_B_DOMAIN);
+        b.station.set_single_sr_class(single);
+        b.station.set_adopt_domain(true);
+        (void)b.station.declare_domain(b.now);
+        (void)b.bridge.declare_domain(DomainBench::domain(statusbar::srp::msrp::SR_CLASS_A, 3, 7), b.now);
+        b.run(4);
+        EXPECT_EQ(b.station.domain().sr_class_vid, single ? uint16_t{2} : uint16_t{7});
+        (void)b.bridge.declare_domain(DomainBench::domain(statusbar::srp::msrp::SR_CLASS_B, 2, 9), b.now);
+        b.run(4);
+        EXPECT_EQ(b.station.domain().sr_class_vid, single ? uint16_t{9} : uint16_t{7});
+        EXPECT_EQ(b.station.domain().sr_class_id, statusbar::srp::msrp::SR_CLASS_B);
+    }
+}
+
+TEST(nanoavb_srp_msrp, a_talker_is_declared_at_the_priority_it_is_given)
+{
+    // IEEE 802.1Q-2022 Clause 35.2.2.8.5: the caller says the priority, whatever the Domain's.
+    for (bool const single : {false, true}) {
+        DomainBench b{};
+        b.station.set_single_sr_class(single);
+        (void)b.station.declare_domain(b.now);
+        TalkerStreamSrpInfo info{};
+        info.stream_id.set_system_address(Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05});
+        info.stream_id.set_unique_id(1);
+        info.dest_address = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x01, 0x00};
+        info.vlan_id = 2;
+        info.max_frame_size = 128;
+        info.max_interval_frames = 1;
+        info.priority = 4;
+        EXPECT_TRUE(b.station.talker_advertise(info, b.now).has_value());
+        b.run(4);
+        EXPECT_EQ(registered_priority(b.bridge, info.stream_id), 4);
+        EXPECT_EQ(b.station.get_talker_stream(info.stream_id)->priority, uint8_t{4});
     }
 }
 

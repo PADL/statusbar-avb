@@ -546,6 +546,12 @@ class MsrpHandler
     /// on_domain_adopted. Off by default: IEEE 802.1Q keeps our own.
     void set_adopt_domain(bool const on) noexcept { adopt_domain_ = on; }
 
+    /// A port that runs the Domain's SR class alone (IEEE 802.1Q-2022 Clause 35.2.1.4): it declares
+    /// that class's Domain only, and adopts (set_adopt_domain) a Domain of that class, Class A or B.
+    /// Off by default: Class A and Class B are declared and a Class A Domain is adopted. Set before declare_domain().
+    void set_single_sr_class(bool const on) noexcept { single_sr_class_ = on; }
+    [[nodiscard]] auto single_sr_class() const noexcept -> bool { return single_sr_class_; }
+
     /// Milan v1.3 4.2.7.2.2 instant leave for every Registrar of this port
     /// (see MsrpParticipant::set_instant_leave).
     void set_instant_leave(bool const on) noexcept { participant_.set_instant_leave(on); }
@@ -656,13 +662,12 @@ class MsrpHandler
     /// once, or under set_talker_waits_for_listener() while a listener wants
     /// the stream. Called again with other parameters for a stream already
     /// declared, the participant leaves the old value first and holds the
-    /// new one for two LeaveAll periods (IEEE 802.1Q 35.2.2.8). The priority
-    /// declared is the SR class Domain's (IEEE 802.1Q-2022 Clause 35.2.2.8.5).
+    /// new one for two LeaveAll periods (IEEE 802.1Q 35.2.2.8).
     /// Errors: NanoAvbError::SrpRegistrationFailed (table full), the participant's.
     [[nodiscard]] auto talker_advertise(TalkerStreamSrpInfo const& info, TimePoint now) -> StatusValue<size_t>
     {
         auto const kept = talker_streams_;  // a refused declaration leaves the table as it was
-        auto const idx = remember_talker(at_priority(info, domain_.sr_class_priority));
+        auto const idx = remember_talker(info);
         if (!idx) {
             return idx;
         }
@@ -721,9 +726,10 @@ class MsrpHandler
         return failure(make_error_code(NanoAvbError::InvalidStreamIndex));
     }
 
-    /// Declare the configured SR class's MSRP Domain on the VID in use (IEEE 802.1Q Clauses 35.2.1.4,
-    /// 35.2.2.9; Milan v1.2 Section 4.2.7.2.1, Class A), so the bridge does not treat the port as an SRP
-    /// domain boundary. Idempotent. The one start of a run after withdraw_all() (resume()).
+    /// Declare this port's MSRP SR class Domains on the VID in use so the bridge does not treat the
+    /// port as an SRP domain boundary (IEEE 802.1Q-2022 Clauses 35.2.1.4, 35.2.2.9): Class B at priority
+    /// 2 and Class A at the Domain's, or the Domain's class alone under set_single_sr_class(). Idempotent;
+    /// the one start of a run after withdraw_all() (resume()).
     [[nodiscard]] auto declare_domain(TimePoint now) -> Status
     {
         bool const resumed = std::exchange(withdrawn_, false);
@@ -731,11 +737,23 @@ class MsrpHandler
             participant_.start(now);
             started_ = true;
         }
-        declare_sr_class(domain_.sr_class_id, domain_.sr_class_priority, now);  // 6 for Class A, 5 for Class B
+        declare_sr_classes(now);
         if (resumed) {
             resume(now);
         }
         return success();
+    }
+
+    /// The Domain's SR class alone (set_single_sr_class()), else Class B at its default priority 2 and
+    /// Class A at the Domain's priority, both on its VLAN.
+    void declare_sr_classes(TimePoint now)
+    {
+        if (single_sr_class_) {
+            declare_sr_class(domain_.sr_class_id, domain_.sr_class_priority, now);
+            return;
+        }
+        declare_sr_class(statusbar::srp::msrp::SR_CLASS_B, srp::SR_CLASS_B_PRIORITY, now);
+        declare_sr_class(statusbar::srp::msrp::SR_CLASS_A, domain_.sr_class_priority, now);
     }
 
     /// Declare one SR class Domain on the handler's VLAN.
@@ -1140,13 +1158,6 @@ class MsrpHandler
         return known ? talker_streams_[idx].state : TalkerReservationState::Idle;
     }
 
-    /// @p info declared at @p priority.
-    [[nodiscard]] static auto at_priority(TalkerStreamSrpInfo info, uint8_t const priority) noexcept -> TalkerStreamSrpInfo
-    {
-        info.priority = priority;
-        return info;
-    }
-
     /// Declare @p stream when a listener wants it (talker_wanted), else let it wait.
     [[nodiscard]] auto follow_talker(TalkerStreamSrpInfo& stream, TimePoint const now) -> Status
     {
@@ -1481,14 +1492,15 @@ class MsrpHandler
         return vid >= 1 && vid <= 4094 && fv.sr_class_priority.get() <= 7;
     }
 
-    /// A Domain registered from the wire. Under adoption, a Domain of our SR
-    /// class whose priority or VLAN differs from ours becomes ours (see
-    /// set_adopt_domain); anything else - another class, the same values, a
-    /// VID or priority outside what 802.1Q allows - is noted and left alone,
-    /// the Domain in force kept.
+    /// A Domain registered from the wire. Under adoption, a Class A Domain (the
+    /// Domain's own class under set_single_sr_class()) whose priority or VLAN
+    /// differs from ours becomes ours (see set_adopt_domain); anything else -
+    /// another class, the same values, a VID or priority outside what 802.1Q
+    /// allows - is noted and left alone, the Domain in force kept.
     void on_remote_domain(statusbar::srp::msrp::DomainFirstValue const& fv, statusbar::srp::msrp::Operation const op)
     {  // NOLINT(statusbar-block-statements) the adoption's checks, then the new Domain declared
-        bool const our_class = fv.sr_class_id.get() == domain_.sr_class_id;
+        uint8_t const followed = single_sr_class_ ? domain_.sr_class_id : uint8_t{statusbar::srp::msrp::SR_CLASS_A};
+        bool const our_class = fv.sr_class_id.get() == followed;
         bool const same = fv.sr_class_priority.get() == domain_.sr_class_priority && fv.sr_class_vid.get() == domain_.sr_class_vid;
         if (!adopt_domain_ || op != statusbar::srp::msrp::Operation::Register || !our_class || same || !adoptable(fv)) {
             return;
@@ -1623,6 +1635,7 @@ class MsrpHandler
     DomainInfo domain_;                      ///< the Domain in force (configured, or adopted from the wire)
     DomainInfo configured_domain_;           ///< what set_domain() gave; return_to_configured_domain() goes back to it
     bool adopt_domain_{false};               ///< Milan v1.3 4.2.7.2.1 Domain adoption (set_adopt_domain)
+    bool single_sr_class_{false};            ///< the Domain's SR class alone (set_single_sr_class)
     bool talker_waits_for_listener_{false};  ///< Milan v1.3 4.3.3.1 (set_talker_waits_for_listener)
     bool talker_addresses_valid_{true};      ///< Milan v1.3 4.3.3.1 condition 1 (set_talker_addresses_valid)
     statusbar::sg14::inplace_vector<TalkerStreamSrpInfo, MaxStreams> talker_streams_;
