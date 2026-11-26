@@ -134,6 +134,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         if (group_name_) {
             desc.group_name = *group_name_;  // and SET_NAME (name_index 1)
         }
+        desc.entity_capabilities.set_flag(added_entity_capabilities_);
         return true;
     }
 
@@ -829,8 +830,8 @@ class DescriptorStorageHandler : public AemEntityHandler
         return authored_stream_format(ref);
     }
 
-    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT
-    /// changes the runtime format only); nullopt if the blob has no such stream.
+    /// The stream's authored current_format: the blob's (a SET_STREAM_FORMAT changes the runtime
+    /// format only); nullopt if the blob has no such stream.
     [[nodiscard]] auto authored_stream_format(DescriptorRef ref) const noexcept -> std::optional<ieee::Eui64>
     {
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
@@ -842,8 +843,9 @@ class DescriptorStorageHandler : public AemEntityHandler
         return authored;
     }
 
-    /// Whether @p format is one the stream's descriptor lists (its authored
-    /// current_format or its stream_formats), as SET_STREAM_FORMAT requires.
+    /// Whether @p format is one the stream's descriptor lists (its authored current_format or its
+    /// stream_formats), as SET_STREAM_FORMAT requires (IEEE 1722.1-2021 Clause 7.4.9); false
+    /// when the blob has no such stream.
     [[nodiscard]] auto stream_format_listed(DescriptorRef ref, ieee::Eui64 const& format) const noexcept -> bool
     {
         auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
@@ -851,8 +853,12 @@ class DescriptorStorageHandler : public AemEntityHandler
             stream_format_supported(*blob, format);
     }
 
-    /// Set the stream's runtime current_format to @p format without the stream-format callback.
-    /// False when the descriptor does not list the format or the blob has no such stream.
+    /// Make listed @p format the stream's runtime current_format without the stream-format
+    /// callback, for a change the entity's data plane has already made, or for the format saved
+    /// before a restart (Milan v1.3 Sections 5.3.7.1 and 5.3.8.1: "The current format shall be
+    /// saved in a non-volatile memory and restored after a power cycle"). No controller is told.
+    /// False, with nothing changed, when the descriptor does not list it or the blob has no
+    /// such stream.
     [[nodiscard]] auto set_runtime_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
     {
         if (!stream_format_listed(ref, format)) {
@@ -1657,7 +1663,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         return mixer_states_.try_push_back(state);
     }
 
-    /// Apply a SET_MIXER value write (Clause 7.4.35). @p value is the
+    /// Apply a SET_MIXER value write (Clause 7.4.31). @p value is the
     /// payload after the 4-byte AemMixerPayloadHeader: the mixer's new
     /// value (one element of its control_value_type).
     [[nodiscard]] auto set_mixer(DescriptorRef ref, std::span<uint8_t const> value) -> uint8_t
@@ -1679,7 +1685,7 @@ class DescriptorStorageHandler : public AemEntityHandler
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
-    /// Serve a GET_MIXER value read (Clause 7.4.36): the stored value.
+    /// Serve a GET_MIXER value read (Clause 7.4.32): the stored value.
     [[nodiscard]] auto get_mixer(DescriptorRef ref, std::span<uint8_t> out) noexcept -> size_t { return mixer_value(ref, out); }
 
     statusbar::sg14::inplace_vector<MixerState, MAX_MIXER_STATES> mixer_states_;
@@ -2004,6 +2010,7 @@ class DescriptorStorageHandler : public AemEntityHandler
     bool manage_entity_name_{false};
     bool manage_object_names_{false};
     std::optional<AtdeccString> group_name_{};  ///< a controller's group_name (manage_object_names)
+    uint32_t added_entity_capabilities_{0};
     statusbar::sg14::inplace_vector<ObjectNameState, MAX_OBJECT_NAMES> object_names_;
     statusbar::sg14::inplace_function<uint8_t(AtdeccString const&), 64> on_entity_name_changed_{};
     NameChangedFn on_name_changed_{};

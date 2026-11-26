@@ -2136,16 +2136,27 @@ void AvbEntityKit::prepare_control_plane()
 void AvbEntityKit::apply_default_mcr_priorities()
 {
     auto const& priorities = config_.default_mcr_priorities;
-    auto& mvu = host_.components().mvu_handler;
-    if (mvu.clock_domain_count() != 0 && priorities.size() > mvu.clock_domain_count()) {
+    size_t const domains = clock_domain_count();
+    if (domains != 0 && priorities.size() > domains) {
         host_.ctl_log().warning(
             "kit: {} default media clock reference priorities for {} clock domain(s): the rest ignored",
             priorities.size(),
-            mvu.clock_domain_count());
+            domains);
     }
-    for (size_t index = 0; !priorities.empty() && index < mvu.clock_domain_count(); ++index) {
-        (void)mvu.set_default_mcr_priority(index, priorities[std::min(index, priorities.size() - 1)]);
+    for (size_t index = 0; !priorities.empty() && index < domains; ++index) {
+        (void)host_.components().aem_handler.set_default_mcr_priority(
+            static_cast<uint16_t>(index), priorities[std::min(index, priorities.size() - 1)]);
     }
+}
+
+auto AvbEntityKit::clock_domain_count() const -> size_t
+{
+    size_t count = 0;
+    while (count < nanoavb::AemCommandHandler::MAX_CLOCK_DOMAINS &&
+           host_.get_descriptor(atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, static_cast<uint16_t>(count)).has_value()) {
+        ++count;
+    }
+    return count;
 }
 
 auto AvbEntityKit::start_declarations(net::MessageReactor& reactor, TimePoint const now) -> Status
@@ -2154,19 +2165,16 @@ auto AvbEntityKit::start_declarations(net::MessageReactor& reactor, TimePoint co
     // addresses via MAAP: the Link Up begins it (B.3.5.9), and the acquired
     // addresses then overwrite the static defaults the data plane reads below.
     // Non-fatal inside: on socket failure the entity keeps the static MACs.
-    if (config_.stream_address_mode == "maap") {
+    if (effective_stream_address_mode(config_) == "maap") {
         if (auto status = setup_maap_addresses(reactor, now); !status) {
             return status;
         }
     }
     // Static addresses are valid at once, MAAP's when the block is defended. Until
     // then the configured default must not reach a listener (TALKER_DEST_MAC_FAIL).
-    for (auto const& spec : talker_specs_) {
-        declarations_.notify_address_valid(spec.index, maap_.ready());
-        if (!maap_.ready()) {
-            if (auto const* s = host_.components().acmp_talker.get_stream(spec.index); s != nullptr) {
-                (void)host_.components().acmp_talker.configure_stream(spec.index, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
-            }
+    for (auto const& spec : maap_.ready() ? std::span<StreamSpec const>{} : std::span{talker_specs_}) {
+        if (auto const s = host_.components().talker_stream(spec.index); s.has_value()) {
+            (void)host_.components().configure_talker_stream(spec.index, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
         }
     }
     // The declarations' timer: a probe window closing, a hold ending. It
@@ -2819,12 +2827,12 @@ void AvbEntityKit::apply_saved_names(PersistentState const& saved)
 
 void AvbEntityKit::apply_saved_mvu_settings(PersistentState const& saved)
 {
-    auto& mvu = host_.components().mvu_handler;
-    mvu.set_system_unique_id(saved.system_unique_id, nanoavb::mcr_domain_name(saved.system_unique_name));
+    auto& aem = host_.components().aem_handler;
+    aem.set_system_unique_id(saved.system_unique_id, atdecc::aem::AtdeccString{saved.system_unique_name});
     for (auto const& mcr : saved.media_clock_references) {
-        nanoavb::MvuCommandHandler::McrInfo const info{
-            .user_mcr_prio = mcr.user_priority, .domain_name = nanoavb::mcr_domain_name(mcr.domain_name)};
-        if (!mvu.set_mcr_info(mcr.clock_domain, info)) {
+        if (mcr.clock_domain >= clock_domain_count() ||
+            !aem.restore_media_clock_reference_info(
+                mcr.clock_domain, mcr.user_priority, atdecc::aem::AtdeccString{mcr.domain_name})) {
             host_.ctl_log().warning(
                 "kit: saved media clock reference of CLOCK_DOMAIN {}: no such clock domain: dropped", mcr.clock_domain);
         }

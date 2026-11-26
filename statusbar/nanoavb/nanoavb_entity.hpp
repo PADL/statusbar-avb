@@ -15,7 +15,6 @@
 #include "statusbar/nanoavb/nanoavb_dynamic_audio_maps.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model_adapter.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
@@ -39,24 +38,17 @@ using namespace atdecc;
 using namespace atdecc::aem;
 using statusbar::container::SlotTable;
 
-/// A packed wire struct @p T from the front of @p data; nullopt when @p data is shorter than T::LENGTH.
-template <typename T>
-[[nodiscard]] auto load_payload(std::span<uint8_t const> const data) noexcept -> std::optional<T>
-{
-    if (data.size() < T::LENGTH) {
-        return std::nullopt;
-    }
-    T payload{};
-    span_load(payload, data.first(T::LENGTH));
-    return payload;
-}
-
 //
 // AEM Command Handler Response
 //
-/// Maximum size for AEM response data: one Ethernet frame after the AEM header (1500 - 24),
-/// as Milan v1.3 Section 5.4.1 allows. Sizes the stack-local buffer of process_packet().
+/// Maximum size for AEM response data: what one Ethernet frame carries after the AEM header
+/// (1500 - 24 octets), which Milan v1.3 Section 5.4.1 lets a GET_AUDIO_MAP response use.
+/// Used by process_packet() to allocate one stack-local output buffer that
+/// is passed into the per-command handlers.
 constexpr size_t MAX_AEM_RESPONSE_SIZE = 1476;
+
+/// The most AEM command-specific data one AECPDU can carry (IEEE 1722.1-2021 Clause 9.2.1.1.7).
+constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
 
 /// Small value returned by each AEM command handler.
 ///
@@ -106,53 +98,6 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 using GetStreamInfoFn = statusbar::sg14::inplace_function<
     bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
     64>;
-
-/// The most clock identities a GET_AS_PATH response carries: an AS path is
-/// the grandmaster, each bridge, and this entity (802.1AS-2020 10.3.9.23).
-constexpr size_t MAX_AS_PATH_LENGTH = 32;
-using AsPath = statusbar::sg14::inplace_vector<Eui64, MAX_AS_PATH_LENGTH>;
-
-/// Fill the gPTP path trace for AVB_INTERFACE @p descriptor_index (IEEE 1722.1-2021 Clause
-/// 7.4.41), empty while no grandmaster is known; false for no such interface.
-using GetAsPathFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AsPath& path), 64>;
-
-/// A STREAM_OUTPUT's presentation time offset in nanoseconds (Milan v1.2
-/// Section 5.3.7.6), or nullopt when @p stream_output_index is not one of
-/// this entity's talker streams.
-using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<uint32_t>(uint16_t stream_output_index), 64>;
-
-/// Set a STREAM_OUTPUT's presentation time offset (range-checked): SUCCESS once in force,
-/// STREAM_IS_RUNNING while it streams, NOT_SUPPORTED when the entity cannot change it.
-using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
-
-/// A successful command changed a persistent setting (is_persistent_setting_command): called
-/// on the reactor thread after the response and its notification, with the command's code.
-using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t command_type), 32>;
-
-/// The AEM commands whose effect Milan v1.2 has the entity keep in non-volatile memory
-/// (Sections 5.3.5.1, 5.3.7.1, 5.3.7.6, 5.3.8.1, 5.3.9.1, 5.3.10.1, 5.3.11.1, 5.3.13).
-[[nodiscard]] constexpr auto is_persistent_setting_command(uint16_t const command_type) noexcept -> bool
-{
-    switch (command_type) {
-        case atdecc::AEM_COMMAND_SET_NAME:
-        case atdecc::AEM_COMMAND_SET_STREAM_FORMAT:
-        case atdecc::AEM_COMMAND_SET_SAMPLING_RATE:
-        case atdecc::AEM_COMMAND_SET_CLOCK_SOURCE:
-        case atdecc::AEM_COMMAND_SET_STREAM_INFO:
-        case atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME:
-        case atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS:
-        case atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS:
-            return true;
-        default:
-            return false;
-    }
-}
-
-/// Apply stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in
-/// cluster order) to the data plane: SUCCESS applies them, any other status refuses and leaves
-/// the port as it was. Reactor thread, before the response.
-using AudioMappingsChangedFn = statusbar::sg14::
-    inplace_function<uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings), 32>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -212,6 +157,33 @@ using GetPresentationOffsetFn = statusbar::sg14::inplace_function<std::optional<
 /// or IN_PROGRESS when it needs time, to finish with complete_pending_command() as a deferred SET.
 using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16_t stream_output_index, uint32_t offset_ns), 64>;
 
+/// A successful command changed a persistent setting (is_persistent_setting_command): called
+/// on the reactor thread after the response and its notification, with the command's code.
+using SettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t command_type), 32>;
+
+/// A successful MVU command changed a setting the entity keeps (SET_SYSTEM_UNIQUE_ID,
+/// SET_MEDIA_CLOCK_REFERENCE_INFO): called after its response and notification, with its code.
+using MvuSettingsChangedFn = statusbar::sg14::inplace_function<void(uint16_t mvu_command_type), 32>;
+
+/// The AEM commands whose effect Milan v1.2 has the entity keep in non-volatile memory
+/// (Sections 5.3.5.1, 5.3.7.1, 5.3.7.6, 5.3.8.1, 5.3.9.1, 5.3.10.1, 5.3.11.1, 5.3.13).
+[[nodiscard]] constexpr auto is_persistent_setting_command(uint16_t const command_type) noexcept -> bool
+{
+    switch (command_type) {
+        case atdecc::AEM_COMMAND_SET_NAME:
+        case atdecc::AEM_COMMAND_SET_STREAM_FORMAT:
+        case atdecc::AEM_COMMAND_SET_SAMPLING_RATE:
+        case atdecc::AEM_COMMAND_SET_CLOCK_SOURCE:
+        case atdecc::AEM_COMMAND_SET_STREAM_INFO:
+        case atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME:
+        case atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS:
+        case atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS:
+            return true;
+        default:
+            return false;
+    }
+}
+
 /// Put stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in cluster
 /// order) in force in the data plane: SUCCESS once in force, any other AEM status refuses and leaves
 /// the port as it was. Called on the reactor thread before the response; it must not change mappings
@@ -260,8 +232,8 @@ struct AemCommandHandlerCallbacks
     /// GET_AVB_INFO replies NOT_IMPLEMENTED.
     GetAvbInfoFn get_avb_info;
 
-    /// Provide the gPTP path trace for GET_AS_PATH. Optional; if unset,
-    /// GET_AS_PATH replies NOT_IMPLEMENTED.
+    /// Provide the gPTP path for GET_AS_PATH. Optional; if unset, GET_AS_PATH
+    /// replies NOT_IMPLEMENTED.
     GetAsPathFn get_as_path;
 
     /// Observe IDENTIFY-control changes (e.g. blink an LED, or log when there
@@ -272,17 +244,39 @@ struct AemCommandHandlerCallbacks
     /// replies NOT_IMPLEMENTED.
     RebootFn on_reboot;
 
-    /// The talkers' presentation time offsets, for SET_STREAM_INFO (Milan v1.2 Section 5.4.2.9)
-    /// and SET/GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
+    /// The talkers' presentation time offsets, for SET_MAX_TRANSIT_TIME and
+    /// GET_MAX_TRANSIT_TIME. Both or neither; unset, those reply NOT_IMPLEMENTED.
     GetPresentationOffsetFn get_presentation_offset;
     SetPresentationOffsetFn set_presentation_offset;
+
+    /// Put a stream port's dynamic mappings in force. Optional; if unset,
+    /// ADD_AUDIO_MAPPINGS and REMOVE_AUDIO_MAPPINGS reply NOT_IMPLEMENTED.
+    AudioMappingsChangedFn on_audio_mappings_changed;
 
     /// A persistent setting changed (SettingsChangedFn). Optional.
     SettingsChangedFn on_settings_changed;
 
-    /// Apply a stream port's dynamic audio mappings (AudioMappingsChangedFn).
-    /// Optional; if unset, ADD/REMOVE_AUDIO_MAPPINGS reply NOT_IMPLEMENTED.
-    AudioMappingsChangedFn on_audio_mappings_changed;
+    /// A kept MVU setting changed (MvuSettingsChangedFn). Optional.
+    MvuSettingsChangedFn on_mvu_settings_changed;
+};
+
+/// What answers Milan's stream input commands over AECP MVU (Milan v1.3
+/// 5.4.4.6 to 5.4.4.8): the entity's Milan connection management, when it
+/// runs one. The handler reads the commands and writes the responses; what
+/// a sink does with them is asked here.
+struct MvuStreamInputCallbacks
+{
+    /// Takes the ACMP response a sink gives to a bind or unbind.
+    using Respond = statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const&), 64>;
+
+    /// A BIND_STREAM or UNBIND_STREAM command, as the BIND_RX or UNBIND_RX
+    /// command it equals (Table 5.22). @p respond is called once, at the
+    /// step where the sink would send its ACMP response (5.5.3.2).
+    statusbar::sg14::inplace_function<void(atdecc::AcmpCommandResponse const& command, Respond const& respond), 64> binding_command;
+
+    /// The GET_STREAM_INPUT_INFO_EX response data of STREAM_INPUT @p index,
+    /// nullopt when the entity has no such stream input.
+    statusbar::sg14::inplace_function<std::optional<atdecc::MvuGetStreamInputInfoExResponse>(uint16_t index), 64> stream_input_info;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -354,22 +348,6 @@ class AemCommandHandler
     /// @param callbacks The callback interface for sending AEM responses
     void set_callbacks(AemCommandHandlerCallbacks callbacks) { callbacks_ = std::move(callbacks); }
 
-    /// The entity's profile (EntityProfile): Milan or classic IEEE 1722.1, a property
-    /// of the model; set by NanoAvbComponents at construction. Default: Milan.
-    void set_entity_profile(EntityProfile const profile) noexcept { entity_profile_ = profile; }
-    [[nodiscard]] auto entity_profile() const noexcept -> EntityProfile { return entity_profile_; }
-
-    /// The GET_STREAM_INFO response form (StreamInfoLayout); unset, the profile's: IEEE
-    /// 1722.1-2021's for Milan (Milan v1.3 Section 5.4.2.10), 1722.1-2013's for classic.
-    void set_stream_info_layout(std::optional<StreamInfoLayout> const layout) noexcept { stream_info_layout_ = layout; }
-    [[nodiscard]] auto stream_info_layout() const noexcept -> StreamInfoLayout
-    {
-        if (stream_info_layout_) {
-            return *stream_info_layout_;
-        }
-        return entity_profile_.milan ? StreamInfoLayout::ieee_2021 : StreamInfoLayout::ieee_2013;
-    }
-
     /// Set only the GET_COUNTERS provider, without disturbing the others
     /// (set_callbacks replaces the whole struct, which would clear send_response
     /// wired by the net layer). The application owns the dynamic counters.
@@ -426,11 +404,15 @@ class AemCommandHandler
     void set_profile(Profile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> Profile { return profile_; }
 
-    /// The GET_STREAM_INFO response length in octets: IEEE 1722.1-2021's 84 under milan13
-    /// (Milan v1.3 Section 5.4.2.10), 1722.1-2013's 48 under classic, for older controllers.
-    [[nodiscard]] auto stream_info_length() const noexcept -> size_t
+    /// The GET_STREAM_INFO response form (StreamInfoLayout); unset, the profile's: IEEE
+    /// 1722.1-2021's under milan13 (Milan v1.3 Section 5.4.2.10), 1722.1-2013's under classic.
+    void set_stream_info_layout(std::optional<StreamInfoLayout> const layout) noexcept { stream_info_layout_ = layout; }
+    [[nodiscard]] auto stream_info_layout() const noexcept -> StreamInfoLayout
     {
-        return profile_ == Profile::milan13 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+        if (stream_info_layout_) {
+            return *stream_info_layout_;
+        }
+        return profile_ == Profile::milan13 ? StreamInfoLayout::ieee_2021 : StreamInfoLayout::ieee_2013;
     }
 
     /// What a Milan PAAD-AE says of itself in GET_MILAN_INFO (Milan v1.3
@@ -464,18 +446,22 @@ class AemCommandHandler
     /// v1.3 Section 5.4.4.5), whether or not the model has it; the defaults past MAX_CLOCK_DOMAINS.
     [[nodiscard]] auto media_clock_reference_info(uint16_t clock_domain_index) const noexcept -> MvuMediaClockReferenceInfoPayload;
 
-    /// What GET_SYSTEM_UNIQUE_ID answers (Milan v1.3 Section 5.4.4.3): the id and name last set or
-    /// restored, 0 and empty until then, the reserved octets and those after the name zero.
-    [[nodiscard]] auto system_unique_id() const noexcept -> MvuSystemUniqueIdPayload
+    /// Put saved settings of CLOCK_DOMAIN @p clock_domain_index back (Milan v1.3 Section 7.6): the
+    /// user priority and the domain name, as a SET_MEDIA_CLOCK_REFERENCE_INFO would, but nobody is
+    /// notified. False past MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto restore_media_clock_reference_info(
+        uint16_t clock_domain_index, uint8_t user_mcr_prio, aem::AtdeccString const& domain_name) noexcept -> bool;
+
+    /// The system unique id (Milan v1.3 Section 5.4.4.2): its number and name, 0 and empty
+    /// until a controller or set_system_unique_id() gives them.
+    [[nodiscard]] auto system_unique_id() const noexcept -> uint64_t { return system_unique_id_; }
+    [[nodiscard]] auto system_unique_name() const noexcept -> aem::AtdeccString const& { return system_unique_name_; }
+    /// Put a saved system unique id back; nobody is notified.
+    void set_system_unique_id(uint64_t const id, aem::AtdeccString const& name = {}) noexcept
     {
-        return {.system_unique_id = system_unique_id_, .system_name = system_name_};
+        system_unique_id_ = id;
+        system_unique_name_ = name;
     }
-    /// Put back the system unique id @p id and name @p name the entity saved (Milan v1.3 Section
-    /// 5.4.4.2): on the reactor thread, before the entity starts. Notifies nobody and calls no
-    /// hook. False, and nothing changed, for a name that is not well-formed UTF-8.
-    [[nodiscard]] auto restore_system_unique_id(uint64_t id, aem::AtdeccString const& name) noexcept -> bool;
-    /// Install the hook told each id and name a SET_SYSTEM_UNIQUE_ID puts in force (SystemUniqueIdChangedFn).
-    void set_on_system_unique_id_changed(SystemUniqueIdChangedFn fn) { on_system_unique_id_changed_ = std::move(fn); }
 
     /// Give the handler what answers BIND_STREAM, UNBIND_STREAM and
     /// GET_STREAM_INPUT_INFO_EX, on behalf of @p owner, an address that names
@@ -506,7 +492,7 @@ class AemCommandHandler
     void set_get_avb_info(GetAvbInfoFn fn) { callbacks_.get_avb_info = std::move(fn); }
     void set_get_as_path(GetAsPathFn fn) { callbacks_.get_as_path = std::move(fn); }
     void set_on_reboot(RebootFn fn) { callbacks_.on_reboot = std::move(fn); }
-    /// Install the presentation time offset store (see AemCommandHandlerCallbacks).
+    /// Install the presentation time offset hooks (see AemCommandHandlerCallbacks).
     void set_presentation_offset_hooks(GetPresentationOffsetFn get, SetPresentationOffsetFn set)
     {
         callbacks_.get_presentation_offset = std::move(get);
@@ -515,34 +501,66 @@ class AemCommandHandler
 
     /// Observe changes to the persistent settings (SettingsChangedFn).
     void set_on_settings_changed(SettingsChangedFn fn) { callbacks_.on_settings_changed = std::move(fn); }
+    /// Observe changes to the kept MVU settings (MvuSettingsChangedFn).
+    void set_on_mvu_settings_changed(MvuSettingsChangedFn fn) { callbacks_.on_mvu_settings_changed = std::move(fn); }
 
-    // ---- Dynamic audio mappings (Milan v1.2 Sections 5.3.10, 5.4.2.26-28) ---
-    // A STREAM_PORT_INPUT with no static AUDIO_MAP keeps dynamic mappings; the command rules
-    // are in docs/NANOAVB_ARCHITECTURE.md.
+    // ---- Dynamic audio mappings (IEEE 1722.1-2021 Clauses 7.4.44-7.4.46) --------
+    // A STREAM_PORT without AUDIO_MAP descriptors has dynamic mappings, kept in the store the
+    // entity hands the handler. A configuration switch forgets them.
 
-    /// Milan v1.2 Section 5.4.2.26: a GET_AUDIO_MAP partition's size.
-    static constexpr size_t MAX_AUDIO_MAP_MAPPINGS = 176;
+    /// A GET_AUDIO_MAP partition under milan13: 176 mappings, 1420 octets (Milan v1.3 Section 5.4.1).
+    static constexpr size_t MILAN_AUDIO_MAP_MAPPINGS = 176;
+    /// A GET_AUDIO_MAP partition under classic, within an AECPDU's 524 octets of control data.
+    static constexpr size_t AUDIO_MAP_MAPPINGS = (MAX_AEM_BODY - AemAudioMapResponseHeader::LENGTH) / AemAudioMapping::LENGTH;
+    static_assert(
+        AemAudioMapResponseHeader::LENGTH + (MILAN_AUDIO_MAP_MAPPINGS * AemAudioMapping::LENGTH) <= MAX_AEM_RESPONSE_SIZE);
+    /// The STREAM_OUTPUTs an output port's GET_AUDIO_MAP partitions count (Milan v1.3 Section 5.4.2.26).
+    static constexpr size_t MAX_PARTITIONED_STREAMS = 256;
 
+    /// Give the handler the store of its stream ports' dynamic mappings, both directions; the
+    /// handler alone changes it. Without one (the default) GET_AUDIO_MAP, ADD_AUDIO_MAPPINGS and
+    /// REMOVE_AUDIO_MAPPINGS answer NOT_IMPLEMENTED. @p maps must outlive the handler, or be withdrawn.
+    void set_dynamic_audio_maps(DynamicAudioMaps* maps) noexcept { audio_maps_ = maps; }
+    /// Off (the default), a STREAM_PORT_OUTPUT's dynamic mappings hold its streams at the unit's rate as
+    /// an input port's do (Milan v1.3 Section 5.4.2.27). On, an output port's mappings are the entity's
+    /// to keep or drop at another rate: only their channels are checked or refuse a SET_STREAM_FORMAT or
+    /// SET_SAMPLING_RATE.
+    void set_output_mappings_follow_streams(bool const follow) noexcept { output_mappings_follow_streams_ = follow; }
+    /// Install the data plane's hook for the dynamic mappings (AudioMappingsChangedFn).
     void set_on_audio_mappings_changed(AudioMappingsChangedFn fn) { callbacks_.on_audio_mappings_changed = std::move(fn); }
-    /// The dynamic mappings in force.
-    [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const& { return dynamic_maps_; }
-    /// Whether (@p port_type, @p port_index) is a STREAM_PORT_INPUT of the
-    /// current configuration with dynamic mappings (no static AUDIO_MAP).
-    [[nodiscard]] auto has_dynamic_input_map(uint16_t port_type, uint16_t port_index) const -> bool;
-    /// Make @p mappings input port (@p port_type, @p port_index)'s dynamic mappings, validated as
-    /// an ADD onto an empty port, applied when @p apply; no notification, no settings report.
-    /// The AEM status; nothing changes unless SUCCESS.
-    [[nodiscard]] auto set_audio_mappings(
-        uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings, bool apply) -> uint8_t;
-    /// REMOVE_AUDIO_MAPPINGS of @p remove, then ADD_AUDIO_MAPPINGS of @p add, on STREAM_PORT_INPUT @p port_index by
-    /// the entity itself: ENTITY_LOCKED while locked or acquired (Milan v1.2 Sections 5.4.2.27-28), else as a
-    /// controller's, all or nothing; a change is notified and reported to the settings hook. The AEM status.
+    /// The store of the dynamic mappings in force, nullptr without one.
+    [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const* { return audio_maps_; }
+    /// Whether STREAM_PORT_INPUT or STREAM_PORT_OUTPUT (@p port_type, @p port_index) of the current
+    /// configuration has dynamic mappings (no AUDIO_MAP descriptor).
+    [[nodiscard]] auto has_dynamic_map(uint16_t port_type, uint16_t port_index) const -> bool;
+    /// Make @p mappings dynamic port (@p port_type, @p port_index)'s, checked as an ADD onto an empty
+    /// port, without the hook and without notifying: an entity's defaults, or mappings it restores to
+    /// a data plane it has set itself. The AEM status; nothing changes unless SUCCESS.
+    [[nodiscard]] auto seed_audio_mappings(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings)
+        -> uint8_t;
+    /// As seed_audio_mappings(), for mappings the data plane has already put in force: what changed is
+    /// told to every registered controller as REMOVE and ADD_AUDIO_MAPPINGS. Reactor thread.
+    [[nodiscard]] auto follow_local_audio_mappings(
+        uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings) -> uint8_t;
+    /// The entity's own REMOVE of @p remove (a mapping not held ignored), then ADD of @p add, on
+    /// dynamic port (@p port_type, @p port_index), all or nothing, checked and put in force through the
+    /// hook as a controller's would be; a change is notified to every registered controller as REMOVE
+    /// then ADD_AUDIO_MAPPINGS, in AECPDUs of at most 63 mappings. The AEM status; local_change_refusal()
+    /// while it refuses.
     [[nodiscard]] auto apply_local_audio_mappings(
-        uint16_t port_index, std::span<DynamicAudioMapping const> add, std::span<DynamicAudioMapping const> remove) -> uint8_t;
-    /// Make @p mappings dynamic STREAM_PORT_OUTPUT @p port_index's, the entity's own at the unit's rate (controllers'
-    /// ADD/REMOVE are NOT_SUPPORTED, Milan v1.2 Section 5.3.9.1), validated as an ADD onto an empty port; a change is
-    /// notified as unsolicited REMOVE then ADD_AUDIO_MAPPINGS. The AEM status; nothing changes unless SUCCESS.
-    [[nodiscard]] auto set_output_mappings(uint16_t port_index, std::span<DynamicAudioMapping const> mappings) -> uint8_t;
+        uint16_t port_type,
+        uint16_t port_index,
+        std::span<DynamicAudioMapping const> add,
+        std::span<DynamicAudioMapping const> remove) -> uint8_t;
+    /// Whether every mapping held still names a cluster channel of its port and a channel of its
+    /// stream's current format at its unit's rate, as an ADD of it would be checked; the handler
+    /// keeps it so by refusing a stream format or rate that would break one (mappings_refusal()).
+    [[nodiscard]] auto mappings_hold() const -> bool;
+    /// The status SET_STREAM_FORMAT or SET_SAMPLING_RATE @p command_body is refused with because a
+    /// mapping held would not hold after it: BAD_ARGUMENTS for a stream channel or rate a format
+    /// leaves (Milan v1.3 Sections 5.4.2.7, 5.4.2.27), NOT_SUPPORTED for a rate (Section 5.4.2.13).
+    [[nodiscard]] auto mappings_refusal(uint16_t command_type, std::span<uint8_t const> command_body) const
+        -> std::optional<uint8_t>;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -624,40 +642,15 @@ class AemCommandHandler
     /// Check if there is a pending acquire waiting for CONTROLLER_AVAILABLE
     [[nodiscard]] auto has_pending_acquire() const noexcept -> bool { return pending_acquire_.active; }
 
-    /// The status a state-changing command from @p controller_entity_id is refused with
-    /// (ENTITY_ACQUIRED, ENTITY_LOCKED), or nullopt. Shared with MVU (Milan v1.2 Section 5.4.4.4).
-    [[nodiscard]] auto exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>;
-
-    /// Call @p fn(controller_mac, controller_entity_id, mvu_sequence_id) for each registered
-    /// controller; the caller sends with the registration's own MVU sequence id and increments
-    /// it whether or not the send succeeds (Milan v1.2 Section 5.4.5.1).
-    template <typename Fn>
-    // NOLINTNEXTLINE(cppcoreguidelines-missing-std-forward) - fn is called, not forwarded
-    void for_each_unsolicited_registration(Fn&& fn)
-    {
-        for (auto& reg : unsolicited_registrations_) {
-            fn(reg.controller_mac, reg.controller_entity_id, reg.mvu_sequence_id);
-        }
-    }
-
-    /// Maximum number of unsolicited notification registrations (Milan v1.2
+    /// Maximum number of unsolicited notification registrations (Milan v1.3
     /// Section 5.3.4.2: at least 16 per AVB interface).
     static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 16;
 
-    /// The controller monitor's period (Milan v1.2 Section 5.4.5.3): a random
-    /// time between these after a registered controller's last AECP command,
-    /// it is sent CONTROLLER_AVAILABLE.
+    /// The controller monitor's period under milan13 (Milan v1.3 Section 5.4.5.4): a random time
+    /// between these after a registered controller's last AECP command, tick() sends it
+    /// CONTROLLER_AVAILABLE, and deregisters it when neither that nor its one retry is answered.
     static constexpr auto CONTROLLER_MONITOR_MIN = std::chrono::seconds(30);
     static constexpr auto CONTROLLER_MONITOR_MAX = std::chrono::seconds(60);
-
-    /// Milan v1.2 Section 5.4.5.3: an MVU command from @p controller_entity_id restarts its
-    /// monitor timer (process_packet() does this for AEM commands).
-    void notify_controller_command(Eui64 const& controller_entity_id, Eui48 const& controller_mac);
-
-    /// GET_COUNTERS notifications go at most once a second per descriptor
-    /// (Milan v1.2 Table 5.22), from tick(): a change goes at the next tick,
-    /// or, within a second of the last one, at the tick a second after it.
-    static constexpr auto COUNTERS_NOTIFICATION_INTERVAL = std::chrono::seconds(1);
 
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
@@ -676,6 +669,11 @@ class AemCommandHandler
     /// The controller at @p controller_mac is gone for good: drop its registrations, release its
     /// acquisition (to a waiting controller, if any) and abandon an acquire it was waiting for.
     void forget_controller_at(Eui48 const& controller_mac);
+
+    /// GET_COUNTERS notifications go at most once a second per descriptor
+    /// (Milan v1.2 Table 5.22), from tick(): a change goes at the next tick,
+    /// or, within a second of the last one, at the tick a second after it.
+    static constexpr auto COUNTERS_NOTIFICATION_INTERVAL = std::chrono::seconds(1);
 
     /// Set our own entity_id, used as the target_entity_id of unsolicited
     /// notifications. process_packet() also keeps this current; call this so
@@ -726,9 +724,13 @@ class AemCommandHandler
     /// emitted only on AEM_STATUS_SUCCESS. local_change_refusal(), with nothing
     /// applied, while it refuses; mappings_refusal() for a stream format or rate.
     [[nodiscard]] auto apply_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
-    /// A SET_NAME by the entity itself (@p command_body as the command's), applied, notified and
-    /// reported to the settings hook as a controller's. The AEM status.
+    /// SET_NAME @p command_body by other than ATDECC, as apply_local_descriptor_value() applies a
+    /// value: local_change_refusal() while it refuses, else the name set and every registered
+    /// controller notified, and on_settings_changed told.
     [[nodiscard]] auto apply_local_name(std::span<uint8_t const> command_body) -> uint8_t;
+    /// apply_local_descriptor_value() without the lock refusal: a value the host has already put in
+    /// force (its clock source following the hardware) is told, never refused.
+    [[nodiscard]] auto follow_local_descriptor_value(uint16_t command_type, std::span<uint8_t const> command_body) -> uint8_t;
 
     /// ENTITY_LOCKED while a controller holds the lock under milan13, else nullopt: a locked
     /// entity's state is not changed by other than ATDECC (Milan v1.3 Sections 5.3.4.1, 5.4.2.17).
@@ -742,21 +744,47 @@ class AemCommandHandler
     /// @p body to every registered controller (plus the IDENTIFY multicast when the
     /// change targets the IDENTIFY control). Exposed so an entity can push a
     /// notification it framed itself; apply_local_descriptor_value() is the usual
-    /// entry point. No-op if no send_response callback is wired.
-    /// Under milan13 the controller whose command this is (requester_) is left out.
+    /// entry point. No-op if no send_response callback is wired. Raised while a
+    /// command is dispatched (from a hook), it is sent after that command's response,
+    /// up to MAX_QUEUED_NOTIFICATIONS of them; past those, a side effect goes at once
+    /// after the side effects held, and one of the command's type is not sent but
+    /// spends each controller's sequence id (Milan v1.3 Section 5.4.5.1), a gap it sees.
     void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
-    /// emit_unsolicited with no requester left out: a state report (GET_COUNTERS, GET_AVB_INFO,
-    /// GET_AS_PATH, GET_STREAM_INFO, GET_MAX_TRANSIT_TIME) reaches every registered controller.
-    void emit_unsolicited_to_all(uint16_t command_type, std::span<uint8_t const> body);
 
-    /// Push an unsolicited GET_COUNTERS response, at most one a second per descriptor: queued
-    /// for tick() (SUCCESS) once ticked, sent at once before. NOT_IMPLEMENTED without a
-    /// get_counters callback, NO_SUCH_DESCRIPTOR when it declines.
+    /// The notifications one command's dispatch holds for after its response, the last
+    /// kept for one of the command's own type.
+    static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
+
+    /// Emit an unsolicited MVU response (u bit set) carrying @p command_type and @p body to
+    /// every registered controller, each with its own MVU sequence id, which advances whether
+    /// or not the send succeeds (Milan v1.3 Sections 5.4.5.1, 5.4.5.2). The controller whose
+    /// MVU command is being dispatched is left out. No-op for an entity without milan_info()
+    /// or a send_response callback.
+    void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// Work a hook leaves for after its command's response, such as more notifications than
+    /// MAX_QUEUED_NOTIFICATIONS holds.
+    using AfterResponseFn = statusbar::sg14::inplace_function<void(), 32>;
+    /// How many AfterResponseFn one command holds.
+    static constexpr size_t MAX_AFTER_RESPONSE = 4;
+
+    /// Run @p fn once the command being dispatched is answered and its held notifications are
+    /// sent, in the order given, the command's controller left out of what it notifies. Outside
+    /// a command off the wire (a local change, tick()), or past MAX_AFTER_RESPONSE, it runs at
+    /// once. Reactor thread.
+    void call_after_response(AfterResponseFn fn);
+
+    /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
+    /// @p descriptor_index) to the registered controllers. IEEE 1722.1 7.5.2 has
+    /// the entity notify when counters change (stream reception, SRP and gPTP
+    /// events) but says nothing about rate, so the application decides when to
+    /// call this: on a state change such as MEDIA_LOCKED, or at most a few times
+    /// a second per descriptor. Counters are read through the get_counters
+    /// callback. Once tick() has run, at most one goes a second per descriptor
+    /// (COUNTERS_NOTIFICATION_INTERVAL): a change is held for tick() and SUCCESS
+    /// answered. Returns the AEM status: NOT_IMPLEMENTED without a callback,
+    /// NO_SUCH_DESCRIPTOR when the callback declines.
     [[nodiscard]] auto notify_counters_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
-
-    /// Push an unsolicited GET_AS_PATH response for AVB_INTERFACE @p descriptor_index (Milan v1.2
-    /// Table 5.22). Returns as notify_counters_changed().
-    [[nodiscard]] auto notify_as_path_changed(uint16_t descriptor_index) -> uint8_t;
 
     /// Push an unsolicited GET_AVB_INFO response for AVB_INTERFACE
     /// @p descriptor_index (IEEE 1722.1 7.5.2: a grandmaster, asCapable or
@@ -774,6 +802,11 @@ class AemCommandHandler
         }
         return info;
     }
+
+    /// Push an unsolicited GET_AS_PATH response for AVB_INTERFACE @p descriptor_index
+    /// (IEEE 1722.1-2021 Clauses 7.4.41, 7.5.2: the gPTP path changed). Reads it through
+    /// the get_as_path callback; same return values as notify_counters_changed().
+    [[nodiscard]] auto notify_as_path_changed(uint16_t descriptor_index) -> uint8_t;
 
     /// Push an unsolicited GET_STREAM_INFO response for a stream descriptor
     /// (talker advertise/failure, listener connection changes). Reads the
@@ -857,8 +890,6 @@ class AemCommandHandler
     /// on_set_name, echoing the command as the response; the name is kept
     /// and answered zero-filled after its first NUL.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// SET_NAME for a controller (handle_set_name) or by non-ATDECC means (apply_local_name).
-    [[nodiscard]] auto set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a
     /// mutating command must be rejected with when the entity is acquired or locked
@@ -888,108 +919,6 @@ class AemCommandHandler
     [[nodiscard]] auto handle_get_stream_format(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
-    /// GET_AUDIO_MAP on a stream port with dynamic maps: partition map_index of its mappings.
-    /// A port with static maps is NOT_SUPPORTED.
-    [[nodiscard]] auto handle_get_audio_map(
-        AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// ADD_AUDIO_MAPPINGS (@p add) or REMOVE_AUDIO_MAPPINGS on a dynamic
-    /// STREAM_PORT_INPUT (see the public section).
-    [[nodiscard]] auto handle_audio_mappings(bool add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
-    /// A stream port's model, for the mapping commands.
-    struct PortModel
-    {
-        uint16_t base_cluster{0};
-        uint16_t number_of_clusters{0};
-        uint16_t number_of_maps{0};
-        uint16_t port_flags{0};
-        uint32_t total_channels{0};  ///< over its clusters
-        /// Each cluster's channel_count, read once (at most this many clusters).
-        sg14::inplace_vector<uint16_t, 512> cluster_channel_counts{};
-    };
-    [[nodiscard]] auto port_model(uint16_t port_type, uint16_t port_index) const -> std::optional<PortModel>;
-    /// The channels of cluster @p cluster_offset of @p port (0: none).
-    [[nodiscard]] static auto cluster_channels(PortModel const& port, uint16_t cluster_offset) -> uint16_t;
-    /// The position of @p mapping's cluster channel among @p port's (its
-    /// clusters' channels in order), or nullopt when it names none.
-    [[nodiscard]] static auto cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) -> std::optional<uint32_t>;
-    /// SUCCESS when @p mapping names a cluster channel of the port and a stream of its direction and,
-    /// with @p check_channel, a channel of its current format (an input's at the unit's rate); else BAD_ARGUMENTS.
-    [[nodiscard]] auto check_mapping(
-        uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const -> uint8_t;
-    /// SUCCESS when @p stream_channel is a channel of @p stream_format and, on an input port that
-    /// does not convert rates, the format is at its audio unit's rate; else BAD_ARGUMENTS.
-    [[nodiscard]] auto check_stream_channel(
-        uint16_t port_index, PortModel const& port, uint64_t stream_format, uint16_t stream_channel) const -> uint8_t;
-    /// Whether the audio unit holding stream input port @p port_index runs at base rate @p rate (true: no such unit).
-    [[nodiscard]] auto input_unit_rate_is(uint16_t port_index, uint32_t rate) const -> bool;
-    /// Port (@p port_type, @p port_index)'s model in @p port when its maps are dynamic; else
-    /// NOT_SUPPORTED (not a stream port, or static maps) or NO_SUCH_DESCRIPTOR.
-    [[nodiscard]] auto dynamic_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
-    /// Keep @p merged as input port @p port_index's mappings, handed first (sorted) to the data
-    /// plane when @p apply; NO_RESOURCES past the store's capacity; nothing changes unless SUCCESS.
-    [[nodiscard]] auto keep_input_mappings(uint16_t port_index, DynamicAudioMaps::Mappings& merged, bool apply) -> uint8_t;
-    /// Keep @p next (cluster order) as output port @p port_index's mappings, notifying a change.
-    [[nodiscard]] auto keep_output_mappings(uint16_t port_index, DynamicAudioMaps::Mappings const& next) -> uint8_t;
-    /// ADD (@p add) or REMOVE_AUDIO_MAPPINGS @p cmd (with @p command_data) on mappable @p port.
-    [[nodiscard]] auto change_audio_mappings(
-        bool add,
-        AemAudioMappingsCommandHeader const& cmd,
-        PortModel const& port,
-        std::span<uint8_t const> command_data,
-        std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// The set an ADD (@p add) or REMOVE of @p listed leaves @p current at, in @p next (cluster
-    /// order), or the status to refuse with.
-    [[nodiscard]] auto next_mappings(
-        bool add,
-        uint16_t port_index,
-        PortModel const& port,
-        DynamicAudioMaps::Mappings const& current,
-        std::span<DynamicAudioMapping const> listed,
-        DynamicAudioMaps::Mappings& next) const -> uint8_t;
-    /// Put a controller's ADD (@p add) or REMOVE_AUDIO_MAPPINGS @p cmd into force (@p next in
-    /// place of @p current) and answer it, telling the other controllers of a change.
-    [[nodiscard]] auto commit_mappings_command(
-        bool add,
-        AemAudioMappingsCommandHeader const& cmd,
-        DynamicAudioMaps::Mappings const& current,
-        DynamicAudioMaps::Mappings const& next,
-        std::span<uint8_t const> command_data,
-        std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// The set the entity's REMOVE of @p remove, then ADD of @p add, leaves input port @p port_index's
-    /// @p current at, in @p next (unsorted), or the status to refuse with.
-    [[nodiscard]] auto local_mappings(
-        uint16_t port_index,
-        DynamicAudioMaps::Mappings const& current,
-        std::span<DynamicAudioMapping const> add,
-        std::span<DynamicAudioMapping const> remove,
-        DynamicAudioMaps::Mappings& next) const -> uint8_t;
-    /// Put the entity's own @p next (cluster order) in place of @p current on input port @p port_index,
-    /// notified and reported to the settings hook; SUCCESS, with nothing done, when they are the same.
-    [[nodiscard]] auto commit_local_mappings(
-        uint16_t port_index, DynamicAudioMaps::Mappings const& current, DynamicAudioMaps::Mappings const& next) -> uint8_t;
-    /// GET_AUDIO_MAP's response for @p cmd on dynamic @p port.
-    [[nodiscard]] auto audio_map_response(
-        AemGetAudioMapCommandPayload const& cmd, PortModel const& port, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
-    /// The port's mappings whose cluster channel ordinals lie in [@p first, @p first + 176), after
-    /// the response header in @p out_buffer; their count, or nullopt when they do not fit.
-    [[nodiscard]] auto store_audio_map_entries(
-        uint16_t port_type, uint16_t port_index, PortModel const& port, size_t first, std::span<uint8_t> out_buffer) const
-        -> std::optional<uint16_t>;
-    /// The set @p mappings would leave port (@p port_index, @p port)
-    /// with, added to @p current (validated as ADD_AUDIO_MAPPINGS), or the
-    /// status to refuse with.
-    [[nodiscard]] auto merged_mappings(
-        uint16_t port_index,
-        PortModel const& port,
-        DynamicAudioMaps::Mappings const& current,
-        std::span<DynamicAudioMapping const> mappings,
-        DynamicAudioMaps::Mappings& merged) const -> uint8_t;
-    /// Read descriptor (@p type, @p index) of the current configuration.
-    template <typename T>
-    [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
-    /// Descriptor (@p type, @p index) of the current configuration on the wire, in @p out; its length (0: none).
-    [[nodiscard]] auto model_descriptor_for_wire(uint16_t type, uint16_t index, std::span<uint8_t> out) const -> size_t;
     /// Handle GET_SAMPLING_RATE — returns the AUDIO_UNIT descriptor's current_sampling_rate.
     [[nodiscard]] auto handle_get_sampling_rate(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
@@ -1096,10 +1025,6 @@ class AemCommandHandler
     /// symbol-keyed on_set_descriptor_value, echoing the command as the response.
     [[nodiscard]] auto handle_set_descriptor_value(
         uint16_t command_type, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// Whether @p command_type's value in @p command_data is the one its GET twin answers now.
-    [[nodiscard]] auto value_is_in_force(uint16_t command_type, std::span<uint8_t const> command_data) -> bool;
-    /// Whether SET_NAME's @p command_data names the name GET_NAME answers now.
-    [[nodiscard]] auto name_in_force(std::span<uint8_t const> command_data) const -> bool;
 
     /// Handle a GET descriptor-value command (GET_CONTROL, and the wider family).
     /// Routes through AemEntityModel::get_descriptor_value_for_wire -> the handler's
@@ -1150,32 +1075,17 @@ class AemCommandHandler
     /// MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and the echo 84 octets.
     [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-
-    /// SET/GET_MAX_TRANSIT_TIME (IEEE 1722.1-2021 Clauses 7.4.77-78, Milan v1.3 Sections
-    /// 5.4.2.30-31): a STREAM_OUTPUT's presentation time offset, as SET_STREAM_INFO sets it.
-    [[nodiscard]] auto handle_set_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
-    [[nodiscard]] auto handle_get_max_transit_time(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
-
+    /// SET_STREAM_INFO's answer @p r: a failure answers the values in force (Clause 7.4.15.1), or
+    /// @p r itself when they cannot be read.
+    [[nodiscard]] auto stream_info_set_answer(
+        AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// SET_STREAM_INFO's checks of @p cmd before its sub-commands: BAD_ARGUMENTS for
-    /// MSRP_ACC_LAT_VALID in the IEEE 1722.1-2021 layout, else presentation_offset_target's.
+    /// MSRP_ACC_LAT_VALID in the IEEE 1722.1-2021 layout, else max_transit_time_target's.
     [[nodiscard]] auto stream_info_target(AemStreamInfoPayload const& cmd, uint32_t& current) const -> uint8_t;
-    /// The presentation offset checks common to SET_STREAM_INFO and SET_MAX_TRANSIT_TIME:
-    /// SUCCESS with the current offset in @p current, or the status to refuse with.
-    [[nodiscard]] auto presentation_offset_target(uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& current) const
-        -> uint8_t;
-    /// Set stream output @p index's presentation offset to @p offset_ns: BAD_ARGUMENTS past
-    /// Milan's maximum, else the set_presentation_offset hook's status.
-    [[nodiscard]] auto set_presentation_offset(uint16_t index, uint64_t offset_ns) -> uint8_t;
     /// SET_STREAM_INFO's sub-commands of @p cmd on a stream output whose offset is @p current,
     /// @p response (the echoed command) already in the output buffer.
     [[nodiscard]] auto set_stream_info(AemStreamInfoPayload const& cmd, uint32_t current, std::span<uint8_t const> response)
         -> AemCommandResponse;
-    /// SET_MAX_TRANSIT_TIME @p cmd on a stream output whose offset is @p current, @p response
-    /// (the echoed command) already in the output buffer; a change is notified.
-    [[nodiscard]] auto set_max_transit_time(
-        AemSetMaxTransitTimePayload const& cmd, uint32_t current, std::span<uint8_t const> response) -> AemCommandResponse;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.
@@ -1455,11 +1365,6 @@ class AemCommandHandler
     /// The GET that reads what a SET writes (SET_NAME -> GET_NAME, SET_CONTROL ->
     /// GET_CONTROL, ...), or nullopt for a SET without one.
     [[nodiscard]] static auto get_twin_of(uint16_t set_command_type) noexcept -> std::optional<uint16_t>;
-    /// @p set_command's response @p r on SUCCESS or IN_PROGRESS, or when the value in force cannot be
-    /// read; else @p r's status with that value (a handler-answered SET: SET_STREAM_INFO, SET_MAX_TRANSIT_TIME).
-    [[nodiscard]] auto answer_set(
-        uint16_t set_command, AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
 
     /// @p set_command's response @p r on SUCCESS, else refused_set()'s, for a SET the handler
     /// answers itself and never defers (SET_CONFIGURATION): an IN_PROGRESS from its hook, which
@@ -1498,44 +1403,9 @@ class AemCommandHandler
         uint16_t command_type,
         std::span<uint8_t const> body);
 
-    /// Handle GET_AS_PATH (IEEE 1722.1-2021 7.4.41) through the get_as_path callback.
-    [[nodiscard]] auto handle_get_as_path(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
-
-    /// A GET_COUNTERS response's status and payload, as the command would answer.
-    struct CountersResponse
-    {
-        AemCommandResponse response{};
-        std::array<uint8_t, sizeof(AemCountersPayload)> payload{};
-    };
-    /// GET_COUNTERS for (@p descriptor_type, @p descriptor_index), answered locally.
-    [[nodiscard]] auto counters_of(uint16_t descriptor_type, uint16_t descriptor_index) -> CountersResponse;
-    /// Send GET_COUNTERS for (@p descriptor_type, @p descriptor_index) now.
-    auto send_counters_notification(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
-
-    /// The notifications due at @p now, from tick(): held-back GET_COUNTERS, and
-    /// in Milan mode the controller monitor.
-    void tick_notifications(sm::TimePoint now);
-    /// The controller monitor (Milan v1.2 Section 5.4.5.3), from tick().
-    void tick_controller_monitor(sm::TimePoint now);
-    /// A random monitor period in [CONTROLLER_MONITOR_MIN, CONTROLLER_MONITOR_MAX].
-    [[nodiscard]] auto monitor_period() noexcept -> sm::Clock::duration;
-    /// The entity is no longer acquired by anyone.
-    void drop_acquisition() noexcept;
-    /// Frame and send CONTROLLER_AVAILABLE to a registered controller.
-    void send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t sequence_id);
-    /// The CONTROLLER_AVAILABLE command header to @p controller_id, with @p sequence_id.
-    [[nodiscard]] auto controller_available_command(Eui64 const& controller_id, uint16_t sequence_id) const -> AemDu;
-    /// An AEM response to one of our commands (CONTROLLER_AVAILABLE).
-    void handle_aem_response(AemDu const& header);
-
     /// True if (@p command_type, @p body) is a SET_CONTROL targeting the configured
     /// IDENTIFY control — i.e. the change must also go to the IDENTIFY multicast.
     [[nodiscard]] auto targets_identify_control(uint16_t command_type, std::span<uint8_t const> body) const noexcept -> bool;
-
-    /// Answer a non-AEM AECP command (ADDRESS_ACCESS, AVC, VENDOR_UNIQUE, ...)
-    /// with its response type and status NOT_IMPLEMENTED, echoing the command.
-    [[nodiscard]] auto send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> command) const -> bool;
 
     /// Build and send AECP AEM response.
     /// @param dest_mac Destination MAC address for the response
@@ -1570,6 +1440,34 @@ class AemCommandHandler
 
     /// The controller monitor, from tick() under milan13.
     void tick_controller_monitor(sm::TimePoint now);
+
+    /// GET_COUNTERS for (@p descriptor_type, @p descriptor_index), answered locally.
+    struct CountersResponse
+    {
+        AemCommandResponse response{};
+        std::array<uint8_t, sizeof(AemCountersPayload)> payload{};
+    };
+    [[nodiscard]] auto counters_of(uint16_t descriptor_type, uint16_t descriptor_index) -> CountersResponse;
+    /// Send GET_COUNTERS for (@p descriptor_type, @p descriptor_index) now.
+    auto send_counters_notification(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+    /// The GET_COUNTERS notifications held back that are due at @p now, from tick().
+    void tick_notifications(sm::TimePoint now);
+
+    /// A rename to the name in force: nothing to save.
+    [[nodiscard]] auto name_in_force(std::span<uint8_t const> command_data) const -> bool;
+    /// A SET of the value in force (its GET twin answers the SET's body): nothing to save.
+    [[nodiscard]] auto value_is_in_force(uint16_t command_type, std::span<uint8_t const> command_data) -> bool;
+    /// Tell on_settings_changed of @p command_type when it is a persistent setting and changed one.
+    void report_setting_changed(uint16_t command_type) const;
+
+    /// Answer @p command (an AECP command of another type, as received) NOT_IMPLEMENTED.
+    [[nodiscard]] auto send_not_implemented(Eui48 const& dest_mac, std::span<uint8_t const> command) const -> bool;
+    /// An MVU command answered, or another AECP command type for us answered NOT_IMPLEMENTED:
+    /// process_packet()'s result; nullopt for anything else (an AEM PDU).
+    [[nodiscard]] auto answer_other_than_aem(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
+        -> std::optional<bool>;
+    /// Drop the acquisition, whoever held it.
+    void drop_acquisition() noexcept;
 
     /// Send CONTROLLER_AVAILABLE (IEEE 1722.1-2021 Clause 7.4.4, no payload) to @p controller_id
     /// at @p dest_mac with @p sequence_id, this entity its controller.
@@ -1661,6 +1559,15 @@ class AemCommandHandler
     [[nodiscard]] auto handle_mvu_get_mcr_info(MvuCommand const& command, std::span<uint8_t> out_buffer) const
         -> AemCommandResponse;
 
+    /// GET_SYSTEM_UNIQUE_ID (5.4.4.3): the number and name in force (Figure 5.7).
+    [[nodiscard]] auto handle_mvu_get_system_unique_id(std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+    /// SET_SYSTEM_UNIQUE_ID (5.4.4.2): refused ENTITY_LOCKED for another's lock and BAD_ARGUMENTS for a
+    /// name that is not well-formed UTF-8; answered with the id in force.
+    [[nodiscard]] auto handle_mvu_set_system_unique_id(MvuCommand const& command, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// The system unique id in force as the SET and GET responses carry it.
+    [[nodiscard]] auto system_unique_id_payload() const noexcept -> MvuSystemUniqueIdPayloadV13;
+
     /// SET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.4): the fields its flags mark, a well-formed UTF-8
     /// name, from a controller the lock does not shut out. Answers the settings in force, the
     /// command given back for a CLOCK_DOMAIN the model lacks.
@@ -1734,8 +1641,8 @@ class AemCommandHandler
     [[nodiscard]] auto send_mvu_pdu(Eui48 const& dest_mac, AecpMvuDu const& header, std::span<uint8_t const> body) const -> bool;
 
     AemCommandHandlerCallbacks callbacks_;
-    EntityProfile entity_profile_{};
-    std::optional<StreamInfoLayout> stream_info_layout_{};
+    MvuStreamInputCallbacks mvu_stream_inputs_{};
+    void const* mvu_stream_inputs_owner_{nullptr};  ///< see attach_mvu_stream_inputs
 
     // One of two code paths:
     //  (1) Legacy `EntityModel&` constructor: adapter_storage_ holds an
@@ -1786,6 +1693,30 @@ class AemCommandHandler
     bool dispatching_{false};
     // The MVU command answer_mvu_command() dispatches changed what it names: its response is notified.
     bool mvu_changed_{false};
+
+    // The system unique id (SET_SYSTEM_UNIQUE_ID), its number and name.
+    uint64_t system_unique_id_{0};
+    aem::AtdeccString system_unique_name_{};
+
+    // The GET_STREAM_INFO response form set; unset, the profile's.
+    std::optional<StreamInfoLayout> stream_info_layout_{};
+
+    // GET_COUNTERS notification hold-off per descriptor (COUNTERS_NOTIFICATION_INTERVAL).
+    struct CountersNotification
+    {
+        uint16_t descriptor_type{0};
+        uint16_t descriptor_index{0};
+        sm::TimePoint next_allowed{sm::TimePoint::min()};
+        bool pending{false};
+    };
+    static constexpr size_t MAX_COUNTERS_NOTIFICATIONS = 64;
+    SlotTable<CountersNotification, MAX_COUNTERS_NOTIFICATIONS> counters_notifications_{};
+    // A tick() has run: the hold-off has a clock.
+    bool have_now_{false};
+
+    // The command being dispatched succeeded without changing a persistent setting
+    // (a SET to the value in force): answer_aem_command does not report it to on_settings_changed.
+    bool setting_unchanged_{false};
 
     // Acquisition state. The acquirer's MAC is kept because IEEE 1722.1 7.5.2
     // implicitly registers the acquiring controller for unsolicited notifications.
@@ -1903,34 +1834,25 @@ class AemCommandHandler
     {
         Eui64 controller_entity_id{};
         Eui48 controller_mac{};       ///< Source MAC of the REGISTER command, for unicast notifications
-        uint16_t sequence_id{0};      ///< of its next unsolicited AEM notification (Milan v1.2 Section 5.3.4.2)
-        uint16_t mvu_sequence_id{0};  ///< of its next unsolicited MVU notification
-        /// Controller monitor (Milan v1.2 Section 5.4.5.3): when it is next
-        /// sent CONTROLLER_AVAILABLE or, with one outstanding, when that times out.
+        uint16_t sequence_id{0};      ///< of its next AEM notification (Milan v1.3 Section 5.3.4.2)
+        uint16_t mvu_sequence_id{0};  ///< of its next MVU notification
+        /// When the monitor next sends CONTROLLER_AVAILABLE or, with one outstanding, when that times out.
         sm::TimePoint monitor_deadline{};
-        bool available_outstanding{false};
-        uint8_t available_tries{0};
-        uint16_t available_sequence_id{0};
+        uint8_t available_tries{0};         ///< CONTROLLER_AVAILABLE sent and unanswered: 0, 1, or 2 with the retry
+        uint16_t available_sequence_id{0};  ///< of the one outstanding
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
 
-    // GET_COUNTERS notification hold-off per descriptor (COUNTERS_NOTIFICATION_INTERVAL).
-    struct CountersNotification
-    {
-        uint16_t descriptor_type{0};
-        uint16_t descriptor_index{0};
-        sm::TimePoint next_allowed{sm::TimePoint::min()};
-        bool pending{false};
-    };
-    static constexpr size_t MAX_COUNTERS_NOTIFICATIONS = 64;
-    SlotTable<CountersNotification, MAX_COUNTERS_NOTIFICATIONS> counters_notifications_{};
-    // The latest tick() time: the clock the hold-off reads.
-    sm::TimePoint now_{};
-    bool have_now_{false};
+    /// Whether @p reg stays registered at @p now: its timer has not run out, or CONTROLLER_AVAILABLE
+    /// or its one retry (IEEE 1722.1-2021 Clause 9.3.6) is sent to it now.
+    [[nodiscard]] auto keep_monitoring(UnsolicitedRegistration& reg, sm::TimePoint now) -> bool;
 
-    // Sequence ids of the commands this entity sends (CONTROLLER_AVAILABLE).
+    /// Send @p reg CONTROLLER_AVAILABLE, or its retry with the same sequence id, at @p now.
+    void ask_controller_available(UnsolicitedRegistration& reg, sm::TimePoint now);
+
+    // Sequence ids of the commands this entity sends as a controller (CONTROLLER_AVAILABLE).
     uint16_t command_sequence_id_{0};
-    // The monitor period's generator (a linear congruential state).
+    // The monitor period's xorshift32 state.
     uint32_t monitor_random_{0x2545F491U};
 
     // Our own entity_id, needed as the target_entity_id of unsolicited
@@ -1948,12 +1870,9 @@ class AemCommandHandler
     uint16_t identify_control_index_{0};
     bool identify_control_index_valid_{false};
 
-    // The stream ports' dynamic audio mappings.
-    DynamicAudioMaps dynamic_maps_{};
-    // The command being dispatched succeeded without changing a persistent
-    // setting (an ADD/REMOVE_AUDIO_MAPPINGS that left the port as it was):
-    // process_packet does not report it to on_settings_changed.
-    bool setting_unchanged_{false};
+    // The stream ports' dynamic audio mappings, in the entity's store (set_dynamic_audio_maps).
+    DynamicAudioMaps* audio_maps_{nullptr};
+    bool output_mappings_follow_streams_{false};
 };
 
 }  // namespace statusbar::nanoavb

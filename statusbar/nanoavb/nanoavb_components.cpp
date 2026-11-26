@@ -44,7 +44,7 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
     ieee::Eui48 src_mac{};
     ieee::Eui48 dest_mac{};
 
-    while (true) {  // NOLINT(statusbar-block-statements) one Announce read; pre-dates the gate
+    while (true) {
         auto result = context_.recv(&src_mac, &dest_mac, payload_buf_);
         if (!result || *result <= 0) {
             break;
@@ -351,20 +351,86 @@ void AtdeccNetHandler::attach_local_port(AtdeccLocalPort* const port)
     port->set_on_client_gone([this](ieee::Eui48 const& mac) { aem_handler_.forget_controller_at(mac); });
 }
 
-void AtdeccNetHandler::tick(int64_t now_ns)
-{  // NOLINT(statusbar-block-statements) the ATDECC timers, one per protocol
-    // Convert nanoseconds to sm::TimePoint for protocol handlers
-    auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
+AtdeccNetHandler::~AtdeccNetHandler()
+{
+    // The Milan pair outlives this handler and sent through it.
+    release_milan_acmp();
+}
 
-    // Tick ATDECC protocol handlers
-    adp_advertiser_.tick(sm_now);
-    // Note: NanoAvbAcmpTalker is event-driven, no tick needed
-    acmp_listener_.tick(sm_now);  // Listener has timeout checking
-    aem_handler_.tick(sm_now);    // AEM has LOCK / pending-acquire timeout checking
-    if (adp_discovery_ != nullptr) {
-        adp_discovery_->tick(sm_now);
+void AtdeccNetHandler::release_milan_acmp() noexcept
+{
+    // Only what this handler attached: a handler made later for the same
+    // pair keeps its senders when this one goes.
+    if (milan_talker_ != nullptr) {
+        milan_talker_->detach_sender(this);
     }
+    if (milan_listener_ != nullptr) {
+        milan_listener_->detach_senders(this);
+    }
+    aem_handler_.detach_mvu_stream_inputs(this);
+}
 
+void AtdeccNetHandler::attach_mvu_stream_inputs()
+{
+    // Milan v1.3 5.5.3.2: a BIND_STREAM or UNBIND_STREAM is the sink's bind
+    // or unbind event, whichever protocol brought it. The talker's last
+    // advertisement goes with it, as with the ACMP command (dispatch_milan_acmp).
+    aem_handler_.attach_mvu_stream_inputs(
+        this,
+        MvuStreamInputCallbacks{
+            .binding_command =
+                [this](atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond) {
+                    (void)milan_listener_->receive_mvu_binding_command(
+                        command, aem_handler_.event_time(), respond, heard_advertisement_of(command.talker_entity_id));
+                },
+            .stream_input_info = [this](uint16_t const index) -> std::optional<atdecc::MvuGetStreamInputInfoExResponse> {
+                auto const* const sink = milan_listener_->sink(index);
+                return sink != nullptr ? std::optional{atdecc::milan_stream_input_info_ex(sink->context())} : std::nullopt;
+            }});
+}
+
+void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, NanoAvbMilanAcmpListener* const listener)
+{
+    release_milan_acmp();
+    milan_talker_ = talker;
+    milan_listener_ = listener;
+    if (talker != nullptr) {
+        talker->attach_sender(this, [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); });
+    }
+    if (listener != nullptr) {
+        listener->attach_senders(
+            this,
+            [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); },
+            [this](atdecc::AcmpCommandResponse const& pdu) { return send_acmp(pdu); });
+        attach_mvu_stream_inputs();
+    }
+}
+
+auto AtdeccNetHandler::send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool
+{
+    // The 56-octet form on Layer 2 (see setup_nanoavb_callbacks), which is
+    // also the truncated ACMPDU Milan v1.3 5.5.2.2 asks for.
+    std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+    return send(atdecc::ATDECC_MULTICAST_MAC, atdecc::acmp_serialize_2016(pdu, buf)).has_value();
+}
+
+void AtdeccNetHandler::tick_protocols(sm::TimePoint const now)
+{
+    adp_advertiser_.tick(now);
+    // Neither talker has a timer. One listener runs: the idle one's tick finds nothing due.
+    acmp_listener_.tick(now);
+    if (milan_listener_ != nullptr) {
+        milan_listener_->tick(now);
+    }
+    aem_handler_.tick(now);  // AEM has LOCK / pending-acquire timeout checking
+    if (adp_discovery_ != nullptr) {
+        adp_discovery_->tick(now);
+    }
+}
+
+void AtdeccNetHandler::tick(int64_t now_ns)
+{
+    tick_protocols(sm::TimePoint{std::chrono::nanoseconds{now_ns}});
     ++tick_count_;
 
     // Periodic telemetry (wall-clock gated; emitted only when a logger is set,
@@ -475,26 +541,16 @@ void AtdeccNetHandler::dispatch_frame(
     // Convert nanoseconds to sm::TimePoint for protocol handlers
     auto const sm_now = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
 
-    switch (subtype) {
-        case AvtpSubtype::adp: {  // NOLINT(statusbar-block-statements) one ADP frame's dispatch; pre-dates the gate
-            // ADP message
-            if (payload.size() < AdpDu::LENGTH) {
-                return;
-            }
-            AdpDu adp{};
-            span_load(adp, payload);
-            dispatch_adp(adp, src_mac, sm_now, local);
+    // First byte is the AVTP subtype
+    switch (payload[0]) {
+        case avtp::AvtpSubtype::adp:
+            dispatch_adp(src_mac, payload, sm_now, local);
             break;
         case avtp::AvtpSubtype::acmp:
             dispatch_acmp(payload, sm_now);
             break;
-        }
-
-        case AvtpSubtype::aecp: {
-            // AECP message - an MVU command to the MVU handler, anything else
-            // to the AEM handler; each sends its unicast response
-            auto const our_entity_id = adp_advertiser_.adpdu().entity_id;
-            (void)dispatch_aecp(aem_handler_, mvu_handler_, src_mac, payload, our_entity_id, sm_now);
+        case avtp::AvtpSubtype::aecp:
+            dispatch_aecp(src_mac, payload, sm_now);
             break;
         default:
             // Unknown ATDECC subtype
@@ -502,14 +558,27 @@ void AtdeccNetHandler::dispatch_frame(
     }
 }
 
-void AtdeccNetHandler::dispatch_adp(ieee::Eui48 const& src_mac, std::span<uint8_t const> const payload, sm::TimePoint const now)
+void AtdeccNetHandler::advertiser_receive(
+    atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
+{
+    // The local socket is not an AVB interface (Milan v1.2 Section 5.6.3): a local discover
+    // is answered at once, to that controller alone, outside the advertise state machine.
+    if (!local) {
+        adp_advertiser_.receive_adpdu(adp, now);
+    } else if (local_port_ != nullptr && adp_advertiser_.is_discover_for_us(adp)) {
+        (void)adp_advertiser_.reply_available([&](atdecc::AdpDu const& du) { return local_port_->send(src_mac, as_bytes(du)); });
+    }
+}
+
+void AtdeccNetHandler::dispatch_adp(
+    ieee::Eui48 const& src_mac, std::span<uint8_t const> const payload, sm::TimePoint const now, bool const local)
 {
     if (payload.size() < atdecc::AdpDu::LENGTH) {
         return;
     }
     atdecc::AdpDu adp{};
     span_load(adp, payload);
-    adp_advertiser_.receive_adpdu(adp, now);
+    advertiser_receive(adp, src_mac, now, local);
     if (adp_discovery_ != nullptr) {
         adp_discovery_->receive_adpdu(adp, src_mac, now);
     }
@@ -811,43 +880,43 @@ auto NanoAvbNetHandlers::make_atdecc_handler() -> std::unique_ptr<AtdeccNetHandl
     return atdecc;
 }
 
-    auto gptp = std::make_unique<GptpAnnounceHandler>(interface_name_);
+void NanoAvbNetHandlers::add_to_reactor(net::MessageReactor& reactor)
+{
+    mvrp_ptr_ = place_handler(
+        reactor, std::make_unique<MvrpNetHandler>(interface_name_, components_->mvrp_handler), unopened_mvrp_, mvrp_valid_);
+    msrp_ptr_ = place_handler(
+        reactor, std::make_unique<MsrpNetHandler>(interface_name_, components_->msrp_handler), unopened_msrp_, msrp_valid_);
+    atdecc_ptr_ = place_atdecc_handler(reactor);
+    gptp_ptr_ = place_handler(reactor, std::make_unique<GptpAnnounceHandler>(interface_name_), unopened_gptp_, gptp_valid_);
+}
 
-    mvrp_valid_ = mvrp->valid();
-    msrp_valid_ = msrp->valid();
+auto NanoAvbNetHandlers::place_atdecc_handler(net::MessageReactor& reactor) -> AtdeccNetHandler*
+{
+    auto atdecc = make_atdecc_handler();
     atdecc_valid_ = atdecc->valid();
-    gptp_valid_ = gptp->valid();
-
-    // Capture raw pointers before ownership transfer
-    mvrp_ptr_ = mvrp.get();
-    msrp_ptr_ = msrp.get();
-    atdecc_ptr_ = atdecc.get();
-    gptp_ptr_ = gptp.get();
-
-    if (!local_port_config_.path.empty()) {
-        if (auto port = AtdeccLocalPort::open(local_port_config_)) {
-            local_ptr_ = port->get();
-            atdecc->attach_local_port(local_ptr_);
-            reactor.add(std::move(*port));
-        } else {
-            local_port_error_ = port.error();
-        }
+    open_local_port(reactor, *atdecc);
+    AtdeccNetHandler* const raw = atdecc.get();
+    if (atdecc_valid_ || local_ptr_ != nullptr) {
+        reactor.add(std::move(atdecc));
+    } else {
+        unopened_atdecc_ = std::move(atdecc);
     }
+    return raw;
+}
 
-    // Transfer ownership to reactor (only valid handlers; the ATDECC handler
-    // always: tick-only without its socket, it still serves the local port
-    // and runs the ADP/ACMP/AEM timers). The rest stay owned here.
-    auto const place = [this, &reactor](bool const valid, std::unique_ptr<net::Pollable> handler) {
-        if (valid) {
-            reactor.add(std::move(handler));
-        } else {
-            unopened_.push_back(std::move(handler));
-        }
-    };
-    place(mvrp_valid_, std::move(mvrp));
-    place(msrp_valid_, std::move(msrp));
-    place(true, std::move(atdecc));
-    place(gptp_valid_, std::move(gptp));
+void NanoAvbNetHandlers::open_local_port(net::MessageReactor& reactor, AtdeccNetHandler& atdecc)
+{
+    if (local_port_config_.path.empty()) {
+        return;
+    }
+    auto port = AtdeccLocalPort::open(local_port_config_);
+    if (!port) {
+        local_port_error_ = port.error();
+        return;
+    }
+    local_ptr_ = port->get();
+    atdecc.attach_local_port(local_ptr_);
+    reactor.add(std::move(*port));
 }
 
 void NanoAvbNetHandlers::close_local_port()
@@ -929,12 +998,6 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
     // would wipe callbacks installed before start (identify_changed,
     // get_counters, get_stream_info).
     components.aem_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
-        auto& atdecc = handlers.atdecc_handler();
-        return atdecc.send(dest_mac, response).has_value();
-    });
-
-    // AECP MVU: unicast to the controller, like AEM.
-    components.mvu_handler.set_send_response([&handlers](ieee::Eui48 const& dest_mac, std::span<uint8_t const> response) -> bool {
         auto& atdecc = handlers.atdecc_handler();
         return atdecc.send(dest_mac, response).has_value();
     });

@@ -702,6 +702,11 @@ class NanoAvbNetHandlers
   private:
     /// The ATDECC handler with the discovery database and ACMP wired to it.
     [[nodiscard]] auto make_atdecc_handler() -> std::unique_ptr<AtdeccNetHandler>;
+    /// The ATDECC handler, in the reactor when its socket or a local port opened: tick-only
+    /// without the socket, it still serves the local port and runs the ADP/ACMP/AEM timers.
+    [[nodiscard]] auto place_atdecc_handler(net::MessageReactor& reactor) -> AtdeccNetHandler*;
+    /// Open the configured local ATDECC port into @p reactor and attach it to @p atdecc.
+    void open_local_port(net::MessageReactor& reactor, AtdeccNetHandler& atdecc);
     void wire_discovery_ageout();
 
     std::string interface_name_;
@@ -723,9 +728,6 @@ class NanoAvbNetHandlers
     AtdeccLocalPort::Config local_port_config_{};
     AtdeccLocalPort* local_ptr_{nullptr};
     std::error_code local_port_error_{};
-    /// Handlers whose socket would not open: not in the reactor, but kept so
-    /// the pointers above (and the callbacks wired through them) stay valid.
-    std::vector<std::unique_ptr<net::Pollable>> unopened_{};
     bool mvrp_valid_{false};
     bool msrp_valid_{false};
     bool atdecc_valid_{false};

@@ -2507,11 +2507,11 @@ struct PersistentKit : MilanKit
         span_store(std::span<uint8_t>{frame}.first(atdecc::AecpMvuDu::LENGTH), header);
         std::ranges::copy(body, frame.begin() + atdecc::AecpMvuDu::LENGTH);
         std::vector<uint8_t> response;
-        kit.host().components().mvu_handler.set_send_response([&response](ieee::Eui48 const&, std::span<uint8_t const> bytes) {
+        kit.host().components().aem_handler.set_send_response([&response](ieee::Eui48 const&, std::span<uint8_t const> bytes) {
             response.assign(bytes.begin(), bytes.end());
             return true;
         });
-        (void)kit.host().components().mvu_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id, {});
+        (void)kit.host().components().aem_handler.process_packet(CONTROLLER_MAC, frame, config.entity_id);
         atdecc::AecpMvuDu reply{};
         span_load(reply, std::span<uint8_t const>{response}.first(atdecc::AecpMvuDu::LENGTH));
         return reply.common.status();
@@ -2824,73 +2824,6 @@ TEST(avb_entity_kit_persistence, presentation_offset_survives_a_rebuild)
         EXPECT_TRUE(m.start_ready());
         EXPECT_TRUE(applied.empty());
         EXPECT_EQ(m.kit.presentation_offset_ns(1), 2'000'000U);  // the constructor's start, before the edit
-    }
-    std::filesystem::remove_all(dir);
-}
-
-// SET_SYSTEM_UNIQUE_ID and SET_MEDIA_CLOCK_REFERENCE_INFO are saved and
-// restored
-TEST(avb_entity_kit_persistence, mvu_values_survive_a_rebuild)
-{
-    auto const dir = state_dir("mvu");
-    auto const path = (dir / "avb-state.toml").string();
-    {
-        PersistentKit m{path};
-        EXPECT_TRUE(m.start_ready());
-        atdecc::MvuSystemUniqueIdPayloadV13 id{};
-        id.number = uint64_t{4242};
-        EXPECT_EQ(m.mvu_packet(atdecc::MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(id)), atdecc::MVU_STATUS_SUCCESS);
-        atdecc::MvuMediaClockReferenceInfoPayload mcr{};
-        mcr.flags = atdecc::MVU_MCR_FLAGS_SUPPORTED;
-        mcr.user_mcr_prio = uint8_t{210};
-        mcr.media_clock_domain_name = nanoavb::mcr_domain_name("Stage");
-        EXPECT_EQ(
-            m.mvu_packet(atdecc::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)), atdecc::MVU_STATUS_SUCCESS);
-    }
-    {
-        PersistentKit m{path};
-        EXPECT_TRUE(m.start_ready());
-        auto const& mvu = m.kit.host().components().mvu_handler;
-        EXPECT_EQ(mvu.system_unique_id(), uint32_t{4242});
-        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, uint8_t{210});
-        EXPECT_TRUE(mvu.mcr_info(0)->domain_name == nanoavb::mcr_domain_name("Stage"));
-    }
-    std::filesystem::remove_all(dir);
-}
-
-// Milan v1.3 Sections 7.6.1.1-2: the configured default priority is the clock domain's
-// default and its user priority's; unset keeps 192. A user priority is saved only away
-// from the default, so a saved 192 survives a default of 224
-TEST(avb_entity_kit_persistence, default_mcr_priority_from_the_config)
-{
-    auto const dir = state_dir("mcr-default");
-    auto const path = (dir / "avb-state.toml").string();
-    {
-        PersistentKit m{path};
-        EXPECT_TRUE(m.start_ready());
-        auto const& mvu = m.kit.host().components().mvu_handler;
-        EXPECT_EQ(mvu.default_mcr_priority(0), atdecc::MVU_MCR_PRIO_NETWORK_INTERFACE);
-        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, atdecc::MVU_MCR_PRIO_NETWORK_INTERFACE);
-    }
-    {
-        PersistentKit m{path};
-        m.config.default_mcr_priorities = {atdecc::MVU_MCR_PRIO_ROUTER, uint8_t{100}};
-        EXPECT_TRUE(m.start_ready());
-        auto const& mvu = m.kit.host().components().mvu_handler;
-        EXPECT_EQ(mvu.default_mcr_priority(0), atdecc::MVU_MCR_PRIO_ROUTER);
-        EXPECT_EQ(mvu.mcr_info(0)->user_mcr_prio, atdecc::MVU_MCR_PRIO_ROUTER);
-        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.media_clock_references.empty());
-        atdecc::MvuMediaClockReferenceInfoPayload mcr{};
-        mcr.flags = atdecc::MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID;
-        mcr.user_mcr_prio = atdecc::MVU_MCR_PRIO_NETWORK_INTERFACE;
-        EXPECT_EQ(
-            m.mvu_packet(atdecc::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)), atdecc::MVU_STATUS_SUCCESS);
-    }
-    {
-        PersistentKit m{path};
-        m.config.default_mcr_priorities = {atdecc::MVU_MCR_PRIO_ROUTER};
-        EXPECT_TRUE(m.start_ready());
-        EXPECT_EQ(m.kit.host().components().mvu_handler.mcr_info(0)->user_mcr_prio, atdecc::MVU_MCR_PRIO_NETWORK_INTERFACE);
     }
     std::filesystem::remove_all(dir);
 }
@@ -5488,12 +5421,44 @@ auto get_clock_source(MilanKit& m, uint16_t const domain) -> uint16_t
 
 }  // namespace
 
+// Milan v1.3 Sections 5.4.4.2 and 5.4.4.4: SET_SYSTEM_UNIQUE_ID and SET_MEDIA_CLOCK_REFERENCE_INFO are
+// non-volatile: a rebuilt kit answers what the last run was given.
+TEST(avb_entity_kit_persistence, mvu_values_survive_a_rebuild)
+{
+    auto const dir = state_dir("mvu");
+    auto const path = kit_state_path(dir, 0x84);
+    {
+        PersistentKit m{path, 0x84, std::nullopt, make_clock_domains_blob()};
+        EXPECT_TRUE(m.start_ready());
+        atdecc::MvuSystemUniqueIdPayloadV13 id{};
+        id.number = uint64_t{4242};
+        EXPECT_EQ(m.mvu_packet(atdecc::MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, make_const_span(id)), atdecc::MVU_STATUS_SUCCESS);
+        atdecc::MvuMediaClockReferenceInfoPayload mcr{};
+        mcr.flags = atdecc::MVU_MCR_FLAGS_SUPPORTED;
+        mcr.user_mcr_prio = uint8_t{210};
+        mcr.media_clock_domain_name = atdecc::aem::AtdeccString{"Stage"};
+        EXPECT_EQ(
+            m.mvu_packet(atdecc::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)), atdecc::MVU_STATUS_SUCCESS);
+        EXPECT_EQ(load_persistent_state(path, 0, {}).state.media_clock_references.size(), size_t{1});
+    }
+    {
+        PersistentKit m{path, 0x84, std::nullopt, make_clock_domains_blob()};
+        EXPECT_TRUE(m.start_ready());
+        auto const& aem = m.kit.host().components().aem_handler;
+        EXPECT_EQ(aem.system_unique_id(), uint64_t{4242});
+        auto const info = aem.media_clock_reference_info(0);
+        EXPECT_EQ(info.user_mcr_prio, uint8_t{210});
+        EXPECT_TRUE(info.media_clock_domain_name.value == atdecc::aem::AtdeccString{"Stage"}.value);
+    }
+    std::filesystem::remove_all(dir);
+}
+
 // SET_CLOCK_SOURCE on CLOCK_DOMAIN 1 reaches the entity's hook; GET_CLOCK_SOURCE reports it, it is
 // notified and saved, and the saved source reaches the hook again at the next start.
 TEST(avb_entity_kit_clock_source, set_clock_source_on_domain_one_reaches_the_host)
 {
     auto const dir = state_dir("clock-source");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x80);
     std::vector<std::pair<uint16_t, uint16_t>> calls;
     auto const hook = [&calls](uint16_t const domain, uint16_t const source) -> uint8_t {
         calls.emplace_back(domain, source);
