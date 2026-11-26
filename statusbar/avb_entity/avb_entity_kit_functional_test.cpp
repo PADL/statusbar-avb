@@ -61,6 +61,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -2222,9 +2223,9 @@ auto listener_on_test_port(KitPair& pair, std::vector<net::TestPortContext::Memb
     return port;
 }
 
-/// A bridge port declaring @p declare to @p pair's listener kit over MSRP, until it is registered.
+/// A bridge port declaring @p declare to @p kit over MSRP from @p now, until it is registered; @p now moves on.
 template <typename Declare>
-void bridge_declares(KitPair& pair, Declare&& declare)
+void bridge_declares(KitUnderTest& kit, TimePoint& now, Declare&& declare)
 {
     std::vector<std::vector<uint8_t>> out;
     srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
@@ -2232,13 +2233,13 @@ void bridge_declares(KitPair& pair, Declare&& declare)
         out.emplace_back(pdu.begin(), pdu.end());
         return true;
     });
-    bridge.start(pair.now);
-    std::forward<Declare>(declare)(bridge);
+    bridge.start(now);
+    std::forward<Declare>(declare)(bridge, now);
     for (int i = 0; i < 4; ++i) {
-        pair.now += std::chrono::milliseconds{250};
-        bridge.tick(pair.now);
+        now += std::chrono::milliseconds{250};
+        bridge.tick(now);
         for (auto const& pdu : std::exchange(out, {})) {
-            pair.listener->host().components().msrp_handler.receive_packet(pdu, pair.now);
+            kit->host().components().msrp_handler.receive_packet(pdu, now);
         }
     }
 }
@@ -2365,10 +2366,10 @@ TEST(avb_entity_kit_input_vlan, an_input_settled_on_another_vlan_holds_its_vid_o
     bind_answered(pair, 0x0200000000000777ULL, Eui48{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x10}, 3);
     EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
 
-    bridge_declares(pair, [&pair](srp::msrp::MsrpParticipant& bridge) {
+    bridge_declares(pair.listener, pair.now, [](srp::msrp::MsrpParticipant& bridge, TimePoint const now) {
         srp::msrp::DomainFirstValue class_a{};
         class_a.sr_class_vid = 3;
-        (void)bridge.declare_domain(class_a, pair.now);
+        (void)bridge.declare_domain(class_a, now);
     });
     EXPECT_EQ(pair.listener->host().components().msrp_handler.domain().sr_class_vid, 3);
     pair.controller_sends(
@@ -2392,14 +2393,14 @@ TEST(avb_entity_kit_input_vlan, an_input_probed_without_a_vlan_joins_its_talker_
     EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->sink(pair.sink)->is_settled());
     EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2)}));  // no VID yet
 
-    bridge_declares(pair, [&](srp::msrp::MsrpParticipant& bridge) {
+    bridge_declares(pair.listener, pair.now, [&](srp::msrp::MsrpParticipant& bridge, TimePoint const now) {
         srp::msrp::TalkerAdvertiseFirstValue fv{};
         (void)tsn::load_unchecked(Eui64{}.from_uint64(stream).span(), &fv.stream_id);
         fv.destination_address = group;
         fv.vlan_identifier = 3;
         fv.max_frame_size = 416;
         fv.max_interval_frames = 1;
-        (void)bridge.declare_talker_advertise(fv, pair.now);
+        (void)bridge.declare_talker_advertise(fv, now);
     });
     EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
     pair.controller_sends(
@@ -2680,6 +2681,173 @@ TEST(avb_entity_kit_input_counters, a_frame_of_another_subtype_on_an_inputs_stre
     EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 1U);
     EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 0U);
     crf.stop();
+}
+
+//
+// GET_STREAM_INFO and GET_TX_STATE of Milan streams - Milan v1.2 Section 5.4.2.10, Table 5.9
+//
+
+namespace {
+
+namespace sif = atdecc::aem::stream_info_flags;
+
+/// GET_STREAM_INFO of stream @p index of @p kit (a STREAM_INPUT unless @p type says otherwise), in
+/// Milan v1.2's 56 octets: the payload and the Milan extension.
+auto milan_stream_info(KitUnderTest& kit, uint16_t const index, uint16_t const type = atdecc::aem::DESCRIPTOR_STREAM_INPUT)
+    -> std::pair<atdecc::aem::AemStreamInfoPayload, atdecc::aem::AemStreamInfoMilanExtension>
+{
+    auto& aem = kit->host().components().aem_handler;
+    aem.set_stream_info_layout(atdecc::aem::StreamInfoLayout::milan_v1_2);
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetStreamInfoCommandPayload asked{};
+    asked.descriptor_type = type;
+    asked.descriptor_index = index;
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = aem.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(result.size, atdecc::aem::AEM_STREAM_INFO_MILAN_LENGTH);
+    atdecc::aem::AemStreamInfoPayload info{};
+    atdecc::aem::AemStreamInfoMilanExtension ext{};
+    span_load(info, std::span<uint8_t const>{out}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
+    span_load(ext, std::span<uint8_t const>{out}.subspan(atdecc::aem::AemStreamInfoPayload::LENGTH));
+    return {info, ext};
+}
+
+/// A bridge port declaring a Listener @p declaration for @p kit's talker stream @p spec.
+void bridge_listener(KitUnderTest& kit, TimePoint& now, StreamSpec const& spec, srp::msrp::ListenerDeclaration const declaration)
+{
+    auto const sid = kit->make_talker_srp_info(spec).stream_id;
+    bridge_declares(kit, now, [&sid, declaration](srp::msrp::MsrpParticipant& bridge, TimePoint const at) {
+        (void)bridge.declare_listener(sid, declaration, at);
+    });
+}
+
+/// GET_TX_STATE of @p kit's talker stream @p index: its response.
+auto tx_state(KitUnderTest& kit, uint16_t const index, TimePoint const now) -> atdecc::AcmpCommandResponse
+{
+    std::vector<atdecc::AcmpCommandResponse> answers;
+    kit->host().components().milan_acmp_talker->set_tx_response([&answers](atdecc::AcmpCommandResponse const& pdu) {
+        answers.push_back(pdu);
+        return true;
+    });
+    receive_acmp(kit, controller_command(atdecc::ACMP_MESSAGE_TYPE_GET_TX_STATE_COMMAND, TALKER_ID, index, Eui64{}, 0), now);
+    EXPECT_EQ(answers.size(), 1U);
+    return answers.empty() ? atdecc::AcmpCommandResponse{} : answers.back();
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_stream_info, a_bound_milan_input_says_how_far_it_has_come)
+{
+    // Bound and settled, the Talker attribute not yet registered: no REGISTERING and no accumulated
+    // latency; registered and reserved: both, probing COMPLETED (Milan v1.2 Table 5.9, Figure 5.1).
+    KitPair pair{"milan13"};
+    auto const settled = sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAM_ID_VALID |
+        sif::STREAM_DEST_MAC_VALID | sif::STREAM_VLAN_ID_VALID;
+    bind_answered(pair, 0x0200000000000777ULL, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x77}, 2);
+    auto [info, ext] = milan_stream_info(pair.listener, pair.sink);
+    EXPECT_EQ(info.flags.get(), settled);
+    EXPECT_EQ(ext.flags_ex.get(), 0U);
+    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::COMPLETED);
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, ANSWERED_TALKER_ID, 0, LISTENER_ID, pair.sink));
+
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    std::tie(info, ext) = milan_stream_info(pair.listener, pair.sink);
+    EXPECT_EQ(info.flags.get(), settled | sif::MSRP_ACC_LAT_VALID);
+    EXPECT_EQ(info.stream_id, pair.talker->host().components().talker_stream(pair.source)->stream_id);
+    EXPECT_EQ(info.stream_vlan_id.get(), 2);
+    EXPECT_EQ(ext.flags_ex.get(), atdecc::aem::stream_info_flags_ex::REGISTERING);
+    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::COMPLETED);
+    EXPECT_EQ(ext.acmp_status(), 0);
+
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_EQ(milan_stream_info(pair.listener, pair.sink).first.flags.get(), sif::STREAM_FORMAT_VALID);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_stream_info, a_probed_milan_output_says_it_declares_until_its_probe_runs_out)
+{
+    // Probed and declared, no Listener yet: the stream's identity and latency, nothing of a
+    // binding; 15 s after the probe with no Listener it waits again (Milan v1.3 Section 4.3.3.1).
+    KitUnderTest kit{make_io_config(TALKER_ID, "milan13")};
+    bring_up(kit);
+    auto const& spec = kit.talker_specs().front();
+    TimePoint now{std::chrono::seconds{4}};
+    probe_talker_stream(kit, spec.index, now);
+    EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Advertising);
+    auto const [info, ext] = milan_stream_info(kit, spec.index, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT);
+    uint32_t const flags = info.flags.get();
+    EXPECT_EQ(
+        flags & (sif::STREAM_FORMAT_VALID | sif::STREAM_ID_VALID | sif::MSRP_ACC_LAT_VALID | sif::STREAM_VLAN_ID_VALID),
+        sif::STREAM_FORMAT_VALID | sif::STREAM_ID_VALID | sif::MSRP_ACC_LAT_VALID | sif::STREAM_VLAN_ID_VALID);
+    EXPECT_EQ(flags & (sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAMING_WAIT | sif::REGISTERING_FAILED), 0U);
+    EXPECT_EQ(info.msrp_accumulated_latency.get(), kit->presentation_offset_ns(spec.index));
+    EXPECT_EQ(ext.flags_ex.get(), 0U);
+    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::DISABLED);
+
+    auto& msrp = kit->host().components().msrp_handler;
+    msrp.tick(now + std::chrono::seconds{5});
+    EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Advertising);
+    msrp.tick(now + nanoavb::MsrpHandler<>::TALKER_PROBE_VALIDITY + std::chrono::milliseconds{1});
+    EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Waiting);
+    EXPECT_TRUE(kit.stop(now + std::chrono::seconds{20}));
+}
+
+TEST(avb_entity_kit_stream_info, a_milan_output_reports_a_registered_listener_and_its_failure)
+{
+    // A Listener Asking Failed: REGISTERING_FAILED in GET_TX_STATE (Milan v1.3 Table 5.23) and
+    // GET_STREAM_INFO, REGISTERING in its extension; Listener Ready: REGISTERING alone, and streamed.
+    KitUnderTest kit{make_io_config(TALKER_ID, "milan13")};
+    bring_up(kit);
+    auto const& spec = kit.talker_specs().front();
+    TimePoint now{std::chrono::seconds{4}};
+    probe_talker_stream(kit, spec.index, now);
+
+    bridge_listener(kit, now, spec, srp::msrp::ListenerDeclaration::AskingFailed);
+    EXPECT_EQ(tx_state(kit, spec.index, now).flags.get(), atdecc::acmp_flags::SRP_REGISTRATION_FAILED);
+    auto [info, ext] = milan_stream_info(kit, spec.index, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT);
+    EXPECT_NE(info.flags.get() & sif::REGISTERING_FAILED, 0U);
+    EXPECT_EQ(ext.flags_ex.get(), atdecc::aem::stream_info_flags_ex::REGISTERING);
+    EXPECT_FALSE(kit->talker_should_transmit(spec.index, realtime::MonotonicRawClock::time_point{now.time_since_epoch()}));
+
+    bridge_listener(kit, now, spec, srp::msrp::ListenerDeclaration::Ready);
+    EXPECT_EQ(tx_state(kit, spec.index, now).flags.get(), 0);
+    std::tie(info, ext) = milan_stream_info(kit, spec.index, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT);
+    EXPECT_EQ(info.flags.get() & sif::REGISTERING_FAILED, 0U);
+    EXPECT_EQ(ext.flags_ex.get(), atdecc::aem::stream_info_flags_ex::REGISTERING);
+    EXPECT_TRUE(kit->talker_should_transmit(spec.index, realtime::MonotonicRawClock::time_point{now.time_since_epoch()}));
+    EXPECT_TRUE(kit.stop(now));
+}
+
+TEST(avb_entity_kit_stream_info, a_stopped_milan_talker_withdraws_and_a_restarted_one_declares_at_the_next_probe)
+{
+    KitUnderTest kit{make_io_config(TALKER_ID, "milan13")};
+    bring_up(kit);
+    auto const& spec = kit.talker_specs().front();
+    TimePoint now{std::chrono::seconds{4}};
+    probe_talker_stream(kit, spec.index, now);
+    bridge_listener(kit, now, spec, srp::msrp::ListenerDeclaration::Ready);
+    auto const raw = [&now] { return realtime::MonotonicRawClock::time_point{now.time_since_epoch()}; };
+    EXPECT_TRUE(kit->talker_should_transmit(spec.index, raw()));
+
+    EXPECT_TRUE(kit.stop(now));
+    EXPECT_NE(talker_state(kit, spec), nanoavb::TalkerReservationState::Advertising);
+    EXPECT_FALSE(kit->talker_should_transmit(spec.index, raw()));
+
+    now += std::chrono::seconds{30};  // the old probe long gone
+    EXPECT_TRUE(kit.start(now));
+    kit->on_link_up(now);
+    kit->on_gptp_announce(now, true);
+    EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Waiting);
+    probe_talker_stream(kit, spec.index, now);
+    EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Advertising);
+    EXPECT_TRUE(kit.stop(now));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)
