@@ -81,9 +81,11 @@ statusbar_add_module(
   log_sweep_generator_test.cpp
   FUNCTIONAL_TESTS
   avb_entity_kit_functional_test.cpp
+  avb_entity_io_gate_functional_test.cpp
   FUNCTIONAL_TEST_DATA
   testdata/entity_tone.bin
-  testdata/entity_audio.bin)
+  testdata/entity_audio.bin
+  testdata/simple2.bin)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_executable(avb_entity_stereo_io_tool avb_entity_stereo_io_tool.cpp)

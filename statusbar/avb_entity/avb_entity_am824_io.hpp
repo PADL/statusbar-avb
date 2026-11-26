@@ -339,6 +339,13 @@ class AvbEntityAm824IO
     /// The Talker Advertise this entity declares for its stream (make_talker_srp_info()).
     [[nodiscard]] auto talker_srp_info() const -> nanoavb::TalkerStreamSrpInfo { return make_talker_srp_info(); }
 
+    /// Whether the talker stream transmits at the media wake told as @p now (TalkerGate::should_transmit):
+    /// the media timer's own predicate. Any thread.
+    [[nodiscard]] auto talker_should_transmit(TalkerGate::RawTimePoint const now) const noexcept -> bool
+    {
+        return gate_.should_transmit(0, now);
+    }
+
   private:
     /// Attach this entity's stream-specific control-plane behavior to the host:
     /// single-stream MSRP advertise/withdraw + the ACMP talker connection log. The
