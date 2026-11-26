@@ -6,6 +6,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -212,6 +213,34 @@ TEST(aecp_mvu, the_two_statuses_of_a_stream_input_do_not_spill_into_each_other)
     info.set_status(0, 0xFF);
     EXPECT_EQ(info.pbsta(), 0);
     EXPECT_EQ(info.acmpsta(), 31);
+}
+
+TEST(aecp_mvu, a_media_clock_reference_info_is_laid_out_as_5_4_4_4_has_it)
+{
+    MvuMediaClockReferenceInfoPayload info{};
+    info.clock_domain_index = 0x0102;
+    info.flags = MVU_MCR_FLAGS_SUPPORTED;
+    info.default_mcr_prio = MVU_MCR_PRIO_AUDIO_INTERFACE;
+    info.user_mcr_prio = 0x40;
+    info.media_clock_domain_name = statusbar::atdecc::aem::AtdeccString{MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME};
+    std::array<uint8_t, MvuMediaClockReferenceInfoPayload::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, info);
+
+    std::array<uint8_t, 17> const golden{
+        0x01, 0x02, 0x03, 0x00, 0xC0, 0x40, 0x00, 0x00, 0x00, 0x00, 'D', 'E', 'F', 'A', 'U', 'L', 'T'};
+    EXPECT_TRUE(std::ranges::equal(std::span{bytes}.first(golden.size()), golden));
+    EXPECT_TRUE(std::ranges::all_of(std::span{bytes}.subspan(golden.size()), [](uint8_t const b) { return b == 0; }));
+
+    MvuMediaClockReferenceInfoPayload back{};
+    span_load(back, make_const_span(bytes));
+    EXPECT_EQ(back.user_mcr_prio.get(), 0x40);
+    EXPECT_EQ(back.media_clock_domain_name.as_string_view(), MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME);
+
+    MvuGetMediaClockReferenceInfoCommand get{};
+    get.clock_domain_index = 0x0102;
+    std::array<uint8_t, MvuGetMediaClockReferenceInfoCommand::LENGTH> get_bytes{};
+    span_store(std::span<uint8_t>{get_bytes}, get);
+    EXPECT_TRUE((get_bytes == std::array<uint8_t, 2>{0x01, 0x02}));
 }
 
 TEST_MAIN(statusbar_atdecc, atdecc_aecp_mvu_test)
