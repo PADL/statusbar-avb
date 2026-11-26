@@ -13,6 +13,7 @@
 #include <array>
 #include <bit>
 #include <chrono>
+#include <cstddef>
 #include <cstring>
 #include <functional>
 #include <iterator>
@@ -149,6 +150,26 @@ template <typename T>
 {
     size_t const declared = size_t{header.control_data_length()} - AemDu::AEM_DATA_LENGTH;
     return payload.subspan(AemDu::LENGTH).first(std::min(payload.size() - AemDu::LENGTH, declared));
+}
+
+/// Where a SET_NAME body's name begins: after its AemNameCommandPayload head (IEEE 1722.1-2021 Clause 7.4.17.1).
+constexpr size_t SET_NAME_NAME_OFFSET = aem::AemNameCommandPayload::LENGTH;
+static_assert(offsetof(aem::AemNamePayload, name) == SET_NAME_NAME_OFFSET);
+
+/// SET_NAME body @p command_data copied into @p out with its name zero-filled after its first NUL, the
+/// form the name is kept, compared and answered in; a body too short for a name, or too long for
+/// @p out, is given back as it is.
+[[nodiscard]] auto name_zero_filled(std::span<uint8_t const> const command_data, std::span<uint8_t> const out)
+    -> std::span<uint8_t const>
+{
+    if (command_data.size() < aem::AemNamePayload::LENGTH || command_data.size() > out.size()) {
+        return command_data;
+    }
+    auto const kept = out.first(command_data.size());
+    span_copy(kept, command_data);
+    auto const name = kept.subspan(SET_NAME_NAME_OFFSET, AtdeccString::LENGTH);
+    std::fill(std::ranges::find(name, uint8_t{0}), name.end(), uint8_t{0});
+    return kept;
 }
 
 }  // namespace
@@ -541,16 +562,17 @@ auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, s
 {
     // Per-call model; the handler applies the name by (descriptor, name_index,
     // symbol). A name that was set is echoed back; one that was not is answered
-    // with the name in force (7.4.17.1).
-    if (auto const as_is = unchanged_set_answer(AEM_COMMAND_SET_NAME, command_data, out_buffer)) {
+    // with the name in force (7.4.17.1). Either is zero-filled after its first NUL.
+    std::array<uint8_t, MAX_AEM_BODY> zero_filled{};
+    auto const command = name_zero_filled(command_data, zero_filled);
+    if (auto const as_is = unchanged_set_answer(AEM_COMMAND_SET_NAME, command, out_buffer)) {
         return *as_is;
     }
-    AemEntityModel aem_model{*handler_};
-    auto const status = aem_model.apply_set_name(command_data);
+    auto const status = AemEntityModel{*handler_}.apply_set_name(command);
     if (status != AEM_STATUS_SUCCESS) {
-        return refused_set(status, AEM_COMMAND_SET_NAME, command_data, out_buffer);
+        return refused_set(status, AEM_COMMAND_SET_NAME, command, out_buffer);
     }
-    return applied_set_name(command_data, out_buffer);
+    return applied_set_name(command, out_buffer);
 }
 
 auto AemCommandHandler::applied_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
