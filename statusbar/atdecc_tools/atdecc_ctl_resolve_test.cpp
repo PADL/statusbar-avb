@@ -419,6 +419,144 @@ TEST(atdecc_ctl_trace, first_broken_leg_wins)
     EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::TalkerRejected);
 }
 
+//
+// connect --trace with a Milan listener: it answers the controller by itself
+// (Milan v1.3 5.5.2.4, 5.5.2.5), and probes the talker after a bind
+//
+
+TEST(atdecc_ctl_trace, a_listener_that_answered_alone_is_no_fault)
+{
+    // A Milan bind seen before its probe, and every Milan unbind: the
+    // listener's SUCCESS and nothing of the talker.
+    HandshakeLegs legs{.listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::ListenerAlone);
+    // The probe went out and the talker has not answered it.
+    legs.relay_seen = true;
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::ListenerAlone);
+}
+
+TEST(atdecc_ctl_trace, an_answered_probe_completes_the_handshake)
+{
+    HandshakeLegs legs{
+        .relay_seen = true, .talker_status = atdecc::ACMP_STATUS_SUCCESS, .listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::None);
+    // Both answers seen and the command between them missed: nobody's fault.
+    legs.relay_seen = false;
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::None);
+}
+
+TEST(atdecc_ctl_trace, a_refused_probe_is_told_apart_from_a_refused_connect)
+{
+    HandshakeLegs legs{
+        .relay_seen = true,
+        .talker_status = atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH,
+        .listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::ProbeRejected);
+    // Under IEEE 1722.1 the listener passes the talker's status on.
+    legs.listener_status = atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH;
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::TalkerRejected);
+    legs.listener_status.reset();
+    EXPECT_TRUE(classify_handshake(legs) == HandshakeFault::TalkerRejected);
+}
+
+TEST(atdecc_ctl_trace, a_connect_is_watched_for_the_probe_after_the_listeners_success_only)
+{
+    HandshakeLegs legs{};
+    EXPECT_FALSE(awaits_probe_response(legs, /*is_connect=*/true));
+    legs.listener_status = atdecc::ACMP_STATUS_LISTENER_EXCLUSIVE;
+    EXPECT_FALSE(awaits_probe_response(legs, /*is_connect=*/true));
+    legs.listener_status = atdecc::ACMP_STATUS_SUCCESS;
+    EXPECT_TRUE(awaits_probe_response(legs, /*is_connect=*/true));
+    legs.relay_seen = true;
+    EXPECT_TRUE(awaits_probe_response(legs, /*is_connect=*/true));
+    // An unbind sends the talker nothing: there is nothing to watch for.
+    EXPECT_FALSE(awaits_probe_response(legs, /*is_connect=*/false));
+    legs.talker_status = atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH;
+    EXPECT_FALSE(awaits_probe_response(legs, /*is_connect=*/true));
+    // Milan v1.3 5.5.3.6: up to 1 s of delay and two tries 200 ms apart.
+    EXPECT_TRUE(PROBE_WATCH_MS >= 1'400);
+}
+
+namespace {
+
+auto traced_op() -> Op
+{
+    Op op{};
+    op.talker = {.name = "node-a", .unique_id = 6};
+    op.listener = {.name = "node-d", .unique_id = 2};
+    return op;
+}
+
+auto has(std::string const& text, std::string_view part) -> bool
+{
+    return text.find(part) != std::string::npos;
+}
+
+}  // namespace
+
+TEST(atdecc_ctl_trace, the_verdict_blames_nobody_for_a_milan_bind_or_unbind)
+{
+    HandshakeLegs const alone{.listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    auto const bind = handshake_verdict(traced_op(), /*is_connect=*/true, alone);
+    EXPECT_TRUE(has(bind, "listener 'node-d' answered SUCCESS"));
+    EXPECT_TRUE(has(bind, "Milan v1.3 5.5.2.4"));
+    EXPECT_TRUE(has(bind, "bound, the talker has not answered a probe yet"));
+    EXPECT_FALSE(has(bind, "never"));
+    EXPECT_FALSE(has(bind, "fault"));
+
+    auto const unbind = handshake_verdict(traced_op(), /*is_connect=*/false, alone);
+    EXPECT_TRUE(has(unbind, "listener 'node-d' answered SUCCESS"));
+    EXPECT_TRUE(has(unbind, "Milan v1.3 5.5.2.5"));
+    EXPECT_TRUE(has(unbind, ": unbound"));
+    EXPECT_FALSE(has(unbind, "never"));
+    EXPECT_FALSE(has(unbind, "fault"));
+}
+
+TEST(atdecc_ctl_trace, the_verdict_of_a_refused_probe_names_the_status)
+{
+    HandshakeLegs const legs{
+        .relay_seen = true,
+        .talker_status = atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH,
+        .listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    auto const text = handshake_verdict(traced_op(), /*is_connect=*/true, legs);
+    EXPECT_TRUE(has(text, "talker 'node-a' answered its probe with "));
+    EXPECT_TRUE(has(text, atdecc::acmp_status_name(atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH)));
+    EXPECT_TRUE(has(text, "bound"));
+}
+
+TEST(atdecc_ctl_trace, the_verdicts_of_an_ieee_1722_1_handshake_are_as_they_were)
+{
+    auto const op = traced_op();
+    EXPECT_TRUE(
+        handshake_verdict(op, true, {}) ==
+        "listener 'node-d' never relayed CONNECT_TX_COMMAND -- it did not accept/forward our command (wrong listener id/uid, "
+        "or the LISTENER entity is the fault)");
+    EXPECT_TRUE(has(handshake_verdict(op, false, {}), "never relayed DISCONNECT_TX_COMMAND"));
+    EXPECT_TRUE(
+        handshake_verdict(op, true, {.relay_seen = true}) ==
+        "listener relayed to the talker but talker 'node-a' never answered -- TALKER-side (wrong talker uid :6, or the talker "
+        "is silent/declining, e.g. third-party devices)");
+    EXPECT_TRUE(
+        has(handshake_verdict(op, true, {.relay_seen = true, .talker_status = atdecc::ACMP_STATUS_TALKER_NO_BANDWIDTH}),
+            "talker 'node-a' REJECTED the stream: "));
+    EXPECT_TRUE(
+        has(handshake_verdict(op, true, {.relay_seen = true, .talker_status = atdecc::ACMP_STATUS_SUCCESS}),
+            "talker answered SUCCESS but the listener's response to the controller was not seen"));
+    EXPECT_TRUE(
+        has(handshake_verdict(
+                op,
+                true,
+                {.relay_seen = true,
+                 .talker_status = atdecc::ACMP_STATUS_SUCCESS,
+                 .listener_status = atdecc::ACMP_STATUS_LISTENER_EXCLUSIVE}),
+            "listener 'node-d' returned "));
+    HandshakeLegs done{
+        .relay_seen = true, .talker_status = atdecc::ACMP_STATUS_SUCCESS, .listener_status = atdecc::ACMP_STATUS_SUCCESS};
+    EXPECT_TRUE(handshake_verdict(op, true, done) == "all four legs completed with SUCCESS");
+    done.relay_seen = false;
+    EXPECT_TRUE(has(handshake_verdict(op, true, done), "talker and listener answered SUCCESS"));
+}
+
 TEST(atdecc_ctl_batch, parses_identify_ops)
 {
     auto doc = toml::parse("[[identify]]\n"

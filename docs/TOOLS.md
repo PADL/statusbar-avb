@@ -156,6 +156,14 @@ the start, and the command goes on as soon as it is there. `list` without
 longer `--discover-ms` on a network of Milan devices. `supervise` resolves its
 names once a pass and does not wait.
 
+`--trace` on a connect or a disconnect prints what was seen of the handshake's
+four messages and a verdict. With an IEEE 1722.1 listener the verdict names the
+first leg that broke. A Milan listener answers the controller by itself (Milan
+v1.3 5.5.2.4 and 5.5.2.5): it probes the talker after a bind, with the same two
+messages, and sends the talker nothing at an unbind. The trace watches up to
+1.5 s more for that probe and its answer, and its verdict then says bound or
+unbound, and whether the talker has answered a probe.
+
 ## AVTP, capture & audio
 
 | Tool | Purpose | Platform |

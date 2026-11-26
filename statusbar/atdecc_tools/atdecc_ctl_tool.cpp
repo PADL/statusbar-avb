@@ -266,65 +266,51 @@ auto snapshot_with(MessageReactor& reactor, ControllerSimple& ctrl, std::vector<
     return ctrl.get_display_entities();
 }
 
+/// The names of a handshake's four messages, in protocol order.
+struct LegNames
+{
+    char const* rx_command;
+    char const* relay;
+    char const* talker_response;
+    char const* listener_response;
+};
+
+auto leg_names(bool is_connect) -> LegNames
+{
+    return is_connect
+        ? LegNames{"CONNECT_RX_COMMAND", "CONNECT_TX_COMMAND", "CONNECT_TX_RESPONSE", "CONNECT_RX_RESPONSE"}
+        : LegNames{"DISCONNECT_RX_COMMAND", "DISCONNECT_TX_COMMAND", "DISCONNECT_TX_RESPONSE", "DISCONNECT_RX_RESPONSE"};
+}
+
+/// The status a leg's response carried, or that none was seen.
+auto leg_status(std::optional<uint8_t> const& status) -> std::string_view
+{
+    return status ? acmp_status_name(*status) : "NO REPLY";
+}
+
+/// What was seen of each of a handshake's four messages.
+void print_trace_legs(bool is_connect, atdecc_tools::HandshakeLegs const& legs)
+{
+    auto const names = leg_names(is_connect);
+    std::println("    [1] controller -> listener   {:<22} sent", names.rx_command);
+    std::println("    [2] listener   -> talker     {:<22} {}", names.relay, legs.relay_seen ? "relayed" : "NOT SEEN");
+    std::println("    [3] talker     -> listener   {:<22} {}", names.talker_response, leg_status(legs.talker_status));
+    std::println("    [4] listener   -> controller {:<22} {}", names.listener_response, leg_status(legs.listener_status));
+}
+
 // Print the leg-by-leg verdict for a (dis)connect handshake. `done` is whether
-// the high-level success criterion was met; the legs explain WHY when it wasn't.
+// the high-level success criterion was met; the legs explain WHY when it wasn't
+// (atdecc_tools::handshake_verdict() pinpoints the first leg that broke).
 void print_trace_verdict(Op const& op, bool is_connect, atdecc_tools::HandshakeLegs const& legs, bool done)
 {
-    char const* const relay_name = is_connect ? "CONNECT_TX_COMMAND" : "DISCONNECT_TX_COMMAND";
-    char const* const tresp_name = is_connect ? "CONNECT_TX_RESPONSE" : "DISCONNECT_TX_RESPONSE";
-    char const* const lresp_name = is_connect ? "CONNECT_RX_RESPONSE" : "DISCONNECT_RX_RESPONSE";
-    char const* const rx_name = is_connect ? "CONNECT_RX_COMMAND" : "DISCONNECT_RX_COMMAND";
-
     std::println(
         "  ACMP handshake  talker {}:{}  listener {}:{}",
         op.talker.name,
         op.talker.unique_id,
         op.listener.name,
         op.listener.unique_id);
-    std::println("    [1] controller -> listener   {:<22} sent", rx_name);
-    std::println("    [2] listener   -> talker     {:<22} {}", relay_name, legs.relay_seen ? "relayed" : "NOT SEEN");
-    std::println(
-        "    [3] talker     -> listener   {:<22} {}",
-        tresp_name,
-        legs.talker_status ? acmp_status_name(*legs.talker_status) : "NO REPLY");
-    std::println(
-        "    [4] listener   -> controller {:<22} {}",
-        lresp_name,
-        legs.listener_status ? acmp_status_name(*legs.listener_status) : "NO REPLY");
-
-    // Pinpoint the first leg that broke -- this is the actionable verdict.
-    std::string verdict;
-    switch (atdecc_tools::classify_handshake(legs)) {
-        case atdecc_tools::HandshakeFault::ListenerNoRelay:
-            verdict = std::format(
-                "listener '{}' never relayed {} -- it did not accept/forward our command (wrong "
-                "listener id/uid, or the LISTENER entity is the fault)",
-                op.listener.name,
-                relay_name);
-            break;
-        case atdecc_tools::HandshakeFault::TalkerNoReply:
-            verdict = std::format(
-                "listener relayed to the talker but talker '{}' never answered -- TALKER-side (wrong "
-                "talker uid :{}, or the talker is silent/declining, e.g. third-party devices)",
-                op.talker.name,
-                op.talker.unique_id);
-            break;
-        case atdecc_tools::HandshakeFault::TalkerRejected:
-            verdict = std::format("talker '{}' REJECTED the stream: {}", op.talker.name, acmp_status_name(*legs.talker_status));
-            break;
-        case atdecc_tools::HandshakeFault::ListenerNoReply:
-            verdict = "talker answered SUCCESS but the listener's response to the controller was not seen "
-                      "(likely just missed on the bus -- the connection is probably up)";
-            break;
-        case atdecc_tools::HandshakeFault::ListenerRejected:
-            verdict = std::format(
-                "listener '{}' returned {} to the controller", op.listener.name, acmp_status_name(*legs.listener_status));
-            break;
-        case atdecc_tools::HandshakeFault::None:
-            verdict = "all four legs completed with SUCCESS";
-            break;
-    }
-    std::println("    verdict: {}{}", verdict, (done ? "" : "  [unconfirmed]"));
+    print_trace_legs(is_connect, legs);
+    std::println("    verdict: {}{}", atdecc_tools::handshake_verdict(op, is_connect, legs), (done ? "" : "  [unconfirmed]"));
 }
 
 // Execute a single op. Returns true on success. When `trace` is set (connect/
@@ -438,6 +424,15 @@ class HandshakeWatch
             op_.listener.name,
             op_.listener.unique_id);
         ctrl.set_acmp_trace(trace_);
+        attempt(reactor, ctrl, action);
+        watch_probe(reactor, ctrl);
+        ctrl.set_acmp_trace(false);
+        return finish();
+    }
+
+  private:
+    void attempt(MessageReactor& reactor, ControllerSimple& ctrl, ControllerAction const& action)
+    {
         // Some listeners (notably the DSP processor) only respond on a later attempt, so
         // re-issue the command up to a few times across the budget. Re-sending
         // a CONNECT/DISCONNECT for the same stream is idempotent.
@@ -446,11 +441,20 @@ class HandshakeWatch
             ctrl.dispatch(action, elapsed_ns());
             (void)pump(reactor, ctrl, 2500, [this] { return done_; }, [this](auto const& ev) { on_event(ev); });
         }
-        ctrl.set_acmp_trace(false);
-        return finish();
     }
 
-  private:
+    // A traced connect that a Milan listener acknowledged: its probe of the
+    // talker and the talker's answer come after its response to us, so the
+    // legs are watched a little longer (atdecc_tools::awaits_probe_response).
+    void watch_probe(MessageReactor& reactor, ControllerSimple& ctrl)
+    {
+        auto const pending = [this] { return trace_ && atdecc_tools::awaits_probe_response(legs_, is_connect_); };
+        if (pending()) {
+            (void)pump(
+                reactor, ctrl, atdecc_tools::PROBE_WATCH_MS, [&] { return !pending(); }, [this](auto const& ev) { on_event(ev); });
+        }
+    }
+
     auto finish() -> bool
     {
         std::println("  {}", done_ ? "OK" : "FAILED (no response after retries)");

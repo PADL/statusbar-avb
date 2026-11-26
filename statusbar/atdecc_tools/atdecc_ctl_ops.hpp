@@ -527,20 +527,47 @@ struct HandshakeLegs
 
 /// Which leg of the handshake is at fault, in protocol order. The FIRST broken
 /// leg is the actionable one — a later leg can't succeed if an earlier one didn't.
+///
+/// That order is IEEE 1722.1's, where the listener answers the controller
+/// last, with what the talker told it. A Milan listener answers first and by
+/// itself: "the Controller Bind process does not involve the Talker" (Milan
+/// v1.3 5.5.2.4, and 5.5.2.5 for an unbind). It probes the talker after a
+/// bind, with the same two messages under the names PROBE_TX_COMMAND and
+/// PROBE_TX_RESPONSE, and sends the talker nothing at an unbind. So a
+/// listener's SUCCESS is never a fault, whatever was or was not seen of the
+/// talker: ListenerAlone and ProbeRejected say what was.
 enum class HandshakeFault : uint8_t
 {
-    None,              ///< all four legs completed with SUCCESS
+    None,              ///< the talker and the listener both answered SUCCESS
     ListenerNoRelay,   ///< listener never relayed the command to the talker (listener-side / bad ids)
     TalkerNoReply,     ///< listener relayed but the talker never answered (talker-side / bad talker uid)
     TalkerRejected,    ///< talker answered with a non-SUCCESS status
     ListenerNoReply,   ///< talker said SUCCESS but the listener's response was not seen on the bus
     ListenerRejected,  ///< listener returned a non-SUCCESS status to the controller
+    ListenerAlone,     ///< listener answered SUCCESS and no talker response was seen: a Milan listener
+    ProbeRejected,     ///< listener answered SUCCESS and the talker answered its probe with a non-SUCCESS status
 };
+
+namespace detail {
+
+/// classify_handshake() for a handshake the listener answered with SUCCESS.
+[[nodiscard]] inline auto classify_acknowledged(HandshakeLegs const& legs) -> HandshakeFault
+{
+    if (!legs.talker_status) {
+        return HandshakeFault::ListenerAlone;
+    }
+    return *legs.talker_status == atdecc::ACMP_STATUS_SUCCESS ? HandshakeFault::None : HandshakeFault::ProbeRejected;
+}
+
+}  // namespace detail
 
 /// Classify a handshake by its first broken leg. Pure function over the observed
 /// legs so the diagnosis is unit-testable without a socket.
 [[nodiscard]] inline auto classify_handshake(HandshakeLegs const& legs) -> HandshakeFault
 {
+    if (legs.listener_status == atdecc::ACMP_STATUS_SUCCESS) {
+        return detail::classify_acknowledged(legs);
+    }
     if (!legs.relay_seen) {
         return HandshakeFault::ListenerNoRelay;
     }
@@ -550,13 +577,92 @@ enum class HandshakeFault : uint8_t
     if (*legs.talker_status != atdecc::ACMP_STATUS_SUCCESS) {
         return HandshakeFault::TalkerRejected;
     }
-    if (!legs.listener_status) {
-        return HandshakeFault::ListenerNoReply;
+    return legs.listener_status ? HandshakeFault::ListenerRejected : HandshakeFault::ListenerNoReply;
+}
+
+/// How long a traced connect is watched after the listener's SUCCESS for the
+/// talker's answer to a probe. Milan v1.3 5.5.3.6: the listener sends its
+/// PROBE_TX_COMMAND right after the BIND_RX_RESPONSE, or after a random delay
+/// of up to 1 s, and repeats it once when 200 ms pass with no response.
+constexpr int64_t PROBE_WATCH_MS = 1'500;
+
+/// Whether a traced handshake that our command has completed is worth
+/// watching for PROBE_WATCH_MS more: a connect the listener answered with
+/// SUCCESS before any talker response was seen. Under IEEE 1722.1 the talker
+/// has answered by then; a Milan listener probes the talker afterwards.
+[[nodiscard]] constexpr auto awaits_probe_response(HandshakeLegs const& legs, bool const is_connect) noexcept -> bool
+{
+    return is_connect && legs.listener_status == atdecc::ACMP_STATUS_SUCCESS && !legs.talker_status;
+}
+
+namespace detail {
+
+/// handshake_verdict() for a listener that answered SUCCESS with no talker
+/// response seen.
+[[nodiscard]] inline auto listener_alone_verdict(Op const& op, bool const is_connect) -> std::string
+{
+    if (!is_connect) {
+        return std::format(
+            "listener '{}' answered SUCCESS without asking the talker -- a Milan listener unbinds by itself (Milan "
+            "v1.3 5.5.2.5): unbound",
+            op.listener.name);
     }
-    if (*legs.listener_status != atdecc::ACMP_STATUS_SUCCESS) {
-        return HandshakeFault::ListenerRejected;
+    return std::format(
+        "listener '{}' answered SUCCESS and no response of talker '{}' was seen -- a Milan listener acknowledges a "
+        "bind by itself and probes the talker afterwards (Milan v1.3 5.5.2.4): bound, the talker has not answered a "
+        "probe yet",
+        op.listener.name,
+        op.talker.name);
+}
+
+/// handshake_verdict() for a handshake both ends answered with SUCCESS.
+[[nodiscard]] inline auto success_verdict(HandshakeLegs const& legs) -> std::string
+{
+    return legs.relay_seen ? "all four legs completed with SUCCESS"
+                           : "talker and listener answered SUCCESS (the listener's command to the talker was not seen on the bus)";
+}
+
+}  // namespace detail
+
+/// The verdict of a traced (dis)connect handshake in one line: the first leg
+/// that broke and whose side it is on, or what the handshake came to.
+[[nodiscard]] inline auto handshake_verdict(Op const& op, bool const is_connect, HandshakeLegs const& legs) -> std::string
+{
+    switch (classify_handshake(legs)) {
+        case HandshakeFault::ListenerNoRelay:
+            return std::format(
+                "listener '{}' never relayed {} -- it did not accept/forward our command (wrong "
+                "listener id/uid, or the LISTENER entity is the fault)",
+                op.listener.name,
+                is_connect ? "CONNECT_TX_COMMAND" : "DISCONNECT_TX_COMMAND");
+        case HandshakeFault::TalkerNoReply:
+            return std::format(
+                "listener relayed to the talker but talker '{}' never answered -- TALKER-side (wrong "
+                "talker uid :{}, or the talker is silent/declining, e.g. third-party devices)",
+                op.talker.name,
+                op.talker.unique_id);
+        case HandshakeFault::TalkerRejected:
+            return std::format(
+                "talker '{}' REJECTED the stream: {}", op.talker.name, atdecc::acmp_status_name(*legs.talker_status));
+        case HandshakeFault::ListenerNoReply:
+            return "talker answered SUCCESS but the listener's response to the controller was not seen "
+                   "(likely just missed on the bus -- the connection is probably up)";
+        case HandshakeFault::ListenerRejected:
+            return std::format(
+                "listener '{}' returned {} to the controller", op.listener.name, atdecc::acmp_status_name(*legs.listener_status));
+        case HandshakeFault::ListenerAlone:
+            return detail::listener_alone_verdict(op, is_connect);
+        case HandshakeFault::ProbeRejected:
+            return std::format(
+                "listener '{}' answered SUCCESS and talker '{}' answered its probe with {} -- bound (Milan v1.3 "
+                "5.5.2.4), and the talker refuses the stream",
+                op.listener.name,
+                op.talker.name,
+                atdecc::acmp_status_name(*legs.talker_status));
+        case HandshakeFault::None:
+            break;
     }
-    return HandshakeFault::None;
+    return detail::success_verdict(legs);
 }
 
 /// Whether the outcome of one of our ACMP commands confirms the (dis)connect of
