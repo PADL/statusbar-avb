@@ -12,6 +12,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_base.hpp"
+#include "statusbar/nanoavb/nanoavb_dynamic_audio_maps.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model_adapter.hpp"
 #include "statusbar/sg14/inplace_function.h"
@@ -40,10 +41,11 @@ using statusbar::container::SlotTable;
 //
 // AEM Command Handler Response
 //
-/// Maximum size for AEM response data (8 byte header + largest descriptor).
+/// Maximum size for AEM response data: what one Ethernet frame carries after the AEM header
+/// (1500 - 24 octets), which Milan v1.3 Section 5.4.1 lets a GET_AUDIO_MAP response use.
 /// Used by process_packet() to allocate one stack-local output buffer that
 /// is passed into the per-command handlers.
-constexpr size_t MAX_AEM_RESPONSE_SIZE = 1024;
+constexpr size_t MAX_AEM_RESPONSE_SIZE = 1476;
 
 /// The most AEM command-specific data one AECPDU can carry (IEEE 1722.1-2021 Clause 9.2.1.1.7).
 constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
@@ -395,6 +397,29 @@ class AemCommandHandler
         callbacks_.get_presentation_offset = std::move(get);
         callbacks_.set_presentation_offset = std::move(set);
     }
+
+    // ---- Dynamic audio mappings (IEEE 1722.1-2021 Clauses 7.4.44-7.4.46) --------
+    // A STREAM_PORT without AUDIO_MAP descriptors has dynamic mappings, kept in the store the
+    // entity hands the handler. A configuration switch forgets them.
+
+    /// A GET_AUDIO_MAP partition under milan13: 176 mappings, 1420 octets (Milan v1.3 Section 5.4.1).
+    static constexpr size_t MILAN_AUDIO_MAP_MAPPINGS = 176;
+    /// A GET_AUDIO_MAP partition under classic, within an AECPDU's 524 octets of control data.
+    static constexpr size_t AUDIO_MAP_MAPPINGS = (MAX_AEM_BODY - AemAudioMapResponseHeader::LENGTH) / AemAudioMapping::LENGTH;
+    static_assert(
+        AemAudioMapResponseHeader::LENGTH + (MILAN_AUDIO_MAP_MAPPINGS * AemAudioMapping::LENGTH) <= MAX_AEM_RESPONSE_SIZE);
+    /// The STREAM_OUTPUTs an output port's GET_AUDIO_MAP partitions count (Milan v1.3 Section 5.4.2.26).
+    static constexpr size_t MAX_PARTITIONED_STREAMS = 256;
+
+    /// Give the handler the store of its stream ports' dynamic mappings, both directions; the
+    /// handler alone changes it. Without one (the default) GET_AUDIO_MAP, ADD_AUDIO_MAPPINGS and
+    /// REMOVE_AUDIO_MAPPINGS answer NOT_IMPLEMENTED. @p maps must outlive the handler, or be withdrawn.
+    void set_dynamic_audio_maps(DynamicAudioMaps* maps) noexcept { audio_maps_ = maps; }
+    /// The store of the dynamic mappings in force, nullptr without one.
+    [[nodiscard]] auto dynamic_audio_maps() const noexcept -> DynamicAudioMaps const* { return audio_maps_; }
+    /// Whether STREAM_PORT_INPUT or STREAM_PORT_OUTPUT (@p port_type, @p port_index) of the current
+    /// configuration has dynamic mappings (no AUDIO_MAP descriptor).
+    [[nodiscard]] auto has_dynamic_map(uint16_t port_type, uint16_t port_index) const -> bool;
 
     /// Called when SET_CONFIGURATION asks to switch to a different (valid)
     /// configuration — this is where the application re-shapes its data
@@ -878,6 +903,63 @@ class AemCommandHandler
     /// answered and notified on SUCCESS, deferred on IN_PROGRESS, else refused with the time in force.
     [[nodiscard]] auto set_max_transit_time(
         AemSetMaxTransitTimePayload const& cmd, std::span<uint8_t const> body, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// A stream port's model, for the mapping commands.
+    struct PortModel
+    {
+        uint16_t port_type{0};  ///< STREAM_PORT_INPUT or STREAM_PORT_OUTPUT
+        uint16_t base_cluster{0};
+        uint16_t number_of_clusters{0};
+        uint16_t number_of_maps{0};
+        uint16_t port_flags{0};
+        uint32_t total_channels{0};  ///< over its clusters
+        /// Each cluster's channel_count, read once (at most this many clusters).
+        sg14::inplace_vector<uint16_t, 512> cluster_channel_counts{};
+        /// An output port's: each STREAM_OUTPUT's channels, as its GET_AUDIO_MAP partitions count them.
+        sg14::inplace_vector<uint16_t, MAX_PARTITIONED_STREAMS> stream_channel_counts{};
+    };
+
+    /// GET_AUDIO_MAP (7.4.44) on a port with dynamic mappings: partition map_index of them.
+    /// A port with AUDIO_MAP descriptors is NOT_SUPPORTED.
+    [[nodiscard]] auto handle_get_audio_map(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// The mappings a GET_AUDIO_MAP partition holds: MILAN_AUDIO_MAP_MAPPINGS under milan13, else AUDIO_MAP_MAPPINGS.
+    [[nodiscard]] auto audio_map_partition() const noexcept -> size_t;
+    /// GET_AUDIO_MAP's response for @p cmd on dynamic @p port.
+    [[nodiscard]] auto audio_map_response(
+        AemGetAudioMapCommandPayload const& cmd, PortModel const& port, std::span<uint8_t> out_buffer) const -> AemCommandResponse;
+    /// Store the mappings of partition @p map_index of @p port (index @p port_index) in @p entries,
+    /// as many as fit; their count.
+    [[nodiscard]] auto store_audio_map_entries(
+        PortModel const& port, uint16_t port_index, size_t map_index, std::span<uint8_t> entries) const -> uint16_t;
+    /// Read stream port (@p port_type, @p port_index)'s model into @p model; false when there is none.
+    [[nodiscard]] auto port_model(uint16_t port_type, uint16_t port_index, PortModel& model) const -> bool;
+    /// Read the channel_count of each of @p model's clusters.
+    void read_clusters(PortModel& model) const;
+    /// Read each STREAM_OUTPUT's channels into an output @p model: the most any format it lists has,
+    /// so its GET_AUDIO_MAP partition stays fixed for the configuration (Milan v1.3 Section 5.4.2.26).
+    void read_output_streams(PortModel& model) const;
+    /// The channels of cluster @p cluster_offset of @p port (0: none).
+    [[nodiscard]] static auto cluster_channels(PortModel const& port, uint16_t cluster_offset) noexcept -> uint16_t;
+    /// The position of @p mapping's cluster channel among @p port's (its clusters' channels in
+    /// order), or nullopt when it names none.
+    [[nodiscard]] static auto cluster_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) noexcept
+        -> std::optional<uint32_t>;
+    /// The position of @p mapping's stream channel among output @p port's partitioned streams'.
+    [[nodiscard]] static auto stream_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) noexcept
+        -> std::optional<uint32_t>;
+    /// The position by which GET_AUDIO_MAP partitions @p mapping: an input's cluster channel,
+    /// an output's stream channel (Milan v1.3 Section 5.4.2.26).
+    [[nodiscard]] static auto partition_ordinal(PortModel const& port, DynamicAudioMapping const& mapping) noexcept
+        -> std::optional<uint32_t>;
+    /// The channels GET_AUDIO_MAP partitions on @p port: its clusters', or for an output its streams'.
+    [[nodiscard]] static auto partitioned_channels(PortModel const& port) noexcept -> uint32_t;
+    /// Port (@p port_type, @p port_index)'s model in @p port when its mappings are dynamic; else
+    /// NOT_SUPPORTED (not a stream port, or AUDIO_MAP descriptors) or NO_SUCH_DESCRIPTOR.
+    [[nodiscard]] auto dynamic_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
+    /// Descriptor (@p type, @p index) of the current configuration, nullopt when there is none.
+    template <typename T>
+    [[nodiscard]] auto read_model_descriptor(uint16_t type, uint16_t index) const -> std::optional<T>;
 
     /// Handle SET_MEMORY_OBJECT_LENGTH / GET_MEMORY_OBJECT_LENGTH (7.4.72 /
     /// 7.4.73) through the handler's on_set/get_memory_object_length hooks.
@@ -1367,6 +1449,9 @@ class AemCommandHandler
     // When valid, a SET_CONTROL on this index also notifies the IDENTIFY multicast.
     uint16_t identify_control_index_{0};
     bool identify_control_index_valid_{false};
+
+    // The stream ports' dynamic audio mappings, in the entity's store (set_dynamic_audio_maps).
+    DynamicAudioMaps* audio_maps_{nullptr};
 };
 
 }  // namespace statusbar::nanoavb
