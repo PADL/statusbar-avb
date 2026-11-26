@@ -788,6 +788,19 @@ auto ListenerStreams::fill_stream_input_counters(
     return true;
 }
 
+auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bool
+{
+    auto* const slot = slot_for(descriptor_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    // A stopped input discards its stream on purpose (5.3.8.7): no interruption.
+    if (stream_stopped(descriptor_index)) {
+        unlock_stream_input(slot->counters);
+    }
+    return slot->intervals.fold(slot->counters);
+}
+
 namespace {
 
 auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId

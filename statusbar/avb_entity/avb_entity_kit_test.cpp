@@ -346,6 +346,21 @@ TEST(avb_entity_kit_profile, the_loop_does_not_sleep_past_an_mrp_timer)
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 200'000'000), 0);
 }
 
+TEST(avb_entity_kit_counters, the_loop_wakes_for_the_end_of_an_observation_interval)
+{
+    // The counters' interval is at most a second (Milan v1.3 5.3.8.10): the
+    // loop's wait is cut to what is left of it, not up to 100 ms past it.
+    KitUnderTest kit{make_config(2, "classic")};
+    int64_t const start_ns = 5'000'000'000;
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns), 100);  // no interval begun
+    kit->poll_counters(start_ns);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 950'000'000), 50);
+    kit->poll_counters(start_ns + 999'000'000);  // not yet over
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 999'000'000), 1);
+    kit->poll_counters(start_ns + 1'000'000'000);  // over: the next one begins
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 1'950'000'000), 50);
+}
+
 TEST(avb_entity_kit_profile, a_talker_given_no_presentation_offset_takes_its_profiles)
 {
     // Milan v1.3 5.3.7.6: "By default, the PAAD-AE shall use a 2ms Presentation

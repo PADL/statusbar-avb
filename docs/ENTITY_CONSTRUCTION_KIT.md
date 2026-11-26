@@ -324,6 +324,28 @@ Everything not listed here is the same under both.
 | A GET_AUDIO_MAP partition of a port's dynamic mappings | 62 mappings, within an AECPDU's 524 octets of control data (9.2.1.1.7) | 176 mappings, 1420 octets (5.4.1, 5.4.2.26) |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 
+### Stream counters
+
+A stream input counts each AVTPDU it receives (`StreamInputCounters`, on
+the RX thread). `AvbEntityKit::poll_counters(now_ns)` ends an
+observation interval on the reactor thread once `COUNTERS_INTERVAL_NS`,
+one second, has passed since the last: `StreamInputIntervals::fold()`
+makes the Milan values from the running counts, an input still locked
+that received nothing for the whole interval has lost its stream
+(MEDIA_UNLOCKED and STREAM_INTERRUPTED, but not for an input stopped by
+STOP_STREAMING) and starts its next run afresh, and each stream
+descriptor whose values changed is notified with an unsolicited
+GET_COUNTERS, under either profile. An interval ends at the first
+reactor cycle after its second is up, so it lasts a second and that
+cycle's wake-up latency, never less: a descriptor is notified at most
+once a second (Milan v1.3 Table 5.20), and Tables 5.4 and 5.6, which
+want an interval of at most a second, are met to within the latency. The
+entity runner calls `poll_counters()` each reactor cycle; an entity with
+a loop of its own does the same and bounds its wait by
+`poll_timeout_ms()`, which counts the end of the interval among its
+deadlines. A loop that never calls it ends no interval, and nothing is
+notified.
+
 ### The format of a stream input
 
 A stream input starts on the format its model authors and takes any other

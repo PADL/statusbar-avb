@@ -117,6 +117,8 @@ struct ListenerStreamSlot
     /// IEEE 1722.1 STREAM_INPUT health counters (Clause 7.4.42). The
     /// per-packet update lives in avb_entity_stream_counters.hpp (unit-tested).
     StreamInputCounters counters{};
+    /// Their Milan form, by observation interval (reactor thread only).
+    StreamInputIntervals intervals{};
 };
 
 struct ListenerStreams
@@ -293,6 +295,11 @@ struct ListenerStreams
     /// one of our stream inputs). Control plane (AEM handler).
     [[nodiscard]] auto fill_stream_input_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
         -> bool;
+
+    /// End STREAM_INPUT @p descriptor_index's observation interval
+    /// (StreamInputIntervals::fold), a stopped input's lock dropped first with
+    /// no interruption: true when a value changed. Reactor thread.
+    [[nodiscard]] auto fold_input_counters(uint16_t descriptor_index) -> bool;
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream group on the RX socket -- when the

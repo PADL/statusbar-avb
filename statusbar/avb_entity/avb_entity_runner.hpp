@@ -19,7 +19,8 @@
 /// on_timeout, state_string, print_state, components(), net_handlers(),
 /// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors, and
 /// optionally poll_timeout_ms(max_ms, now_ns), which bounds each reactor
-/// wait by the entity's next control-plane deadline (MAAP's, today).
+/// wait by the entity's next control-plane deadline, and poll_counters(now_ns),
+/// called each reactor cycle to end its counters' observation interval.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
@@ -422,6 +423,16 @@ template <typename Entity>
     }
 }
 
+/// End @p entity's counters' observation interval when it is due, for an
+/// entity that has one (AvbEntityKit::poll_counters).
+template <typename Entity>
+void entity_poll_counters(Entity& entity)
+{
+    if constexpr (requires { entity.poll_counters(int64_t{}); }) {
+        entity.poll_counters(net::monotonic_ns());
+    }
+}
+
 /// Tell @p entity how well the media timer's clock link is known, when it
 /// asks to be told (on_link_quality). One seqlock read; media thread.
 template <typename Entity>
@@ -554,6 +565,7 @@ auto run_entity_main_loop(
     auto reactor_cycle = [&] {
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(entity_poll_timeout_ms(entity, REACTOR_POLL_MS));
+        entity_poll_counters(entity);
         if (hooks.poll) {
             hooks.poll();
         }
