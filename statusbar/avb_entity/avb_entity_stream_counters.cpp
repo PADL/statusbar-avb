@@ -316,4 +316,45 @@ void StreamInputIntervals::reset(StreamInputCounters const& c) noexcept
     read_events(c, {}, last);
 }
 
+namespace {
+
+using O = StreamOutputIntervals;
+
+/// The total behind each interval counter of Milan v1.3 Table 5.4.
+constexpr std::array<std::pair<O::Index, uint32_t StreamOutputTotals::*>, 3> OUTPUT_INTERVAL_COUNTERS{{
+    {O::MEDIA_RESET, &StreamOutputTotals::mr_toggles},
+    {O::TIMESTAMP_UNCERTAIN, &StreamOutputTotals::tu_pdus},
+    {O::FRAMES_TX, &StreamOutputTotals::pdus},
+}};
+
+/// The interval counters of @p values at the end of an interval in which the totals went from @p last to @p totals.
+void count_output_intervals(
+    std::array<uint32_t, O::COUNT>& values, StreamOutputTotals const& last, StreamOutputTotals const& totals) noexcept
+{
+    bool const started = totals.starts != last.starts;  // Table 5.4: "Reset to 0 each time the Talker starts streaming"
+    for (auto const& [index, total] : OUTPUT_INTERVAL_COUNTERS) {
+        values[index] = (started ? 0U : values[index]) + (totals.*total != last.*total ? 1U : 0U);
+    }
+}
+
+}  // namespace
+
+auto StreamOutputIntervals::current(StreamOutputTotals const& totals) const noexcept -> std::array<uint32_t, COUNT>
+{
+    auto out = totals.starts != last.starts ? std::array<uint32_t, COUNT>{} : values;  // Table 5.4: reset at a start
+    out[STREAM_START] = totals.starts;
+    out[STREAM_STOP] = totals.stops;
+    return out;
+}
+
+auto StreamOutputIntervals::fold(StreamOutputTotals const& totals) noexcept -> bool
+{
+    auto const before = values;
+    values[STREAM_START] = totals.starts;
+    values[STREAM_STOP] = totals.stops;
+    count_output_intervals(values, last, totals);
+    last = totals;
+    return values != before;
+}
+
 }  // namespace statusbar::avb_entity
