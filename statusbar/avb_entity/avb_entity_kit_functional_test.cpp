@@ -2163,12 +2163,16 @@ TEST(avb_entity_kit_input_counters, a_milan_input_whose_talker_withdraws_is_inte
     EXPECT_EQ(counters.stream_interrupted.load(), 1U);
 }
 
-TEST(avb_entity_kit_input_counters, an_input_is_notified_once_at_the_end_of_an_interval_that_changed_it)
+TEST(avb_entity_kit_input_counters, a_milan_input_is_notified_at_every_second_interval_and_an_ieee_one_never)
 {
-    // Milan v1.3 Table 5.20: a GET_COUNTERS notification when a counter is
-    // updated, at most once a second; and a locked input that receives
-    // nothing for an interval has lost its stream (Table 5.6). Either profile.
+    // Milan v1.3 Table 5.20: a GET_COUNTERS notification when a counter is updated, at most one a
+    // second per descriptor. The interval is half a second (Tables 5.4 and 5.6 allow a second), so a
+    // change is told at every second end of one. IEEE 1722.1 asks for no such notification: its
+    // controller reads the counters. Under either profile a locked input that receives nothing for an
+    // interval has lost its stream (Table 5.6).
+    static_assert(AvbEntityKit::COUNTERS_INTERVAL_NS == 500'000'000 && AvbEntityKit::COUNTERS_NOTIFY_FOLDS == 2);
     for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
+        size_t const told = profile == "milan13" ? 1 : 0;  // a Milan entity tells, an IEEE 1722.1 one does not
         KitPair pair{profile};
         auto const input = aaf_input_of(pair);
         pair.bind();
@@ -2181,20 +2185,30 @@ TEST(avb_entity_kit_input_counters, an_input_is_notified_once_at_the_end_of_an_i
         talker.send(50);
         talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
         pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS - 1);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // not yet a second
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the interval is not over
         pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{1});
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the first end of an interval: half a second
 
-        // A second interval with nothing received: the stream stopped while locked.
+        // A second interval with nothing received: the stream stopped while locked. Its end is the
+        // second, and the changes of both are told at once.
         pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{2});
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
         auto const counters = counters_of(input);
         EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
         EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 2U);
         EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 2U);
-        // And a third changes nothing, so nothing is notified.
+
+        // Two more that change nothing: nothing is told.
+        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
+
+        // A change in the interval after a notification waits for the second end after it.
+        talker.send(50);
+        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
         pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{2});
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), 2 * told);
         EXPECT_TRUE(pair.listener.stop(pair.now));
         EXPECT_TRUE(pair.talker.stop(pair.now));
     }
@@ -2289,7 +2303,9 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an
     pair.bind();
     counters = counters_of(input);
     EXPECT_TRUE(std::ranges::all_of(counters.counters, [](ieee::quadlet_t const v) { return v.get() == 0; }));
-    // Told at the end of the interval, as any change is.
+    // Told at the second end of an interval after the last notification, as any change is.
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(watcher.of_input(AAF_STREAM), notified);
     pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of_input(AAF_STREAM), notified + 1);
     EXPECT_TRUE(pair.listener.stop(pair.now));
@@ -2371,10 +2387,11 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     EXPECT_EQ(counters.counters_valid.get(), O::VALID);
     EXPECT_EQ(counters.counters[O::STREAM_START].get(), 1U);
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{1});
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{0});  // the first end of an interval
     media_tick(100);
     pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(counters_of(output).counters[O::FRAMES_TX].get(), 2U);
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{1});  // the second: told
 
     // Unbound, the listener's registration goes and the talker stops streaming.
     pair.controller_sends(
@@ -2396,7 +2413,7 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     EXPECT_EQ(counters.counters[O::STREAM_START].get(), 2U);
     EXPECT_EQ(counters.counters[O::STREAM_STOP].get(), 1U);
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{4});
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{2});  // four intervals, each with a change: told twice
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }

@@ -1469,23 +1469,54 @@ void AvbEntityKit::poll_counters(int64_t const now_ns)
 
 void AvbEntityKit::fold_stream_counters()
 {
-    // Table 5.20: a notification when a counter changed, one a second per descriptor at most.
     fold_output_counters();
-    if (listener_ == nullptr) {
+    fold_input_counters();
+    if (++counters_folds_ < COUNTERS_NOTIFY_FOLDS) {
         return;
     }
-    for (auto const& spec : listener_specs_) {
-        if (listener_->fold_input_counters(spec.index)) {
-            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
-        }
-    }
+    counters_folds_ = 0;
+    notify_changed_counters();
 }
 
 void AvbEntityKit::fold_output_counters()
 {
     for (auto const& spec : talker_specs_) {
         if (spec.index < output_counters_.size() && output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
-            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+            output_counters_changed_[spec.index] = true;
+        }
+    }
+}
+
+void AvbEntityKit::fold_input_counters()
+{
+    if (listener_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        if (listener_->fold_input_counters(spec.index) && spec.index < input_counters_changed_.size()) {
+            input_counters_changed_[spec.index] = true;
+        }
+    }
+}
+
+auto AvbEntityKit::take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t const index) const noexcept -> bool
+{
+    return index < changed.size() && std::exchange(changed[index], false) && milan_profile();
+}
+
+void AvbEntityKit::notify_changed_counters()
+{
+    // Milan v1.3 Table 5.20: a notification when a counter changed, one a second per descriptor
+    // at most. IEEE 1722.1 asks for none: there the changes are dropped untold.
+    auto& aem = host_.components().aem_handler;
+    for (auto const& spec : talker_specs_) {
+        if (take_counters_change(output_counters_changed_, spec.index)) {
+            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        }
+    }
+    for (auto const& spec : listener_specs_) {
+        if (take_counters_change(input_counters_changed_, spec.index)) {
+            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
         }
     }
 }

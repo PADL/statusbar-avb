@@ -179,14 +179,23 @@ class AvbEntityKit
     /// the Join after a LeaveAll, up to 100 ms past the JoinTime.
     [[nodiscard]] auto next_control_deadline_ns() const noexcept -> std::optional<int64_t>;
 
-    /// The observation interval of the stream counters (Milan v1.3 Section
-    /// 5.3.8.10: at most 1 second).
-    static constexpr int64_t COUNTERS_INTERVAL_NS = 1'000'000'000;
+    /// The observation interval of the stream counters: half a second, where
+    /// Milan v1.3 Tables 5.4 and 5.6 allow a second at most. An interval is
+    /// timed from the fold that ended the one before, so it lasts this and the
+    /// loop's wake-up, and stays under the second.
+    static constexpr int64_t COUNTERS_INTERVAL_NS = 500'000'000;
+    /// The observation intervals between two unsolicited GET_COUNTERS of one
+    /// descriptor. Each interval lasts COUNTERS_INTERVAL_NS at least, so this
+    /// many of them are never under the second Table 5.20 asks for.
+    static constexpr unsigned COUNTERS_NOTIFY_FOLDS = 2;
+    static_assert(COUNTERS_INTERVAL_NS * COUNTERS_NOTIFY_FOLDS >= 1'000'000'000);
     /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS
-    /// has passed since the last, at reactor-clock @p now_ns, and notify each
-    /// stream descriptor whose counters changed (GET_COUNTERS). The first call
-    /// starts the first interval. Call it each reactor cycle, its wait bounded
-    /// by poll_timeout_ms(). Reactor thread only.
+    /// has passed since the last, at reactor-clock @p now_ns. Under the Milan
+    /// profile, at every COUNTERS_NOTIFY_FOLDS-th end, each stream descriptor
+    /// whose counters changed since it was last told is notified (GET_COUNTERS);
+    /// an IEEE 1722.1 entity notifies none, and a controller reads them. The
+    /// first call starts the first interval. Call it each reactor cycle, its
+    /// wait bounded by poll_timeout_ms(). Reactor thread only.
     void poll_counters(int64_t now_ns);
 
     // --- Media-thread (RT) calls ----------------------------------------------
@@ -490,10 +499,19 @@ class AvbEntityKit
     void follow_milan_bindings();
     void follow_inputs_bound();
     void follow_input_bound(uint16_t index);
-    /// End the observation interval of every stream's counters; notify those that changed.
+    /// End the observation interval of every stream's counters, and at every
+    /// COUNTERS_NOTIFY_FOLDS-th one notify those that changed.
     void fold_stream_counters();
-    /// The stream outputs' half of fold_stream_counters().
+    /// The stream outputs' and the stream inputs' halves of fold_stream_counters():
+    /// each notes which descriptors' counters changed.
     void fold_output_counters();
+    void fold_input_counters();
+    /// Notify each stream descriptor whose counters changed since it was last
+    /// told, under the Milan profile, and forget the changes under either.
+    void notify_changed_counters();
+    /// Whether the counters of stream descriptor @p index, noted in @p changed, are to be told now:
+    /// they changed and the profile is Milan's. The note is cleared.
+    [[nodiscard]] auto take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t index) const noexcept -> bool;
     /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
     /// describes: the status of the command. A stream input takes another
     /// channel count (change_input_format); a stream output keeps the one
@@ -643,6 +661,11 @@ class AvbEntityKit
     int64_t cycle_ns_{0};
     /// The end of the counters' observation interval (poll_counters), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
+    /// The intervals ended since the descriptors were last notified (fold_stream_counters).
+    unsigned counters_folds_{0};
+    /// The stream inputs and outputs whose counters changed since they were last notified.
+    std::array<bool, MAX_ENTITY_STREAMS> input_counters_changed_{};
+    std::array<bool, MAX_ENTITY_STREAMS> output_counters_changed_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
     /// Each stream output's Milan counters, by observation interval (reactor thread).

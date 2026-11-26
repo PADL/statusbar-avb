@@ -331,17 +331,19 @@ Everything not listed here is the same under both.
 A stream input counts each AVTPDU it receives (`StreamInputCounters`, on
 the RX thread). `AvbEntityKit::poll_counters(now_ns)` ends an
 observation interval on the reactor thread once `COUNTERS_INTERVAL_NS`,
-one second, has passed since the last: `StreamInputIntervals::fold()`
-makes the Milan values from the running counts, an input still locked
+half a second, has passed since the last: `StreamInputIntervals::fold()`
+makes the Milan values from the running counts, and an input still locked
 that received nothing for the whole interval has lost its stream
 (MEDIA_UNLOCKED and STREAM_INTERRUPTED, but not for an input stopped by
-STOP_STREAMING) and starts its next run afresh, and each stream
-descriptor whose values changed is notified with an unsolicited
-GET_COUNTERS, under either profile. An interval ends at the first
-reactor cycle after its second is up, so it lasts a second and that
-cycle's wake-up latency, never less: a descriptor is notified at most
-once a second (Milan v1.3 Table 5.20), and Tables 5.4 and 5.6, which
-want an interval of at most a second, are met to within the latency.
+STOP_STREAMING) and starts its next run afresh. An interval ends at the
+first reactor cycle after its half second is up, so it lasts half a
+second and that cycle's wake-up latency: under the second that Milan
+v1.3 Tables 5.4 and 5.6 allow, with room to spare. Under the Milan
+profile each stream descriptor whose values changed is notified with an
+unsolicited GET_COUNTERS at every second end of an interval
+(`COUNTERS_NOTIFY_FOLDS`), so two notifications of one descriptor are
+never less than a second apart (Table 5.20). An IEEE 1722.1 entity
+notifies none: a controller reads its counters.
 Under the Milan profile GET_COUNTERS answers MEDIA_LOCKED,
 MEDIA_UNLOCKED and STREAM_INTERRUPTED as they stand and the interval
 counters as of the last fold; a bind's reset is answered at once and

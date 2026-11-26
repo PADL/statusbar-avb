@@ -351,17 +351,20 @@ TEST(avb_entity_kit_profile, the_loop_does_not_sleep_past_an_mrp_timer)
 
 TEST(avb_entity_kit_counters, the_loop_wakes_for_the_end_of_an_observation_interval)
 {
-    // The counters' interval is at most a second (Milan v1.3 5.3.8.10): the
+    // The counters' interval is at most a second (Milan v1.3 5.3.8.10), and here half of one: the
     // loop's wait is cut to what is left of it, not up to 100 ms past it.
+    constexpr int64_t interval = AvbEntityKit::COUNTERS_INTERVAL_NS;
+    constexpr int64_t ms = 1'000'000;
+    static_assert(interval <= 1'000'000'000);
     KitUnderTest kit{make_config(2, "classic")};
     int64_t const start_ns = 5'000'000'000;
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns), 100);  // no interval begun
     kit->poll_counters(start_ns);
-    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 950'000'000), 50);
-    kit->poll_counters(start_ns + 999'000'000);  // not yet over
-    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 999'000'000), 1);
-    kit->poll_counters(start_ns + 1'000'000'000);  // over: the next one begins
-    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + 1'950'000'000), 50);
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + interval - (50 * ms)), 50);
+    kit->poll_counters(start_ns + interval - ms);  // not yet over
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + interval - ms), 1);
+    kit->poll_counters(start_ns + interval);  // over: the next one begins
+    EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + (2 * interval) - (50 * ms)), 50);
 }
 
 TEST(avb_entity_kit_profile, a_talker_given_no_presentation_offset_takes_its_profiles)
