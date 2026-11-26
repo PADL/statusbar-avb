@@ -30,6 +30,7 @@
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
@@ -151,14 +152,9 @@ struct TalkerStreams
         , mem_resource_{memory_resource}
     {}
 
-    /// Tag the stream frames with @p vlan_id and priority @p pcp from now on
-    /// (the SR class Domain adopted from the wire). Safe from the control
-    /// thread while the media thread transmits.
-    void set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
-    {
-        vlan_id_.store(vlan_id, std::memory_order_relaxed);
-        stream_pcp_.store(pcp, std::memory_order_relaxed);
-    }
+    /// Tag the stream frames with @p vlan_id and priority @p pcp from now on (the SR class Domain adopted from the
+    /// wire), told to the frames hook. Reactor thread, as it reads the slots; the media thread reads the tag per frame.
+    void set_vlan(uint16_t vlan_id, uint8_t pcp) noexcept;
     [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
     [[nodiscard]] auto stream_pcp() const noexcept -> uint8_t { return stream_pcp_.load(std::memory_order_relaxed); }
 
@@ -327,6 +323,14 @@ struct TalkerStreams
     /// (AvbEntityKit::talker_should_transmit()). Reactor thread.
     [[nodiscard]] auto frame_template(uint16_t stream_index, ieee::Eui48 const& src_mac) const noexcept
         -> std::optional<StreamFrameTemplate>;
+    /// Called with an open stream's index at each change of its frame_template(): a VID or PCP set_vlan() moves (every
+    /// open stream), a destination set_destination() moves. The thread that made the change calls it, the kit's
+    /// reactor; not at open_stream(). A later install replaces an earlier one; it must not throw.
+    using FramesChangedFn = sg14::inplace_function<void(uint16_t stream_index), 32>;
+    void set_on_frames_changed(FramesChangedFn fn) noexcept { on_frames_changed_ = std::move(fn); }
+    /// STREAM_OUTPUT @p stream_index's frames go to @p dest_mac from now on (a MAAP block), told to the frames hook
+    /// when that moves them. Reactor thread; the media thread reads it per frame, as it always has.
+    void set_destination(uint16_t stream_index, ieee::Eui48 const& dest_mac) noexcept;
 
     /// Emit this tick's traffic for @p slot from @p src (this stream's
     /// interleaved audio for the tick — per-stream sources are the entity's
@@ -443,6 +447,7 @@ struct TalkerStreams
     /// Atomics: written from the control thread, read per frame on the media thread.
     std::atomic<uint16_t> vlan_id_{config_.vlan_id};
     std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
+    FramesChangedFn on_frames_changed_{};
     /// When the AVTPDUs carry tu (notify_grandmaster_*): the reactor writes, the media thread reads.
     itc::SeqlockValue<TimestampUncertainty> uncertainty_{};
     /// The media wake now being served (tell_wake_time). Media thread only.

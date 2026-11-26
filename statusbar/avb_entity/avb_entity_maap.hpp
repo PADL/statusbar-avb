@@ -260,9 +260,7 @@ class MaapAddressAcquirer
             if (auto const s = components.talker_stream(idx); s.has_value()) {
                 (void)components.configure_talker_stream(idx, s->stream_id, dest, s->stream_vlan_id);
             }
-            if (auto* slot = talker.slot_for(idx); slot != nullptr) {
-                slot->dest_mac = dest;
-            }
+            talker.set_destination(idx, dest);
         }
     }
 

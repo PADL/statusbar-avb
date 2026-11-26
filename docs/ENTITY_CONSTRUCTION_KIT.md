@@ -583,6 +583,14 @@ changes only at a header.
 place, so a stream has one writer whichever path sends it: the media
 thread calls one of the two for a stream each tick, never both.
 
+**Frames.** `TalkerStreams::set_on_frames_changed()` tells each change of
+an open stream's template, on the thread that makes it, the kit's
+reactor: a VID or PCP `set_vlan()` moves (a Domain adopted from the wire,
+Milan v1.3 4.2.7.2.1; every open stream), a destination
+`set_destination()` moves (a MAAP block, `MaapAddressAcquirer::
+publish_block()`). Not at `open_stream()`: the data plane reads the
+template when the gate opens, and again at each change.
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one

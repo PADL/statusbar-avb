@@ -248,6 +248,31 @@ TEST(avb_entity_kit_domain, an_adopted_domain_moves_acmp_and_the_talker_advertis
     }
 }
 
+// A data plane beside the port follows each stream's frames: a Domain adopted from the wire (Milan v1.3
+// 4.2.7.2.1) moves every stream's tag, a MAAP block (IEEE 1722-2025 Annex B) the destinations it gives.
+TEST(avb_entity_kit_domain, an_adopted_domain_and_a_maap_block_are_told_as_changes_of_the_frames)
+{
+    KitUnderTest kit{make_config(7, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    std::vector<uint16_t> told;
+    kit->talker().set_on_frames_changed([&told](uint16_t const index) { told.push_back(index); });
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    std::vector<uint16_t> every{};
+    for (auto const& spec : kit.talker_specs()) {
+        every.push_back(spec.index);
+    }
+    EXPECT_TRUE(told == every);
+
+    told.clear();
+    std::array<uint16_t, 1> const indices{every.front()};
+    Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x56, 0x78};
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, block);
+    EXPECT_TRUE(told == std::vector<uint16_t>{every.front()});
+    MaapAddressAcquirer::publish_block(kit->host().components(), kit->talker(), indices, block);  // the same block
+    EXPECT_EQ(told.size(), size_t{1});
+    kit->talker().set_on_frames_changed({});
+}
+
 TEST(avb_entity_kit_domain, a_classic_kit_keeps_its_configured_domain)
 {
     KitUnderTest kit{make_config(7, "classic")};
