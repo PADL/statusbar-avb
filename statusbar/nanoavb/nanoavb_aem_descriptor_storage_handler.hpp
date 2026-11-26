@@ -49,6 +49,7 @@
 #include "statusbar/atdecc/atdecc_aem_control_types.hpp"
 #include "statusbar/atdecc/atdecc_aem_control_values.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_entity_handler.hpp"
 #include "statusbar/sg14/inplace_function.h"
@@ -713,7 +714,8 @@ class DescriptorStorageHandler : public AemEntityHandler
     //
     // SET_STREAM_FORMAT validates the requested format against the STREAM
     // descriptor's authored formats (current_format + the stream_formats
-    // trailer), offers it to a veto/apply callback, and stores it in RAM;
+    // trailer, an "up to" entry of which describes a range of channel
+    // counts), offers it to a veto/apply callback, and stores it in RAM;
     // GET_STREAM_FORMAT and READ_DESCRIPTOR then serve the runtime value.
     // START/STOP_STREAMING latch a per-stream streaming/stopped state the
     // data plane can honor via the change callback. SET_SAMPLING_RATE does
@@ -727,6 +729,26 @@ class DescriptorStorageHandler : public AemEntityHandler
                                       64> fn)
     {
         on_stream_format_changed_ = std::move(fn);
+    }
+
+    /// Take @p format as the stream's current format with no command behind
+    /// it: the one saved before a restart (Milan v1.3 5.3.7.1 and 5.3.8.1:
+    /// "The current format shall be saved in a non-volatile memory and
+    /// restored after a power cycle"). It has to be a format the descriptor's
+    /// formats describe, as for SET_STREAM_FORMAT. The change callback is not
+    /// called and no controller is told. False, with nothing changed, when
+    /// it is not such a format or the blob has no such stream.
+    [[nodiscard]] auto restore_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        bool const described = blob.has_value() && blob->size() >= atdecc::aem::DescriptorStream::MINIMUM_LENGTH &&
+            stream_format_supported(*blob, format);
+        auto* const state = described ? find_or_init_stream_state(ref) : nullptr;
+        if (state != nullptr) {
+            state->format = format;
+            state->has_format = true;
+        }
+        return state != nullptr;
     }
 
     /// The stream's runtime current_format (falls back to the blob's
@@ -817,6 +839,16 @@ class DescriptorStorageHandler : public AemEntityHandler
     [[nodiscard]] static auto blob_list_contains(
         std::span<uint8_t const> const blob, size_t const offset_field, size_t const count_field, T const& wanted) noexcept -> bool
     {
+        return blob_list_any<T>(blob, offset_field, count_field, [&wanted](T const& entry) { return entry == wanted; });
+    }
+
+    /// True when @p accepts says so of an entry of the blob's authored list
+    /// of T entries, found as blob_list_contains() finds it.
+    template <typename T, typename Accepts>
+    [[nodiscard]] static auto blob_list_any(
+        std::span<uint8_t const> const blob, size_t const offset_field, size_t const count_field, Accepts const& accepts) noexcept
+        -> bool
+    {
         size_t const offset = read_u16(blob, offset_field);
         size_t const count = read_u16(blob, count_field);
         for (size_t i = 0; i < count; ++i) {
@@ -826,7 +858,7 @@ class DescriptorStorageHandler : public AemEntityHandler
             }
             T candidate{};
             span_load(candidate, blob.subspan(off, sizeof(T)));
-            if (candidate == wanted) {
+            if (accepts(candidate)) {
                 return true;
             }
         }
@@ -1524,13 +1556,22 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     /// True when @p format is the descriptor's authored current_format or
-    /// appears in its stream_formats trailer.
+    /// one an entry of its stream_formats trailer describes: the entry
+    /// itself, or with the AAF "up to" bit any channel count from one to the
+    /// entry's (avtp::stream_format_covers). A @p format with that bit set
+    /// is never one: IEEE 1722-2025 I.2.4 has it zero in a current format and
+    /// in a SET_STREAM_FORMAT.
     [[nodiscard]] static auto stream_format_supported(std::span<uint8_t const> const blob, ieee::Eui64 const& format) noexcept
         -> bool
     {
         ieee::Eui64 authored{};
         span_load(authored, blob.subspan(STREAM_CURRENT_FORMAT_FIELD, 8));
-        return authored == format || blob_list_contains(blob, STREAM_FORMATS_OFFSET_FIELD, STREAM_NUMBER_OF_FORMATS_FIELD, format);
+        uint64_t const wanted = format.to_uint64();
+        auto const describes = [wanted](ieee::Eui64 const& listed) {
+            return avtp::stream_format_covers(listed.to_uint64(), wanted);
+        };
+        return describes(authored) ||
+            blob_list_any<ieee::Eui64>(blob, STREAM_FORMATS_OFFSET_FIELD, STREAM_NUMBER_OF_FORMATS_FIELD, describes);
     }
 
     /// Apply a SET_STREAM_FORMAT (Clause 7.4.9). @p value is the payload

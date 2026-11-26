@@ -11,6 +11,7 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -2160,9 +2161,17 @@ constexpr uint64_t STREAM_FMT_A = 0x0205022002006000ULL;  // authored current
 constexpr uint64_t STREAM_FMT_B = 0x0205041802006000ULL;  // in the formats trailer
 constexpr uint64_t STREAM_FMT_X = 0x1111111111111111ULL;  // not authored anywhere
 
+// FMT_A is AAF, 48 kHz, 32 bit integer, 8 channels of 6 samples. The same
+// with another channel count, and the "up to" entry that describes them all.
+constexpr auto stream_fmt_a_of(uint64_t const channels) noexcept -> uint64_t
+{
+    return (STREAM_FMT_A & ~avtp::AAF_STREAM_FORMAT_CHANNELS_MASK) | (channels << 22);
+}
+constexpr uint64_t STREAM_FMT_A_UP_TO_8 = STREAM_FMT_A | avtp::AAF_STREAM_FORMAT_UT_BIT;
+
 /// Blob with one STREAM_OUTPUT (index 0): current_format = FMT_A, formats
-/// trailer = {FMT_A, FMT_B}.
-auto make_blob_with_stream_output() -> std::vector<uint8_t>
+/// trailer = {FMT_A, @p second}.
+auto make_blob_with_stream_output(uint64_t const second = STREAM_FMT_B) -> std::vector<uint8_t>
 {
     constexpr uint32_t header_size = 20;
     constexpr uint32_t toc_entry_size = 12;
@@ -2185,7 +2194,7 @@ auto make_blob_with_stream_output() -> std::vector<uint8_t>
         make_span(blob, {.start = desc_offset + offsetof(DescriptorStream, current_format), .length = 8}),
         ieee::octlet_t{STREAM_FMT_A});
     span_store(make_span(blob, {.start = desc_offset + DescriptorStream::LENGTH, .length = 8}), ieee::octlet_t{STREAM_FMT_A});
-    span_store(make_span(blob, {.start = desc_offset + DescriptorStream::LENGTH + 8, .length = 8}), ieee::octlet_t{STREAM_FMT_B});
+    span_store(make_span(blob, {.start = desc_offset + DescriptorStream::LENGTH + 8, .length = 8}), ieee::octlet_t{second});
     return blob;
 }
 
@@ -2428,6 +2437,79 @@ TEST(stream_lifecycle, set_stream_format_validates_and_round_trips)
     auto const ok = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, STREAM_FMT_A));
     EXPECT_EQ(ok.status, AEM_STATUS_SUCCESS);
     EXPECT_EQ(seen_format, STREAM_FMT_A);
+}
+
+TEST(stream_lifecycle, an_up_to_entry_lets_set_stream_format_name_any_channel_count_it_describes)
+{
+    auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    for (uint64_t const channels : {1U, 2U, 4U, 6U, 8U}) {
+        auto const set = run_aem_command(
+            cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, stream_fmt_a_of(channels)));
+        EXPECT_EQ(set.status, AEM_STATUS_SUCCESS);
+        auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+        EXPECT_EQ(response_stream_format(get.bytes), stream_fmt_a_of(channels));
+    }
+}
+
+TEST(stream_lifecycle, set_stream_format_refuses_what_an_up_to_entry_does_not_describe)
+{
+    auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+
+    // More channels than the entry names; another sample format; and the
+    // entry itself, which is a range and not a format (IEEE 1722-2025 I.2.4:
+    // the ut bit is zero in a SET_STREAM_FORMAT).
+    for (uint64_t const refused : {stream_fmt_a_of(9), STREAM_FMT_B, STREAM_FMT_A_UP_TO_8}) {
+        auto const set = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_STREAM_FORMAT, make_stream_format_body(0, refused));
+        EXPECT_EQ(set.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    }
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get.bytes), STREAM_FMT_A);
+}
+
+TEST(stream_lifecycle, a_restored_stream_format_is_served_and_no_callback_runs)
+{
+    auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    static int called = 0;
+    called = 0;
+    handler.set_on_stream_format_changed([](uint16_t, uint16_t, uint64_t) -> uint8_t {
+        ++called;
+        return AEM_STATUS_SUCCESS;
+    });
+    DescriptorRef const output{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0};
+
+    EXPECT_TRUE(handler.restore_stream_format(output, ieee::Eui64{}.from_uint64(stream_fmt_a_of(2))));
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get.bytes), stream_fmt_a_of(2));
+    EXPECT_EQ(called, 0);
+}
+
+TEST(stream_lifecycle, a_format_the_model_no_longer_describes_is_not_restored)
+{
+    auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    DescriptorRef const output{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0};
+    DescriptorRef const absent{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 7};
+
+    EXPECT_FALSE(handler.restore_stream_format(output, ieee::Eui64{}.from_uint64(STREAM_FMT_B)));
+    EXPECT_FALSE(handler.restore_stream_format(absent, ieee::Eui64{}.from_uint64(STREAM_FMT_A)));
+    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get.bytes), STREAM_FMT_A);
 }
 
 TEST(stream_lifecycle, start_stop_streaming_latches_and_gates)
