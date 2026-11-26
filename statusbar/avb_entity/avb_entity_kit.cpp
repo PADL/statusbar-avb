@@ -222,9 +222,9 @@ void AvbEntityKit::install_storage_hooks()
         return on_stream_format_changed(type, index, format);
     });
     // Under Milan the started/stopped state of an input is its sink's
-    // (a bind's STREAMING_WAIT, START_STREAMING, STOP_STREAMING): each input
-    // takes or discards its frames as its sink's binding says.
-    host_.set_on_milan_bindings_changed([this]() { apply_input_stopped_states(); });
+    // (a bind's STREAMING_WAIT, START_STREAMING, STOP_STREAMING), and a bind
+    // zeroes its counters: each input follows its sink's binding.
+    host_.set_on_milan_bindings_changed([this]() { follow_milan_bindings(); });
     // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
     // source; the media thread reads it per tick (media_rate()).
     storage_handler_.set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
@@ -402,6 +402,35 @@ void AvbEntityKit::restore_input_format(SavedStreamFormat const& saved)
             "state: the saved format {:016x} of stream {} is not one it has now; it keeps its authored format",
             saved.format,
             saved.descriptor_index);
+    }
+}
+
+void AvbEntityKit::follow_milan_bindings()
+{
+    apply_input_stopped_states();
+    follow_inputs_bound();
+}
+
+void AvbEntityKit::follow_inputs_bound()
+{
+    if (listener_ == nullptr || !host_.components().acmp_is_milan()) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        follow_input_bound(spec.index);
+    }
+}
+
+void AvbEntityKit::follow_input_bound(uint16_t const index)
+{
+    // Milan v1.3 5.3.8.10: zeroed each time the input becomes bound, not when it is unbound.
+    auto const* const sink = host_.components().milan_acmp_listener->sink(index);
+    bool const bound = sink != nullptr && sink->is_bound();
+    if (index >= input_bound_.size() || bound == std::exchange(input_bound_[index], bound)) {
+        return;
+    }
+    if (bound) {
+        listener_->reset_input_counters(index);
     }
 }
 
@@ -1091,8 +1120,9 @@ void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_grou
     bool const milan = host_.components().acmp_is_milan();
     host_.enable_listener_binding_persistence(
         state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
-    // The started/stopped state is restored with the binding (5.3.8.7).
-    apply_input_stopped_states();
+    // The started/stopped state is restored with the binding (5.3.8.7),
+    // and a restored binding is bound from here on.
+    follow_milan_bindings();
     // And each input's format, saved when a controller last set it (5.3.8.1).
     restore_input_formats();
 }

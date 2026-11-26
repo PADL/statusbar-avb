@@ -2253,4 +2253,44 @@ TEST(avb_entity_kit_input_counters, a_milan_input_counts_intervals_and_a_classic
     }
 }
 
+TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an_unbind_keeps_them)
+{
+    // Milan v1.3 Section 5.3.8.10: reset each time the input changes from not
+    // bound to bound, not when it changes from bound to not bound.
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    CountersWatcher const watcher{pair.listener};
+    AafSender talker{pair};
+    int64_t t = 1'000'000'000;
+    pair.listener->poll_counters(t);
+    talker.send(20);
+    talker.send(20, 1);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(input).counters[I::FRAMES_RX].get(), 1U);
+    EXPECT_EQ(counters_of(input).counters[I::SEQ_NUM_MISMATCH].get(), 1U);
+
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_EQ(counters_of(input).counters[I::MEDIA_UNLOCKED].get(), 2U);  // at once, not at the interval's end
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto counters = counters_of(input);
+    EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), 1U);
+    EXPECT_EQ(counters.counters[I::SEQ_NUM_MISMATCH].get(), 1U);
+    EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
+    EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 2U);      // the unbind drops the lock
+    EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 1U);  // the lost AVTPDU's alone
+
+    size_t const notified = watcher.of_input(AAF_STREAM);
+    pair.bind();
+    counters = counters_of(input);
+    EXPECT_TRUE(std::ranges::all_of(counters.counters, [](ieee::quadlet_t const v) { return v.get() == 0; }));
+    // Told at the end of the interval, as any change is.
+    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(watcher.of_input(AAF_STREAM), notified + 1);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

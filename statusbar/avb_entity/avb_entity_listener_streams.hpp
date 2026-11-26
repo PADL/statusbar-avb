@@ -306,6 +306,10 @@ struct ListenerStreams
     /// no interruption: true when a value changed. Reactor thread.
     [[nodiscard]] auto fold_input_counters(uint16_t descriptor_index) -> bool;
 
+    /// The input became bound: zero its Milan counters (Milan v1.3 Section
+    /// 5.3.8.10). Reactor thread.
+    void reset_input_counters(uint16_t descriptor_index);
+
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream group on the RX socket -- when the
     /// destination is a multicast address (IEEE 1722.1-2021 8.2.1.13); a

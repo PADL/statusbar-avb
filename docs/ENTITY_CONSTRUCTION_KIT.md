@@ -322,7 +322,7 @@ Everything not listed here is the same under both.
 | Descriptor lengths when `atdecc.version` is empty (the default) | `2016`: STREAM, AVB_INTERFACE, AUDIO_CLUSTER and the other descriptors that grew are cut to their 1722.1-2013/2016 lengths, for controllers that reject the longer ones | `2021`: the full IEEE 1722.1-2021 descriptors, which are the ones Milan names (5.3.3); `2016` or `2021` given outright is used under either |
 | Stream destination addresses when `stream.address_mode` is empty (the default) | `static`: the configured `*_dest_mac` | `maap`: a block acquired and defended by MAAP (4.3.3.1), kept across restarts in `maap-range`; `static` or `maap` given outright is used under either. Where the MAAP socket cannot be opened the entity still falls back to the configured addresses, with a warning |
 | A GET_AUDIO_MAP partition of a port's dynamic mappings | 62 mappings, within an AECPDU's 524 octets of control data (9.2.1.1.7) | 176 mappings, 1420 octets (5.4.1, 5.4.2.26) |
-| GET_COUNTERS of a stream input | the running counts of IEEE 1722.1-2021 Clause 7.4.42, bits 0 to 11: AVTPDUs, locks and losses since the input was opened | Milan v1.3 Table 5.13: MEDIA_LOCKED, MEDIA_UNLOCKED and STREAM_INTERRUPTED count events, the others the observation intervals in which they were seen (Table 5.6); no TIMESTAMP_VALID or TIMESTAMP_NOT_VALID |
+| GET_COUNTERS of a stream input | the running counts of IEEE 1722.1-2021 Clause 7.4.42, bits 0 to 11: AVTPDUs, locks and losses since the input was opened | Milan v1.3 Table 5.13: MEDIA_LOCKED, MEDIA_UNLOCKED and STREAM_INTERRUPTED count events, the others the observation intervals in which they were seen (Table 5.6); no TIMESTAMP_VALID or TIMESTAMP_NOT_VALID; all zeroed each time the input becomes bound (5.3.8.10) |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 
 ### Stream counters
@@ -343,12 +343,13 @@ once a second (Milan v1.3 Table 5.20), and Tables 5.4 and 5.6, which
 want an interval of at most a second, are met to within the latency.
 Under the Milan profile GET_COUNTERS answers MEDIA_LOCKED,
 MEDIA_UNLOCKED and STREAM_INTERRUPTED as they stand and the interval
-counters as of the last fold. The entity runner calls `poll_counters()`
-each reactor cycle; an entity with a loop of its own does the same and
-bounds its wait by `poll_timeout_ms()`, which counts the end of the
-interval among its deadlines. A loop that never calls it ends no
-interval: a Milan input then answers its event counters and zero for
-every interval counter, and nothing is notified.
+counters as of the last fold; a bind's reset is answered at once and
+notified at the end of its interval. The entity runner calls
+`poll_counters()` each reactor cycle; an entity with a loop of its own
+does the same and bounds its wait by `poll_timeout_ms()`, which counts
+the end of the interval among its deadlines. A loop that never calls it
+ends no interval: a Milan input then answers its event counters and zero
+for every interval counter, and nothing is notified.
 
 ### The format of a stream input
 
