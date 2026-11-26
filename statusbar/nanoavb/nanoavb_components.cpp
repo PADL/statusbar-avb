@@ -63,33 +63,48 @@ void GptpAnnounceHandler::on_ready(int64_t now_ns)
 
 namespace {
 
-/// The TLVs after an Announce's 64-octet body, up to messageLength (empty when there are none).
+/// The TLVs after the Announce body of @p announce, as far as its messageLength (IEEE 802.1AS-2020
+/// Clause 10.6.3.1); empty when there are none.
 auto announce_tlvs(std::span<uint8_t const> const announce) noexcept -> std::span<uint8_t const>
 {
     if (announce.size() < gptp::AnnounceMessage::LENGTH) {
         return {};
     }
-    size_t const message_length = (size_t{announce[2]} << 8U) | announce[3];
-    auto const tlvs = announce.first(std::min(announce.size(), message_length));
-    return tlvs.size() > gptp::AnnounceMessage::LENGTH ? tlvs.subspan(gptp::AnnounceMessage::LENGTH) : std::span<uint8_t const>{};
+    gptp::MessageHeader header{};
+    span_load(header, announce);
+    size_t const end = std::min<size_t>(announce.size(), header.message_length.get());
+    return end > gptp::AnnounceMessage::LENGTH
+        ? announce.subspan(gptp::AnnounceMessage::LENGTH, end - gptp::AnnounceMessage::LENGTH)
+        : std::span<uint8_t const>{};
 }
 
-/// The PATH_TRACE TLV's value among @p tlvs; empty when absent or cut short.
+/// The value of the PATH_TRACE TLV among @p tlvs; empty when it is absent or a TLV runs past them.
 auto path_trace_value(std::span<uint8_t const> tlvs) noexcept -> std::span<uint8_t const>
 {
-    using gptp::TlvHeader;
-    while (tlvs.size() >= TlvHeader::LENGTH) {
-        uint16_t const type = static_cast<uint16_t>((uint16_t{tlvs[0]} << 8U) | tlvs[1]);
-        size_t const length = (size_t{tlvs[2]} << 8U) | tlvs[3];
-        if (tlvs.size() < TlvHeader::LENGTH + length) {
+    while (tlvs.size() >= gptp::TlvHeader::LENGTH) {
+        gptp::TlvHeader tlv{};
+        span_load(tlv, tlvs);
+        auto const value = tlvs.subspan(gptp::TlvHeader::LENGTH);
+        if (value.size() < tlv.length_field.get()) {
             return {};
         }
-        if (type == gptp::TLV_TYPE_PATH_TRACE) {
-            return tlvs.subspan(TlvHeader::LENGTH, length);
+        if (tlv.tlv_type.get() == gptp::TLV_TYPE_PATH_TRACE) {
+            return value.first(tlv.length_field.get());
         }
-        tlvs = tlvs.subspan(TlvHeader::LENGTH + length);
+        tlvs = value.subspan(tlv.length_field.get());
     }
     return {};
+}
+
+/// The path @p announce makes known: @p path_trace, or its grandmaster alone without one.
+auto announced_path(gptp::AnnounceMessage const& announce, AsPath const& path_trace) -> AsPath
+{
+    if (!path_trace.empty()) {
+        return path_trace;
+    }
+    AsPath path{};
+    path.push_back(announce.grandmaster_identity.to_eui64());
+    return path;
 }
 
 }  // namespace
@@ -98,22 +113,25 @@ auto parse_announce_path_trace(std::span<uint8_t const> const announce) noexcept
 {
     AsPath path{};
     auto const value = path_trace_value(announce_tlvs(announce));
-    for (size_t at = 0; at + 8 <= value.size() && path.size() < AsPath::capacity(); at += 8) {
-        Eui64 id{};
-        span_copy(id.span(), value.subspan(at, 8));
-        path.push_back(id);
+    for (size_t at = 0; at + Eui64::LENGTH <= value.size() && path.size() < AsPath::capacity(); at += Eui64::LENGTH) {
+        span_load(path.emplace_back(), value.subspan(at));
     }
     return path;
 }
 
 void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace)
-{  // NOLINT(statusbar-block-statements) the Announce recorded, then each observer told
+{
     // Record first: a callback that asks last_announce() must be told the
     // Announce that named the grandmaster it is being told about.
     last_announce_time_ns_ = now_ns;
     last_announce_ = announce;
     has_announce_ = true;
-    observe_path_trace(now_ns, announce, path_trace);
+    set_path_trace(now_ns, announced_path(announce, path_trace));
+    observe_grandmaster(now_ns, announce);
+}
+
+void GptpAnnounceHandler::observe_grandmaster(int64_t const now_ns, gptp::AnnounceMessage const& announce)
+{
     if (announce.grandmaster_identity == grandmaster_identity_) {
         return;
     }
@@ -123,22 +141,6 @@ void GptpAnnounceHandler::observe_announce(int64_t const now_ns, gptp::AnnounceM
     }
     if (on_grandmaster_changed_) {
         on_grandmaster_changed_(now_ns);
-    }
-}
-
-void GptpAnnounceHandler::observe_path_trace(int64_t const now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace)
-{
-    // An Announce without a path trace names its grandmaster alone.
-    AsPath path = path_trace;
-    if (path.empty()) {
-        path.push_back(announce.grandmaster_identity.to_eui64());
-    }
-    if (std::ranges::equal(path, path_trace_)) {
-        return;
-    }
-    path_trace_ = path;
-    if (callbacks_.path_trace_changed) {
-        callbacks_.path_trace_changed(now_ns);
     }
 }
 
@@ -166,11 +168,17 @@ void GptpAnnounceHandler::tick(int64_t const now_ns)
     if (callbacks_.grandmaster_lost) {
         callbacks_.grandmaster_lost(now_ns);
     }
-    if (!path_trace_.empty()) {
-        path_trace_.clear();
-        if (callbacks_.path_trace_changed) {
-            callbacks_.path_trace_changed(now_ns);
-        }
+    set_path_trace(now_ns, AsPath{});
+}
+
+void GptpAnnounceHandler::set_path_trace(int64_t const now_ns, AsPath const& path)
+{
+    if (std::ranges::equal(path, path_trace_)) {
+        return;
+    }
+    path_trace_ = path;
+    if (on_path_trace_changed_) {
+        on_path_trace_changed_(now_ns);
     }
 }
 
@@ -1017,9 +1025,12 @@ void setup_nanoavb_callbacks(NanoAvbComponents& components, NanoAvbNetHandlers& 
                 grandmaster_after_loss(components),
                 last != nullptr ? last->header.domain_number.get() : 0,
                 sm::TimePoint{std::chrono::nanoseconds{now_ns}});
-        },
-        // A new path, or none: GET_AS_PATH's subscribers are told (IEEE 1722.1-2021 Clause 7.4.41).
-        .path_trace_changed = [&components](int64_t) { (void)components.aem_handler.notify_as_path_changed(0); }});
+        }});
+
+    // A new path trace, or none, is an unsolicited GET_AS_PATH (IEEE 1722.1-2021 Clause 7.4.41).
+    // Apart from the callbacks above, which integrators replace whole.
+    handlers.gptp_handler().set_on_path_trace_changed(
+        [&components](int64_t /*now_ns*/) -> void { (void)components.aem_handler.notify_as_path_changed(0); });
 }
 
 auto grandmaster_after_loss(NanoAvbComponents const& components) -> gptp::ClockIdentity

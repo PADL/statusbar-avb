@@ -465,8 +465,8 @@ TEST(nanoavb_gptp_announce, path_trace_from_the_tlv)
     EXPECT_TRUE(statusbar::nanoavb::parse_announce_path_trace(cut).empty());
 
     int changes = 0;
-    statusbar::nanoavb::GptpAnnounceHandler handler{
-        "nanoavb-announce-test0", statusbar::nanoavb::GptpAnnounceCallbacks{.path_trace_changed = [&](int64_t) { ++changes; }}};
+    statusbar::nanoavb::GptpAnnounceHandler handler{"nanoavb-announce-test0"};
+    handler.set_on_path_trace_changed([&](int64_t) { ++changes; });
     constexpr int64_t t0 = 100'000'000'000;
     handler.observe_announce(t0, announce, path);
     EXPECT_EQ(changes, 1);

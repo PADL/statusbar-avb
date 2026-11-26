@@ -306,14 +306,14 @@ struct GptpAnnounceCallbacks
     /// the last Announce's header named): the grandmaster is lost, and
     /// has_grandmaster() is already false.
     statusbar::sg14::inplace_function<void(int64_t now_ns), 64> grandmaster_lost;
-
-    /// Called when the path trace the Announces carry changes, or is cleared
-    /// when the grandmaster is lost (see GptpAnnounceHandler::path_trace).
-    statusbar::sg14::inplace_function<void(int64_t now_ns), 64> path_trace_changed;
 };
 
-/// The clock identities of an Announce's PATH_TRACE TLV (IEEE 802.1AS-2020
-/// 10.6.3.3), at most MAX_AS_PATH_LENGTH of them.
+/// Called when GptpAnnounceHandler::path_trace() changes, to another path or to none.
+using PathTraceChangedFn = statusbar::sg14::inplace_function<void(int64_t now_ns), 64>;
+
+/// The PATH_TRACE TLV of the gPTP Announce message @p announce (IEEE 802.1AS-2020 Clause
+/// 10.6.3.3), read only as far as its messageLength; empty when it has none or the TLVs
+/// are cut short. Identities past MAX_AS_PATH_LENGTH are dropped.
 [[nodiscard]] auto parse_announce_path_trace(std::span<uint8_t const> announce) noexcept -> AsPath;
 
 /// gPTP Announce Handler - receives gPTP Announce messages and notifies on
@@ -358,14 +358,13 @@ class GptpAnnounceHandler : public net::Pollable
     /// Whether a grandmaster is in force.
     [[nodiscard]] auto has_grandmaster() const noexcept -> bool { return grandmaster_identity_.is_set(); }
 
-    /// Take one Announce as received at @p now_ns: record it, then tell the
-    /// callbacks what changed. on_ready() calls this for every Announce the
-    /// socket delivers; a test can call it directly.
-    /// @p path_trace is the Announce's PATH_TRACE (parse_announce_path_trace).
+    /// Handle one Announce received at @p now_ns, @p path_trace its PATH_TRACE
+    /// (parse_announce_path_trace): record it, then tell the callbacks what changed.
+    /// on_ready() calls this for every Announce the socket delivers; a test can call it directly.
     void observe_announce(int64_t now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace = {});
 
-    /// The path trace of the last Announce (IEEE 802.1AS-2020 Clause 10.6.3.3), empty while no
-    /// grandmaster is known; without the TLV, the grandmaster alone.
+    /// The last Announce's path trace (IEEE 802.1AS-2020 Clause 10.6.3.3), the grandmaster
+    /// alone when it carried none; empty while no grandmaster is in force.
     [[nodiscard]] auto path_trace() const noexcept -> AsPath const& { return path_trace_; }
 
     /// How long after its last Announce a grandmaster is held: three times
@@ -414,9 +413,6 @@ class GptpAnnounceHandler : public net::Pollable
     int64_t last_announce_time_ns_{0};
     gptp::AnnounceMessage last_announce_{};
     bool has_announce_{false};
-    AsPath path_trace_{};
-
-    void observe_path_trace(int64_t now_ns, gptp::AnnounceMessage const& announce, AsPath const& path_trace);
     std::array<uint8_t, 2048> payload_buf_{};
 };
 
