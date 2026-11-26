@@ -10,16 +10,23 @@
 
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
+#include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
 #include "statusbar/avtp/avtp_aaf.hpp"
+#include "statusbar/avtp/avtp_am824.hpp"
+#include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_test_port.hpp"
@@ -115,6 +122,8 @@ class KitUnderTest
         return handler_.on_get_entity(id, entity) ? entity.entity_capabilities.get() : 0;
     }
     [[nodiscard]] auto talker_specs() const noexcept -> StreamSpecs const& { return talker_specs_; }
+    /// The media clock the kit's talker timestamps from, driven by hand as the media thread would.
+    [[nodiscard]] auto media_clock() noexcept -> ptpclient::MediaClockGenerator& { return media_clock_; }
 
     /// Bring the control plane up (or up again), as the tool does at @p now.
     [[nodiscard]] auto start(TimePoint const now) -> bool { return kit_.start(reactor_, now).has_value(); }
@@ -1242,6 +1251,201 @@ TEST(avb_entity_kit_stream_port, a_port_opened_before_the_start_carries_the_talk
     }
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
     EXPECT_FALSE(kit->stream_port().valid());
+}
+
+//
+// AVTP tu on the wire - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2
+//
+
+namespace {
+
+/// The tu and mr of one AVTPDU captured on the wire.
+struct StreamBits
+{
+    bool tu{false};
+    bool mr{false};
+
+    auto operator==(StreamBits const&) const -> bool = default;
+};
+
+/// The tu and mr of the AVTPDU in captured @p frame of a @p kind stream; nullopt when it holds none.
+auto bits_of(StreamKind const kind, std::span<uint8_t const> const frame) -> std::optional<StreamBits>
+{
+    auto const pdu = frame.size() > TAGGED_HEADER_LENGTH ? frame.subspan(TAGGED_HEADER_LENGTH) : std::span<uint8_t const>{};
+    switch (kind) {
+        case StreamKind::am824: {
+            auto const p = avtp::am824_parse_header(pdu);
+            return p ? std::optional{StreamBits{.tu = p->stream_header.tu(), .mr = p->stream_header.mr()}} : std::nullopt;
+        }
+        case StreamKind::aaf: {
+            auto const p = avtp::aaf_parse_header(pdu);
+            return p ? std::optional{StreamBits{.tu = p->tu(), .mr = p->mr()}} : std::nullopt;
+        }
+        case StreamKind::crf: {
+            auto const p = avtp::crf_parse_header(pdu);
+            return p ? std::optional{StreamBits{.tu = p->tu(), .mr = p->mr()}} : std::nullopt;
+        }
+        case StreamKind::other:
+        default:
+            return std::nullopt;
+    }
+}
+
+/// One AVTPDU of @p slot, sent as the media thread sends one of its kind.
+void transmit_one(TalkerStreams& talker, TalkerStreamSlot& slot)
+{
+    constexpr uint32_t AM824_SAMPLES = 6;
+    std::vector<float> const audio(size_t{avtp::Am824Pdu::MAX_SAMPLES_PER_PACKET} * slot.spec.format.channels);
+    switch (slot.spec.format.kind) {
+        case StreamKind::am824:
+            talker.transmit_am824(slot, talker.presentation_for(0), AM824_SAMPLES, audio);
+            return;
+        case StreamKind::aaf:
+            talker.transmit_aaf(slot, talker.presentation_for(0), slot.aaf_samples, audio);
+            return;
+        case StreamKind::crf:
+            talker.transmit_crf(slot, 0);
+            return;
+        case StreamKind::other:
+        default:
+            return;
+    }
+}
+
+using RawTimePoint = TalkerStreams::RawTimePoint;
+
+/// The tu and mr of @p count AVTPDUs the kit's @p kind output sends in a media wake at RAW
+/// instant @p wake, as captured on @p wire. The kit is asked about the stream first, as an
+/// entity asks it each wake, which tells the talker the wake's instant.
+auto send(KitUnderTest& kit, net::TestPortContext& wire, StreamKind const kind, size_t const count, RawTimePoint const wake)
+    -> std::vector<StreamBits>
+{
+    std::vector<StreamBits> captured;
+    auto* const slot = kit->talker().slot_of(kind);
+    for (size_t i = 0; slot != nullptr && i < count; ++i) {
+        (void)kit->talker_should_transmit(slot->spec.index, wake);
+        transmit_one(kit->talker(), *slot);
+        auto const frame = wire.pop_tx();
+        auto const bits = frame ? bits_of(kind, frame->frame) : std::nullopt;
+        if (bits.has_value()) {
+            captured.push_back(*bits);
+        }
+    }
+    return captured;
+}
+
+/// @p count AVTPDUs of one tu and one mr.
+auto all(size_t const count, bool const tu, bool const mr) -> std::vector<StreamBits>
+{
+    return std::vector<StreamBits>(count, StreamBits{.tu = tu, .mr = mr});
+}
+
+/// The talker's three kinds of stream, each the tone model's STREAM_OUTPUT of its kind.
+constexpr std::array<StreamKind, 3> ALL_KINDS{StreamKind::am824, StreamKind::aaf, StreamKind::crf};
+
+/// The tone kit started on a test port, its media clock anchored at a told gPTP instant (CRF needs one).
+auto start_streaming(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
+{
+    auto* const wire = start_on_test_port(kit, now);
+    (void)kit.media_clock().advance(1'000'000'000, 1.0, 6);
+    return wire;
+}
+
+/// GET_COUNTERS of the kit's STREAM_OUTPUT of @p kind, as a controller reads them.
+auto output_counters(KitUnderTest& kit, StreamKind const kind) -> atdecc::aem::AemCountersPayload
+{
+    auto const* const slot = kit->talker().slot_of(kind);
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_COUNTERS, atdecc::aem::AemGetCountersCommandPayload::LENGTH);
+    header.controller_entity_id = RATE_CONTROLLER_A;
+    atdecc::aem::AemGetCountersCommandPayload const asked{
+        .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT,
+        .descriptor_index = slot != nullptr ? slot->spec.index : uint16_t{0xFFFF}};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemCountersPayload counters{};
+    span_load(counters, std::span<uint8_t const>{out}.first(atdecc::aem::AemCountersPayload::LENGTH));
+    return counters;
+}
+
+/// What GET_COUNTERS answers for the kit's @p kind output at @p bit (IEEE 1722.1-2021 Table 7-158).
+auto output_counter(KitUnderTest& kit, StreamKind const kind, unsigned const bit) -> uint32_t
+{
+    return output_counters(kit, kind).counters.at(bit).get();
+}
+
+/// The RAW instant of the reactor cycle an Announce arrives in, as the loop tells the kit it.
+constexpr RawTimePoint CYCLE{std::chrono::seconds{500}};
+/// The gPTP handler's time of that Announce.
+constexpr int64_t ANNOUNCE_NS = 2'000'000'000;
+/// A media wake @p after the cycle the Announce arrived in.
+constexpr auto wake_after(std::chrono::nanoseconds const after) -> RawTimePoint
+{
+    return CYCLE + after;
+}
+constexpr auto WINDOW = std::chrono::nanoseconds{TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+
+/// A grandmaster announced to @p kit in the reactor cycle at CYCLE, as the loop tells it; its handler.
+auto announce_grandmaster(KitUnderTest& kit) -> nanoavb::GptpAnnounceHandler&
+{
+    auto& announces = kit->host().net_handlers()->gptp_handler();
+    gptp::AnnounceMessage announce{};
+    announce.init(1);
+    announce.grandmaster_identity = gptp::ClockIdentity{Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55}};
+    kit->tell_cycle_time(ANNOUNCE_NS, CYCLE);
+    announces.observe_announce(ANNOUNCE_NS, announce);
+    return announces;
+}
+
+}  // namespace
+
+// A start knows no grandmaster: every AVTPDU of each kind carries tu, and does again once the
+// grandmaster announced is lost; TIMESTAMP_UNCERTAIN counts each of them.
+TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_while_no_grandmaster_is_in_force)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* const wire = start_streaming(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send(kit, *wire, kind, 3, wake_after(std::chrono::seconds{1})) == all(3, true, false));
+    }
+
+    auto& announces = announce_grandmaster(kit);
+    announces.tick(ANNOUNCE_NS + announces.announce_receipt_timeout_ns() + 1);  // the Announces stopped
+    EXPECT_FALSE(announces.has_grandmaster());
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send(kit, *wire, kind, 2, wake_after(std::chrono::seconds{10})) == all(2, true, false));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_timestamp_uncertain_bit), 5U);
+        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 5U);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{3}}));
+}
+
+// Milan v1.3 Annex B.1.1: an Announce opens the 0.25 s window at the reactor cycle it arrives in;
+// every AVTPDU of a wake inside it carries tu, none of a wake at its end or past it.
+TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_inside_the_window_after_an_announce_and_not_past_it)
+{
+    using std::chrono::nanoseconds;
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* const wire = start_streaming(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    (void)announce_grandmaster(kit);
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(nanoseconds{0})) == all(1, true, false));
+        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(WINDOW - nanoseconds{1})) == all(1, true, false));
+        EXPECT_TRUE(send(kit, *wire, kind, 1, wake_after(WINDOW)) == all(1, false, false));
+        EXPECT_TRUE(send(kit, *wire, kind, 2, wake_after(std::chrono::seconds{1})) == all(2, false, false));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_timestamp_uncertain_bit), 2U);
+        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 5U);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
