@@ -155,11 +155,21 @@ class AvbEntityKit
         return avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
     }
 
-    /// The earliest of the MAAP deadline and the MSRP and MVRP timers. An MRP
-    /// jointimer is 200 ms, so a loop that only woke every 100 ms sent a
-    /// declaration's second New, and the Join after a LeaveAll, up to 100 ms
-    /// past the JoinTime.
+    /// The earliest of the MAAP deadline, the MSRP and MVRP timers and the end
+    /// of the counters' observation interval. An MRP jointimer is 200 ms, so a
+    /// loop that only woke every 100 ms sent a declaration's second New, and
+    /// the Join after a LeaveAll, up to 100 ms past the JoinTime.
     [[nodiscard]] auto next_control_deadline_ns() const noexcept -> std::optional<int64_t>;
+
+    /// The observation interval of the stream counters (Milan v1.3 Section
+    /// 5.3.8.10: at most 1 second).
+    static constexpr int64_t COUNTERS_INTERVAL_NS = 1'000'000'000;
+    /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS
+    /// has passed since the last, at reactor-clock @p now_ns, and notify each
+    /// stream descriptor whose counters changed (GET_COUNTERS). The first call
+    /// starts the first interval. Call it each reactor cycle, its wait bounded
+    /// by poll_timeout_ms(). Reactor thread only.
+    void poll_counters(int64_t now_ns);
 
     // --- Media-thread (RT) calls ----------------------------------------------
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
@@ -412,6 +422,8 @@ class AvbEntityKit
     void set_input_stopped(uint16_t index, bool stopped);
     /// Every stream input given the stopped state input_stopped() says.
     void apply_input_stopped_states();
+    /// End the observation interval of every stream's counters; notify those that changed.
+    void fold_stream_counters();
     /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
     /// describes: the status of the command. A stream input takes another
     /// channel count (change_input_format); a stream output keeps the one
@@ -549,6 +561,8 @@ class AvbEntityKit
     UnitRateFn on_unit_rate_changed_{};
     /// The streams a SET_SAMPLING_RATE re-timed, notified after its response.
     RetimedFormats retimed_notices_{};
+    /// The end of the counters' observation interval (poll_counters), unset before the first.
+    std::optional<int64_t> next_counters_fold_ns_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

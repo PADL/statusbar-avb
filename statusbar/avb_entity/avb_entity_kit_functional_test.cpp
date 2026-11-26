@@ -16,6 +16,7 @@
 #include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
@@ -2027,6 +2028,60 @@ TEST(avb_entity_kit_format, with_no_state_directory_the_format_is_set_and_nothin
 
 namespace {
 
+using atdecc::aem::AemCountersPayload;
+using I = StreamInputIntervals;
+
+/// GET_COUNTERS of stream @p stream as its kit answers CONTROLLER_ID.
+auto counters_of(StreamOf const stream) -> AemCountersPayload
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_COUNTERS, atdecc::aem::AemGetCountersCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetCountersCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    AemCountersPayload counters{};
+    span_load(counters, std::span<uint8_t const>{out}.first(AemCountersPayload::LENGTH));
+    return counters;
+}
+
+/// A controller registered for a kit's notifications: the GET_COUNTERS ones it is sent.
+struct CountersWatcher
+{
+    std::vector<AemCountersPayload> notified{};
+
+    explicit CountersWatcher(KitUnderTest& kit)
+    {
+        auto& aem = kit->host().components().aem_handler;
+        aem.set_send_response([this](Eui48 const&, std::span<uint8_t const> const frame) {
+            atdecc::AemDu header{};
+            span_load(header, frame);
+            if (header.is_unsolicited() && header.command_code() == atdecc::AEM_COMMAND_GET_COUNTERS) {
+                AemCountersPayload body{};
+                span_load(body, frame.subspan(atdecc::AemDu::LENGTH));
+                notified.push_back(body);
+            }
+            return true;
+        });
+        atdecc::AemDu reg{};
+        reg.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
+        reg.target_entity_id = LISTENER_ID;
+        reg.controller_entity_id = OTHER_CONTROLLER_ID;
+        std::array<uint8_t, atdecc::AemDu::LENGTH> frame{};
+        span_store(frame, reg);
+        (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x99}, frame, LISTENER_ID);
+    }
+
+    /// The notifications of STREAM_INPUT @p index.
+    [[nodiscard]] auto of_input(uint16_t const index) const -> size_t
+    {
+        return static_cast<size_t>(std::ranges::count_if(notified, [index](AemCountersPayload const& c) {
+            return c.descriptor_type.get() == atdecc::aem::DESCRIPTOR_STREAM_INPUT && c.descriptor_index.get() == index;
+        }));
+    }
+};
+
 /// The pair's AAF stream as its talker numbers and stamps it, handed to the
 /// listener kit's input as received a millisecond before presentation.
 struct AafSender
@@ -2103,8 +2158,65 @@ TEST(avb_entity_kit_input_counters, a_milan_input_whose_talker_withdraws_is_inte
     EXPECT_EQ(counters.media_locked.load(), 2U);
     EXPECT_EQ(counters.media_unlocked.load(), 2U);
     EXPECT_EQ(counters.stream_interrupted.load(), 1U);
+}
+
+TEST(avb_entity_kit_input_counters, an_input_is_notified_once_at_the_end_of_an_interval_that_changed_it)
+{
+    // Milan v1.3 Table 5.20: a GET_COUNTERS notification when a counter is
+    // updated, at most once a second; and a locked input that receives
+    // nothing for an interval has lost its stream (Table 5.6). Either profile.
+    for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
+        KitPair pair{profile};
+        auto const input = aaf_input_of(pair);
+        pair.bind();
+        pair.run(2 * ROUNDS_PER_SECOND);
+        CountersWatcher const watcher{pair.listener};
+        AafSender talker{pair};
+        int64_t t = 1'000'000'000;
+        pair.listener->poll_counters(t);  // the first interval starts
+
+        talker.send(50);
+        talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
+        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS - 1);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // not yet a second
+        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{1});
+
+        // A second interval with nothing received: the stream stopped while locked.
+        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{2});
+        auto const counters = counters_of(input);
+        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
+        EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 2U);
+        EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 2U);
+        // And a third changes nothing, so nothing is notified.
+        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{2});
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+}
+
+TEST(avb_entity_kit_input_counters, a_stopped_milan_input_loses_its_lock_without_an_interruption)
+{
+    // STOP_STREAMING discards the stream on purpose (5.3.8.7): when nothing
+    // arrives after it, the lock goes as MEDIA_UNLOCKED alone.
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    AafSender talker{pair};
+    int64_t t = 1'000'000'000;
+    pair.listener->poll_counters(t);
+    talker.send(30);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const counters = counters_of(input);
+    EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 0U);
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
-
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

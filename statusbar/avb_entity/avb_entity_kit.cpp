@@ -1162,7 +1162,8 @@ auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<in
 {
     auto earliest = maap_.next_deadline_ns();
     auto const& components = host_.components();
-    for (auto const next : {components.msrp_handler.next_deadline_ns(), components.mvrp_handler.next_deadline_ns()}) {
+    for (auto const next :
+         {components.msrp_handler.next_deadline_ns(), components.mvrp_handler.next_deadline_ns(), next_counters_fold_ns_}) {
         if (next && (!earliest || *next < *earliest)) {
             earliest = next;
         }
@@ -1288,6 +1289,31 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
         auto result = host_.components().msrp_handler.talker_advertise(make_talker_srp_info(spec), time);
         if (!result) {
             host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", spec.index, result.error().value());
+        }
+    }
+}
+
+void AvbEntityKit::poll_counters(int64_t const now_ns)
+{
+    if (next_counters_fold_ns_.has_value() && now_ns < *next_counters_fold_ns_) {
+        return;
+    }
+    bool const first = !next_counters_fold_ns_.has_value();
+    next_counters_fold_ns_ = now_ns + COUNTERS_INTERVAL_NS;
+    if (!first) {  // else the first interval starts now
+        fold_stream_counters();
+    }
+}
+
+void AvbEntityKit::fold_stream_counters()
+{
+    // Table 5.20: a notification when a counter changed, one a second per descriptor at most.
+    if (listener_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        if (listener_->fold_input_counters(spec.index)) {
+            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
         }
     }
 }

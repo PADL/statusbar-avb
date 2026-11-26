@@ -134,6 +134,8 @@ class AvbEntityToneGenerator
     {
         return kit_.poll_timeout_ms(max_ms, now_ns);
     }
+    /// See AvbEntityKit::poll_counters.
+    void poll_counters(int64_t const now_ns) { kit_.poll_counters(now_ns); }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;
