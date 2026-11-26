@@ -296,4 +296,26 @@ TEST(talker_tx_counters, a_stream_starts_when_its_gate_opens_and_stops_when_it_c
     EXPECT_EQ(starts_stops(), (std::array{3U, 3U}));
 }
 
+// --- AVTP tu: IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1 ---
+
+TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_none_is_in_force)
+{
+    constexpr int64_t SECOND_NS = 1'000'000'000;
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.timestamp_uncertain(0));  // nothing told: certain
+
+    talker.notify_grandmaster_changed(10 * SECOND_NS);
+    EXPECT_TRUE(talker.timestamp_uncertain(10 * SECOND_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain((10 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS - 1));
+    EXPECT_FALSE(talker.timestamp_uncertain((10 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS));
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.timestamp_uncertain(100 * SECOND_NS));  // until one is in force, however long
+    talker.notify_grandmaster_changed(200 * SECOND_NS);
+    EXPECT_TRUE(talker.timestamp_uncertain((200 * SECOND_NS) + 1));
+    EXPECT_FALSE(talker.timestamp_uncertain((200 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

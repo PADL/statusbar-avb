@@ -26,6 +26,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sg14/inplace_vector.h"
@@ -126,6 +127,34 @@ struct TalkerStreams
     }
     [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
     [[nodiscard]] auto stream_pcp() const noexcept -> uint8_t { return stream_pcp_.load(std::memory_order_relaxed); }
+
+    //
+    // AVTP tu - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2
+    //
+
+    /// How long every AVTPDU carries tu after a change of grandmaster (Milan v1.3 Annex B.1.1).
+    static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
+    /// When the AVTPDUs carry tu: while no grandmaster is in force, and before steady-clock until_ns.
+    struct TimestampUncertainty
+    {
+        bool grandmaster_lost{false};
+        int64_t until_ns{0};
+    };
+    /// A grandmaster came into force at steady-clock @p now_ns (net::monotonic_ns()), another or
+    /// the first after none: tu for TU_AFTER_GM_CHANGE_NS. Reactor thread, the one writer.
+    void notify_grandmaster_changed(int64_t const now_ns) noexcept
+    {
+        uncertainty_.store({.grandmaster_lost = false, .until_ns = now_ns + TU_AFTER_GM_CHANGE_NS});
+    }
+    /// No grandmaster is in force: tu until one is. Reactor thread, the one writer.
+    void notify_grandmaster_lost() noexcept { uncertainty_.store({.grandmaster_lost = true}); }
+    /// Whether an AVTPDU sent at steady-clock @p now_ns carries tu: never before the first
+    /// notify_grandmaster_*. Any thread; lock-free (itc::SeqlockValue), so the media thread too.
+    [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
+    {
+        auto const uncertainty = uncertainty_.load();
+        return uncertainty.grandmaster_lost || now_ns < uncertainty.until_ns;
+    }
 
     /// TX pcap capture knobs for open_tx (see TxPcapRecorder). Empty path =
     /// capture disabled.
@@ -273,6 +302,8 @@ struct TalkerStreams
     /// Atomics: written from the control thread, read per frame on the media thread.
     std::atomic<uint16_t> vlan_id_{config_.vlan_id};
     std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
+    /// When the AVTPDUs carry tu (notify_grandmaster_*): the reactor writes, the media thread reads.
+    itc::SeqlockValue<TimestampUncertainty> uncertainty_{};
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;
