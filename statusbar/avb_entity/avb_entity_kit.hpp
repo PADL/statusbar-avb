@@ -470,6 +470,10 @@ class AvbEntityKit
     /// addresses, the stream callbacks, the VID, and Milan sinks at startup.
     void restore_control_state(TimePoint now);
     void restart_milan_sinks(TimePoint now);
+    /// The talker's tu follows the grandmaster of this start's Announce handler, none at first.
+    void follow_grandmaster();
+    /// The talker told whether a grandmaster is in force (@p in_force), as of now.
+    void notify_talker_of_grandmaster(bool in_force) noexcept;
     /// Not fatal when it does not open: the entity keeps its control plane.
     void open_stream_port();
     [[nodiscard]] auto claim_stream_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
