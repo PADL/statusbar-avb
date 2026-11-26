@@ -233,6 +233,17 @@ class AvbEntityKit
     /// hook or feed a gate input.
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
+    /// Told each change of whether talker stream @p idx streams (slot open, MAAP ready, admitted, not stopped), on the
+    /// reactor thread, start() and stop() included; not the state at install (talker_gate_open()). A later install
+    /// replaces an earlier one, an empty function removes it. It must not throw, install a hook or feed a gate input.
+    using TalkerGateFn = sg14::inplace_function<void(uint16_t idx, bool open), 32>;
+    void set_on_talker_gate_changed(TalkerGateFn fn) noexcept { on_talker_gate_changed_ = std::move(fn); }
+    /// Whether talker stream @p idx streams, as the reactor last evaluated and told it; false past the table.
+    /// Reactor thread.
+    [[nodiscard]] auto talker_gate_open(uint16_t const idx) const noexcept -> bool
+    {
+        return idx < talker_gates_.size() && talker_gates_[idx];
+    }
     /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
     /// known at the RAW instant @p now (the host's hook passes the cycle's, tell_cycle_time). Stamps
     /// the gate, then re-evaluates admission.
@@ -334,6 +345,9 @@ class AvbEntityKit
     /// The port the streams go through. One the host opened before start() (a test port,
     /// StreamPort::open_test) is kept by it; stop() closes it either way.
     [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return stream_port_; }
+    /// The MAAP acquirer of the talker streams' addresses ("maap" address mode). Reactor thread. The kit
+    /// installs its set_on_ready_changed() hook, which keeps the talker gates; a caller must not replace it.
+    [[nodiscard]] auto maap() noexcept -> MaapAddressAcquirer& { return maap_; }
     /// nullptr when the blob declares no stream inputs.
     [[nodiscard]] auto listener() noexcept -> ListenerStreams* { return listener_.get(); }
     [[nodiscard]] auto listener() const noexcept -> ListenerStreams const* { return listener_.get(); }
@@ -372,6 +386,10 @@ class AvbEntityKit
     /// grace that runs out with no MSRP or ACMP event still leaves the set and is told to the hook.
     /// Before it, nothing. end_cycle() calls it.
     void on_admission_timer(RawTimePoint now);
+    /// Evaluate each talker stream's gate (evaluate_talker_gate()); tell on_talker_gate_changed_ each that moved.
+    void notify_talker_gates() noexcept;
+    /// Whether talker stream @p idx streams by the reactor's state: slot open, MAAP ready, admitted, not stopped.
+    [[nodiscard]] auto evaluate_talker_gate(uint16_t idx) const noexcept -> bool;
     /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
     void wire_ieee_acmp_callbacks();
     /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
@@ -577,7 +595,7 @@ class AvbEntityKit
     /// Open stream input @p spec; the group it joins from the start (zero: none).
     [[nodiscard]] auto open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>;
     void attach_listener_rx(std::span<ieee::Eui48 const> rx_groups, net::MessageReactor& reactor);
-    /// The TX path, then the diagnostics.
+    /// The TX path, the diagnostics, then each talker gate open now told.
     void finish_start();
     void report_inert_controls();
 
@@ -673,6 +691,9 @@ class AvbEntityKit
     std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
     /// The reactor-clock half of the pair last told (tell_cycle_time); the gate holds the RAW half.
     int64_t cycle_ns_{0};
+    /// Each talker stream's gate as last evaluated (notify_talker_gates), and the hook told its changes.
+    std::array<bool, MAX_ENTITY_STREAMS> talker_gates_{};
+    TalkerGateFn on_talker_gate_changed_{};
     /// The end of the counters' observation interval (end_cycle), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
     /// The intervals ended since the descriptors were last notified (fold_stream_counters).
