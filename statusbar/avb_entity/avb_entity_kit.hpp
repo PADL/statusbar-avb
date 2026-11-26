@@ -46,6 +46,7 @@
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -215,6 +216,19 @@ class AvbEntityKit
     /// no handler still get the generic store/serve built-in.
     void on_control_symbol(uint32_t symbol_code, ControlChangedFn fn);
 
+    // --- Presentation time offset (IEEE 1722.1-2021 Clauses 7.4.76, 7.4.77) ---
+    /// The entity puts talker stream @p idx's new presentation time offset in force in its
+    /// data plane and answers an AEM status (STREAM_IS_RUNNING when it cannot while the
+    /// stream runs). Reactor thread. Without one, SET_MAX_TRANSIT_TIME answers
+    /// NOT_SUPPORTED and the configured offset stays in force. The kit does not defer the
+    /// SET: an IN_PROGRESS is answered ENTITY_MISBEHAVING and nothing is put in force.
+    using PresentationOffsetFn = sg14::inplace_function<uint8_t(uint16_t idx, uint32_t offset_ns), 32>;
+    void set_on_presentation_offset_changed(PresentationOffsetFn fn) noexcept { on_presentation_offset_changed_ = std::move(fn); }
+    /// Talker stream @p idx's presentation time offset in nanoseconds, as GET_MAX_TRANSIT_TIME
+    /// and GET_STREAM_INFO report it: the configured one until a controller changes it, 0 for
+    /// an index that is no talker stream's. Reactor thread.
+    [[nodiscard]] auto presentation_offset_ns(uint16_t idx) const noexcept -> uint32_t;
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
@@ -281,8 +295,14 @@ class AvbEntityKit
     [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
     /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
     [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
-    /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills.
+    /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills, and the
+    /// presentation offsets of SET and GET_MAX_TRANSIT_TIME.
     void wire_aem_stream_callbacks();
+    /// SET_MAX_TRANSIT_TIME's @p offset_ns for talker stream @p idx, through
+    /// on_presentation_offset_changed_ (NOT_SUPPORTED without it): its AEM status.
+    [[nodiscard]] auto change_presentation_offset(uint16_t idx, uint32_t offset_ns) -> uint8_t;
+    /// Whether @p idx is one of the kit's talker streams.
+    [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
     /// A PROBE_TX_COMMAND arrived for stream output @p stream_index: tell the
     /// SRP handler, which under the Milan profile declares the stream's
     /// Talker attribute on it (Milan v1.3 4.3.3.1).
@@ -471,6 +491,11 @@ class AvbEntityKit
     /// the media thread.
     std::atomic<uint16_t> active_clock_source_{0};
     std::optional<uint16_t> crf_clock_source_index_{};
+
+    /// Each talker stream's presentation offset a controller set (reactor thread); unset,
+    /// the configured one.
+    std::array<std::optional<uint32_t>, MAX_ENTITY_STREAMS> presentation_offsets_{};
+    PresentationOffsetFn on_presentation_offset_changed_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

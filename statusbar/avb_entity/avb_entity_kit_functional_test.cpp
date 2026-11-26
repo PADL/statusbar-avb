@@ -809,6 +809,94 @@ TEST(avb_entity_kit_as_path, a_new_path_trace_is_notified_after_the_gptp_callbac
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
+//
+// SET_MAX_TRANSIT_TIME / GET_MAX_TRANSIT_TIME - IEEE 1722.1-2021 Clauses 7.4.76, 7.4.77
+//
+
+namespace {
+
+/// @p kit's answer to MAX_TRANSIT_TIME @p command for talker stream @p index, @p time_ns asked
+/// of a SET: the status and the time the response carries.
+auto transit_time_command(KitUnderTest& kit, uint16_t const command, uint16_t const index, uint64_t const time_ns = 0)
+    -> std::pair<uint8_t, uint64_t>
+{
+    std::array<uint8_t, atdecc::aem::AemSetMaxTransitTimePayload::LENGTH> body{};
+    span_store(
+        body,
+        atdecc::aem::AemSetMaxTransitTimePayload{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = index, .max_transit_time = time_ns});
+    bool const set = command == atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME;
+    auto const sent = set ? std::span<uint8_t const>{body} : std::span<uint8_t const>{body}.first(4);
+    atdecc::AemDu header{};
+    header.init_command(command, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + sent.size()));
+    header.controller_entity_id = CONTROLLER_ID;
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const r = kit->host().components().aem_handler.handle_command(header, sent, out);
+    atdecc::aem::AemSetMaxTransitTimePayload answer{};
+    span_load(answer, std::span<uint8_t const>{out});
+    return {r.status, r.size >= body.size() ? answer.max_transit_time.get() : 0};
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_max_transit_time, without_an_entity_hook_the_configured_offset_is_answered_and_kept)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    uint16_t const index = kit.talker_specs().front().index;
+    uint64_t const configured = kit->presentation_offset_ns(index);
+    EXPECT_EQ(configured, uint64_t{1'000'000});  // the classic default
+    auto const get = transit_time_command(kit, atdecc::AEM_COMMAND_GET_MAX_TRANSIT_TIME, index);
+    EXPECT_EQ(get.first, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(get.second, configured);
+    auto const set = transit_time_command(kit, atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, index, 1'500'000);
+    EXPECT_EQ(set.first, atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(set.second, configured);
+    EXPECT_EQ(uint64_t{kit->presentation_offset_ns(index)}, configured);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+TEST(avb_entity_kit_max_transit_time, an_entity_hook_puts_a_new_offset_in_force_or_refuses_it)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    uint16_t const index = kit.talker_specs().front().index;
+    std::vector<std::pair<uint16_t, uint32_t>> applied;
+    uint8_t answer = atdecc::AEM_STATUS_SUCCESS;
+    kit->set_on_presentation_offset_changed([&](uint16_t const idx, uint32_t const offset_ns) -> uint8_t {
+        applied.emplace_back(idx, offset_ns);
+        return answer;
+    });
+
+    auto const set = transit_time_command(kit, atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, index, 1'500'000);
+    EXPECT_EQ(set.first, atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(applied == (std::vector<std::pair<uint16_t, uint32_t>>{{index, 1'500'000}}));
+    EXPECT_EQ(transit_time_command(kit, atdecc::AEM_COMMAND_GET_MAX_TRANSIT_TIME, index).second, uint64_t{1'500'000});
+    std::array<uint8_t, 4> const stream_output{0x00, 0x06, 0x00, static_cast<uint8_t>(index)};
+    atdecc::AemDu get_info{};
+    get_info.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::AemDu::AEM_DATA_LENGTH + 4);
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    EXPECT_EQ(kit->host().components().aem_handler.handle_command(get_info, stream_output, out).status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemStreamInfoPayload info{};
+    span_load(info, std::span<uint8_t const>{out});
+    EXPECT_EQ(info.msrp_accumulated_latency.get(), 1'500'000U);
+
+    // The entity cannot while the stream runs: the time in force stays.
+    answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    auto const refused = transit_time_command(kit, atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, index, 3'000'000);
+    EXPECT_EQ(refused.first, atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(refused.second, uint64_t{1'500'000});
+    EXPECT_EQ(kit->presentation_offset_ns(index), 1'500'000U);
+
+    // The kit holds no deferred offset: an IN_PROGRESS is refused, nothing deferred or kept.
+    answer = atdecc::AEM_STATUS_IN_PROGRESS;
+    auto const deferred = transit_time_command(kit, atdecc::AEM_COMMAND_SET_MAX_TRANSIT_TIME, index, 3'000'000);
+    EXPECT_EQ(deferred.first, atdecc::AEM_STATUS_ENTITY_MISBEHAVING);
+    EXPECT_EQ(deferred.second, uint64_t{1'500'000});
+    EXPECT_EQ(kit->host().components().aem_handler.pending_command_count(), size_t{0});
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
 TEST(avb_entity_kit_acmp, the_profile_chooses_which_acmp_runs)
 {
     // The milan13 profile, or a Milan model with no profile named, runs
