@@ -19,7 +19,6 @@ statusbar_add_module(
   avb_entity_listener_streams.cpp
   avb_entity_listener_vlan.cpp
   avb_entity_talker_streams.cpp
-  avb_entity_talker_declarations.cpp
   avb_entity_talker_gate.cpp
   avb_entity_shaper.cpp
   avb_entity_udptun_bridge.cpp

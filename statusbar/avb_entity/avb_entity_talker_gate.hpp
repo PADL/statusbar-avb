@@ -35,21 +35,20 @@ struct TalkerGate
     using RawTimePoint = realtime::MonotonicRawClock::time_point;
 
     /// A gate whose note_listener_ready() finds streams by @p stream_index (reactor thread); with
-    /// @p gate_enabled false every stream is admitted. A departed Listener admits for @p grace.
-    TalkerGate(bool gate_enabled, StreamIndexFn stream_index, std::chrono::nanoseconds grace = GRACE) noexcept;
-    /// The kit's gate: @p components' ACMP talker streams, which must outlive it; MILAN_GRACE
-    /// for a Milan entity, GRACE for a classic one.
+    /// @p gate_enabled false every stream is admitted.
+    TalkerGate(bool gate_enabled, StreamIndexFn stream_index) noexcept;
+    /// The kit's gate: the streams of @p components' ACMP talker that runs, which must outlive it.
     TalkerGate(bool gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept;
 
     /// Install the reactor-thread logger for gate-transition status lines.
     void set_logger(logging::Logger const log) noexcept { logger_ = log; }
 
-    /// Whether a stream needs an ACMP connection to be admitted (the
-    /// default, IEEE 1722.1). A Milan talker keeps no connections and
-    /// streams "as long as bandwidth is reserved" (Milan v1.3 5.5.4.1): for
-    /// it the gate is Started and MSRP Listener Ready alone. Set before the
-    /// media timer runs.
-    void set_needs_acmp_connection(bool const needed) noexcept { needs_acmp_connection_ = needed; }
+    /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
+    /// data plane's maximum blob-declared stream table (kit phase 1).
+    static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
+    /// How long the gate stays open after the listener declaration was last seen registered, so
+    /// an MRP LeaveAll re-registration blip does not chop the stream.
+    static constexpr auto GRACE = std::chrono::seconds{5};
 
     /// How long a stream stays admitted after its Listener Ready was
     /// withdrawn (GRACE by default). A Milan talker sets none: nothing but the
@@ -59,16 +58,19 @@ struct TalkerGate
     /// last listener left and the Talker attribute was withdrawn. Set before
     /// the media timer runs.
     void set_listener_grace(std::chrono::nanoseconds const grace) noexcept { grace_ = grace; }
-
-    /// One per talker stream (STREAM_OUTPUT descriptor index); sized for the
-    /// data plane's maximum blob-declared stream table (kit phase 1).
-    static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
-    /// How long the gate stays open after the listener declaration was last seen registered, so
-    /// an MRP LeaveAll re-registration blip does not chop the stream.
-    static constexpr auto GRACE = std::chrono::seconds{5};
-    /// A Milan entity's grace: none. Its MSRP registrar holds a Listener through a LeaveAll for
-    /// LeaveTime and drops one at its Lv (Milan v1.3 Section 4.2.7.2.2).
-    static constexpr auto MILAN_GRACE = std::chrono::nanoseconds{0};
+    /// Whether a stream needs an ACMP connection to be admitted (the default, IEEE 1722.1). A Milan
+    /// talker keeps no connections and streams "as long as bandwidth is reserved" (Milan v1.3
+    /// Section 5.5.4.1): for it the gate is Started and the Listener's registration alone. Set
+    /// before the media timer runs.
+    void set_needs_acmp_connection(bool const needed) noexcept { needs_acmp_connection_ = needed; }
+    /// Reactor thread: talker stream @p idx now has @p count ACMP connections (the ACMP talker's
+    /// connection_count(idx) after a connect or disconnect), published for the media thread.
+    void note_acmp_connections(uint16_t const idx, uint32_t const count) noexcept
+    {
+        if (idx < acmp_connections_.size()) {
+            acmp_connections_[idx].store(count, std::memory_order_relaxed);
+        }
+    }
 
     /// Reactor thread: whether a Listener declaration permitting transmission (Ready or Ready
     /// Failed) is registered for @p stream_id at @p now. Registration and withdrawal both stamp
@@ -104,8 +106,8 @@ struct TalkerGate
     }
 
     /// Any thread: is talker stream @p idx admitted at @p now? True if gating is disabled, or
-    /// the stream is Started and a permitting listener declaration is registered now or was
-    /// within the grace. Time-dependent: the kit re-evaluates it at grace_ends() (AvbEntityKit::on_admission_timer).
+    /// the stream is Started, has an ACMP connection (unless set_needs_acmp_connection(false)) and
+    /// a permitting listener declaration is registered now or was within the grace. Time-dependent: the kit re-evaluates it at grace_ends() (AvbEntityKit::on_admission_timer).
     [[nodiscard]] auto admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
     /// Whether stream @p idx has a permitting listener declaration now or within the grace,
@@ -126,7 +128,8 @@ struct TalkerGate
     // --- References / values (bound at construction) ---------------------------
     bool gate_enabled_;                        ///< config.gate_talker_on_listener, destructured at the call site
     StreamIndexFn stream_index_;               ///< maps stream_id -> talker stream index
-    std::chrono::nanoseconds grace_;           ///< how long a departed Listener still admits
+    std::chrono::nanoseconds grace_{GRACE};    ///< how long a departed Listener still admits (set_listener_grace)
+    bool needs_acmp_connection_{true};         ///< see set_needs_acmp_connection
     std::optional<logging::Logger> logger_{};  ///< reactor-thread gate-transition logging
 
   private:
@@ -142,6 +145,8 @@ struct TalkerGate
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even with Listener Ready registered.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};
+    /// Per-stream ACMP connection count (note_acmp_connections, reactor), read by admitted().
+    std::array<std::atomic<uint32_t>, STREAM_COUNT> acmp_connections_{};
 };
 
 }  // namespace statusbar::avb_entity

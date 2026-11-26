@@ -349,10 +349,11 @@ class MaapAddressAcquirer
             // attributes at the SRP handler's next tick (Milan v1.3 4.3.3.1:
             // an address in conflict is not a valid one).
             ready_.store(false, std::memory_order_release);
-            // The media slot keeps its MAC; the control plane's is zeroed.
+            components.msrp_handler.set_talker_addresses_valid(false);
+            // The media slot keeps its MAC; the control plane's is zeroed (Milan v1.2 Table 5.3).
             for (auto const idx : indices_) {
-                if (auto const* s = components.acmp_talker.get_stream(idx); s != nullptr) {
-                    (void)components.acmp_talker.configure_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
+                if (auto const s = components.talker_stream(idx); s.has_value()) {
+                    (void)components.configure_talker_stream(idx, s->stream_id, ieee::Eui48{}, s->stream_vlan_id);
                 }
             }
             log_->warning("maap: no longer defending {:012x}; stream TX gated", start.to_uint64());
