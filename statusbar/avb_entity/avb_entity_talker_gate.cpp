@@ -17,13 +17,13 @@ namespace statusbar::avb_entity {
 
 namespace {
 
-/// The kit's lookup: the first ACMP talker stream declaring @p stream_id.
+/// The kit's lookup: the first talker stream of the ACMP talker that runs declaring @p stream_id.
 [[nodiscard]] auto acmp_talker_index(nanoavb::NanoAvbComponents const& components, tsn::StreamId const& stream_id) noexcept
     -> std::optional<uint16_t>
 {
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(TalkerGate::STREAM_COUNT); ++idx) {
-        auto const* s = components.acmp_talker.get_stream(idx);
-        if (s != nullptr && s->stream_id.to_uint64() == stream_id.to_uint64()) {
+        auto const s = components.talker_stream(idx);
+        if (s.has_value() && s->stream_id.to_uint64() == stream_id.to_uint64()) {
             return idx;
         }
     }
@@ -32,10 +32,9 @@ namespace {
 
 }  // namespace
 
-TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index, std::chrono::nanoseconds const grace) noexcept
+TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index) noexcept
     : gate_enabled_{gate_enabled}
     , stream_index_{std::move(stream_index)}
-    , grace_{grace}
 {
     // Stream Started defaults true: a stream is admitted once a listener's
     // Ready is registered unless explicitly stopped via note_stream_started().
@@ -45,10 +44,7 @@ TalkerGate::TalkerGate(bool const gate_enabled, StreamIndexFn stream_index, std:
 }
 
 TalkerGate::TalkerGate(bool const gate_enabled, nanoavb::NanoAvbComponents const& components) noexcept
-    : TalkerGate{
-          gate_enabled,
-          [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); },
-          components.profile.milan ? std::chrono::nanoseconds{MILAN_GRACE} : std::chrono::nanoseconds{GRACE}}
+    : TalkerGate{gate_enabled, [&components](tsn::StreamId const& sid) { return acmp_talker_index(components, sid); }}
 {}
 
 void TalkerGate::note_listener_ready(tsn::StreamId const& stream_id, bool const ready, RawTimePoint const now)
@@ -114,7 +110,8 @@ auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noex
     if (idx >= stream_started_.size() || !stream_started_[idx].load(std::memory_order_relaxed)) {
         return false;
     }
-    return listener_admitted(idx, now);
+    bool const connected = !needs_acmp_connection_ || acmp_connections_[idx].load(std::memory_order_relaxed) > 0;
+    return connected && listener_admitted(idx, now);
 }
 
 auto TalkerGate::listener_admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
@@ -126,6 +123,9 @@ auto TalkerGate::listener_admitted(uint16_t const idx, RawTimePoint const now) c
     // blip by the grace; a listener that does not re-declare within it closes the gate.
     if (listener_ready_[idx].load(std::memory_order_acquire)) {
         return true;
+    }
+    if (grace_ <= std::chrono::nanoseconds{0}) {
+        return false;  // no grace: the registration alone admits, whatever clock the caller reads
     }
     auto const ends = grace_ends(idx);
     return ends.has_value() && now < *ends;

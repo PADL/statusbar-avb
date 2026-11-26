@@ -231,8 +231,11 @@ TEST(tone_gate, disabled_allows_all_talkers)
     EXPECT_TRUE((*result)->talker_should_transmit(2, RAW_NOW));
 }
 
-// Each talker stream gates on its own reservation: CRF must not transmit merely
-// because an audio stream is admitted. A second TalkerGate drives the state.
+// Each talker stream gates INDEPENDENTLY on its own ACMP connection + reservation.
+// Regression for the CRF-follows-audio bug: CRF is a first-class stream and must
+// NOT transmit merely because an audio stream is admitted. Drives real ACMP
+// connections through the shared acmp_talker; a second TalkerGate over the same
+// components lets the test set listener-ready / stream-started via the public API.
 TEST(tone_gate, crf_gates_independently_of_audio_streams)
 {
     auto blob = load_file(entity_tone_bin_path());
@@ -244,6 +247,9 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
         return;
     }
     auto& comps = (*result)->components();
+
+    // Gate under test: gating enabled, over the entity's live components. Reads the
+    // shared acmp_talker connection state; owns its own listener-ready/started flags.
     TalkerGate gate{/*gate_enabled=*/true, comps};
 
     constexpr uint16_t k_aaf = 1;  // tone.json: AM824@0, AAF@1, CRF@2
@@ -262,31 +268,47 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     };
     auto const aaf_sid = as_stream_id(aaf_stream->stream_id);
     auto const crf_sid = as_stream_id(crf_stream->stream_id);
-    constexpr auto t0 = RAW_NOW;
 
-    // No listener -> nothing transmits.
-    EXPECT_FALSE(gate.admitted(k_aaf, t0));
-    EXPECT_FALSE(gate.admitted(k_crf, t0));
+    Eui64 const entity_id{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // == make_config_with_blob
+    Eui64 const listener_id{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
+    auto const connect = [&](uint16_t talker_unique, uint16_t listener_unique) {
+        atdecc::AcmpCommandResponse cmd{};
+        cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+        cmd.talker_entity_id = entity_id;
+        cmd.talker_unique_id = talker_unique;
+        cmd.listener_entity_id = listener_id;
+        cmd.listener_unique_id = listener_unique;
+        cmd.sequence_id = 1;
+        (void)comps.acmp_talker.receive_command(cmd, sm::TimePoint{});
+        // Mirror what the entity's on_connect callback does: publish the fresh
+        // ACMP connection count into the gate (the media thread reads only this,
+        // never the reactor-mutated connection list).
+        gate.note_acmp_connections(talker_unique, static_cast<uint32_t>(comps.acmp_talker.connection_count(talker_unique)));
+    };
 
-    // Admit the AAF stream (MSRP Listener Ready). CRF is left untouched -- it
-    // must stay suppressed.
-    gate.note_listener_ready(aaf_sid, true, t0);
-    EXPECT_TRUE(gate.admitted(k_aaf, t0));
-    EXPECT_FALSE(gate.admitted(k_crf, t0));  // the regression: CRF must not ride AAF
+    // Nothing connected -> nothing transmits.
+    EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW));
 
+    // Fully admit the AAF stream (ACMP connection + MSRP Listener Ready). CRF is
+    // left untouched -- it must stay suppressed.
+    connect(k_aaf, 0);
+    gate.note_listener_ready(aaf_sid, true);
+    EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
+    EXPECT_EQ(comps.acmp_talker.connection_count(k_crf), size_t{0});
+    EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
+    EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW));  // the regression: CRF must not ride AAF
+
     // Admit CRF on its OWN merits -> now it transmits, independently.
-    gate.note_listener_ready(crf_sid, true, t0);
-    EXPECT_TRUE(gate.admitted(k_crf, t0));
+    connect(k_crf, 1);
+    gate.note_listener_ready(crf_sid, true);
+    EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
     gate.note_stream_started(k_aaf, false);
-    EXPECT_FALSE(gate.admitted(k_aaf, t0));
     EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
-    EXPECT_TRUE(gate.admitted(k_crf, t0));
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
-    gate.note_stream_started(k_aaf, true);
-    EXPECT_TRUE(gate.admitted(k_aaf, t0));
+    // The grace from the reactor's stamp: talker_gate_test.
 }
 
 namespace {
@@ -294,8 +316,8 @@ namespace {
 /// The tone entity's AAF talker stream id (index 1), for the gate tests.
 auto tone_aaf_sid(nanoavb::NanoAvbComponents const& comps) -> std::optional<nanoavb::StreamId>
 {
-    auto const* stream = comps.acmp_talker.get_stream(1);
-    if (stream == nullptr) {
+    auto const stream = comps.talker_stream(1);  // the ACMP talker that runs
+    if (!stream.has_value()) {
         return std::nullopt;
     }
     nanoavb::StreamId sid;
@@ -324,8 +346,9 @@ void acmp_connect(nanoavb::NanoAvbComponents& comps, uint16_t talker_unique)
 // stops when the declaration goes (Milan v1.3 Section 4.2.7.2.2).
 TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 {
-    auto blob = load_file(entity_tone_bin_path());
-    auto result = AvbEntityToneGenerator::create(make_config_with_blob(std::move(blob)));
+    auto config = make_config_with_blob(load_file(entity_tone_bin_path()));
+    config.milan = true;  // a Milan device (entity.milan)
+    auto result = AvbEntityToneGenerator::create(std::move(config));
     EXPECT_TRUE(result.has_value());
     if (!result.has_value()) {
         return;
@@ -341,6 +364,8 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     constexpr auto later = std::chrono::seconds{60};
     using std::chrono::nanoseconds;
     TalkerGate gate{/*gate_enabled=*/true, comps};
+    gate.set_needs_acmp_connection(false);  // as the kit sets them under Milan
+    gate.set_listener_grace(nanoseconds{0});
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{0});
     EXPECT_FALSE(gate.admitted(k_aaf, t0));
 
@@ -353,7 +378,7 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
     // Withdrawn at t1 (the registrar's Lv state already rode out any LeaveAll): closed from then.
     auto const t1 = t0 + later;
     gate.note_listener_ready(*sid, false, t1);
-    EXPECT_TRUE(gate.admitted(k_aaf, t1 - nanoseconds{1}));
+    EXPECT_FALSE(gate.admitted(k_aaf, t1 - nanoseconds{1}));
     EXPECT_FALSE(gate.admitted(k_aaf, t1));
 
     // Registered again: open again.
@@ -368,38 +393,6 @@ TEST(tone_gate, milan_listener_ready_admits_without_acmp_connection)
 
     // Out of range is never admitted.
     EXPECT_FALSE(gate.admitted(TalkerGate::STREAM_COUNT, t0));
-}
-
-// Classic 1722.1: the ACMP connection neither admits on its own nor is needed;
-// the listener's Listener Ready (declared after CONNECT_RX) admits, and the
-// disconnect's Ready withdrawal closes the stream after the grace window.
-TEST(tone_gate, classic_listener_admitted_by_listener_ready_not_connection)
-{
-    auto config = make_config_with_blob(nanoavb::with_classic_profile(load_file(entity_tone_bin_path())));  // CONNECT_TX counted
-    auto result = AvbEntityToneGenerator::create(std::move(config));
-    EXPECT_TRUE(result.has_value());
-    if (!result.has_value()) {
-        return;
-    }
-    auto& comps = (*result)->components();
-    auto const sid = tone_aaf_sid(comps);
-    EXPECT_TRUE(sid.has_value());
-    if (!sid) {
-        return;
-    }
-    constexpr uint16_t k_aaf = 1;
-    constexpr auto t0 = RAW_NOW;
-    constexpr auto tick = std::chrono::nanoseconds{1};
-    TalkerGate gate{/*gate_enabled=*/true, comps};
-
-    acmp_connect(comps, k_aaf);
-    EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
-    EXPECT_FALSE(gate.admitted(k_aaf, t0));  // connected, no reservation yet
-    gate.note_listener_ready(*sid, true, t0);
-    EXPECT_TRUE(gate.admitted(k_aaf, t0));
-    gate.note_listener_ready(*sid, false, t0 + tick);  // the listener's Ready goes with the disconnect
-    EXPECT_TRUE(gate.admitted(k_aaf, t0 + TalkerGate::GRACE));
-    EXPECT_FALSE(gate.admitted(k_aaf, t0 + tick + TalkerGate::GRACE));
 }
 
 // gate_talker_on_listener=false: always admitted, always transmitting, even

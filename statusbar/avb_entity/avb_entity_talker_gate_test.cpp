@@ -39,11 +39,27 @@ constexpr auto GRACE = TalkerGate::GRACE;
 
 }  // namespace
 
+// IEEE 1722.1-2021 Clause 8.2.1: an IEEE 1722.1 talker stream is admitted only while it has an ACMP
+// connection and its Listener Ready is registered; set_needs_acmp_connection(false) leaves MSRP alone.
+TEST(talker_gate, a_stream_needs_an_acmp_connection_by_default)
+{
+    TalkerGate gate{true, lookup};
+    gate.note_listener_ready(sid(0x101), true, T0);
+    EXPECT_FALSE(gate.admitted(1, T0));
+    gate.note_acmp_connections(1, 1);
+    EXPECT_TRUE(gate.admitted(1, T0));
+    gate.note_acmp_connections(1, 0);
+    EXPECT_FALSE(gate.admitted(1, T0));
+    gate.set_needs_acmp_connection(false);
+    EXPECT_TRUE(gate.admitted(1, T0));
+}
+
 // The gate finds a stream through the caller's lookup, not an entity's ACMP table, and keeps
 // IEEE 802.1Q-2022 Clause 35.2.4.4's rule: transmit while a Ready declaration is registered.
 TEST(talker_gate, an_injected_lookup_admits_the_named_stream_only)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x102), true, T0);
     EXPECT_TRUE(gate.admitted(2, T0));
     EXPECT_FALSE(gate.admitted(1, T0));
@@ -53,6 +69,7 @@ TEST(talker_gate, an_injected_lookup_admits_the_named_stream_only)
 TEST(talker_gate, a_stream_id_the_lookup_does_not_know_is_ignored)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x200), true, T0);
     for (uint16_t idx = 0; idx < 4; ++idx) {
         EXPECT_FALSE(gate.admitted(idx, T0));
@@ -85,6 +102,7 @@ TEST(talker_gate, a_stream_whose_advertise_is_held_back_is_not_admitted_with_the
 TEST(talker_gate, an_index_beyond_the_gate_is_ignored)
 {
     TalkerGate gate{true, [](tsn::StreamId const&) { return std::optional<uint16_t>{TalkerGate::STREAM_COUNT}; }};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x100), true, T0);
     EXPECT_FALSE(gate.admitted(0, T0));
     EXPECT_FALSE(gate.admitted(TalkerGate::STREAM_COUNT, T0));
@@ -94,6 +112,7 @@ TEST(talker_gate, an_index_beyond_the_gate_is_ignored)
 TEST(talker_gate, without_a_lookup_nothing_is_admitted)
 {
     TalkerGate gate{true, TalkerGate::StreamIndexFn{}};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x100), true, T0);
     EXPECT_FALSE(gate.admitted(0, T0));
 }
@@ -102,6 +121,7 @@ TEST(talker_gate, without_a_lookup_nothing_is_admitted)
 TEST(talker_gate, a_withdrawn_listener_keeps_the_gate_open_for_the_grace)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x101), true, T0);
     gate.note_listener_ready(sid(0x101), false, T0 + 1ns);
     EXPECT_TRUE(gate.grace_ends(1) == T0 + 1ns + GRACE);
@@ -117,15 +137,17 @@ TEST(talker_gate, a_withdrawn_listener_keeps_the_gate_open_for_the_grace)
 // gate closes the moment its last Listener is withdrawn and arms no deadline.
 TEST(talker_gate, a_milan_gate_closes_when_the_last_listener_is_withdrawn)
 {
-    TalkerGate gate{true, lookup, TalkerGate::MILAN_GRACE};
+    TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
+    gate.set_listener_grace(std::chrono::nanoseconds{0});
     gate.note_listener_ready(sid(0x101), true, T0);
     EXPECT_TRUE(gate.admitted(1, T0 + 1s));
     gate.note_listener_ready(sid(0x101), false, T0 + 1s);
     EXPECT_FALSE(gate.admitted(1, T0 + 1s));
     EXPECT_FALSE(gate.listener_admitted(1, T0 + 1s));
     EXPECT_TRUE(gate.grace_ends(1) == T0 + 1s);
-    // A wake told an instant before the withdrawal still reads the registration.
-    EXPECT_TRUE(gate.admitted(1, T0 + 1s - 1ns));
+    // No grace: closed for every wake from the withdrawal on, whatever instant it is told.
+    EXPECT_FALSE(gate.admitted(1, T0 + 1s - 1ns));
 }
 
 TEST(talker_gate, a_disabled_gate_admits_every_stream)
@@ -140,6 +162,7 @@ TEST(talker_gate, a_disabled_gate_admits_every_stream)
 TEST(talker_gate, a_listener_ready_without_a_time_is_stamped_now)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x102), true);
     gate.note_listener_ready(sid(0x102), false);
     auto const now = net::rx_clock_now();
@@ -152,6 +175,7 @@ TEST(talker_gate, a_listener_ready_without_a_time_is_stamped_now)
 TEST(talker_gate, the_media_side_and_the_reactor_agree_on_a_ready_set_and_cleared_between_wakes)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     EXPECT_FALSE(gate.should_transmit(0, T0));
     gate.note_listener_ready(sid(0x100), true, T0 + 10us);
     gate.note_listener_ready(sid(0x100), false, T0 + 20us);
@@ -168,6 +192,7 @@ TEST(talker_gate, the_media_side_and_the_reactor_agree_on_a_ready_set_and_cleare
 TEST(talker_gate, a_ready_missed_over_a_long_gap_is_checked_against_its_stamp)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x100), true, T0);
     gate.note_listener_ready(sid(0x100), false, T0 + 1ns);
     EXPECT_TRUE(gate.should_transmit(0, T0 + 4s));
@@ -180,6 +205,7 @@ TEST(talker_gate, a_ready_missed_over_a_long_gap_is_checked_against_its_stamp)
 TEST(talker_gate, a_stream_stopped_through_a_blip_is_admitted_again_within_the_grace)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x101), true, T0);
     gate.note_stream_started(1, false);
     EXPECT_FALSE(gate.should_transmit(1, T0 + 125us));
@@ -196,6 +222,7 @@ TEST(talker_gate, a_stream_stopped_through_a_blip_is_admitted_again_within_the_g
 TEST(talker_gate, a_talker_withdrawal_closes_at_once_and_a_later_ready_reopens)
 {
     TalkerGate gate{true, lookup};
+    gate.set_needs_acmp_connection(false);  // MSRP alone: no ACMP connection to count
     gate.note_listener_ready(sid(0x102), true, T0);
     EXPECT_TRUE(gate.should_transmit(2, T0 + 125us));
     gate.notify_talker_withdrawn(2);

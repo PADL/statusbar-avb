@@ -779,43 +779,80 @@ class AvbEntityKit
     [[nodiscard]] auto talker_accumulated_latency_ns(uint16_t idx) const noexcept -> uint32_t;
     void advertise_talker_streams(TimePoint time);
     void withdraw_talker_streams(TimePoint time);
-    /// One pass of update_talker_declarations over the talker streams.
-    void run_talker_declarations(int64_t now_ns, RefreshSet refresh);
-    /// One talker stream's turn of run_talker_declarations: declare, withdraw or leave it.
-    void run_talker_declaration(StreamSpec const& spec, int64_t now_ns, bool refresh);
-    /// Advertise @p spec's Talker; on success note it, re-learn the gate and announce it.
-    void declare_talker(
-        StreamSpec const& spec,
-        nanoavb::TalkerStreamSrpInfo const& info,
-        TalkerDeclarations::Params const& params,
-        bool was_declared,
-        int64_t now_ns);
-    /// Log a first declaration and notify GET_STREAM_INFO when it or the Listener changed.
-    void announce_talker_declared(StreamSpec const& spec, bool was_declared, bool listener_changed);
-    /// Withdraw @p spec's Talker Advertise and close its transmit gate.
-    void withdraw_talker(StreamSpec const& spec, nanoavb::TalkerStreamSrpInfo const& info, int64_t now_ns);
+    /// Hand talker stream @p spec's parameters to the MSRP handler again at @p now (a changed
+    /// TSpec, address or VLAN): it re-declares a declared stream, a waiting one stays waiting.
+    void readvertise_talker(StreamSpec const& spec, TimePoint now);
+    /// Before a probe declares talker @p idx: its parameters as they are now, unless it is declared.
+    void refresh_waiting_talker(uint16_t idx, TimePoint now);
     /// SET_STREAM_INFO / SET_MAX_TRANSIT_TIME's offset @p offset_ns for talker @p idx: its AEM status.
     [[nodiscard]] auto change_presentation_offset(uint16_t idx, uint32_t offset_ns) -> uint8_t;
     /// Apply a changed offset through on_presentation_offset_changed_: its AEM status.
     [[nodiscard]] auto commit_presentation_offset(uint16_t idx, uint32_t before, uint32_t offset_ns) -> uint8_t;
-    /// The ACMP talker's Milan hooks, the AEM presentation offset store and
-    /// the GET_STREAM_INFO fills.
-    void wire_milan_talker();
-    /// The Milan listener's sink hooks (persistence, stopped inputs,
-    /// GET_STREAM_INFO notifications) and its MSRP talker registration feed.
-    void wire_milan_listener();
-    /// Report settled Milan sink @p index's Talker registration (Section
-    /// 5.5.3.3: matching stream ID, destination address and VLAN ID).
-    void refresh_sink_registration(uint16_t index, TimePoint now);
+    /// The AEM presentation offset store (SET_STREAM_INFO, SET and GET_MAX_TRANSIT_TIME).
+    void wire_presentation_offsets();
+    /// Which ACMP runs: IEEE 1722.1-2021's, or under the Milan profile Milan v1.3's
+    /// (NanoAvbComponents::use_milan_acmp), with the transmit gate to match.
+    void apply_acmp_profile(bool milan);
+    /// The ACMP third of the stream callbacks, for whichever ACMP the components run.
+    void wire_acmp_callbacks();
+    /// IEEE 1722.1 ACMP: probes, the talker connection log, the listener's connect and disconnect.
+    void wire_ieee_acmp_callbacks();
+    /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
+    void wire_milan_talker_callbacks();
+    void wire_milan_listener_callbacks();
+    /// The Milan listener's settle and its giving up of the SRP parameters, onto the stream
+    /// inputs, with the Talker attribute each sink probed and its VLAN joined.
+    void wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener);
+    /// What a sink with the SRP parameters @p srp follows in SRP.
+    [[nodiscard]] static auto probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch;
+    /// The stream outputs have destination addresses that are theirs to use (Milan v1.3 4.3.3.1, 5.5.4.1 step 3).
+    [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool;
+    /// REGISTERING_FAILED for stream output @p stream_index (Milan v1.3 Table 5.23).
+    [[nodiscard]] auto talker_registering_failed(uint16_t stream_index) const -> bool;
+    /// The entity is locked by a controller other than @p controller.
+    [[nodiscard]] auto locked_out(ieee::Eui64 const& controller) const noexcept -> bool;
+    /// This entity's gPTP grandmaster and domain, as its own ADP reports them.
+    [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
+    /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
+    [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
+    /// A Milan sink's binding changed: the counters of an input bound or unbound, the stopped
+    /// states (Milan v1.3 Sections 5.3.8.7, 5.3.8.10), and a save.
+    void follow_milan_bindings();
+    /// Milan input @p index bound or unbound since last seen: its counters zeroed, or its lock let go.
+    void follow_input_bound(uint16_t index);
+    /// START_STREAMING or STOP_STREAMING was accepted for a stream.
+    [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
+    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_OUTPUT @p index: stopped
+    /// or started under IEEE 1722.1, NOT_SUPPORTED and nothing changed under the Milan profile.
+    [[nodiscard]] auto start_or_stop_output(uint16_t index, bool stopped) -> uint8_t;
+    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_INPUT @p index: to its
+    /// Milan sink, or straight to the input under IEEE 1722.1.
+    void start_or_stop_input(uint16_t index, bool stopped);
+    /// Whether STREAM_INPUT @p index is to discard its frames: a Milan sink bound with the
+    /// stopped state (5.3.8.7), or an IEEE 1722.1 input after STOP_STREAMING.
+    [[nodiscard]] auto input_stopped(uint16_t index) const noexcept -> bool;
+    /// The input's stopped state set, logged and notified (GET_STREAM_INFO), when it changes.
+    void set_input_stopped(uint16_t index, bool stopped);
+    /// Every stream input given the stopped state input_stopped() says.
+    void apply_input_stopped_states();
+    /// A start is a power cycle to a Milan sink (Milan v1.3 5.5.1.4).
+    void restart_milan_sinks(TimePoint now);
+    /// The file a kind of saved state goes in: @p named when the configuration names one; else,
+    /// when @p wanted, the file @p name of the entity's state directory; else empty.
+    [[nodiscard]] auto state_file(std::string const& named, std::string_view name, bool wanted) -> std::string;
+    /// The entity's own state directory, made at the first call that needs it; empty when the
+    /// machine has no state directory or it may not be written, which one status line then says.
+    [[nodiscard]] auto entity_state_dir() -> std::string const&;
     /// A settled Milan input's VID joins MVRP and the NIC's VLAN filter at @p now (refcounted;
     /// the Class A VID is the host's), and leaves both when the last such input goes.
     void join_sink_vlan(uint16_t vid, TimePoint now);
     void leave_sink_vlan(uint16_t vid, TimePoint now);
-    /// Re-read talker stream @p idx's registered Listener; true when it changed (GET_STREAM_INFO
-    /// follows it, and a change runs the declaration passes).
+    /// Re-read talker stream @p idx's registered Listener; true when it changed (GET_STREAM_INFO follows it).
     [[nodiscard]] auto refresh_talker_listener(uint16_t idx) -> bool;
     /// The talker spec index for @p stream_id, or nullopt.
     [[nodiscard]] auto talker_index_of(nanoavb::StreamId const& stream_id) const noexcept -> std::optional<uint16_t>;
+    /// Talker stream @p idx's IEEE 1722.1 ACMP connection count to the gate, then admission re-read.
+    void publish_talker_connections(uint16_t idx);
     [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
     /// Fires the unsolicited GET_STREAM_INFO for talker stream @p idx.
     void notify_talker_stream_info(uint16_t idx);
@@ -1046,12 +1083,8 @@ class AvbEntityKit
     void fold_stream_counters();
     /// Talker stream @p idx's registered Listener; nullopt for no such stream.
     [[nodiscard]] auto registered_listener_of(uint16_t idx) const -> std::optional<srp::msrp::ListenerDeclaration>;
-    /// update_talker_declarations()'s passes: one, then those asked for meanwhile (at most 4).
-    void run_declaration_passes(int64_t now_ns, RefreshSet refresh);
-    /// Every talker stream undeclared, inactive and gated at steady-clock @p now_ns.
-    void notify_all_talkers_withdrawn(int64_t now_ns);
-    /// The registration of the Talker that settled Milan sink @p sink probed.
-    [[nodiscard]] auto talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration;
+    /// Every talker stream gated at once (no grace): its Talker Advertise was withdrawn.
+    void notify_all_talkers_withdrawn();
 
     //
     // start() and stop() phases
@@ -1173,16 +1206,9 @@ class AvbEntityKit
 
     /// Per-stream transmit gate (MSRP listener declaration + grace). Binds config_ + components.
     TalkerGate gate_;
-    /// When each talker stream declares its Talker Advertise, and the deadline
-    /// its timer next wakes for (nullopt: none).
-    TalkerDeclarations declarations_;
-    std::optional<int64_t> declaration_deadline_ns_{};
-    GateTimePoint declarations_gate_now_{};  ///< the gate reading the running declaration pass stamps with
-    bool updating_declarations_{false};
-    bool declarations_pending_{false};           ///< asked for while updating
-    RefreshSet declarations_pending_refresh_{};  ///< ... the streams to re-declare
-    RefreshSet refresh_pending_{};               ///< re-declarations an AEM hook asked for, run at the next pass
-    /// What the declarations' timer reaches the kit through (start(); stop()
+    /// Talker streams an AEM hook re-advertises at the next timer pass (this hook is told no time).
+    std::bitset<MAX_ENTITY_STREAMS> readvertise_pending_{};
+    /// What the kit's timer reaches the kit through (start(); stop()
     /// drops it and the timer finishes).
     std::shared_ptr<AvbEntityKit* const> declaration_timer_token_{};
     /// The registered Listener per talker stream (refresh_talker_listener).

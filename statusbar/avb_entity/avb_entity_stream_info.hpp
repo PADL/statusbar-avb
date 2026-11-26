@@ -145,10 +145,10 @@ struct TalkerStreamStatus
 /// An output's stream ID, address, VID and msrp_accumulated_latency into @p out; the first three's flags:
 /// the ID and VID always (valid while declaring, undefined otherwise), the address while MAAP
 /// has one (Milan v1.2 Table 5.3).
-template <size_t N>
 [[nodiscard]] inline auto fill_talker_identity(
-    atdecc::TalkerStreamInfoDynamic<N> const& stream, TalkerStreamStatus const& status, atdecc::aem::AemStreamInfoPayload& out)
-    -> uint32_t
+    nanoavb::NanoAvbComponents::TalkerStream const& stream,
+    TalkerStreamStatus const& status,
+    atdecc::aem::AemStreamInfoPayload& out) -> uint32_t
 {
     using namespace atdecc::aem::stream_info_flags;
     out.stream_id = stream.stream_id;
@@ -168,8 +168,8 @@ template <size_t N>
     atdecc::aem::AemStreamInfoPayload& out,
     atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
 {
-    auto const* stream = host.components().acmp_talker.get_stream(descriptor_index);
-    if (stream == nullptr) {
+    auto const stream = host.components().talker_stream(descriptor_index);
+    if (!stream.has_value()) {
         return false;
     }
     uint32_t const flags = fill_talker_identity(*stream, status, out) | fill_talker_format(host, descriptor_index, out) |
