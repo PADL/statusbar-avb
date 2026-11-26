@@ -95,19 +95,6 @@ struct AcmpListenerCallbacks
     statusbar::sg14::inplace_function<void(uint16_t stream_index), 64> srp_detach_listener;
 };
 
-/// What only the entity knows about a talker stream, for the Milan talker's
-/// responses (atdecc::MilanTalkerSource; the stream identity comes from
-/// configure_stream()).
-struct MilanTalkerStreamState
-{
-    /// MAAP has allocated the stream's destination address, without conflict.
-    bool dest_mac_valid{false};
-    /// Declaring the Talker Advertise and registering a Listener Asking Failed.
-    bool registering_failed{false};
-    /// The STREAM_OUTPUT's avb_interface_index.
-    uint16_t avb_interface_index{0};
-};
-
 //
 // NanoAVB ACMP Talker Handler
 //
@@ -117,11 +104,6 @@ class NanoAvbAcmpTalker
 {
   public:
     using TimePoint = sm::TimePoint;
-    /// The entity's part of a stream's Milan state (stream_index < max_streams()).
-    using MilanStreamStateFn = statusbar::sg14::inplace_function<MilanTalkerStreamState(uint16_t stream_index), 64>;
-    /// A PROBE_TX_COMMAND for @p stream_index counts for its declaration window;
-    /// called before the response is sent.
-    using ProbeFn = statusbar::sg14::inplace_function<void(uint16_t stream_index, TimePoint time), 64>;
 
     /// Construct with entity ID and optional max streams
     /// @param entity_id The entity ID for this talker
@@ -176,22 +158,6 @@ class NanoAvbAcmpTalker
     /// Get the maximum number of streams
     [[nodiscard]] auto max_streams() const noexcept -> size_t { return ctx_.max_streams(); }
 
-    /// Answer as a Milan talker (true) or a classic 1722.1 talker (false).
-    void set_milan(bool const milan) noexcept { milan_ = milan; }
-    [[nodiscard]] auto milan() const noexcept -> bool { return milan_; }
-
-    /// The Milan talker's hooks: @p state supplies what only the entity knows, @p on_probe
-    /// hears the probes that count. A classic talker refuses CONNECT_TX TALKER_DEST_MAC_FAIL
-    /// until @p state's dest_mac_valid holds.
-    void set_milan_callbacks(MilanStreamStateFn state, ProbeFn on_probe)
-    {
-        milan_state_ = std::move(state);
-        on_probe_ = std::move(on_probe);
-    }
-
-    /// The Milan source @p stream_index answers from, nullopt past max_streams().
-    [[nodiscard]] auto milan_source(uint16_t stream_index) const -> std::optional<MilanTalkerSource>;
-
     // Stream Configuration
 
     /// Configure a talker stream
@@ -222,30 +188,20 @@ class NanoAvbAcmpTalker
     /// Process a received ACMP command
     /// @param cmd The received ACMP command
     /// @param event_time Current time for timeout tracking
-    /// @param ingress_interface The AVB interface it arrived on (Milan's
-    ///        PROBE_TX interface check); the entity has one, 0.
     /// @return true if the command was handled
-    [[nodiscard]] auto receive_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface = 0)
-        -> bool;
+    auto receive_command(AcmpCommandResponse const& cmd, TimePoint event_time) -> bool;
 
     /// Get the current state machine state
     [[nodiscard]] auto current_state() const noexcept -> TalkerState { return sm_.current_state(); }
 
   private:
     void wire_talker_tx_response();
-    /// A CONNECT_TX for a stream with no destination address yet, answered TALKER_DEST_MAC_FAIL: true.
-    [[nodiscard]] auto refused_without_dest_mac(AcmpCommandResponse const& cmd) -> bool;
-    /// The classic talker state machine on @p cmd's @p event.
-    void run_state_machine(AcmpCommandResponse const& cmd, TalkerEvent event, TimePoint event_time);
-    [[nodiscard]] auto receive_milan_command(AcmpCommandResponse const& cmd, TimePoint event_time, uint16_t ingress_interface)
-        -> bool;
+    /// Tell on_probe about @p cmd when it is a CONNECT_TX_COMMAND for a stream this talker has.
+    void report_probe(AcmpCommandResponse const& cmd, TimePoint event_time);
 
     AcmpTalkerCallbacks callbacks_;
     TalkerContext<> ctx_;
     AcmpTalkerStateMachine<> sm_;
-    bool milan_{false};
-    MilanStreamStateFn milan_state_{};
-    ProbeFn on_probe_{};
 };
 
 //

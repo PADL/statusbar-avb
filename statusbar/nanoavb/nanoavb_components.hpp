@@ -20,9 +20,8 @@
 #include "statusbar/nanoavb/nanoavb_base.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_entity_model.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
 #include "statusbar/nanoavb/nanoavb_local_port.hpp"
-#include "statusbar/nanoavb/nanoavb_mvu_handler.hpp"
+#include "statusbar/nanoavb/nanoavb_milan_acmp.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/nanoavb/nanoavb_srp_net.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -259,13 +258,36 @@ class AtdeccNetHandler : public net::Pollable
 
     [[nodiscard]] auto finished() const noexcept -> bool override { return false; }
 
-  private:
+    /// Give one received ATDECC frame (@p payload from the AVTP subtype
+    /// octet on, sent by @p src_mac) to the protocol it belongs to. What
+    /// on_ready() does with each frame it reads; public so that a frame can
+    /// be handed in without a socket.
     /// @p local: from a local controller (see attach_local_port).
     void dispatch_frame(int64_t now_ns, ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, bool local = false);
-    /// An ADPDU's way through the entity: the advertiser, discovery and the ACMP listener.
-    void dispatch_adp(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint now, bool local);
+
+  private:
+    void dispatch_adp(ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, sm::TimePoint now, bool local);
     /// Hand @p adp to the ADP advertiser (a local controller's discover is answered locally).
     void advertiser_receive(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint now, bool local);
+    void dispatch_acmp(std::span<uint8_t const> payload, sm::TimePoint now);
+    void dispatch_aecp(ieee::Eui48 const& src_mac, std::span<uint8_t const> payload, sm::TimePoint now);
+    /// What an ADP message means for the listener side and the registered controllers.
+    void note_adp(atdecc::AdpDu const& adp, sm::TimePoint now);
+    void dispatch_ieee_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
+    void dispatch_milan_acmp(atdecc::AcmpCommandResponse const& pdu, sm::TimePoint now);
+    /// What ADP discovery holds of @p talker: its last ENTITY_AVAILABLE while
+    /// it is still good, for a Milan sink a controller binds to it.
+    [[nodiscard]] auto heard_advertisement_of(Eui64 const& talker) const -> std::optional<atdecc::MilanHeardAdvertisement>;
+    void trace_listener_command(atdecc::AcmpCommandResponse const& pdu, bool handled) const;
+    /// Take back the senders this handler gave the Milan pair, and the
+    /// stream inputs it gave the AEM handler.
+    void release_milan_acmp() noexcept;
+    /// Give the AEM handler the Milan listener's sinks for the MVU stream input commands.
+    void attach_mvu_stream_inputs();
+    /// Send an ACMP PDU to the ACMP multicast address, in the 56-octet form.
+    auto send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool;
+    void tick_protocols(sm::TimePoint now);
+    [[nodiscard]] auto listener_connections() const -> size_t;
     void log_status();
 
     net::RawnetContext context_{};

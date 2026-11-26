@@ -281,6 +281,16 @@ class AvbEntityHost
         return net_handlers_ != nullptr ? net_handlers_->local_port() : nullptr;
     }
 
+    /// Called after any Milan sink's binding parameters changed (a bind, an
+    /// unbind, a started/stopped change), once they are saved where they are
+    /// saved at all, and before the controller is answered. For what follows
+    /// a binding beside its file: the kit's stopped state of each stream
+    /// input. Reactor thread.
+    void set_on_milan_bindings_changed(statusbar::sg14::inplace_function<void(), 64> fn)
+    {
+        on_milan_bindings_changed_ = std::move(fn);
+    }
+
     // --- Logging -----------------------------------------------------------------
     //
     // The host owns two SPSC log channels, one per producer thread context:
@@ -585,6 +595,7 @@ class AvbEntityHost
     std::optional<bool> port_as_capable_{};                   ///< see notify_port_as_capable
     std::string listener_bindings_path_{};                    ///< see enable_listener_binding_persistence
     nanoavb::AtdeccLocalPort::Config local_atdecc_socket_{};  ///< see set_local_atdecc_socket
+    statusbar::sg14::inplace_function<void(), 64> on_milan_bindings_changed_{};
     bool running_{false};
     bool adp_held_{false};  ///< see hold_adp()
     bool adp_owed_{false};  ///< a Link Up under the hold has not started ADP yet

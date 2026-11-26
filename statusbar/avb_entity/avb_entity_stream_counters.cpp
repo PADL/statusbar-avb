@@ -256,7 +256,9 @@ void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& co
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
 {
     c.frames_rx.fetch_add(1, relaxed);
-    unlock_stream_input(c);
+    if (c.is_locked.exchange(false, relaxed)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+    }
     forget_run(c);
 }
 

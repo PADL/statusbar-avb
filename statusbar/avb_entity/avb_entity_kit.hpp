@@ -736,151 +736,6 @@ class AvbEntityKit
 
     /// The VLAN the streams use now: the adopted one, else the configured one.
     [[nodiscard]] auto current_vlan_id() const noexcept -> uint16_t;
-    // The constructor's steps.
-    void make_listener_streams(std::atomic<int64_t>& last_gptp_ns, StreamRxAudioSink* audio_sink);
-    /// The AEM handler's options, the profile, and the SRP handler's defaults.
-    void configure_control_plane();
-    /// Everything the profile decides (milan_profile()).
-    void apply_profile();
-    /// Which ACMP runs: IEEE 1722.1-2021's, or under the Milan profile
-    /// Milan v1.3's (NanoAvbComponents::use_milan_acmp), with the transmit
-    /// gate to match.
-    void apply_acmp_profile(bool milan);
-    void apply_srp_profile(bool milan);
-    /// Each stream output's stream id and static destination address into ACMP's picture.
-    void seed_talker_streams();
-    /// The file a kind of saved state goes in: @p named when the
-    /// configuration names one; else, when @p wanted, the file @p name of
-    /// the entity's state directory (avb_entity_state_dir.hpp); else empty.
-    [[nodiscard]] auto state_file(std::string const& named, std::string_view name, bool wanted) -> std::string;
-    /// The entity's own state directory, made at the first call that needs
-    /// it; empty when the machine has no state directory or it may not be
-    /// written, which one status line then says.
-    [[nodiscard]] auto entity_state_dir() -> std::string const&;
-    [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
-    /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
-    void install_storage_hooks();
-    /// SET_CLOCK_SOURCE asked for @p source in clock domain @p domain. NOT_SUPPORTED, and nothing
-    /// changed, for a source of domain 0 the entity cannot run (clock_source_runs()). Otherwise
-    /// SUCCESS: domain 0's active source is @p source, its streams' media clock restarted when
-    /// that is another, and the choice is saved.
-    [[nodiscard]] auto change_clock_source(uint16_t domain, uint16_t source) -> uint8_t;
-    /// The file the clock domains' chosen sources are saved in (Milan v1.3 5.3.11.1), empty when
-    /// the machine has no state directory. To save, @p make the entity's own directory when it is
-    /// not there; to load, only name the file.
-    [[nodiscard]] auto clock_sources_file(bool make) -> std::string;
-    /// Save every clock domain's source in force, clock domain @p domain's as @p source: the one
-    /// a SET_CLOCK_SOURCE being answered is about to put in force.
-    void save_clock_sources(uint16_t domain, uint16_t source);
-    /// The clock sources saved before the last stop, back in force.
-    void restore_clock_sources();
-    /// One saved clock source to its domain, when the model still lists it and the entity can
-    /// still run it; a status line says so when not.
-    void restore_clock_source(SavedClockSource const& saved);
-    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream outputs.
-    void restart_media_clock(uint16_t domain);
-    /// START_STREAMING or STOP_STREAMING was accepted for a stream.
-    [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
-    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_OUTPUT
-    /// @p index: the talker's stream stopped or started under IEEE 1722.1,
-    /// NOT_SUPPORTED and nothing changed under the Milan profile. The status
-    /// of the command.
-    [[nodiscard]] auto start_or_stop_output(uint16_t index, bool stopped) -> uint8_t;
-    /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_INPUT
-    /// @p index: to its Milan sink, or straight to the input under IEEE 1722.1.
-    void start_or_stop_input(uint16_t index, bool stopped);
-    /// Whether STREAM_INPUT @p index is to discard its frames: a Milan
-    /// sink bound with the stopped state (5.3.8.7), or an IEEE 1722.1 input
-    /// after STOP_STREAMING.
-    [[nodiscard]] auto input_stopped(uint16_t index) const noexcept -> bool;
-    /// The input's stopped state set, logged and notified (GET_STREAM_INFO), when it changes.
-    void set_input_stopped(uint16_t index, bool stopped);
-    /// Every stream input given the stopped state input_stopped() says.
-    void apply_input_stopped_states();
-    /// A Milan sink's binding changed: each input's stopped state, and its
-    /// counters zeroed when it became bound.
-    void follow_milan_bindings();
-    void follow_inputs_bound();
-    void follow_input_bound(uint16_t index);
-    /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS has passed since
-    /// the last, at reactor-clock @p now_ns; under the Milan profile, at every COUNTERS_NOTIFY_FOLDS-th
-    /// end, notify each stream descriptor whose counters changed since it was last told (GET_COUNTERS).
-    /// The first call starts the first interval. end_cycle() calls it.
-    void poll_counters(int64_t now_ns);
-    /// End the observation interval of every stream's counters, and at every
-    /// COUNTERS_NOTIFY_FOLDS-th one notify those that changed.
-    void fold_stream_counters();
-    /// The stream outputs' and the stream inputs' halves of fold_stream_counters():
-    /// each notes which descriptors' counters changed.
-    void fold_output_counters();
-    void fold_input_counters();
-    /// Notify each stream descriptor whose counters changed since it was last
-    /// told, under the Milan profile, and forget the changes under either.
-    void notify_changed_counters();
-    /// Whether the counters of stream descriptor @p index, noted in @p changed, are to be told now:
-    /// they changed and the profile is Milan's. The note is cleared.
-    [[nodiscard]] auto take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t index) const noexcept -> bool;
-    /// Keep the signal presence STREAM_OUTPUT @p spec reports now, within its channels, as this
-    /// fold's; true when it changed.
-    [[nodiscard]] auto fold_output_presence(StreamSpec const& spec) noexcept -> bool;
-    /// The channels of STREAM_OUTPUT @p index's format, 0 for an index the entity has no output for.
-    [[nodiscard]] auto output_channels(uint16_t index) const noexcept -> uint16_t;
-    /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
-    /// describes: the status of the command. A stream input takes another
-    /// channel count (change_input_format); a stream output keeps the one
-    /// format its serializer was made for, and any other is NOT_SUPPORTED.
-    [[nodiscard]] auto on_stream_format_changed(uint16_t type, uint16_t index, uint64_t format) -> uint8_t;
-    /// STREAM_INPUT @p index to @p format: STREAM_IS_RUNNING while the input
-    /// runs (input_running), NOT_SUPPORTED for a format the listener cannot
-    /// be brought to; else the listener takes it and the inputs' formats
-    /// are saved.
-    [[nodiscard]] auto change_input_format(uint16_t index, uint64_t format) -> uint8_t;
-    /// The GET_STREAM_INFO answer for a stream: the talker's or the
-    /// listener's picture of it, with the format now in force. False for a
-    /// stream the entity does not have.
-    [[nodiscard]] auto stream_info(uint16_t type, uint16_t index, atdecc::aem::AemStreamInfoPayload& out) -> bool;
-    /// The current format of a stream as its descriptor has it; 0 for a stream the model does not have.
-    [[nodiscard]] auto current_stream_format(uint16_t type, uint16_t index) -> uint64_t;
-    /// The file the streams' current formats are saved in (Milan v1.3
-    /// 5.3.7.1, 5.3.8.1), empty when the machine has no state directory.
-    /// To save, @p make the entity's own directory when it is not there;
-    /// to load, only name the file.
-    [[nodiscard]] auto stream_formats_file(bool make) -> std::string;
-    /// Save every stream input's current format, STREAM_INPUT @p index
-    /// having @p format: its descriptor takes that once the command's hook
-    /// has returned.
-    void save_input_formats(uint16_t index, uint64_t format);
-    /// The formats saved before the last stop, back to the stream inputs.
-    void restore_input_formats();
-    /// One saved format to its input, when the model still describes it
-    /// and the listener takes it; else the input stays as authored, and a
-    /// status line says so.
-    void restore_input_format(SavedStreamFormat const& saved);
-
-    // start()'s steps, in order.
-    [[nodiscard]] auto bring_up_control_plane(net::MessageReactor& reactor, TimePoint now) -> Status;
-    /// What every start puts back: the configured Domain, valid stream
-    /// addresses, the stream callbacks, the VID, and Milan sinks at startup.
-    void restore_control_state(TimePoint now);
-    void restart_milan_sinks(TimePoint now);
-    /// The talker's tu follows the grandmaster of this start's Announce handler, none at first.
-    void follow_grandmaster();
-    /// The talker told whether a grandmaster is in force (@p in_force), as of now.
-    void notify_talker_of_grandmaster(bool in_force) noexcept;
-    /// On config_.net_backend unless the host opened it already. Not fatal when it does not
-    /// open: the entity keeps its control plane.
-    void open_stream_port();
-    [[nodiscard]] auto claim_stream_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
-    [[nodiscard]] auto open_streams(net::MessageReactor& reactor) -> Status;
-    [[nodiscard]] auto open_talker_streams() -> Status;
-    [[nodiscard]] auto open_listener_streams(net::MessageReactor& reactor) -> Status;
-    /// Open stream input @p spec; the group it joins from the start (zero: none).
-    [[nodiscard]] auto open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>;
-    void attach_listener_rx(std::span<ieee::Eui48 const> rx_groups, net::MessageReactor& reactor);
-    /// The TX path, the diagnostics, then each talker gate open now told.
-    void finish_start();
-    void report_inert_controls();
-
     /// The MRP timers of both SRP handlers: Milan v1.3 Table 4.3's under the
     /// Milan profile, IEEE 802.1Q Table 10-7's otherwise.
     void apply_mrp_timers(bool milan);
@@ -960,7 +815,7 @@ class AvbEntityKit
     void load_persistent_state();
     /// Apply one saved setting, logging (and dropping) what the model refuses.
     void apply_saved_settings(PersistentState const& saved);
-    /// start(), the listener up: arm the saved bindings as fast-connect goals
+    /// start(), the listener up: arm the saved classic bindings as fast-connect goals
     /// and save every change of them.
     void apply_saved_listener_bindings();
     /// The entity model id controllers see (the ENTITY descriptor served).
@@ -1142,6 +997,11 @@ class AvbEntityKit
     void open_stream_tx();
     /// The RX slots on the stream port, the VLAN filter and the saved bindings.
     [[nodiscard]] auto start_listener_streams(net::MessageReactor& reactor) -> Status;
+    /// The listener's RX handler: kept for the RT timer, else in the reactor; a refusal kept in stream_rx_error().
+    void attach_listener_rx(net::MessageReactor& reactor);
+    /// A classic listener's saved fast-connect goals, or the host's saved bindings with their
+    /// started state, and (without kit_data_plane) the inputs' saved formats.
+    void restore_listener_bindings();
     /// One RX slot per listener stream, the CRF recovery input and the static RX groups.
     [[nodiscard]] auto open_listener_streams() -> Status;
 #if defined(__linux__)
@@ -1150,15 +1010,17 @@ class AvbEntityKit
 #endif
     /// Join settled Milan input @p index's VID once: the probe answer's, or with none (0) the matched
     /// Talker attribute's once it is registered (matched_talker_vid).
-    void join_input_vlan(uint16_t index, atdecc::MilanSink const& sink, TimePoint now);
-    /// The VLAN of the registered Talker Advertise or Failed on @p sink's StreamID and destination; 0: none.
-    [[nodiscard]] auto matched_talker_vid(atdecc::MilanSink const& sink) const -> uint16_t;
+    /// Settled Milan input @p index's VID (its probed one, else its registered Talker's) joined once at @p now.
+    void join_input_vlan(uint16_t index, atdecc::MilanSrpParameters const& srp, TimePoint now);
+    /// The VLAN of the registered Talker Advertise or Failed on @p srp's StreamID and destination; 0: none.
+    [[nodiscard]] auto matched_talker_vid(atdecc::MilanSrpParameters const& srp) const -> uint16_t;
     /// stop(): the data plane down and a pending save written.
     void close_data_plane();
     /// stop(), after close_data_plane() saved the bindings: no input stays connected. The next
     /// start() reloads the saved bindings and reconnects them through the connect path.
     void drop_listener_connections(TimePoint now);
-    /// Unbind Milan input @p index, or clear classic input @p index's connection (its goal kept).
+    /// Clear classic input @p index's connection (its goal kept) with on_talker_departed(), the
+    /// classic listener's local teardown; a Milan sink keeps its binding (its restart re-settles it).
     void drop_listener_connection(uint16_t index, TimePoint now);
 
     //
@@ -1177,13 +1039,14 @@ class AvbEntityKit
     void apply_saved_names(PersistentState const& saved);
     void apply_saved_mvu_settings(PersistentState const& saved);
     /// Arm each saved binding and drop them; how many were armed.
-    [[nodiscard]] auto restore_saved_bindings(bool milan) -> size_t;
-    [[nodiscard]] auto restore_listener_binding(PersistedListenerBinding const& binding, bool milan) -> bool;
+    [[nodiscard]] auto restore_saved_bindings() -> size_t;
+    [[nodiscard]] auto restore_listener_binding(PersistedListenerBinding const& binding) -> bool;
     /// Whether @p binding names an input that is there, at the format it was saved with.
     [[nodiscard]] auto saved_binding_applies(PersistedListenerBinding const& binding) -> bool;
-    [[nodiscard]] auto restore_milan_binding(PersistedListenerBinding const& binding) -> bool;
     void collect_entity_settings(PersistentState& state) const;
     void collect_stream_settings(PersistentState& state) const;
+    /// With kit_data_plane: each stream's format away from the model's, and collect_unit_formats().
+    void collect_stream_formats(PersistentState& state) const;
     /// With AUDIO_UNIT 0 off its authored rate, every audio stream of it not yet in @p state, at its format.
     void collect_unit_formats(PersistentState& state) const;
     void collect_listener_bindings(PersistentState& state) const;

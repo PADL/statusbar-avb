@@ -88,6 +88,29 @@ auto aaf_timed_packet(
         .sequence_num = pdu.get_sequence_num()};
 }
 
+/// What one AAF AVTPDU gave the consumers: its samples per channel and their time.
+struct AafDelivery
+{
+    uint64_t samples{0};
+    uint64_t pts{0};
+    uint64_t period{0};
+};
+
+/// One channel's worth of silence, as long as the longest lane an AVTPDU
+/// that fits the receive buffer can hold.
+constexpr std::array<float, 1024> SILENT_LANE{};
+
+/// The channels of the opened input that a stream of @p carried channels
+/// does not carry, to the slot's consumer as silence of the AVTPDU's length
+/// and time (ListenerStreams::set_stream_format).
+void offer_silent_channels(ListenerStreamSlot& slot, uint16_t const carried, AafDelivery const& delivery)
+{
+    std::span<float const> const silence{SILENT_LANE.data(), std::min<size_t>(delivery.samples, SILENT_LANE.size())};
+    for (uint16_t ch = carried; slot.consume && !silence.empty() && ch < slot.spec.format.channels; ++ch) {
+        slot.consume(static_cast<uint8_t>(ch), silence, delivery.pts, delivery.period);
+    }
+}
+
 auto aaf_header_matches_format(StreamFormatFields const& format, avtp::AafPdu const& pdu) noexcept -> bool
 {
     if (format.kind != StreamKind::aaf || pdu.get_format() != format.aaf_format ||
@@ -197,7 +220,7 @@ auto ListenerStreams::shape(ListenerStreamSlot& slot, StreamSpec const& spec) ->
             if (!rate || spec.format.channels == 0) {
                 return failure(std::errc::invalid_argument);
             }
-            slot.aaf.emplace(spec.format.aaf_format, *rate, spec.format.channels, spec.format.bit_depth);
+            make_aaf_context(slot, spec.format);
             return success();
         }
         case StreamKind::crf: {
@@ -235,6 +258,79 @@ auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
     }
     begin_slot(slot, spec);
     return success();
+}
+
+void ListenerStreams::make_aaf_context(ListenerStreamSlot& slot, StreamFormatFields const& format)
+{
+    auto const rate = avtp::aaf_sample_rate_from_hz(format.sample_rate_hz);
+    slot.aaf.emplace(format.aaf_format, rate.value_or(avtp::AafSampleRate::user_specified), format.channels, format.bit_depth);
+    slot.aaf->samples_per_pdu = format.aaf_samples_per_frame;
+}
+
+auto ListenerStreams::can_take_stream_format(uint16_t const stream_index, uint64_t const format_word) const noexcept -> bool
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || stream_index >= stream_format_.size()) {
+        return false;
+    }
+    return format_word == slot->spec.format_word || aaf_input_can_take(slot->spec.format, format_word);
+}
+
+auto ListenerStreams::set_stream_format(uint16_t const stream_index, uint64_t const format_word) noexcept -> bool
+{
+    if (!can_take_stream_format(stream_index, format_word)) {
+        return false;
+    }
+    // The opened word is kept as 0: a slot opened from fields alone has no
+    // word of its own to be decoded again.
+    bool const as_opened = format_word == slot_for(stream_index)->spec.format_word;
+    stream_format_[stream_index].store(as_opened ? 0 : format_word, std::memory_order_release);
+    return true;
+}
+
+auto ListenerStreams::stream_format(uint16_t const stream_index) const noexcept -> uint64_t
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || stream_index >= stream_format_.size()) {
+        return 0;
+    }
+    uint64_t const set = stream_format_[stream_index].load(std::memory_order_acquire);
+    return set != 0 ? set : slot->spec.format_word;
+}
+
+void ListenerStreams::follow_stream_format(ListenerStreamSlot& slot)
+{
+    uint64_t const wanted =
+        slot.spec.index < stream_format_.size() ? stream_format_[slot.spec.index].load(std::memory_order_acquire) : 0;
+    if (wanted == slot.rx_format_word || !slot.aaf) {
+        return;
+    }
+    make_aaf_context(slot, wanted != 0 ? decode_stream_format(wanted) : slot.spec.format);
+    slot.rx_format_word = wanted;
+}
+
+auto ListenerStreams::received_format(ListenerStreamSlot const& slot) noexcept -> StreamFormatFields
+{
+    return slot.rx_format_word != 0 ? decode_stream_format(slot.rx_format_word) : slot.spec.format;
+}
+
+void ListenerStreams::offer_aaf_to_sink(ListenerStreamSlot const& slot, std::span<uint8_t const> const audio)
+{
+    // The accepted audio to the RX sink, which decides whether to consume it, at the width the input was opened with.
+    if (audio_sink_ == nullptr) {
+        return;
+    }
+    uint16_t const width = slot.spec.format.channels;
+    if (slot.aaf->channel_count == width) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, audio);
+        return;
+    }
+    std::array<uint8_t, SINK_SCRATCH_OCTETS> widened{};
+    size_t const octets =
+        avtp::aaf_frames_to_width(audio, avtp::aaf_bytes_per_sample(slot.aaf->format), slot.aaf->channel_count, width, widened);
+    if (octets != 0) {
+        audio_sink_->on_listener_audio(slot.spec.index, StreamAudioFormat::aaf_int32, std::span{widened}.first(octets));
+    }
 }
 
 void ListenerStreams::begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec)
@@ -574,13 +670,15 @@ void ListenerStreams::on_stream_rx_frame(std::span<uint8_t const> frame, int64_t
 void ListenerStreams::receive_into(
     ListenerStreamSlot& slot, StreamKind const kind, std::span<uint8_t const> frame, int64_t const gptp_now_ns)
 {
-    if (slot.stopped.load(std::memory_order_relaxed)) {
+    if (stream_stopped(slot.spec.index)) {
+        tally_discarded_stream_input_packet(slot.counters);  // Milan v1.3 Section 5.3.8.7
         return;
     }
     std::unique_lock const entry{slot.guard, std::try_to_lock};
     if (!entry.owns_lock()) {
         return;  // being re-shaped (reformat_stream)
     }
+    follow_stream_format(slot);
     if (slot.kind.load(std::memory_order_relaxed) != kind) {
         count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);  // another subtype on its stream_id
         return;
@@ -698,14 +796,14 @@ auto ListenerStreams::decode_am824(
 void ListenerStreams::receive_aaf(
     ListenerStreamSlot& slot, avtp::AafStreamInputContext& ctx, std::span<uint8_t const> const frame, int64_t const gptp_now_ns)
 {
-    auto const pdu = accepted_aaf_pdu(slot, frame, now);
+    auto const pdu = avtp::aaf_parse_header(frame);
     if (!pdu) {
         slot.rx_bad.add(1);
         count_rejected(slot, frame, /*ts_sparse=*/false, gptp_now_ns);
         return;
     }
     // Milan v1.2 Section 4.4.2.2: a mismatched format is discarded, counted in UNSUPPORTED_FORMAT.
-    bool const format_ok = aaf_header_matches_format(slot.spec.format, *pdu);
+    bool const format_ok = aaf_header_matches_format(received_format(slot), *pdu);
     uint64_t const samples = format_ok ? deliver_aaf(slot, ctx, *pdu, avtp::aaf_get_audio_payload(*pdu, frame), gptp_now_ns) : 0;
     // AAF timestamps every packet: tv=0 is a real fault (not ts_sparse).
     update_stream_input_counters(
@@ -740,7 +838,8 @@ auto ListenerStreams::deliver_aaf(
     } else {
         samples = decode_aaf(slot, ctx, pdu, audio, gptp_now_ns);
     }
-    count_received(slot, samples, StreamAudioFormat::aaf_int32, audio);
+    count_received(slot, samples, StreamAudioFormat::aaf_int32, {});
+    offer_aaf_to_sink(slot, audio);
     return samples;
 }
 
@@ -751,25 +850,24 @@ auto ListenerStreams::decode_aaf(
     std::span<uint8_t const> const audio,
     int64_t const gptp_now_ns) -> uint64_t
 {
-    uint64_t samples = 0;
-    uint64_t pts_first = 0;
+    AafDelivery delivery{};
     avtp::aaf_stream_deserialize(
         ctx,
         pdu,
         audio,
         static_cast<uint64_t>(gptp_now_ns),
-        [&samples, &pts_first, &slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
-            samples = s.size();
-            pts_first = pts;
+        [&delivery, &slot](uint8_t ch, std::span<float> s, uint64_t pts, uint64_t period) {
+            delivery = AafDelivery{.samples = s.size(), .pts = pts, .period = period};
             if (slot.consume) {
                 slot.consume(ch, s, pts, period);
             }
         });
-    if (timed_sink_ != nullptr && samples != 0) {
+    offer_silent_channels(slot, ctx.channel_count, delivery);
+    if (timed_sink_ != nullptr && delivery.samples != 0) {
         timed_sink_->on_listener_packet(
-            aaf_timed_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint16_t>(samples), pts_first));
+            aaf_timed_packet(slot.spec.index, ctx, pdu, audio, static_cast<uint16_t>(delivery.samples), delivery.pts));
     }
-    return samples;
+    return delivery.samples;
 }
 
 void ListenerStreams::count_received(
@@ -778,7 +876,7 @@ void ListenerStreams::count_received(
     slot.rx_packets.add(1);
     slot.rx_samples.add(samples);
     // The accepted audio to the RX sink, which decides whether to consume it.
-    if (audio_sink_ != nullptr) {
+    if (audio_sink_ != nullptr && !audio.empty()) {
         audio_sink_->on_listener_audio(slot.spec.index, format, audio);
     }
 }
@@ -985,7 +1083,7 @@ auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bo
     }
     // A stopped input discards its AVTPDUs on purpose (STOP_STREAMING): its
     // lock goes without an interruption.
-    if (slot->stopped.load(std::memory_order_relaxed)) {
+    if (stream_stopped(descriptor_index)) {
         unlock_stream_input(slot->counters);
     }
     return slot->intervals.fold(slot->counters);
@@ -1101,22 +1199,6 @@ void ListenerStreams::log_connected(uint16_t const stream_index, ieee::Eui48 con
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
-void ListenerStreams::log_settled(
-    uint16_t const stream_index, nanoavb::TalkerMatch const& probed, bool const ready, bool const joined)
-{
-    if (!logger_) {
-        return;
-    }
-    logger_->status(
-        "acmp: listener stream {} ({}) SETTLED on dest={:012x} vlan={} -> MSRP Listener {}, mcast join {}",
-        stream_index,
-        kind_lit(slot_for(stream_index)),
-        probed.dest_address.to_uint64(),
-        probed.vlan_id,
-        ready ? logging::lit("Ready") : logging::lit("waits for that Talker attribute"),
-        joined ? logging::lit("ok") : logging::lit("none"));
-}
-
 auto ListenerStreams::attach_ready(
     ieee::Eui64 const& stream_id, sm::TimePoint const now, std::optional<nanoavb::TalkerMatch> const& only) -> bool
 {
@@ -1124,7 +1206,7 @@ auto ListenerStreams::attach_ready(
     // registered. Until then (e.g. a fast-connect racing the talker's boot)
     // the handler waits with nothing declared and declares Ready when it
     // appears; a registered Talker Failed gets Asking Failed.
-    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, match);
+    auto const result = components_.msrp_handler.listener_attach(to_stream_id(stream_id), now, only);
     return result.has_value() && *result == nanoavb::ListenerReservationState::Ready;
 }
 
@@ -1152,95 +1234,22 @@ auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
 }
 
 void ListenerStreams::on_listener_connected(
-    uint16_t const stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 const dest_mac, sm::TimePoint const now)
+    uint16_t const stream_index,
+    ieee::Eui64 const& stream_id,
+    ieee::Eui48 const dest_mac,
+    sm::TimePoint const now,
+    std::optional<nanoavb::TalkerMatch> const& only)
 {  // NOLINT(statusbar-block-statements) the CONNECT's bookkeeping: count, attach, take, publish, log
     auto* slot = slot_for(stream_index);
     if (slot == nullptr) {
         return;  // not one of our inputs: nothing to receive on, nothing to join for
     }
     count_connection(*slot, stream_id);
-    bool const ready = attach_or_held_ready(slot->connection, stream_id, now);
+    bool const ready = attach_or_held_ready(slot->connection, stream_id, now, only);
     take_connection(slot->connection, stream_id, group_to_join(dest_mac), now);
-    publish_connection(*slot, stream_id, only.has_value());
+    slot->connection.settled = only.has_value();
+    publish_rx_stream(*slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
     log_attached(stream_index, dest_mac, only, ready);
-}
-
-void ListenerStreams::publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool const settled)
-{
-    slot.connection.settled = settled;
-    publish_rx_stream(slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
-}
-
-void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
-{
-    bool const moved = slot.rx_stream_id.load() != stream_id;
-    slot.rx_stream_id.publish(stream_id);
-    if (moved) {
-        notify_input_changed(slot);
-    }
-}
-
-void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
-{
-    if (auto const state = input_state(slot.spec.index); state && on_input_changed_) {
-        on_input_changed_(slot.spec.index, *state);
-    }
-}
-
-auto ListenerStreams::input_state(uint16_t const stream_index) const noexcept -> std::optional<InputState>
-{
-    auto const* const slot = slot_for(stream_index);
-    if (slot == nullptr) {
-        return std::nullopt;
-    }
-    return InputState{
-        .stream_id = slot->rx_stream_id.load(), .stopped = stream_stopped(stream_index), .format = stream_format(stream_index)};
-}
-
-auto ListenerStreams::notify_offload_received(
-    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
-{
-    auto* const slot = slot_for(stream_index);
-    if (slot == nullptr) {
-        return false;
-    }
-    if (stream_stopped(stream_index) || slot->rx_stream_id.load() == 0) {
-        count_offload_idle(*slot, counts);  // nothing delivered
-        return true;
-    }
-    add_stream_input_counts(slot->counters, counts);
-    count_offload_delivered(*slot, counts, samples);
-    return true;
-}
-
-void ListenerStreams::count_offload_idle(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
-{
-    add_stream_input_counts(slot.counters, without_lock(counts));
-    // A stopped input is not synchronized and loses no lock as an interruption (Milan v1.3 5.3.8.7). One with no
-    // stream is left to the reactor, which drops its lock as it releases the stream (5.3.8.10, Table 5.6).
-    if (stream_stopped(slot.spec.index)) {
-        unlock_stream_input(slot.counters);
-    }
-}
-
-void ListenerStreams::count_offload_delivered(
-    ListenerStreamSlot& slot, StreamInputCounts const& counts, uint64_t const samples) noexcept
-{
-    uint32_t const bad = std::min(counts.unsupported_format, counts.frames_rx);
-    slot.rx_bad.add(bad);
-    slot.rx_packets.add(counts.frames_rx - bad);
-    slot.rx_samples.add(samples);
-}
-
-void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
-{
-    if (stream_index >= stream_stopped_.size() ||
-        stream_stopped_[stream_index].exchange(stopped, std::memory_order_acq_rel) == stopped) {
-        return;
-    }
-    if (auto const* const slot = slot_for(stream_index); slot != nullptr) {
-        notify_input_changed(*slot);
-    }
 }
 
 void ListenerStreams::log_attached(
@@ -1255,7 +1264,77 @@ void ListenerStreams::log_attached(
     }
 }
 
-void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now, StreamInputLoss const why)
+void ListenerStreams::log_settled(
+    uint16_t const stream_index, nanoavb::TalkerMatch const& probed, bool const ready, bool const joined)
+{
+    if (!logger_) {
+        return;
+    }
+    logger_->status(
+        "acmp: listener stream {} ({}) SETTLED on dest={:012x} vlan={} -> MSRP Listener {}, mcast join {}",
+        stream_index,
+        kind_lit(slot_for(stream_index)),
+        probed.dest_address.to_uint64(),
+        probed.vlan_id,
+        ready ? logging::lit("Ready") : logging::lit("waits for that Talker attribute"),
+        joined ? logging::lit("ok") : logging::lit("none"));
+}
+
+void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
+{
+    bool const changed = slot.rx_stream_id.load() != stream_id;
+    slot.rx_stream_id.publish(stream_id);
+    if (changed) {
+        notify_input_changed(slot);
+    }
+}
+
+void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
+{
+    if (on_input_changed_) {
+        on_input_changed_(slot.spec.index, slot.rx_stream_id.load(), stream_stopped(slot.spec.index));
+    }
+}
+
+void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+{
+    if (stream_index >= stream_stopped_.size() ||
+        stream_stopped_[stream_index].exchange(stopped, std::memory_order_acq_rel) == stopped) {
+        return;
+    }
+    if (auto* const slot = slot_for(stream_index); slot != nullptr) {
+        notify_input_changed(*slot);
+    }
+}
+
+auto ListenerStreams::notify_offload_received(
+    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    count_offload_received(*slot, counts, stream_stopped(stream_index));
+    slot->rx_packets.add(counts.frames_rx - std::min(counts.unsupported_format, counts.frames_rx));  // those accepted
+    slot->rx_samples.add(samples);
+    return true;
+}
+
+void ListenerStreams::count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts, bool const stopped) noexcept
+{
+    bool const idle = stopped || slot.rx_stream_id.load() == 0;
+    if (!idle || counts.media_locked.value_or(true)) {
+        add_stream_input_counts(slot.counters, counts);
+        return;
+    }
+    // A stopped or unbound input's lock goes without an interruption (Milan v1.2 Sections 5.3.8.7, 5.3.8.10).
+    auto quiet = counts;
+    quiet.media_locked.reset();
+    add_stream_input_counts(slot.counters, quiet);
+    unlock_stream_input(slot.counters);
+}
+
+void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
 {
     bool settled = false;
     if (auto* slot = slot_for(stream_index); slot != nullptr) {

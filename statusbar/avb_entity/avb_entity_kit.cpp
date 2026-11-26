@@ -8,7 +8,6 @@
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
-#include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
 #include "statusbar/avb_entity/avb_entity_shaper.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
@@ -273,9 +272,9 @@ void AvbEntityKit::wire_controller_hooks()
 {
     wire_storage_hooks();
     wire_dynamic_mappings();
-    // The Milan talker's and listener's hooks need no network.
-    wire_milan_talker();
-    wire_milan_listener();
+    wire_presentation_offsets();
+    // A Milan sink's binding changed (saved by the host): counters, stopped states, the kit's save.
+    host_.set_on_milan_bindings_changed([this]() { follow_milan_bindings(); });
 }
 
 void AvbEntityKit::wire_storage_hooks()
@@ -297,18 +296,8 @@ void AvbEntityKit::wire_storage_hooks()
     // The change shows in GET_STREAM_INFO as STREAMING_WAIT (IEEE 1722.1-2021
     // Table 7-145), so every subscribed controller is told by an unsolicited
     // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
-    storage_handler_.set_on_streaming_changed([this](uint16_t type, uint16_t index, bool streaming) -> uint8_t {
-        if (type == DESCRIPTOR_STREAM_OUTPUT) {
-            talker_->set_stream_stopped(index, !streaming);
-            notify_admission(net::rx_clock_now());  // STREAM_START / STREAM_STOP now
-            (void)host_.components().aem_handler.notify_stream_info_changed(type, index);
-        }
-        // Milan v1.2 Sections 5.4.2.19-20: a bound input becomes started or
-        // stopped (no effect on an unbound one); the AEM lock was checked.
-        if (type == DESCRIPTOR_STREAM_INPUT && host_.components().profile.milan) {
-            (void)host_.components().acmp_listener.milan_sinks().set_started(index, streaming);
-        }
-        return atdecc::AEM_STATUS_SUCCESS;
+    storage_handler_.set_on_streaming_changed([this](uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t {
+        return on_streaming_changed(type, index, streaming);
     });
     // SET_STREAM_FORMAT: the kit's checks, then the entity's data plane (see the
     // header), so no descriptor reports a format the streams are not using (and
@@ -1080,6 +1069,10 @@ void AvbEntityKit::follow_domain(DomainInfo const& domain, TimePoint const now)
     if (domain.sr_class_vid != old_vlan) {
         (void)host_.components().mvrp_handler.withdraw_vlan(old_vlan, now);
         (void)host_.components().mvrp_handler.register_vlan(domain.sr_class_vid, now);
+        // Keep the VIDs settled listener streams still use.
+        for (auto const& [vid, count] : sink_vlans_) {
+            (void)host_.components().mvrp_handler.register_vlan(vid, now);
+        }
     }
     move_talker_streams_to(domain, now);
 #if defined(__linux__)
@@ -1475,50 +1468,7 @@ void AvbEntityKit::wire_srp_callbacks()
         notify_listener_ready(stream_id, ready, steady_ns_of(time), net::rx_clock_now());
     });
 
-    // ACMP: log talker connections (classic only: they no longer gate
-    // anything); drive the listener (MSRP attach + mcast join) on listener
-    // connect/disconnect.
-    host_.components().acmp_talker.set_connection_callbacks(
-        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            host_.ctl_log().status(
-                "acmp: talker stream {} ({}) CONNECTED by listener {:012x} unique_id {}",
-                stream_index,
-                logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-        },
-        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
-            host_.ctl_log().status(
-                "acmp: talker stream {} ({}) DISCONNECTED by listener {:012x} unique_id {}",
-                stream_index,
-                logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
-                listener_entity_id.to_uint64(),
-                listener_unique_id);
-        });
-    if (listener_ != nullptr) {
-        // A connected (classic) or settled (Milan) input: the MSRP Listener
-        // declaration, the multicast join and, for Milan, the stream's VID with
-        // MVRP (Milan v1.2 Section 4.4.1).
-        host_.components().acmp_listener.set_connection_callbacks(
-            [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
-                listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
-                if (host_.components().profile.milan) {
-                    refresh_sink_registration(stream_index, now);  // the input's VID joined there
-                }
-            },
-            [this](uint16_t stream_index, TimePoint now) {
-                if (stream_index < input_vid_.size()) {
-                    leave_sink_vlan(std::exchange(input_vid_[stream_index], uint16_t{0}), now);
-                }
-                // A classic disconnect is the controller's: no interruption.
-                // (A Milan input unsettles for other reasons too; its unbind is
-                // the sink's binding change.)
-                listener_->on_listener_disconnected(stream_index, now);
-                if (!host_.components().profile.milan) {
-                    listener_->notify_input_unbound(stream_index);
-                }
-            });
-    }
+    wire_acmp_callbacks();
     wire_aecp_queries();
 }
 
@@ -1564,8 +1514,9 @@ void AvbEntityKit::wire_aecp_queries()
                 filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 auto const layout = host_.components().aem_handler.stream_info_layout();
-                filled = milan ? fill_milan_listener_stream_info(host_, descriptor_index, layout, out, ext)
-                               : fill_listener_stream_info(host_, descriptor_index, out);
+                filled = host_.components().acmp_is_milan()
+                    ? fill_milan_listener_stream_info(host_, descriptor_index, layout, out, ext)
+                    : fill_listener_stream_info(host_, descriptor_index, listener_->stream_stopped(descriptor_index), out);
             }
             // The fills read the blob's authored format: the stream's current
             // one is the runtime format (a SET_STREAM_FORMAT, a rate change).
@@ -1584,195 +1535,252 @@ void AvbEntityKit::wire_aecp_queries()
         [this](uint16_t const idx, uint32_t const offset_ns) -> uint8_t { return change_presentation_offset(idx, offset_ns); });
 }
 
-auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const offset_ns) -> uint8_t
+void AvbEntityKit::wire_acmp_callbacks()
 {
-    if (!on_presentation_offset_changed_) {
-        return atdecc::AEM_STATUS_NOT_SUPPORTED;  // the configured offset is fixed
+    if (host_.components().acmp_is_milan()) {
+        wire_milan_talker_callbacks();
+        wire_milan_listener_callbacks();
+        return;
     }
-    auto const status = on_presentation_offset_changed_(idx, offset_ns);
-    if (status == atdecc::AEM_STATUS_SUCCESS) {
-        presentation_offsets_[idx] = offset_ns;  // the handler asks only for a talker's index
-        host_.ctl_log().status("aem: talker stream {} presentation offset {} ns", idx, offset_ns);
-    }
-    // The kit keeps no deferred offset to finish later: IN_PROGRESS is not an answer here.
-    return status == atdecc::AEM_STATUS_IN_PROGRESS ? atdecc::AEM_STATUS_ENTITY_MISBEHAVING : status;
+    wire_ieee_acmp_callbacks();
 }
 
-auto AvbEntityKit::is_talker_index(uint16_t const idx) const noexcept -> bool
-{
-    return idx < MAX_ENTITY_STREAMS && std::ranges::any_of(talker_specs_, [idx](StreamSpec const& s) { return s.index == idx; });
+void AvbEntityKit::wire_ieee_acmp_callbacks()
+{  // NOLINT(statusbar-block-statements) one hook per ACMP event
+    host_.components().acmp_talker.set_on_probe(
+        [this](uint16_t const stream_index, TimePoint const now) { notify_talker_probe(stream_index, now); });
+    // ACMP: log talker connections and publish the fresh connection count for the media-timer gate.
+    host_.components().acmp_talker.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            host_.ctl_log().status(
+                "acmp: talker stream {} ({}) CONNECTED by listener {:012x} unique_id {}",
+                stream_index,
+                logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            publish_talker_connections(stream_index);
+        },
+        [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
+            host_.ctl_log().status(
+                "acmp: talker stream {} ({}) DISCONNECTED by listener {:012x} unique_id {}",
+                stream_index,
+                logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
+                listener_entity_id.to_uint64(),
+                listener_unique_id);
+            publish_talker_connections(stream_index);
+        });
+    if (listener_ == nullptr) {
+        return;
+    }
+    // A connected input: the MSRP Listener declaration and the multicast join; a disconnect is the
+    // controller's: no interruption.
+    host_.components().acmp_listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
+        },
+        [this](uint16_t stream_index, TimePoint now) {
+            listener_->on_listener_disconnected(stream_index, now);
+            listener_->notify_input_unbound(stream_index);
+        });
 }
 
-auto AvbEntityKit::presentation_offset_ns(uint16_t const idx) const noexcept -> uint32_t
+auto AvbEntityKit::talker_addresses_valid() const noexcept -> bool
 {
-    if (!is_talker_index(idx)) {
-        return 0;
-    }
-    auto const configured = std::min<uint64_t>(effective_presentation_offset_ns(config_), std::numeric_limits<uint32_t>::max());
-    return presentation_offsets_[idx].value_or(static_cast<uint32_t>(configured));
+    // Milan v1.3 4.3.3.1 (1): MAAP has the address and has reported no conflict.
+    return maap_.ready() && host_.components().msrp_handler.talker_addresses_valid();
 }
 
-auto AvbEntityKit::stream_info(uint16_t const type, uint16_t const index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+auto AvbEntityKit::talker_registering_failed(uint16_t const stream_index) const -> bool
 {
-    bool filled = false;
-    if (type == DESCRIPTOR_STREAM_OUTPUT) {
-        filled = fill_talker_stream_info(host_, index, presentation_offset_ns(index), talker_->stream_stopped(index), out);
-    } else if (type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-        filled = fill_listener_stream_info(host_, index, listener_->stream_stopped(index), out);
-    }
-    // The fillers read the format the model authors; the one in force is the
-    // descriptor's, which a SET_STREAM_FORMAT or a restored format changes.
-    auto const format = filled ? storage_handler_.current_stream_format(stream_ref(type, index)) : std::nullopt;
-    if (format.has_value()) {
-        span_copy(make_span(out.stream_format), format->span());
-    }
-    return filled;
+    auto const stream = host_.components().talker_stream(stream_index);
+    return stream.has_value() && host_.components().msrp_handler.talker_listener_asking_failed(srp_stream_id(stream->stream_id));
 }
 
-auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t const rate) -> uint8_t
+void AvbEntityKit::wire_milan_talker_callbacks()
 {
-    // IEEE 1722.1-2021 Clause 7.4.21: the rate in force is a no-op; another moves the data plane or is refused.
-    auto const in_force = storage_handler_.current_sampling_rate(
-        {.configuration_index = 0, .descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = audio_unit});
-    if (in_force == rate) {
+    // What the Milan talker asks of the rest of the entity (5.5.4): a probe
+    // is told to SRP, the address comes from MAAP, REGISTERING_FAILED from SRP.
+    auto& talker = *host_.components().milan_acmp_talker;
+    talker.set_on_probe([this](uint16_t const stream_index, TimePoint const now) { notify_talker_probe(stream_index, now); });
+    talker.set_dest_mac_valid([this](uint16_t /*stream_index*/) { return talker_addresses_valid(); });
+    talker.set_registering_failed([this](uint16_t const stream_index) { return talker_registering_failed(stream_index); });
+}
+
+auto AvbEntityKit::locked_out(ieee::Eui64 const& controller) const noexcept -> bool
+{
+    auto const& aem = host_.components().aem_handler;
+    return aem.is_locked() && aem.locking_controller() != controller;
+}
+
+auto AvbEntityKit::own_gptp_state() const noexcept -> atdecc::MilanGptpState
+{
+    // What this entity's own ENTITY_AVAILABLE says, kept current by the
+    // gPTP Announce handler (nanoavb::report_grandmaster).
+    auto const& adpdu = host_.components().adp_advertiser.adpdu();
+    return atdecc::MilanGptpState{.grandmaster_id = adpdu.gptp_grandmaster_id, .domain_number = adpdu.gptp_domain_number.get()};
+}
+
+auto AvbEntityKit::talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration
+{
+    // 5.3.8.8: the attribute counts only when its StreamID, destination
+    // address and VLAN are the ones the PROBE_TX_RESPONSE gave. The sink's
+    // Listener declaration follows the same match, so the two cannot disagree.
+    auto const registered = host_.components().msrp_handler.registered_talker(srp_stream_id(srp.stream_id), probed_talker(srp));
+    if (!registered.has_value()) {
+        return atdecc::MilanTalkerRegistration::None;
+    }
+    return registered->failed ? atdecc::MilanTalkerRegistration::Failed : atdecc::MilanTalkerRegistration::Advertise;
+}
+
+auto AvbEntityKit::probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch
+{
+    return nanoavb::TalkerMatch{.dest_address = srp.stream_dest_mac, .vlan_id = srp.stream_vlan_id};
+}
+
+void AvbEntityKit::wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener)
+{
+    // A sink that settles reserves and listens (5.5.3.6.18 step 4), its VID joined (Milan v1.2
+    // Section 4.4.1); one that gives its SRP parameters up stops. Its Listener declaration follows
+    // the Talker attribute it probed and no other (5.3.8.5).
+    if (listener_ == nullptr) {
+        return;
+    }
+    listener.set_connection_callbacks(
+        [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
+            auto const* sink = host_.components().milan_acmp_listener->sink(stream_index);
+            auto const only = sink != nullptr ? std::optional{probed_talker(sink->context().srp)} : std::nullopt;
+            listener_->on_listener_connected(stream_index, stream_id, dest_mac, now, only);
+            if (sink != nullptr) {
+                join_input_vlan(stream_index, sink->context().srp, now);
+            }
+        },
+        [this](uint16_t stream_index, TimePoint now) {
+            if (stream_index < input_vid_.size()) {
+                leave_sink_vlan(std::exchange(input_vid_[stream_index], uint16_t{0}), now);
+            }
+            listener_->on_listener_disconnected(stream_index, now);
+        });
+}
+
+void AvbEntityKit::wire_milan_listener_callbacks()
+{
+    // What the Milan listener asks of the rest of the entity (5.5.3, 5.6.4):
+    // the lock from AEM, the grandmaster from gPTP, the Talker attribute from
+    // SRP, which also says when to look again.
+    auto& listener = *host_.components().milan_acmp_listener;
+    listener.set_locked_out([this](ieee::Eui64 const& controller) { return locked_out(controller); });
+    listener.set_gptp_state([this]() { return own_gptp_state(); });
+    listener.set_talker_registration([this](atdecc::MilanSrpParameters const& srp) { return talker_registration_for(srp); });
+    host_.components().msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& /*stream_id*/, TimePoint const now) {
+        host_.components().milan_acmp_listener->on_srp_changed(now);
+    });
+    wire_milan_listener_connections(listener);
+}
+
+void AvbEntityKit::follow_milan_bindings()
+{
+    // Milan v1.3 Section 5.3.8.10: bound from unbound zeroes the input's counters; an unbind is
+    // no interruption. Then the stopped states (5.3.8.7), and the kit's own save.
+    for (auto const& spec : listener_ != nullptr ? std::span{listener_specs_} : std::span<StreamSpec const>{}) {
+        follow_input_bound(spec.index);
+    }
+    apply_input_stopped_states();
+    persist_pending_ = true;
+}
+
+void AvbEntityKit::follow_input_bound(uint16_t const index)
+{
+    auto const* const listener = host_.components().milan_acmp_listener.get();
+    bool const bound = listener != nullptr && listener->is_bound(index);
+    if (index >= input_bound_.size() || bound == std::exchange(input_bound_[index], bound)) {
+        return;
+    }
+    if (bound) {
+        listener_->reset_input_counters(index);
+    } else {
+        listener_->notify_input_unbound(index);
+    }
+    (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, index);
+}
+
+auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
+{
+    if (type == DESCRIPTOR_STREAM_INPUT) {
+        start_or_stop_input(index, !streaming);
         return atdecc::AEM_STATUS_SUCCESS;
     }
-    if (audio_unit != 0 || !in_force || !on_unit_rate_changed_ || !retimed_clock_domain_) {
+    return type == DESCRIPTOR_STREAM_OUTPUT ? start_or_stop_output(index, !streaming) : atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::start_or_stop_output(uint16_t const index, bool const stopped) -> uint8_t
+{
+    // Milan v1.3 5.4.2.19 and 5.4.2.20: "The PAAD-AE shall not support the
+    // START_STREAMING command for a Stream Output (NOT_SUPPORTED shall be
+    // returned)", and the same of STOP_STREAMING.
+    if (milan_profile()) {
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
-    auto const retimed = retimed_formats(*in_force, rate);
-    return retimed ? retime_streams(rate, *retimed) : retimed.error();
-}
-
-auto AvbEntityKit::retimed_formats(uint32_t const from, uint32_t const rate) -> std::expected<RetimedFormats, uint8_t>
-{
-    RetimedFormats out{};
-    for (bool const output : {true, false}) {
-        for (auto const& spec : output ? talker_specs_ : listener_specs_) {
-            if (auto const status = add_retimed(output, spec, from, rate, out); status != atdecc::AEM_STATUS_SUCCESS) {
-                return std::unexpected(status);
-            }
-        }
-    }
-    return out;
-}
-
-auto AvbEntityKit::add_retimed(
-    bool const output, StreamSpec const& spec, uint32_t const from, uint32_t const rate, RetimedFormats& out) -> uint8_t
-{
-    auto const word = retimed_from(output, spec, from);
-    if (!word) {
-        return atdecc::AEM_STATUS_SUCCESS;  // a CRF's format stays, as does one at another rate or in another domain
-    }
-    auto const to = retimed_to(output, spec.index, *word, rate);
-    if (!to) {
-        return to.error();
-    }
-    (void)out.try_push_back(
-        {.type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, .index = spec.index, .from = *word, .to = *to});
+    // IEEE 1722.1: STOP_STREAMING gates the talker slot; START reopens. It shows in GET_STREAM_INFO
+    // as STREAMING_WAIT (IEEE 1722.1-2021 Table 7-145), told to every subscribed controller (7.5.2).
+    talker_->set_stream_stopped(index, stopped);
+    notify_admission(net::rx_clock_now());  // STREAM_START / STREAM_STOP now
+    (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     return atdecc::AEM_STATUS_SUCCESS;
 }
 
-auto AvbEntityKit::retimed_from(bool const output, StreamSpec const& spec, uint32_t const from) -> std::optional<uint64_t>
+void AvbEntityKit::start_or_stop_input(uint16_t const index, bool const stopped)
 {
-    auto const in_force =
-        storage_handler_.current_stream_format(stream_ref(output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, spec.index));
-    uint64_t const word = in_force.value_or(ieee::Eui64{}).to_uint64();
-    auto const format = decode_stream_format(word);
-    bool const audio = format.kind == StreamKind::aaf || format.kind == StreamKind::am824;
-    bool const moves = audio && format.sample_rate_hz == from && spec.clock_domain_index == retimed_clock_domain_;
-    return moves ? std::optional<uint64_t>{word} : std::nullopt;
+    // Milan v1.3 5.3.8.7: the started/stopped state of a stream input is its sink's, a binding
+    // parameter saved with the others; a command for an input that is not bound has no effect.
+    // What the sink restored comes back through the bindings hook (apply_input_stopped_states).
+    if (host_.components().acmp_is_milan()) {
+        (void)host_.components().milan_acmp_listener->set_streaming_wait(index, stopped);
+        return;
+    }
+    set_input_stopped(index, stopped);
 }
 
-auto AvbEntityKit::retimed_to(bool const output, uint16_t const index, uint64_t const word, uint32_t const rate) const
-    -> std::expected<uint64_t, uint8_t>
+auto AvbEntityKit::input_stopped(uint16_t const index) const noexcept -> bool
 {
-    auto const to = aaf_format_at_rate(word, rate);
-    if (!to ||
-        !storage_handler_.stream_format_listed(
-            stream_ref(output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, index), ieee::Eui64{}.from_uint64(*to))) {
-        return std::unexpected(atdecc::AEM_STATUS_NOT_SUPPORTED);  // AM824, or a stream that lists no such format
+    if (host_.components().acmp_is_milan()) {
+        auto const* const sink = host_.components().milan_acmp_listener->sink(index);
+        return sink != nullptr && sink->is_bound() && sink->context().binding->streaming_wait;
     }
-    // Milan v1.3 Section 5.4.2.7: refused as the input's own SET_STREAM_FORMAT would be; an output is the hook's.
-    if (!output && input_running(index)) {
-        return std::unexpected(atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-    }
-    return *to;
+    return !storage_handler_.is_streaming(DESCRIPTOR_STREAM_INPUT, index);
 }
 
-auto AvbEntityKit::input_running(uint16_t const index) const noexcept -> bool
+void AvbEntityKit::set_input_stopped(uint16_t const index, bool const stopped)
 {
-    auto const& components = host_.components();
-    if (components.acmp_is_milan()) {
-        return components.milan_acmp_listener->is_bound(index);
+    if (listener_ == nullptr || listener_->stream_stopped(index) == stopped) {
+        return;
     }
-    return components.acmp_listener.is_connected(index);
+    listener_->set_stream_stopped(index, stopped);
+    host_.ctl_log().status(
+        "acmp: listener stream {} {}",
+        index,
+        stopped ? logging::lit("STOPPED: its frames are discarded") : logging::lit("no longer STOPPED"));
+    // Table 5.20: the started/stopped state of a stream input is told.
+    (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
 }
 
-auto AvbEntityKit::retime_streams(uint32_t const rate, RetimedFormats const& retimed) -> uint8_t
+void AvbEntityKit::apply_input_stopped_states()
 {
-    // The data plane first, all or none; then the descriptors, reactor-side state, follow it. The
-    // kit's own specs and engines are not touched: the media thread reads them unguarded.
-    if (auto const status = on_unit_rate_changed_(rate, retimed); status != atdecc::AEM_STATUS_SUCCESS) {
-        return status;
+    if (listener_ == nullptr) {
+        return;
     }
-    for (auto const& r : retimed) {
-        (void)storage_handler_.set_runtime_stream_format(stream_ref(r.type, r.index), ieee::Eui64{}.from_uint64(r.to));
-        if (r.type == DESCRIPTOR_STREAM_OUTPUT) {
-            (void)talker_->toggle_media_clock_restart(r.index);  // its media clock restarts (IEEE 1722-2016 Clause 4.4.4.3)
-        }
-    }
-    notify_after_response(retimed);
-    host_.ctl_log().status("aem: AUDIO_UNIT 0 at {} Hz, {} streams re-timed", rate, retimed.size());
-    return atdecc::AEM_STATUS_SUCCESS;
-}
-
-void AvbEntityKit::notify_after_response(RetimedFormats const& retimed)
-{
-    retimed_notices_ = retimed;
-    host_.components().aem_handler.call_after_response([this] { notify_retimed(); });
-}
-
-void AvbEntityKit::notify_retimed()
-{
-    // Framed as each stream's own SET_STREAM_FORMAT (IEEE 1722.1-2021 Clause 7.5.2), and sent to
-    // every registered controller, the requester included (Milan v1.3 Section 5.4.5.3).
-    for (auto const& r : std::exchange(retimed_notices_, {})) {
-        std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> body{};
-        span_store(
-            std::span{body},
-            atdecc::aem::AemStreamFormatPayload{
-                .descriptor_type = r.type,
-                .descriptor_index = r.index,
-                .stream_format = std::bit_cast<std::array<ieee::octet_t, 8>>(ieee::octlet_t{r.to})});
-        host_.components().aem_handler.emit_unsolicited(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, body);
+    for (auto const& spec : listener_specs_) {
+        set_input_stopped(spec.index, input_stopped(spec.index));
     }
 }
 
-void AvbEntityKit::wire_milan_talker()
+void AvbEntityKit::restart_milan_sinks(TimePoint const now)
 {
-    auto& components = host_.components();
-    // Milan v1.2 Section 5.5.4: the ACMP talker answers from what only the kit
-    // knows (MAAP's address, the registered Listener, the interface), and a
-    // probe opens the stream's declaration window.
-    components.acmp_talker.set_milan_callbacks(
-        [this](uint16_t const idx) -> nanoavb::MilanTalkerStreamState {
-            auto const* s = host_.components().acmp_talker.get_stream(idx);
-            return nanoavb::MilanTalkerStreamState{
-                .dest_mac_valid = declarations_.address_valid(idx) && s != nullptr && s->stream_dest_mac != ieee::Eui48{},
-                .registering_failed = idx < talker_listener_.size() && declarations_.declared(idx) &&
-                    talker_listener_[idx] == srp::msrp::ListenerDeclaration::AskingFailed,
-                .avb_interface_index = idx < talker_interface_.size() ? talker_interface_[idx] : uint16_t{0}};
-        },
-        [this](uint16_t const idx, TimePoint const time) { notify_talker_probe(idx, steady_ns_of(time)); });
-
-    // The presentation time offset (Milan v1.2 Sections 5.4.2.9-10): refused
-    // while the output is streaming and when the entity cannot apply it.
-    components.aem_handler.set_presentation_offset_hooks(
-        [this](uint16_t const idx) -> std::optional<uint32_t> {
-            return is_talker_index(idx) ? std::optional<uint32_t>{presentation_offset_ns(idx)} : std::nullopt;
-        },
-        [this](uint16_t const idx, uint32_t const offset_ns) -> uint8_t { return change_presentation_offset(idx, offset_ns); });
+    // A start is a power cycle to a Milan sink (5.5.1.4): what it had
+    // reserved went with the stop, and a bound one begins again by waiting
+    // for its talker's ADP. Nothing to do on a first start.
+    if (host_.components().acmp_is_milan()) {
+        host_.components().milan_acmp_listener->restart(now);
+    }
 }
 
 auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const offset_ns) -> uint8_t
@@ -2075,32 +2083,6 @@ auto AvbEntityKit::start_control(net::MessageReactor& reactor, TimePoint const n
     if (auto status = host_.start_control_plane(reactor, config_.interface_name); !status) {
         return status;
     }
-    restore_control_state(now);
-    follow_grandmaster();
-    return success();
-}
-
-void AvbEntityKit::follow_grandmaster()
-{
-    // AVTP tu (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2) from the Announce
-    // handler's own observer, which an integrator's GptpAnnounceCallbacks do not replace.
-    auto& announces = host_.net_handlers()->gptp_handler();
-    announces.set_on_grandmaster_changed(
-        [this, &announces](int64_t) { notify_talker_of_grandmaster(announces.has_grandmaster()); });
-    notify_talker_of_grandmaster(announces.has_grandmaster());
-}
-
-void AvbEntityKit::notify_talker_of_grandmaster(bool const in_force) noexcept
-{
-    if (in_force) {
-        talker_->notify_grandmaster_changed(gate_.told_time());  // the reactor cycle's instant, as the loop told it
-        return;
-    }
-    talker_->notify_grandmaster_lost();
-}
-
-void AvbEntityKit::restore_control_state(TimePoint const now)
-{
     // Milan v1.3 4.2.7.2.1: after startup the Class A Domain is the
     // configured one again, whatever was adopted before the stop; the
     // streams, MVRP and GET_AVB_INFO follow (follow_domain). The Link Up
@@ -2114,6 +2096,7 @@ void AvbEntityKit::restore_control_state(TimePoint const now)
     // the rest, but the Domain adopted from the wire outlives a stop, and
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
+    restart_milan_sinks(now);
     return start_declarations(reactor, now);
 }
 
@@ -2304,16 +2287,7 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
     if (auto status = open_listener_streams(); !status) {
         return status;
     }
-    // In RT-timer mode the handler is kept here for the tool's SCHED_FIFO RX timer (drain_stream_rx(),
-    // its wake's gPTP time), so the control plane cannot starve RX; rx_to_reactor() is the way back
-    // should that timer not start.
-    if (!stream_rx_error_) {
-        if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
-            rt_rx_handler_ = std::move(*rx);
-        } else {
-            stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
-        }
-    }
+    attach_listener_rx(reactor);
 #if defined(__linux__)
     // The VID's tagged stream frames must get past the NIC's VLAN filter.
     // Never fatal: without CAP_NET_ADMIN this only warns.
@@ -2322,18 +2296,42 @@ auto AvbEntityKit::start_listener_streams(net::MessageReactor& reactor) -> Statu
         open_listener_vlan_filter();
     }
 #endif
-    // Persisted fast-connect bindings (kit phase 5b): a restarted entity
-    // re-connects its inputs without a controller (see AvbEntityHost),
-    // kept in the persistent state when there is one.
-    if (persistence_active_) {
-        apply_saved_listener_bindings();
-    } else if (!host_.components().profile.milan) {
-        host_.enable_listener_binding_persistence(config_.listener_bindings_path);
-    } else if (!config_.listener_bindings_path.empty()) {
-        host_.ctl_log().warning("kit: the Milan listener keeps its bindings in the persistent state file only: none is configured, "
-                                "the listener bindings file is not used");
-    }
+    restore_listener_bindings();
     return success();
+}
+
+void AvbEntityKit::attach_listener_rx(net::MessageReactor& reactor)
+{
+    // In RT-timer mode the handler is kept here for the tool's SCHED_FIFO RX timer (drain_stream_rx(),
+    // its wake's gPTP time), so the control plane cannot starve RX; rx_to_reactor() is the way back
+    // should that timer not start.
+    if (stream_rx_error_) {
+        return;
+    }
+    if (auto rx = listener_->attach_rx(stream_port_, rx_static_groups_, reactor, config_.stream_rx_rt_timer)) {
+        rt_rx_handler_ = std::move(*rx);
+    } else {
+        stream_rx_error_ = rx.error();  // tolerated here; a host may refuse (stream_rx_error())
+    }
+}
+
+void AvbEntityKit::restore_listener_bindings()
+{
+    // A Milan listener's bindings are saved and restored by the host, in the entity's state
+    // directory (Milan v1.3 Section 5.3.8.3); a classic one's fast-connect goals in the persistent
+    // state when there is one.
+    bool const milan = host_.components().acmp_is_milan();
+    if (!milan && persistence_active_) {
+        apply_saved_listener_bindings();
+        return;
+    }
+    host_.enable_listener_binding_persistence(
+        state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
+    // The started/stopped state is restored with the binding (Milan v1.3 Section 5.3.8.7).
+    apply_input_stopped_states();
+    if (!config_.kit_data_plane) {
+        restore_input_formats();  // each input's format, saved when a controller last set it (Section 5.3.8.1)
+    }
 }
 
 auto AvbEntityKit::open_listener_streams() -> Status
@@ -2423,15 +2421,12 @@ void AvbEntityKit::drop_listener_connections(TimePoint const now)
 void AvbEntityKit::drop_listener_connection(uint16_t const index, TimePoint const now)
 {
     auto& acmp = host_.components().acmp_listener;
-    if (auto const* sink = acmp.milan_sinks().sink(index); sink != nullptr && sink->bound()) {
-        // As the controller the entity's acquisition or lock admits (Milan v1.3 Section 5.5.3.6.3).
-        auto const& aem = host_.components().aem_handler;
-        auto const owner = aem.is_acquired() ? aem.acquiring_controller() : aem.locking_controller();
-        (void)acmp.milan_sinks().unbind_stream(index, owner, now, [](uint8_t) {});
-        return;
+    if (host_.components().acmp_is_milan()) {
+        return;  // a Milan sink keeps its binding; the next start restarts it (restart_milan_sinks)
     }
+    // Every input of the talker; stop() drops them all. Its fast-connect goal stays.
     if (auto const* stream = acmp.get_stream(index); stream != nullptr && stream->connected) {
-        (void)acmp.on_talker_departed(stream->talker_entity_id, now);  // its fast-connect goal stays
+        (void)acmp.on_talker_departed(stream->talker_entity_id, now);
     }
 }
 
@@ -2841,15 +2836,8 @@ void AvbEntityKit::apply_saved_mvu_settings(PersistentState const& saved)
 
 void AvbEntityKit::apply_saved_listener_bindings()
 {
-    bool const milan = host_.components().profile.milan;
-    auto const armed = restore_saved_bindings(milan);
-    if (armed != 0 && milan) {
-        host_.ctl_log().status("acmp: {} saved listener binding(s) restored; probing their talkers once discovered", armed);
-    } else if (armed != 0) {
+    if (auto const armed = restore_saved_bindings(); armed != 0) {
         host_.ctl_log().status("acmp: {} saved listener binding(s) loaded; fast-connect armed", armed);
-    }
-    if (milan) {
-        return;  // the sinks report their binding changes (wire_milan_listener)
     }
     // Sticky from here on: every successful connect is remembered, every goal
     // change (connect, retarget, controller DISCONNECT) saved once the
@@ -2858,11 +2846,11 @@ void AvbEntityKit::apply_saved_listener_bindings()
     host_.components().acmp_listener.set_on_goals_changed([this] { persist_pending_ = true; });
 }
 
-auto AvbEntityKit::restore_saved_bindings(bool const milan) -> size_t
+auto AvbEntityKit::restore_saved_bindings() -> size_t
 {
     size_t armed = 0;
     for (auto const& binding : saved_bindings_) {
-        if (restore_listener_binding(binding, milan)) {
+        if (restore_listener_binding(binding)) {
             ++armed;
         }
     }
@@ -2870,13 +2858,10 @@ auto AvbEntityKit::restore_saved_bindings(bool const milan) -> size_t
     return armed;
 }
 
-auto AvbEntityKit::restore_listener_binding(PersistedListenerBinding const& binding, bool const milan) -> bool
+auto AvbEntityKit::restore_listener_binding(PersistedListenerBinding const& binding) -> bool
 {
     if (!saved_binding_applies(binding)) {
         return false;
-    }
-    if (milan) {
-        return restore_milan_binding(binding);
     }
     host_.components().acmp_listener.set_fast_connect_goal(
         binding.stream_input, ieee::Eui64{}.from_uint64(binding.talker_entity_id), binding.talker_unique_id);
@@ -2900,26 +2885,6 @@ auto AvbEntityKit::saved_binding_applies(PersistedListenerBinding const& binding
             "kit: saved listener binding of STREAM_INPUT {}: the input's format changed: dropped", binding.stream_input);
         return false;
     }
-    return true;
-}
-
-auto AvbEntityKit::restore_milan_binding(PersistedListenerBinding const& binding) -> bool
-{
-    // Milan v1.2 Section 5.5.3.5.2: bound, waiting in PRB_W_AVAIL to
-    // discover the talker, then probing it again.
-    if (!host_.components().acmp_listener.milan_sinks().restore(
-            binding.stream_input,
-            atdecc::MilanSinkBinding{
-                .talker_entity_id = ieee::Eui64{}.from_uint64(binding.talker_entity_id),
-                .talker_unique_id = binding.talker_unique_id,
-                .controller_entity_id = ieee::Eui64{}.from_uint64(binding.controller_entity_id),
-                .started = binding.started})) {
-        return false;
-    }
-    listener_->set_stream_stopped(binding.stream_input, !binding.started);
-    // Bound from here on: an UNBIND_RX is a change of binding.
-    input_bound_[binding.stream_input] = true;
-    listener_->reset_input_counters(binding.stream_input);
     return true;
 }
 
@@ -3028,25 +2993,8 @@ void AvbEntityKit::collect_listener_bindings(PersistentState& state) const
     // Before the listener is up (start() arms them then), the saved ones.
     if (!saved_bindings_.empty()) {
         state.listener_bindings = saved_bindings_;
-    } else if (host_.components().profile.milan) {
-        // Milan v1.2 Sections 5.3.8.2-3, 5.3.8.7: every bound input.
-        auto const& sinks = host_.components().acmp_listener.milan_sinks();
-        for (size_t i = 0; i < sinks.sink_count(); ++i) {
-            auto const index = static_cast<uint16_t>(i);
-            auto const* sink = sinks.sink(index);
-            if (!sink->bound()) {
-                continue;
-            }
-            auto const format = storage_handler_.current_stream_format(
-                {.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = index});
-            state.listener_bindings.push_back(
-                {.stream_input = index,
-                 .talker_entity_id = sink->binding.talker_entity_id.to_uint64(),
-                 .talker_unique_id = sink->binding.talker_unique_id,
-                 .format = format ? format->to_uint64() : 0,
-                 .controller_entity_id = sink->binding.controller_entity_id.to_uint64(),
-                 .started = sink->binding.started});
-        }
+    } else if (host_.components().acmp_is_milan()) {
+        return;  // the host's listener-bindings file
     } else {
         for (auto const& goal : host_.components().acmp_listener.fast_connect_goals()) {
             auto const format = storage_handler_.current_stream_format(
