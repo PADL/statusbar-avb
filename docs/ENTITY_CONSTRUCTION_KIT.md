@@ -320,6 +320,7 @@ Everything not listed here is the same under both.
 | Talker presentation offset when `presentation_offset_ns` is 0 (the default) | 1 ms | 2 ms (5.3.7.6); a value other than 0 is used as given under either |
 | Descriptor lengths when `atdecc.version` is empty (the default) | `2016`: STREAM, AVB_INTERFACE, AUDIO_CLUSTER and the other descriptors that grew are cut to their 1722.1-2013/2016 lengths, for controllers that reject the longer ones | `2021`: the full IEEE 1722.1-2021 descriptors, which are the ones Milan names (5.3.3); `2016` or `2021` given outright is used under either |
 | Stream destination addresses when `stream.address_mode` is empty (the default) | `static`: the configured `*_dest_mac` | `maap`: a block acquired and defended by MAAP (4.3.3.1), kept across restarts in `maap-range`; `static` or `maap` given outright is used under either. Where the MAAP socket cannot be opened the entity still falls back to the configured addresses, with a warning |
+| A GET_AUDIO_MAP partition of a port's dynamic mappings | 62 mappings, within an AECPDU's 524 octets of control data (9.2.1.1.7) | 176 mappings, 1420 octets (5.4.1, 5.4.2.26) |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 
 ### Saved state
@@ -412,6 +413,19 @@ force in the data plane or refuses it (STREAM_IS_RUNNING while it cannot);
 without the hook the offset is fixed and the SET answers NOT_SUPPORTED.
 Either way an offset past 0x7FFFFFFF ns is BAD_ARGUMENTS (Milan v1.3
 5.4.2.30), a refusal carries the time in force, and a change is notified.
+
+A STREAM_PORT without AUDIO_MAP descriptors has dynamic audio mappings
+(IEEE 1722.1-2021 7.4.44 to 7.4.46, Milan v1.3 5.4.2.26 to 5.4.2.28),
+kept in a `DynamicAudioMaps` store (`nanoavb_dynamic_audio_maps.hpp`, up to
+1024 mappings over every port, about 20 KB) that the entity owns and hands
+to its `AemCommandHandler` with `set_dynamic_audio_maps`; without one,
+GET_AUDIO_MAP, ADD and REMOVE answer NOT_IMPLEMENTED, as they did before,
+and the handler holds no mapping memory. A port with AUDIO_MAP descriptors
+answers them NOT_SUPPORTED. GET_AUDIO_MAP partitions an input port's
+cluster channels, and an output port's stream channels (each STREAM_OUTPUT
+counted at the most channels any format it lists has, so the partition is
+fixed for the configuration), in order, into maps of the size the table
+above gives, and answers map_index P with the mappings of partition P.
 
 Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while
