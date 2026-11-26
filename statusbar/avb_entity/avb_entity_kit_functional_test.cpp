@@ -14,13 +14,17 @@
 #include "statusbar/avb_entity/avb_entity_descriptor_helpers.hpp"
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
+#include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
-#include "statusbar/avtp/avtp_aaf_stream_output.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
+#include "statusbar/avtp/avtp_common_header.hpp"
+#include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -2407,404 +2411,234 @@ TEST(avb_entity_kit_input_vlan, an_input_probed_without_a_vlan_joins_its_talker_
 #endif
 
 //
-// GET_STREAM_INFO of a Milan stream input (Milan v1.3 5.4.2.10.1, Table 5.8)
-// and the notifications of its changes (Table 5.20).
+// A Milan input's counters - Milan v1.3 Section 5.3.8.10, Table 5.16
 //
 
 namespace {
 
-namespace info_flag = atdecc::aem::stream_info_flags;
-constexpr uint32_t INFO_BOUND = info_flag::FAST_CONNECT | info_flag::SAVED_STATE | info_flag::CONNECTED;
-constexpr uint32_t INFO_SETTLED = info_flag::STREAM_ID_VALID | info_flag::STREAM_DEST_MAC_VALID | info_flag::STREAM_VLAN_ID_VALID;
-constexpr Eui64 ABSENT_TALKER{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x7E};
+// examples/dual.json: STREAM_INPUT 2 and STREAM_OUTPUT 2 are the CRF pair, 48 kHz, 96 events a timestamp.
+constexpr uint16_t CRF_STREAM = 2;
 
-/// GET_STREAM_INFO of @p stream, as a controller reads it.
-auto stream_info_of(StreamOf const stream) -> atdecc::aem::AemStreamInfoPayload
+/// GET_COUNTERS of STREAM_INPUT @p index of @p kit.
+auto input_counters(KitUnderTest& kit, uint16_t const index) -> atdecc::aem::AemCountersPayload
 {
     atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
+    header.init_command(atdecc::AEM_COMMAND_GET_COUNTERS, atdecc::AemDu::AEM_DATA_LENGTH + 4);
     header.controller_entity_id = CONTROLLER_ID;
-    atdecc::aem::AemGetStreamInfoCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
+    std::array<uint8_t, 4> const body{0x00, 0x05, 0x00, static_cast<uint8_t>(index)};
     std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
-    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
-    atdecc::aem::AemStreamInfoPayload info{};
-    span_load(info, std::span<uint8_t const>{out}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
-    return info;
+    EXPECT_EQ(kit->host().components().aem_handler.handle_command(header, body, out).status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemCountersPayload counters{};
+    span_load(counters, std::span<uint8_t const>{out}.first(sizeof(atdecc::aem::AemCountersPayload)));
+    return counters;
 }
 
-/// A controller registered for a kit's notifications: the GET_STREAM_INFO ones it is sent for stream inputs.
-struct StreamInfoWatcher
+// Table 5.16's positions in the counters block.
+constexpr size_t MEDIA_LOCKED = 0;
+constexpr size_t MEDIA_UNLOCKED = 1;
+constexpr size_t STREAM_INTERRUPTED = 2;
+constexpr size_t SEQ_NUM_MISMATCH = 3;
+constexpr size_t TIMESTAMP_UNCERTAIN = 5;
+constexpr size_t UNSUPPORTED_FORMAT = 8;
+constexpr size_t FRAMES_RX = 11;
+
+/// A KitPair with the listener's CRF input bound to the talker's CRF output, settled and reserved.
+struct CrfPair
 {
-    std::vector<atdecc::aem::AemStreamInfoPayload> notified{};
+    KitPair pair{"milan13"};
+    ListenerStreams* inputs{nullptr};
+    avtp::CrfStreamOutputContext tx;
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
+    uint64_t ts{9'000'000'000ULL};
+    int64_t poll_ns{1'000'000'000};
 
-    explicit StreamInfoWatcher(KitUnderTest& kit, Eui64 const& entity = LISTENER_ID)
+    CrfPair()
+        : tx{crf_context(96)}
     {
-        auto& aem = kit->host().components().aem_handler;
-        aem.set_send_response([this](Eui48 const&, std::span<uint8_t const> const frame) {
-            note(frame);
-            return true;
-        });
-        atdecc::AemDu reg{};
-        reg.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
-        reg.target_entity_id = entity;
-        reg.controller_entity_id = OTHER_CONTROLLER_ID;
-        std::array<uint8_t, atdecc::AemDu::LENGTH> frame{};
-        span_store(frame, reg);
-        (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x99}, frame, entity);
+        pair.source = CRF_STREAM;
+        pair.sink = CRF_STREAM;
+        pair.bind();
+        pair.run(2 * ROUNDS_PER_SECOND);
+        inputs = pair.listener->listener();
+        EXPECT_TRUE(inputs != nullptr && inputs->slot_for(CRF_STREAM) != nullptr);
+        pair.listener->poll_counters(poll_ns);  // the first interval starts
     }
-    StreamInfoWatcher(StreamInfoWatcher const&) = delete;
-    auto operator=(StreamInfoWatcher const&) -> StreamInfoWatcher& = delete;
+    CrfPair(CrfPair const&) = delete;
+    auto operator=(CrfPair const&) -> CrfPair& = delete;
+    ~CrfPair() = default;
 
-    void note(std::span<uint8_t const> const frame)
+    /// Both kits stopped.
+    void stop()
     {
-        atdecc::AemDu header{};
-        span_load(header, frame);
-        if (!header.is_unsolicited() || header.command_code() != atdecc::AEM_COMMAND_GET_STREAM_INFO) {
-            return;
-        }
-        atdecc::aem::AemStreamInfoPayload body{};
-        span_load(body, frame.subspan(atdecc::AemDu::LENGTH).first(atdecc::aem::AemStreamInfoPayload::LENGTH));
-        if (body.descriptor_type.get() == atdecc::aem::DESCRIPTOR_STREAM_INPUT) {
-            notified.push_back(body);
-        }
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
     }
 
-    /// The flags of the last notification, the format's bit left out; 0 with none.
-    [[nodiscard]] auto last_flags() const -> uint32_t
+    /// The talker's CRF stream as a sender at @p interval events a timestamp.
+    [[nodiscard]] auto crf_context(uint16_t const interval) -> avtp::CrfStreamOutputContext
     {
-        return notified.empty() ? 0U : notified.back().flags.get() & ~info_flag::STREAM_FORMAT_VALID;
+        StreamSpec const* spec = nullptr;
+        for (auto const& s : pair.talker.talker_specs()) {
+            spec = s.index == CRF_STREAM ? &s : spec;
+        }
+        auto const sid = spec != nullptr ? pair.talker->make_talker_srp_info(*spec).stream_id : nanoavb::StreamId{};
+        return {sid, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, interval, 1};
+    }
+
+    /// The next PDU of @p ctx, its header changed by @p edit, @p length octets of it received.
+    template <typename Edit>
+    void send(avtp::CrfStreamOutputContext& ctx, Edit&& edit, size_t const length)
+    {
+        std::array<uint64_t, 1> const one{ts};
+        EXPECT_EQ(serialize_crf_raw(ctx, frame, one), frame.size());
+        avtp::CrfPdu pdu{};
+        span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
+        std::forward<Edit>(edit)(pdu);
+        span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+        inputs->on_stream_rx_frame(std::span{frame}.first(length), static_cast<int64_t>(ts) - 2'000'000);
+        ts += 2'000'000;  // 96 events at 48 kHz
+    }
+    void send()
+    {
+        send(tx, [](avtp::CrfPdu&) {}, frame.size());
+    }
+
+    /// The counters a second on, as GET_COUNTERS answers them.
+    auto counters_after_a_second() -> atdecc::aem::AemCountersPayload
+    {
+        pair.listener->poll_counters(poll_ns += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        return input_counters(pair.listener, CRF_STREAM);
     }
 };
 
-/// The listener kit's cycle ends at the pair's time: what changed since the last one is told.
-void end_cycle(KitPair& pair)
-{
-    pair.listener->end_cycle(ns_of(pair.now));
-}
-
 }  // namespace
 
-TEST(avb_entity_kit_stream_info, a_milan_stream_input_reads_as_table_5_8_has_it_from_unbound_to_registered)
+TEST(avb_entity_kit_input_counters, a_bind_zeroes_an_inputs_counters_and_an_unbind_keeps_them)
 {
+    // Milan v1.3 Section 5.3.8.10: zeroed when the input becomes bound, not when it is unbound.
     KitPair pair{"milan13"};
-    auto const input = aaf_input_of(pair);
+    auto* const slot = pair.listener->listener()->slot_for(pair.sink);
+    EXPECT_TRUE(slot != nullptr);
+    int64_t t = 1'000'000'000;
+    pair.listener->poll_counters(t);
+    slot->counters.frames_rx.store(10);
+    slot->counters.seq_num_mismatch.store(3);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto counters = input_counters(pair.listener, pair.sink);
+    EXPECT_EQ(counters.counters_valid.get(), StreamInputIntervals::VALID);
+    EXPECT_EQ(counters.counters[FRAMES_RX].get(), 1U);  // one interval
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 1U);
 
-    // Not bound: the format, and nothing else.
-    auto info = stream_info_of(input);
-    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID);
-    EXPECT_EQ(info.stream_id, Eui64{});
-
-    // Bound to a talker that is not there: bound, never settled.
-    pair.controller_sends(
-        controller_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, ABSENT_TALKER, pair.source, LISTENER_ID, pair.sink));
-    info = stream_info_of(input);
-    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | info_flag::NOT_REGISTERING_SRP);
-    EXPECT_EQ(info.stream_id, Eui64{});
-    EXPECT_EQ(info.stream_dest_mac, Eui48{});
-    EXPECT_EQ(info.stream_vlan_id.get(), 0);
-
-    // Bound to the pair's talker, which answers the probe: settled, its Talker attribute not yet registered.
     pair.bind();
-    auto const source = pair.talker->host().components().talker_stream(pair.source);
-    info = stream_info_of(input);
-    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | INFO_SETTLED | info_flag::NOT_REGISTERING_SRP);
-    EXPECT_EQ(info.stream_id, source->stream_id);
-    EXPECT_EQ(info.stream_dest_mac, source->stream_dest_mac);
-    EXPECT_EQ(info.stream_vlan_id.get(), source->stream_vlan_id);
-    EXPECT_EQ(info.msrp_accumulated_latency.get(), 0U);
+    counters = input_counters(pair.listener, pair.sink);
+    EXPECT_EQ(counters.counters[FRAMES_RX].get(), 0U);
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 0U);
+    slot->counters.frames_rx.store(20);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS - 1);  // not yet a second
+    EXPECT_EQ(input_counters(pair.listener, pair.sink).counters[FRAMES_RX].get(), 0U);
+    pair.listener->poll_counters(t += 1);
+    EXPECT_EQ(input_counters(pair.listener, pair.sink).counters[FRAMES_RX].get(), 1U);
 
-    // MSRP runs: the matching Talker Advertise is registered, and its latency is the talker's.
-    pair.run(2 * ROUNDS_PER_SECOND);
-    info = stream_info_of(input);
-    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | INFO_SETTLED | info_flag::MSRP_ACC_LAT_VALID);
-    // What the pair's talker declares, which is no latency of its own; a value that is not
-    // zero is followed through MSRP and Table 5.8 in their own tests.
-    auto const declared = pair.talker->make_talker_srp_info(pair.talker.talker_specs()[pair.source]);
-    EXPECT_EQ(info.msrp_accumulated_latency.get(), declared.accumulated_latency);
-    EXPECT_EQ(info.msrp_failure_code.get(), 0);
-
-    // Stopped, then unbound.
-    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE((stream_info_of(input).flags.get() & info_flag::STREAMING_WAIT) != 0);
     pair.controller_sends(
         controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
-    info = stream_info_of(input);
-    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID);
-    EXPECT_EQ(info.stream_id, Eui64{});
-    EXPECT_EQ(info.msrp_accumulated_latency.get(), 0U);
+    EXPECT_EQ(input_counters(pair.listener, pair.sink).counters[FRAMES_RX].get(), 1U);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
-TEST(avb_entity_kit_stream_info, each_change_of_a_milan_stream_input_is_told_once_at_the_end_of_its_cycle)
+TEST(avb_entity_kit_input_counters, what_an_offload_received_reaches_get_counters)
 {
+    // An offload data plane's reception of an input counts as the kit's own: Table 5.16's
+    // interval counters, MEDIA_LOCKED from its check of the lock.
     KitPair pair{"milan13"};
-    auto const input = aaf_input_of(pair);
-    StreamInfoWatcher watcher{pair.listener};
-    end_cycle(pair);  // the first look only looks
-    end_cycle(pair);
-    EXPECT_TRUE(watcher.notified.empty());
-
-    // Bound and settled inside one cycle: one notification, of the state at its end.
-    pair.bind();
-    EXPECT_TRUE(watcher.notified.empty());
-    end_cycle(pair);
-    EXPECT_EQ(watcher.notified.size(), 1U);
-    EXPECT_EQ(watcher.notified.back().descriptor_index.get(), input.index);
-    EXPECT_EQ(watcher.last_flags(), INFO_BOUND | INFO_SETTLED | info_flag::NOT_REGISTERING_SRP);
-    end_cycle(pair);
-    EXPECT_EQ(watcher.notified.size(), 1U);
-
-    // The Talker attribute registers: its registration state changed.
-    pair.run(2 * ROUNDS_PER_SECOND);
-    end_cycle(pair);
-    EXPECT_EQ(watcher.notified.size(), 2U);
-    EXPECT_EQ(watcher.last_flags(), INFO_BOUND | INFO_SETTLED | info_flag::MSRP_ACC_LAT_VALID);
-
-    // STOP_STREAMING is told as it is answered, and not a second time at the end of the cycle.
-    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(watcher.notified.size(), 3U);
-    EXPECT_TRUE((watcher.last_flags() & info_flag::STREAMING_WAIT) != 0);
-    end_cycle(pair);
-    EXPECT_EQ(watcher.notified.size(), 3U);
-
-    // Unbound: connected state, stream ID, address, VLAN and registration all go in one notification.
-    pair.controller_sends(
-        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
-    end_cycle(pair);
-    EXPECT_EQ(watcher.last_flags(), 0U);
-    EXPECT_EQ(watcher.notified.back().stream_id, Eui64{});
-    auto const told = watcher.notified.size();
-    end_cycle(pair);
-    EXPECT_EQ(watcher.notified.size(), told);
+    int64_t t = 1'000'000'000;
+    pair.listener->poll_counters(t);
+    EXPECT_TRUE(pair.listener->listener()->notify_offload_received(
+        pair.sink,
+        {.frames_rx = 8, .seq_num_mismatch = 1, .timestamp_uncertain = 2, .timestamp_valid = 8, .media_locked = true},
+        48));
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto const counters = input_counters(pair.listener, pair.sink);
+    EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 1U);  // one interval
+    EXPECT_EQ(counters.counters[TIMESTAMP_UNCERTAIN].get(), 1U);
+    EXPECT_EQ(counters.counters[FRAMES_RX].get(), 1U);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
-TEST(avb_entity_kit_stream_info, a_format_change_alone_is_not_told_as_stream_info_and_a_classic_listener_tells_none)
+TEST(avb_entity_kit_input_counters, a_crf_input_counts_media_lock_from_its_timestamps)
 {
-    {
-        KitPair pair{"milan13"};
-        auto const input = aaf_input_of(pair);
-        StreamInfoWatcher watcher{pair.listener};
-        end_cycle(pair);
-        EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
-        end_cycle(pair);
-        EXPECT_TRUE(watcher.notified.empty());
+    // A CRF input locks on a steady timestamp step (IEEE 1722-2016 Clause 10.4) and unlocks on a
+    // lost PDU; a PDU of another format is discarded and counted in UNSUPPORTED_FORMAT.
+    CrfPair crf;
+    for (int k = 0; k < 20; ++k) {
+        crf.send();
     }
-    // IEEE 1722.1 connection management: the end of a cycle compares nothing.
-    KitPair classic{"classic"};
-    StreamInfoWatcher watcher{classic.listener};
-    end_cycle(classic);
-    classic.bind();
-    classic.run(2 * ROUNDS_PER_SECOND);
-    end_cycle(classic);
-    EXPECT_TRUE(watcher.notified.empty());
+    auto counters = crf.counters_after_a_second();
+    EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[MEDIA_UNLOCKED].get(), 0U);
+    EXPECT_EQ(counters.counters[FRAMES_RX].get(), 1U);  // one interval, however many PDUs
+    EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 0U);
+
+    crf.ts += 2'000'000;  // one PDU lost
+    crf.send();
+    auto other = crf.crf_context(160);
+    crf.send(other, [](avtp::CrfPdu&) {}, crf.frame.size());
+    counters = crf.counters_after_a_second();
+    EXPECT_EQ(counters.counters[MEDIA_UNLOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[STREAM_INTERRUPTED].get(), 1U);
+    EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 1U);
+    crf.stop();
 }
 
-//
-// Clock sources: which the entity runs, and the one chosen kept across a
-// restart (Milan v1.3 5.3.11.1). The model is examples/crf-generator.json.
-//
-
-namespace {
-
-constexpr uint16_t LOCAL_SOURCE = 0;
-constexpr uint16_t GPTP_SOURCE = 1;
-constexpr uint16_t SYSTEM_SOURCE = 2;
-constexpr uint16_t PTP_SOURCE = 3;
-
-/// The configuration of a kit over the CRF generator model, with the state directory @p state.
-auto crf_generator_config(std::string state_dir = {}) -> AvbEntityAudioIOConfig
+TEST(avb_entity_kit_input_counters, a_rejected_crf_pdu_is_unsupported_and_keeps_its_place_in_the_sequence)
 {
-    auto config = make_config(2, "classic");
-    config.descriptor_storage_blob =
-        load_file(statusbar::test::functional_test_data(__FILE__, "testdata/entity_crf_generator.bin"));
-    config.state_dir = std::move(state_dir);
-    return config;
+    // Milan v1.3 Section 5.3.8.10: a CRF PDU the input rejects is still a Stream Data AVTPDU of the
+    // stream; one with sv=0 is none, and is not counted.
+    CrfPair crf;
+    auto const typed = [](uint8_t const type, bool const sv) {
+        return [type, sv](avtp::CrfPdu& pdu) {
+            pdu.set_type(type);
+            pdu.set_sv(sv);
+        };
+    };
+    crf.send(crf.tx, typed(1, true), crf.frame.size());
+    crf.send(crf.tx, typed(7, true), crf.frame.size());  // a CRF type IEEE 1722-2016 does not define
+    crf.send(crf.tx, typed(1, true), crf.frame.size());
+    auto counters = crf.counters_after_a_second();
+    EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 1U);
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 0U);
+    crf.send(crf.tx, typed(1, false), crf.frame.size());
+    EXPECT_EQ(crf.counters_after_a_second().counters[UNSUPPORTED_FORMAT].get(), 1U);  // the interval before alone
+    crf.stop();
 }
 
-/// A state directory of this process's own, removed with the object.
-struct OwnStateDir
+TEST(avb_entity_kit_input_counters, a_short_crf_pdu_is_unsupported_and_keeps_its_place_in_the_sequence)
 {
-    std::filesystem::path state{
-        std::filesystem::temp_directory_path() / ("statusbar_clock_sources_test_" + std::to_string(::getpid()))};
-
-    OwnStateDir()
-    {
-        std::filesystem::remove_all(state);
-        std::filesystem::create_directories(state);
-    }
-    OwnStateDir(OwnStateDir const&) = delete;
-    auto operator=(OwnStateDir const&) -> OwnStateDir& = delete;
-    ~OwnStateDir() { std::filesystem::remove_all(state); }
-
-    /// The file a kit of crf_generator_config() saves its clock sources in.
-    [[nodiscard]] auto file() const -> std::filesystem::path
-    {
-        return state / entity_state_dir_name(crf_generator_config().entity_id) / entity_state_file::CLOCK_SOURCES;
-    }
-
-    /// Put @p text where an earlier run would have saved its clock sources.
-    void save(std::string_view const text) const
-    {
-        std::filesystem::create_directories(file().parent_path());
-        std::ofstream{file(), std::ios::binary} << text;
-    }
-
-    [[nodiscard]] auto saved() const -> std::string
-    {
-        std::ifstream in(file(), std::ios::binary);
-        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
-    }
-};
-
-/// SET_CLOCK_SOURCE of clock domain 0 to @p source, as a controller asks it; the status answered.
-auto ask_clock_source(KitUnderTest& kit, uint16_t const source) -> uint8_t
-{
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
-    header.controller_entity_id = CONTROLLER_ID;
-    atdecc::aem::AemClockSourcePayload const asked{
-        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    return kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
+    CrfPair crf;
+    crf.send();
+    crf.send(crf.tx, [](avtp::CrfPdu&) {}, avtp::AVTP_COMMON_HEADER_LENGTH + 4);  // the common header, then cut short
+    crf.send();
+    auto const counters = crf.counters_after_a_second();
+    EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 1U);
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 0U);
+    crf.stop();
 }
 
-/// The clock source GET_CLOCK_SOURCE reports for clock domain 0.
-auto reported_clock_source(KitUnderTest& kit) -> uint16_t
+TEST(avb_entity_kit_input_counters, a_frame_of_another_subtype_on_an_inputs_stream_is_an_unsupported_format)
 {
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, atdecc::aem::AemGetClockSourceCommandPayload::LENGTH);
-    header.controller_entity_id = CONTROLLER_ID;
-    atdecc::aem::AemGetClockSourceCommandPayload const asked{
-        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
-    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
-    atdecc::aem::AemClockSourcePayload answered{};
-    span_load(answered, std::span<uint8_t const>{out}.first(atdecc::aem::AemClockSourcePayload::LENGTH));
-    return answered.clock_source_index.get();
-}
-
-constexpr TimePoint CLOCK_TEST_START{std::chrono::seconds{1}};
-
-}  // namespace
-
-TEST(avb_entity_kit_clock_source, the_kit_knows_what_each_clock_source_of_the_model_is)
-{
-    KitUnderTest kit{crf_generator_config()};
-    EXPECT_TRUE(kit->clock_source_kind(LOCAL_SOURCE) == ClockSourceKind::Internal);
-    EXPECT_TRUE(kit->clock_source_kind(GPTP_SOURCE) == ClockSourceKind::Gptp);
-    EXPECT_TRUE(kit->clock_source_kind(SYSTEM_SOURCE) == ClockSourceKind::External);
-    EXPECT_TRUE(kit->clock_source_kind(PTP_SOURCE) == ClockSourceKind::External);
-    EXPECT_FALSE(kit->clock_source_kind(4).has_value());
-    EXPECT_TRUE(kit->clock_source_runs(LOCAL_SOURCE));
-    EXPECT_TRUE(kit->clock_source_runs(GPTP_SOURCE));
-    EXPECT_FALSE(kit->clock_source_runs(SYSTEM_SOURCE));
-    EXPECT_FALSE(kit->clock_source_runs(PTP_SOURCE));
-}
-
-TEST(avb_entity_kit_clock_source, a_source_nothing_can_follow_is_refused_not_supported_and_the_source_in_force_stays)
-{
-    KitUnderTest kit{crf_generator_config()};
-    EXPECT_TRUE(kit.start(CLOCK_TEST_START));
-    EXPECT_EQ(ask_clock_source(kit, GPTP_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::Gptp);
-
-    // IEEE 1722.1-2021 7.4.23: the response carries the old value when the command fails.
-    for (uint16_t const refused : {SYSTEM_SOURCE, PTP_SOURCE}) {
-        EXPECT_EQ(ask_clock_source(kit, refused), atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
-        EXPECT_EQ(kit->active_clock_source(), GPTP_SOURCE);
-    }
-    // A source that is not of the clock domain's list is another matter.
-    EXPECT_EQ(ask_clock_source(kit, 4), atdecc::AEM_STATUS_BAD_ARGUMENTS);
-
-    EXPECT_EQ(ask_clock_source(kit, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(reported_clock_source(kit), LOCAL_SOURCE);
-    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::Internal);
-    EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
-}
-
-TEST(avb_entity_kit_clock_source, a_source_the_entity_names_by_its_symbol_is_taken)
-{
-    KitUnderTest kit{crf_generator_config()};
-    kit->run_clock_source("system_clock");
-    kit->run_clock_source("no_such_symbol");  // the blob has none: nothing bound
-    kit->run_clock_source("crf_out");         // a stream output's symbol is no clock source
-    EXPECT_TRUE(kit->clock_source_runs(SYSTEM_SOURCE));
-    EXPECT_FALSE(kit->clock_source_runs(PTP_SOURCE));
-    EXPECT_TRUE(kit.start(CLOCK_TEST_START));
-
-    EXPECT_EQ(ask_clock_source(kit, SYSTEM_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(reported_clock_source(kit), SYSTEM_SOURCE);
-    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::External);
-    EXPECT_EQ(ask_clock_source(kit, PTP_SOURCE), atdecc::AEM_STATUS_NOT_SUPPORTED);
-    EXPECT_EQ(reported_clock_source(kit), SYSTEM_SOURCE);
-    EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
-}
-
-TEST(avb_entity_kit_clock_source, the_chosen_source_is_saved_and_in_force_again_after_a_restart)
-{
-    OwnStateDir const dir;
-    {
-        KitUnderTest kit{crf_generator_config(dir.state.string())};
-        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
-        EXPECT_FALSE(std::filesystem::exists(dir.file()));  // nothing chosen, nothing saved
-        EXPECT_EQ(ask_clock_source(kit, GPTP_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 1\n"});
-        // A refused source saves nothing.
-        EXPECT_EQ(ask_clock_source(kit, PTP_SOURCE), atdecc::AEM_STATUS_NOT_SUPPORTED);
-        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 1\n"});
-        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
-    }
-    // Another process: the fixture builds its kit on source 0 until the start restores the saved one.
-    KitUnderTest again{crf_generator_config(dir.state.string())};
-    EXPECT_EQ(again->active_clock_source(), LOCAL_SOURCE);
-    EXPECT_TRUE(again.start(CLOCK_TEST_START));
-    EXPECT_EQ(again->active_clock_source(), GPTP_SOURCE);
-    EXPECT_TRUE(again->active_clock_source_kind() == ClockSourceKind::Gptp);
-    EXPECT_EQ(reported_clock_source(again), GPTP_SOURCE);
-
-    // And the next choice replaces the saved one.
-    EXPECT_EQ(ask_clock_source(again, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 0\n"});
-    EXPECT_TRUE(again.stop(CLOCK_TEST_START));
-}
-
-TEST(avb_entity_kit_clock_source, a_saved_source_the_entity_names_is_restored_and_one_nothing_follows_is_not)
-{
-    OwnStateDir const dir;
-    dir.save("statusbar-clock-sources v1\ndomain 0 2\n");
-    {
-        // Nothing follows the system time here: the model's authored source, gPTP, stays reported.
-        KitUnderTest kit{crf_generator_config(dir.state.string())};
-        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
-        EXPECT_EQ(kit->active_clock_source(), LOCAL_SOURCE);  // as the fixture built it
-        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
-        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
-    }
-    KitUnderTest follows{crf_generator_config(dir.state.string())};
-    follows->run_clock_source("system_clock");
-    EXPECT_TRUE(follows.start(CLOCK_TEST_START));
-    EXPECT_EQ(follows->active_clock_source(), SYSTEM_SOURCE);
-    EXPECT_EQ(reported_clock_source(follows), SYSTEM_SOURCE);
-    EXPECT_TRUE(follows.stop(CLOCK_TEST_START));
-}
-
-TEST(avb_entity_kit_clock_source, a_saved_file_that_names_no_source_of_the_model_or_cannot_be_read_changes_nothing)
-{
-    for (std::string_view const text :
-         {"statusbar-clock-sources v1\ndomain 0 9\n", "statusbar-clock-sources v1\ndomain 3 1\n", "not the file\n"}) {
-        OwnStateDir const dir;
-        dir.save(text);
-        KitUnderTest kit{crf_generator_config(dir.state.string())};
-        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
-        EXPECT_EQ(kit->active_clock_source(), LOCAL_SOURCE);
-        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
-        // The entity still takes a choice, and saves it over what was there.
-        EXPECT_EQ(ask_clock_source(kit, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
-        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 0\n"});
-        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
-    }
+    // A frame of another AVTP subtype carrying the input's stream_id is a Stream Data AVTPDU of that
+    // stream in a format it does not accept (Milan v1.3 Section 5.3.8.10).
+    CrfPair crf;
+    auto const subtype = [](uint8_t const value) { return [value](avtp::CrfPdu& pdu) { pdu.subtype = value; }; };
+    crf.send(crf.tx, subtype(avtp::AvtpSubtype::crf), crf.frame.size());
+    crf.send(crf.tx, subtype(avtp::AvtpSubtype::aaf), crf.frame.size());
+    crf.send(crf.tx, subtype(avtp::AvtpSubtype::crf), crf.frame.size());
+    auto const counters = crf.counters_after_a_second();
+    EXPECT_EQ(counters.counters[UNSUPPORTED_FORMAT].get(), 1U);
+    EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 0U);
+    crf.stop();
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)
