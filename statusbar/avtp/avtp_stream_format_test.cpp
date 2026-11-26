@@ -133,30 +133,6 @@ TEST(am824_stream_format, a_non_am824_event_type_has_no_rate)
     EXPECT_TRUE(s == "AM824 8ch SFC=0x0a");
 }
 
-// IEEE 1722-2016 Annex I.2.4: an AAF word with ut set lists every channel count from 1 to its
-// own (Milan v1.3 Section 6.6: XF24 is one such word a rate)
-TEST(stream_format, an_up_to_word_covers_every_count_to_its_own)
-{
-    constexpr uint64_t XF24_48K = 0x0215022006006000ULL;    // INT_32, 48 kHz, 24 channels, 6 samples, ut
-    constexpr uint64_t INT32_13CH = 0x0205022003406000ULL;  // 13 channels
-    EXPECT_TRUE(stream_format_covers(XF24_48K, INT32_13CH));
-    EXPECT_TRUE(stream_format_covers(XF24_48K, 0x0205022000406000ULL));   // 1 channel
-    EXPECT_TRUE(stream_format_covers(XF24_48K, 0x0205022006006000ULL));   // 24 channels
-    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205022006406000ULL));  // 25
-    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205022000006000ULL));  // none
-    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x0205021803406000ULL));  // INT_24
-    EXPECT_FALSE(stream_format_covers(XF24_48K, 0x020702200340C000ULL));  // 96 kHz
-    EXPECT_FALSE(stream_format_covers(XF24_48K, XF24_48K));               // no stream's format
-    // Without ut, only the word itself
-    EXPECT_TRUE(stream_format_covers(INT32_13CH, INT32_13CH));
-    EXPECT_FALSE(stream_format_covers(0x0205022006006000ULL, INT32_13CH));
-    // Not AAF: the word itself
-    EXPECT_TRUE(stream_format_covers(0x041060010000BB80ULL, 0x041060010000BB80ULL));
-    // At its widest, the up-to word is the 24-channel format
-    EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
-    EXPECT_EQ(stream_format_widest(0x041060010000BB80ULL), uint64_t{0x041060010000BB80ULL});
-}
-
 // IEEE 1722-2016 Figure I.12: ut is octet 1 bit 4, between header[7:5] and nsr
 TEST(stream_format, the_up_to_bit_sits_just_above_nsr)
 {
@@ -164,10 +140,64 @@ TEST(stream_format, the_up_to_bit_sits_just_above_nsr)
     EXPECT_EQ(stream_format_bytes(XF24_48K)[1], uint8_t{0x15});
     EXPECT_EQ(AafStreamFormat::from_u64(XF24_48K).nsr(), uint8_t{0x05});
     EXPECT_TRUE(decode_aaf_stream_format(XF24_48K) == "AAF 24ch 48kHz 32-bit");
-    EXPECT_EQ(stream_format_widest(XF24_48K), uint64_t{0x0205022006006000ULL});
+    EXPECT_EQ(XF24_48K & AAF_STREAM_FORMAT_UT_BIT, AAF_STREAM_FORMAT_UT_BIT);
     // A header bit is no ut: the word covers itself only
     EXPECT_FALSE(stream_format_covers(0x0285022006006000ULL, 0x0205022003406000ULL));
-    EXPECT_EQ(stream_format_widest(0x0285022006006000ULL), uint64_t{0x0285022006006000ULL});
+}
+
+// The Milan Base format at 96 kHz: AAF, 32 bit integer, 12 samples per AVTPDU
+// (Milan v1.3 Table 6.3), with @p channels channels.
+static constexpr auto base_96k(uint64_t const channels) noexcept -> uint64_t
+{
+    return 0x0207022000000000ULL | (channels << 22) | (12ULL << 12);
+}
+
+TEST(stream_format_covers, an_entry_with_the_ut_bit_clear_describes_itself_alone)
+{
+    EXPECT_TRUE(stream_format_covers(base_96k(8), base_96k(8)));
+    EXPECT_FALSE(stream_format_covers(base_96k(8), base_96k(2)));
+    EXPECT_FALSE(stream_format_covers(base_96k(2), base_96k(8)));
+}
+
+TEST(stream_format_covers, an_up_to_entry_describes_every_channel_count_from_one_to_its_own)
+{
+    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
+    for (uint64_t channels = 1; channels <= 8; ++channels) {
+        EXPECT_TRUE(stream_format_covers(up_to_8, base_96k(channels)));
+    }
+    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(0)));
+    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(9)));
+}
+
+TEST(stream_format_covers, an_up_to_entry_describes_no_format_that_differs_in_another_field)
+{
+    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
+    uint64_t const at_48k = (base_96k(2) & ~0x000F000000000000ULL) | 0x0005000000000000ULL;
+    uint64_t const of_24_bits = (base_96k(2) & ~0x000000FF00000000ULL) | 0x0000001800000000ULL;
+    uint64_t const of_6_samples = (base_96k(2) & ~(0x3FFULL << 12)) | (6ULL << 12);
+    EXPECT_FALSE(stream_format_covers(up_to_8, at_48k));
+    EXPECT_FALSE(stream_format_covers(up_to_8, of_24_bits));
+    EXPECT_FALSE(stream_format_covers(up_to_8, of_6_samples));
+}
+
+TEST(stream_format_covers, a_wanted_format_with_the_ut_bit_set_is_described_by_no_entry)
+{
+    // IEEE 1722-2025 I.2.4: the bit is zero in a current format and in a
+    // SET_STREAM_FORMAT, so the entry itself, sent back, is not a format.
+    uint64_t const up_to_8 = base_96k(8) | AAF_STREAM_FORMAT_UT_BIT;
+    EXPECT_FALSE(stream_format_covers(up_to_8, up_to_8));
+    EXPECT_FALSE(stream_format_covers(up_to_8, base_96k(2) | AAF_STREAM_FORMAT_UT_BIT));
+}
+
+TEST(stream_format_covers, an_entry_of_another_subtype_describes_itself_alone)
+{
+    uint64_t const am824 = 0x00A0040860000800ULL;
+    uint64_t const crf = 0x041060010000BB80ULL;
+    EXPECT_TRUE(stream_format_covers(am824, am824));
+    EXPECT_TRUE(stream_format_covers(crf, crf));
+    EXPECT_FALSE(stream_format_covers(am824, crf));
+    EXPECT_FALSE(stream_format_covers(am824, base_96k(8)));
+    EXPECT_FALSE(stream_format_covers(base_96k(8) | AAF_STREAM_FORMAT_UT_BIT, am824));
 }
 
 TEST_MAIN(statusbar_avtp, avtp_stream_format_test)
