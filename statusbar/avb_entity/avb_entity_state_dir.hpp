@@ -42,6 +42,9 @@ inline constexpr std::string_view LISTENER_BINDINGS{"listener-bindings"};
 inline constexpr std::string_view MAAP_RANGE{"maap-range"};
 /// The streams' current formats (Milan v1.3 5.3.7.1, 5.3.8.1), in the form avb_entity_stream_formats_file.hpp reads.
 inline constexpr std::string_view STREAM_FORMATS{"stream-formats"};
+/// The settings a controller changed that no other kind keeps (names, rates, clock sources,
+/// presentation offsets, mappings, MVU settings), in the form avb_entity_persistent_state.hpp reads.
+inline constexpr std::string_view ENTITY_STATE{"entity-state"};
 }  // namespace entity_state_file
 
 /// The name of an entity's own directory: its entity ID as sixteen lowercase hex digits.

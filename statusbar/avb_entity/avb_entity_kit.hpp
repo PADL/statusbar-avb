@@ -34,11 +34,12 @@
 #include "statusbar/avb_entity/avb_entity_listener_vlan.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_persistent_state.hpp"
+#include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
-#include "statusbar/avb_entity/avb_entity_talker_declarations.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -1127,6 +1128,8 @@ class AvbEntityKit
     std::string configured_entity_name_;
     std::vector<PersistedListenerBinding> saved_bindings_{};
     std::string persisted_text_{};
+    /// The persistent state's file: entity-state in the entity's state directory, empty without one.
+    std::string persistent_state_path_{};
     bool persistence_active_{false};   ///< a state path is configured
     bool persistence_blocked_{false};  ///< the file did not read at start: nothing written this run
     bool persist_pending_{false};      ///< a listener goal changed this reactor pass
@@ -1142,6 +1145,8 @@ class AvbEntityKit
     std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
     std::optional<int64_t> next_counters_fold_ns_{};
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
+    /// entity_state_dir()'s answer once asked for; unset before.
+    std::optional<std::string> entity_state_dir_{};
     /// Start or stop each talker stream's STREAM_START/STREAM_STOP at @p now:
     /// streaming while it may transmit (talker_should_transmit).
     void update_output_streaming(GateTimePoint now);
@@ -1171,8 +1176,6 @@ class AvbEntityKit
     /// MAAP dynamic-address acquisition (active only in "maap"
     /// stream_address_mode; ready() defaults true for static MACs).
     MaapAddressAcquirer maap_{};
-    /// entity_state_dir()'s answer once asked for; unset before.
-    std::optional<std::string> entity_state_dir_{};
     bool link_up_{false};
 
     /// CRF-input media-clock recovery: fed by the CRF stream input's
