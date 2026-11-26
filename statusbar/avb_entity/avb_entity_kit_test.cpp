@@ -311,7 +311,8 @@ struct MilanKit
         c.interface_name = "kit-milan-test0";  // no such interface: no MAC, no sockets
         c.entity_id = ieee::Eui64{}.from_uint64(0x020000fffe000000ULL | entity_low);
         c.stream_address_mode = "static";
-        c.milan = true;  // a Milan model (entity.milan): milan13, and GET_MILAN_INFO to answer
+        c.milan = milan;          // a Milan model (entity.milan): milan13, and GET_MILAN_INFO to answer
+        c.kit_data_plane = true;  // the kit's engines carry the audio: they re-time and route the identity
         return c;
     }
 
@@ -1387,10 +1388,311 @@ TEST(avb_entity_kit_profile, the_milan_info_comes_from_the_configuration)
     }
 }
 
+// A Milan device (entity.milan) with no atdecc.profile runs milan13 throughout: its entity profile
+// (MRP timers, ACMP) and its AEM handler, and it adopts the bridge's Class A Domain (Milan v1.3 4.2.7.2.1).
+TEST(avb_entity_kit_domain, a_milan_device_without_a_profile_runs_milan13)
+{
+    KitUnderTest kit{make_config(7, "", true)};
+    EXPECT_TRUE(kit->host().components().acmp_is_milan());
+    EXPECT_TRUE(kit->host().components().aem_handler.profile() == nanoavb::AemCommandHandler::Profile::milan13);
+    bridge_declares_domain(kit, DomainInfo{.sr_class_id = 6, .sr_class_priority = 5, .sr_class_vid = 5});
+    EXPECT_EQ(kit->talker().vlan_id(), 5U);
+    EXPECT_EQ(kit->host().components().msrp_handler.domain().sr_class_vid, 5U);
+}
+
+TEST(avb_entity_kit_profile, mvu_binding_is_advertised_when_bind_stream_is_answered_and_only_then)
+{
+    // Milan v1.3 5.4.4.6: the flag says the commands are implemented. They
+    // are under the Milan profile, whatever the configuration leaves out,
+    // and are not under IEEE 1722.1 connection management, whatever it claims.
+    auto claimed = make_config(2, "classic", true);
+    claimed.milan_features_flags = atdecc::MVU_FEATURE_MVU_BINDING | atdecc::MVU_FEATURE_REDUNDANCY;
+    KitUnderTest classic{claimed};
+    EXPECT_FALSE(classic->host().components().acmp_is_milan());
+    EXPECT_EQ(milan_info_of(classic)->features_flags, atdecc::MVU_FEATURE_REDUNDANCY);
+
+    KitUnderTest milan{make_config(2, "", true)};
+    EXPECT_TRUE(milan->host().components().acmp_is_milan());
+    EXPECT_EQ(milan_info_of(milan)->features_flags, atdecc::MVU_FEATURE_MVU_BINDING);
+}
+
+//
+// SET_SAMPLING_RATE - IEEE 1722.1-2021 Clause 7.4.21
+//
+
+namespace {
+
+constexpr uint64_t AAF_48K_8CH = 0x0205022002006000ULL;  // AAF 48k INT_32 8ch 6 samples/frame
+constexpr uint64_t AAF_96K_8CH = 0x020702200200C000ULL;  // AAF 96k INT_32 8ch 12 samples/frame
+constexpr uint64_t CRF_48K = 0x041060010000BB80ULL;
+Eui64 const RATE_ENTITY{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
+Eui64 const RATE_CONTROLLER_A{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xA1};
+Eui64 const RATE_CONTROLLER_B{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0xB2};
+Eui48 const RATE_MAC_A{0x02, 0x00, 0x00, 0x00, 0x00, 0xA1};
+Eui48 const RATE_MAC_B{0x02, 0x00, 0x00, 0x00, 0x00, 0xB2};
+
+/// A model whose AUDIO_UNIT 0 lists 48, 96 and 192 kHz, with an AAF stream input and output listing
+/// their format at 48 and 96 kHz, a CRF output, and dynamic stream ports (source: entity_rates.json).
+auto make_rates_config(std::string_view const profile) -> AvbEntityAudioIOConfig
+{
+    auto config = make_config(2, profile);
+    config.descriptor_storage_blob = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_rates.bin");
+    return config;
+}
+
+/// One frame the kit's AEM handler sent: where to, and the AECPDU.
+struct SentFrame
+{
+    Eui48 dest{};
+    std::vector<uint8_t> frame;
+
+    [[nodiscard]] auto header() const -> atdecc::AemDu
+    {
+        atdecc::AemDu du{};
+        span_load(du, std::span<uint8_t const>{frame});
+        return du;
+    }
+    [[nodiscard]] auto body() const -> std::span<uint8_t const>
+    {
+        return std::span<uint8_t const>{frame}.subspan(atdecc::AemDu::LENGTH);
+    }
+};
+
+/// The kit's AEM handler as two controllers see it: commands go in through process_packet(),
+/// every frame it sends is kept.
+struct RateControllers
+{
+    KitUnderTest& kit;
+    std::vector<SentFrame> sent{};
+    uint16_t sequence_id{0};
+
+    explicit RateControllers(KitUnderTest& under_test)
+        : kit{under_test}
+    {
+        kit->host().components().aem_handler.set_send_response([this](Eui48 const& dest, std::span<uint8_t const> const frame) {
+            sent.push_back({.dest = dest, .frame = {frame.begin(), frame.end()}});
+            return true;
+        });
+    }
+
+    /// @p controller at @p mac sends AEM @p command with @p body; its response's status.
+    auto command(Eui64 const& controller, Eui48 const& mac, uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
+    {
+        atdecc::AemDu header{};
+        header.init_command(command, static_cast<uint16_t>(atdecc::AemDu::AEM_DATA_LENGTH + body.size()));
+        header.target_entity_id = RATE_ENTITY;
+        header.controller_entity_id = controller;
+        header.sequence_id = ++sequence_id;
+        std::vector<uint8_t> frame(atdecc::AemDu::LENGTH + body.size());
+        span_store(std::span{frame}, header);
+        std::ranges::copy(body, frame.begin() + atdecc::AemDu::LENGTH);
+        size_t const before = sent.size();
+        (void)kit->host().components().aem_handler.process_packet(mac, frame, header.target_entity_id);
+        auto const response = std::find_if(sent.begin() + static_cast<std::ptrdiff_t>(before), sent.end(), [](SentFrame const& f) {
+            return !f.header().is_unsolicited();
+        });
+        return response != sent.end() ? response->header().status() : uint8_t{0xFF};
+    }
+
+    auto set_rate(uint32_t const rate) -> uint8_t
+    {
+        std::array<uint8_t, atdecc::aem::AemSamplingRatePayload::LENGTH> body{};
+        span_store(
+            std::span{body},
+            atdecc::aem::AemSamplingRatePayload{
+                .descriptor_type = atdecc::aem::DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0, .sampling_rate = rate});
+        return command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_SET_SAMPLING_RATE, body);
+    }
+
+    /// The rate GET_SAMPLING_RATE answers for AUDIO_UNIT 0.
+    auto rate() -> uint32_t
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x02, 0x00, 0x00};
+        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_SAMPLING_RATE, body);
+        atdecc::aem::AemSamplingRatePayload answer{};
+        span_load(answer, sent.back().body());
+        return answer.sampling_rate.get();
+    }
+
+    /// The format GET_STREAM_FORMAT answers for stream (@p type, @p index).
+    auto format(uint16_t const type, uint16_t const index) -> uint64_t
+    {
+        std::array<uint8_t, 4> const body{0x00, static_cast<uint8_t>(type), 0x00, static_cast<uint8_t>(index)};
+        (void)command(RATE_CONTROLLER_A, RATE_MAC_A, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, body);
+        ieee::octlet_t word{};
+        span_load(word, sent.back().body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
+        return word.get();
+    }
+
+    void register_b()
+    {
+        (void)command(RATE_CONTROLLER_B, RATE_MAC_B, atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, {});
+        sent.clear();
+    }
+
+    /// The unsolicited SET_STREAM_FORMATs in sent: (type, index, format).
+    [[nodiscard]] auto format_notifications() const -> std::vector<std::tuple<uint16_t, uint16_t, uint64_t>>
+    {
+        std::vector<std::tuple<uint16_t, uint16_t, uint64_t>> found;
+        for (auto const& f : sent) {
+            if (f.header().is_unsolicited() && f.header().command_code() == atdecc::AEM_COMMAND_SET_STREAM_FORMAT) {
+                atdecc::aem::AemStreamFormatPayload payload{};
+                span_load(payload, f.body());
+                ieee::octlet_t word{};
+                span_load(word, f.body().subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)));
+                found.emplace_back(payload.descriptor_type.get(), payload.descriptor_index.get(), word.get());
+            }
+        }
+        return found;
+    }
+};
+
+/// What the entity's data plane was asked: each rate with its streams.
+struct UnitRateRecorder
+{
+    std::vector<std::pair<uint32_t, std::vector<AvbEntityKit::RetimedFormat>>> asked{};
+    uint8_t answer{atdecc::AEM_STATUS_SUCCESS};
+
+    void install(KitUnderTest& kit)
+    {
+        kit->set_on_unit_rate_changed([this](uint32_t const rate, std::span<AvbEntityKit::RetimedFormat const> const streams) {
+            asked.emplace_back(rate, std::vector<AvbEntityKit::RetimedFormat>{streams.begin(), streams.end()});
+            return answer;
+        });
+    }
+};
+
+}  // namespace
+
+TEST(avb_entity_kit_rate, without_a_unit_rate_hook_only_the_rate_in_force_is_accepted)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    EXPECT_EQ(controllers.set_rate(48'000), atdecc::AEM_STATUS_SUCCESS);
+    // The data plane keeps its rate, so the unit does not report another (IEEE 1722.1-2021 Clause 7.4.21).
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(controllers.rate(), 48'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_48K_8CH);
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+}
+
+TEST(avb_entity_kit_rate, a_unit_rate_hook_retimes_the_units_streams_notified_after_the_response)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    controllers.register_b();
+
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    // The AAF output and input, their layout kept; the CRF output stays.
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    if (data_plane.asked.size() == 1) {
+        auto const& [rate, streams] = data_plane.asked.front();
+        EXPECT_EQ(rate, 96'000U);
+        EXPECT_EQ(streams.size(), size_t{2});
+        EXPECT_TRUE(std::ranges::all_of(streams, [](auto const& s) { return s.from == AAF_48K_8CH && s.to == AAF_96K_8CH; }));
+    }
+    // The response first, to A; then, to B alone, the rate's notification and each stream's.
+    EXPECT_FALSE(controllers.sent.empty());
+    EXPECT_FALSE(controllers.sent.front().header().is_unsolicited());
+    EXPECT_TRUE(std::ranges::all_of(
+        controllers.sent.begin() + 1, controllers.sent.end(), [](SentFrame const& f) { return f.dest == RATE_MAC_B; }));
+    EXPECT_EQ(controllers.sent.size(), size_t{4});
+    using Notice = std::tuple<uint16_t, uint16_t, uint64_t>;
+    EXPECT_TRUE(
+        controllers.format_notifications() ==
+        (std::vector<Notice>{
+            {atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0, AAF_96K_8CH}, {atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0, AAF_96K_8CH}}));
+
+    // The descriptors report what the data plane runs.
+    EXPECT_EQ(controllers.rate(), 96'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0), AAF_96K_8CH);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_96K_8CH);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 1), CRF_48K);
+    // The kit's specs and engines keep the rate they were built with: the media thread reads them.
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+    EXPECT_EQ(kit->talker_specs().front().format.sample_rate_hz, 48'000U);
+    EXPECT_EQ(kit->talker_specs().front().format_word, AAF_48K_8CH);
+}
+
+TEST(avb_entity_kit_rate, a_refused_or_unlisted_rate_moves_nothing)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    controllers.register_b();
+
+    // The unit lists 192 kHz, its AAF streams do not: the data plane is not asked.
+    EXPECT_EQ(controllers.set_rate(192'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(data_plane.asked.empty());
+    // The data plane refuses: its status, and the rate and formats in force.
+    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    EXPECT_TRUE(controllers.format_notifications().empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+    EXPECT_EQ(controllers.format(atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0), AAF_48K_8CH);
+    EXPECT_EQ(kit->sample_rate(), 48'000U);
+}
+
+TEST(avb_entity_kit_rate, a_bound_milan_input_keeps_the_rate)
+{
+    KitUnderTest kit{make_rates_config("milan13")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    auto& sinks = *kit->host().components().milan_acmp_listener;
+    EXPECT_TRUE(sinks.restore_binding(
+        atdecc::MilanBinding{.listener_unique_id = 0, .talker_entity_id = RATE_CONTROLLER_B}, TimePoint{std::chrono::seconds{1}}));
+
+    // Milan v1.3 Section 5.4.2.7: as the input's own SET_STREAM_FORMAT would be.
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_TRUE(data_plane.asked.empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+}
+
+// Milan v1.3 Section 5.4.2.13: a mapping held on a stream at the rate in force refuses a re-time,
+// the data plane not asked; once it is removed the unit re-times.
+TEST(avb_entity_kit_rate, a_held_mapping_refuses_a_retime)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    auto& aem = kit->host().components().aem_handler;
+    auto const maps = std::make_unique<nanoavb::DynamicAudioMaps>();
+    aem.set_dynamic_audio_maps(maps.get());
+    aem.set_on_audio_mappings_changed(
+        [](uint16_t, uint16_t, std::span<nanoavb::DynamicAudioMapping const>) -> uint8_t { return atdecc::AEM_STATUS_SUCCESS; });
+    auto const mapping = [&controllers](uint16_t const command) {
+        std::array<uint8_t, atdecc::aem::AemAudioMappingsCommandHeader::LENGTH + atdecc::aem::AemAudioMapping::LENGTH> body{};
+        span_store(
+            std::span{body},
+            atdecc::aem::AemAudioMappingsCommandHeader{
+                .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, .descriptor_index = 0, .number_of_mappings = 1});
+        span_store(
+            std::span{body}.subspan(atdecc::aem::AemAudioMappingsCommandHeader::LENGTH),
+            atdecc::aem::AemAudioMapping{.stream_index = 0, .stream_channel = 0, .cluster_offset = 0, .cluster_channel = 0});
+        return controllers.command(RATE_CONTROLLER_A, RATE_MAC_A, command, body);
+    };
+    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_ADD_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(data_plane.asked.empty());
+    EXPECT_EQ(controllers.rate(), 48'000U);
+
+    EXPECT_EQ(mapping(atdecc::AEM_COMMAND_REMOVE_AUDIO_MAPPINGS), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(data_plane.asked.size(), size_t{1});
+    EXPECT_TRUE(aem.mappings_hold());
+    aem.set_dynamic_audio_maps(nullptr);
+}
+
 }  // namespace kit_domain
 
 // Talker admission through the kit, driven by MSRP listener events and grace
-// expiry with no ACMP connection; the callback fires on every transition.
+// expiry once each stream is connected; the callback fires on every transition.
 TEST(avb_entity_kit_admission, follows_msrp_listener_ready_and_grace_expiry)
 {
     // A classic kit at Ready declares both streams (a stream is admitted only
@@ -2356,13 +2658,69 @@ TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
     std::filesystem::remove_all(dir);
 }
 
+namespace {
+
+/// LOCK_ENTITY (@p unlock: UNLOCK) of @p m from another controller, through the AEM handler.
+auto lock_entity(MilanKit& m, bool const unlock = false) -> uint8_t
+{
+    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};
+    lock[3] = unlock ? 0x01 : 0x00;
+    nanoavb::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_LOCK_ENTITY, static_cast<uint16_t>(nanoavb::AemDu::AEM_DATA_LENGTH + lock.size()));
+    header.controller_entity_id = ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL);
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return m.kit.host().components().aem_handler.handle_command(header, lock, out).status;
+}
+
+}  // namespace
+
+// Identify set by other than ATDECC, through the AEM handler or the host, is refused while a
+// controller holds the lock under milan13 (Milan v1.3 Section 5.4.2.17)
+TEST(avb_entity_kit_lock, a_local_identify_is_refused_while_locked)
+{
+    MilanKit m{std::nullopt, 0x3A, true, make_blob(1, 1, 1, /*identify=*/true)};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    aem.set_profile(nanoavb::AemCommandHandler::Profile::classic);  // as atdecc.profile = "classic"
+    std::vector<bool> told;
+    aem.set_identify_changed([&told](bool const on) { told.push_back(on); });
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(false));  // classic
+    m.kit.host().components().aem_handler.set_profile(nanoavb::AemCommandHandler::Profile::milan13);
+    EXPECT_EQ(aem.set_local_identify(true), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_FALSE(m.kit.host().set_local_identify(true));
+    EXPECT_TRUE(told == std::vector<bool>({true, false}));  // the refused changes applied nothing
+    EXPECT_EQ(lock_entity(m, true), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(m.kit.host().set_local_identify(true));
+}
+
+// Every local path of the AEM handler answers the lock refusal under milan13
+// (Milan v1.3 Section 5.3.4.1), its change not applied
+TEST(avb_entity_kit_lock, every_local_aem_path_is_refused_while_locked)
+{
+    PersistentKit m{"", 0x3B};
+    EXPECT_TRUE(m.start_ready());
+    auto& aem = m.kit.host().components().aem_handler;
+    EXPECT_EQ(lock_entity(m), atdecc::AEM_STATUS_SUCCESS);
+    m.kit.host().components().aem_handler.set_profile(nanoavb::AemCommandHandler::Profile::milan13);
+    std::array<uint8_t, 8 + atdecc::aem::AtdeccString::LENGTH> name{};
+    std::ranges::copy(std::string_view{"Locked"}, name.begin() + 8);
+    EXPECT_EQ(aem.apply_local_name(name), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_TRUE(m.entity_name() == "kit milan");
+    EXPECT_EQ(
+        aem.apply_local_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, 0, {}, {}), atdecc::AEM_STATUS_ENTITY_LOCKED);
+    std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> format{};
+    EXPECT_EQ(aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format), atdecc::AEM_STATUS_ENTITY_LOCKED);
+}
+
 // The entity renamed by other than ATDECC (the bridge's control socket): as
 // a controller's SET_NAME, saved and told to every controller; refused while
 // a controller has the entity locked; an empty name is the configured one
 TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
 {
     auto const dir = state_dir("request-name");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     PersistentKit m{path};
     std::vector<std::string> told;
     m.handler.set_on_name_changed(
@@ -3951,200 +4309,28 @@ TEST(avb_entity_kit_formats, milan_v1_3_tspec)
     auto const tspec = m.kit.talker_tspec(m.kit.talker_specs().front());
     EXPECT_EQ(tspec.max_frame_size, milan_srp_max_frame_size(m.kit.talker_specs().front().format));
     EXPECT_EQ(tspec.clock_drift_bytes, MILAN_TSPEC_SPARE_BYTES);
-    EXPECT_TRUE(m.kit.host().components().profile.milan);
+    EXPECT_TRUE(m.kit.host().components().acmp_is_milan());
     EXPECT_TRUE(m.kit.host().components().aem_handler.stream_info_layout() == atdecc::aem::StreamInfoLayout::ieee_2021);
 }
 
+// What an offload data plane received of an input reaches GET_COUNTERS as the kit's own reception does: Milan
+// v1.2 Table 5.16's interval counters, MEDIA_LOCKED from its check of the lock.
+
 // Milan v1.2 Table 5.16: the input's ten counters; zeroed when it becomes
 // bound (Section 5.3.8.10), not when it is unbound; the fold counts intervals.
-TEST(avb_entity_kit_counters, stream_input_reset_on_bind)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    auto* slot = p.l.kit.listener()->slot_for(0);
-    EXPECT_TRUE(slot != nullptr);
-    int64_t t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);  // the first interval starts
-    slot->counters.frames_rx.store(10);
-    slot->counters.seq_num_mismatch.store(3);
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
-    EXPECT_EQ(c.counters_valid.get(), 0x0F3FU);
-    EXPECT_EQ(c.counters[11].get(), 1U);  // FRAMES_RX: one interval
-    EXPECT_EQ(c.counters[3].get(), 1U);   // SEQ_NUM_MISMATCH
-
-    auto const bound = p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    EXPECT_EQ(bound.status(), atdecc::ACMP_STATUS_SUCCESS);
-    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
-    EXPECT_EQ(c.counters[11].get(), 0U);
-    EXPECT_EQ(c.counters[3].get(), 0U);
-
-    slot->counters.frames_rx.store(20);
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS - 1);  // not yet a second
-    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 0U);
-    p.l.kit.poll_counters(t += 1);
-    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 1U);
-
-    // Unbound: kept.
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_EQ(counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0).counters[11].get(), 1U);
-}
 
 // A CRF input locks on a steady timestamp step (timestamp_interval events, IEEE 1722-2016
 // Clause 10.4) and unlocks on a lost PDU; a PDU of another format is discarded (Milan v1.2
 // Section 4.4.2.2) and counted in UNSUPPORTED_FORMAT.
-TEST(avb_entity_kit_counters, a_crf_input_counts_media_lock_from_its_timestamps)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
-    p.talker_advertises();
-    p.pump(20);
-    auto* listener = p.l.kit.listener();
-    EXPECT_TRUE(listener != nullptr && listener->slot_for(1) != nullptr && listener->slot_for(1)->crf.has_value());
-
-    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
-    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
-    uint64_t ts = 9'000'000'000ULL;
-    auto const send = [&](avtp::CrfStreamOutputContext& ctx) {
-        std::array<uint64_t, 1> const one{ts};
-        EXPECT_EQ(serialize_crf_raw(ctx, frame, one), frame.size());
-        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
-        ts += 2'000'000;  // 96 events at 48 kHz
-    };
-    int64_t t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);
-    for (int k = 0; k < 20; ++k) {
-        send(tx);
-    }
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[0].get(), 1U);   // MEDIA_LOCKED
-    EXPECT_EQ(c.counters[1].get(), 0U);   // MEDIA_UNLOCKED
-    EXPECT_EQ(c.counters[11].get(), 1U);  // FRAMES_RX: one interval, however many PDUs
-    EXPECT_EQ(c.counters[8].get(), 0U);   // UNSUPPORTED_FORMAT
-
-    ts += 2'000'000;  // one PDU lost
-    send(tx);
-    avtp::CrfStreamOutputContext other{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 160, 1};
-    send(other);
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[1].get(), 1U);  // MEDIA_UNLOCKED
-    EXPECT_EQ(c.counters[2].get(), 1U);  // STREAM_INTERRUPTED
-    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
-}
 
 // Milan v1.3 Section 5.3.8.10: a CRF PDU the input rejects is still a Stream Data AVTPDU, counted
 // in UNSUPPORTED_FORMAT and holding its place in the sequence.
-TEST(avb_entity_kit_counters, a_rejected_crf_pdu_keeps_its_place_in_the_sequence)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
-    p.talker_advertises();
-    p.pump(20);
-    auto* listener = p.l.kit.listener();
-    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
-
-    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
-    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
-    uint64_t ts = 9'000'000'000ULL;
-    auto const send = [&](uint8_t const type, bool const sv) {
-        std::array<uint64_t, 1> const one{ts};
-        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
-        avtp::CrfPdu pdu{};
-        span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
-        pdu.set_type(type);
-        pdu.set_sv(sv);
-        span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
-        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
-        ts += 2'000'000;
-    };
-    int64_t const t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);
-    send(1, true);
-    send(7, true);  // a CRF type IEEE 1722-2016 does not define
-    send(1, true);
-    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
-    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
-
-    // sv=0 is no stream data of this stream: not counted, and the sequence passes over it.
-    send(1, false);
-    p.l.kit.poll_counters(t + (2 * AvbEntityKit::COUNTERS_INTERVAL_NS));
-    c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[8].get(), 1U);
-}
 
 // A CRF PDU cut short past its AVTP common header still counts in UNSUPPORTED_FORMAT and holds its
 // place in the sequence (Milan v1.3 Section 5.3.8.10).
-TEST(avb_entity_kit_counters, a_short_crf_pdu_is_unsupported_and_keeps_its_place_in_the_sequence)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
-    p.talker_advertises();
-    p.pump(20);
-    auto* listener = p.l.kit.listener();
-    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
-
-    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
-    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
-    uint64_t ts = 9'000'000'000ULL;
-    auto const send = [&](size_t const length) {
-        std::array<uint64_t, 1> const one{ts};
-        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
-        listener->on_stream_rx_frame(std::span{frame}.first(length), static_cast<int64_t>(ts) - 2'000'000);
-        ts += 2'000'000;
-    };
-    int64_t const t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);
-    send(frame.size());
-    send(avtp::AVTP_COMMON_HEADER_LENGTH + 4);  // the common header, then cut short
-    send(frame.size());
-    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
-    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
-}
 
 // A frame of another AVTP subtype carrying a CRF input's stream_id is a Stream Data AVTPDU of
 // that stream in a format it does not accept: UNSUPPORTED_FORMAT, in sequence (Milan v1.3 Section 5.3.8.10).
-TEST(avb_entity_kit_counters, a_frame_of_another_subtype_on_an_input_stream_is_an_unsupported_format)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, 0, 1).status(), atdecc::ACMP_STATUS_SUCCESS);
-    p.talker_advertises();
-    p.pump(20);
-    auto* listener = p.l.kit.listener();
-    EXPECT_FALSE(listener == nullptr || listener->slot_for(1) == nullptr);
-
-    avtp::CrfStreamOutputContext tx{p.t.sid(1), avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
-    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH + avtp::CrfPdu::TIMESTAMP_SIZE> frame{};
-    uint64_t ts = 9'000'000'000ULL;
-    auto const send = [&](uint8_t const subtype) {
-        std::array<uint64_t, 1> const one{ts};
-        EXPECT_EQ(serialize_crf_raw(tx, frame, one), frame.size());
-        avtp::CrfPdu pdu{};
-        span_load(pdu, std::span<uint8_t const>{frame}.first(avtp::CrfPdu::HEADER_LENGTH));
-        pdu.subtype = subtype;
-        span_store(std::span{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
-        listener->on_stream_rx_frame(frame, static_cast<int64_t>(ts) - 2'000'000);
-        ts += 2'000'000;
-    };
-    int64_t const t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);
-    send(avtp::AvtpSubtype::crf);
-    send(avtp::AvtpSubtype::aaf);
-    send(avtp::AvtpSubtype::crf);
-    p.l.kit.poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 1);
-    EXPECT_EQ(c.counters[8].get(), 1U);  // UNSUPPORTED_FORMAT
-    EXPECT_EQ(c.counters[3].get(), 0U);  // SEQ_NUM_MISMATCH
-}
 
 // GET_AS_PATH (Milan v1.2 Section 5.4.2.24) from the Announces' path trace,
 // and its notification; GET_AVB_INFO notified asynchronously when the

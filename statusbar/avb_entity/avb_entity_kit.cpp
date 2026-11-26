@@ -155,10 +155,10 @@ AvbEntityKit::AvbEntityKit(
     }
 
     configure_milan();
-    // ATDECC descriptor wire version. Default "2016": emit descriptors at their
-    // 1722.1-2013/2016 lengths so controllers that reject 2021-length descriptors
-    // can enumerate the model. "2021" emits the full 2021 forms.
-    host_.components().aem_handler.set_legacy_2016(config_.atdecc_version != "2021");
+    // ATDECC descriptor wire version: "2016" emits descriptors at their 1722.1-2013/2016 lengths
+    // for controllers that reject the 2021 ones; "2021" the full forms; empty, the profile's
+    // (effective_atdecc_version).
+    host_.components().aem_handler.set_legacy_2016(effective_atdecc_version(config_) != "2021");
 
     configure_profile();
     configure_talker_streams();
@@ -168,8 +168,6 @@ AvbEntityKit::AvbEntityKit(
 
 void AvbEntityKit::configure_milan()
 {
-    // GET_MILAN_INFO's features, fixed before the entity is advertised (Milan v1.3 Section 5.4.4.1).
-    host_.components().mvu_handler.set_extra_features(config_.signal_presence ? atdecc::MVU_FEATURE_TALKER_SIGNAL_PRESENCE : 0U);
     // Advertised, so reported from the start: no signal until the application says otherwise.
     for (auto const& spec : talker_specs_) {
         output_counters_[spec.index].presence = reports_signal_presence() ? std::optional<uint64_t>{0} : std::nullopt;
@@ -1530,16 +1528,11 @@ void AvbEntityKit::wire_aecp_queries()
     // a talker stream's identity (a Milan listener checks it), a listener sink's binding.
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
-            bool const milan = host_.components().profile.milan;
+            bool const milan = milan_profile();
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 return is_talker_index(descriptor_index) &&
                     fill_talker_stream_counters(
-                           *talker_,
-                           descriptor_index,
-                           output_counters_[descriptor_index],
-                           host_.components().profile,
-                           valid,
-                           counters);
+                           *talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 // Classic keeps IEEE 1722.1's running totals.
@@ -1554,7 +1547,7 @@ void AvbEntityKit::wire_aecp_queries()
             uint16_t descriptor_index,
             atdecc::aem::AemStreamInfoPayload& out,
             atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool {
-            bool const milan = host_.components().profile.milan;
+            bool const milan = milan_profile();
             bool filled = false;
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 if (!is_talker_index(descriptor_index)) {
@@ -2486,6 +2479,20 @@ auto AvbEntityKit::milan_profile() const noexcept -> bool
     return is_milan_profile(config_);
 }
 
+void AvbEntityKit::install_milan_info()
+{
+    if (!config_.milan) {
+        host_.components().aem_handler.set_milan_info(std::nullopt);
+        return;
+    }
+    advertise_milan_capabilities();
+    host_.components().aem_handler.set_milan_info(nanoavb::AemCommandHandler::MilanInfo{
+        .features_flags = milan_features_flags(),
+        .certification_version = milan_version_or(config_.milan_certification_version, 0, "milan.certification_version"),
+        .specification_version =
+            milan_version_or(config_.milan_specification_version, atdecc::mvu_version(1, 3), "milan.specification_version")});
+}
+
 namespace {
 
 /// What a Milan PAAD-AE says of itself in its entity_capabilities (Milan v1.3
@@ -2506,31 +2513,47 @@ void AvbEntityKit::advertise_milan_capabilities()
     auto entity = adp.entity();
     entity.entity_capabilities.set_flag(MILAN_ENTITY_CAPABILITIES);
     adp.set_entity(entity);
-    adp.notify_entity_changed();
-}
-
-void AvbEntityKit::install_milan_info()
-{
-    if (!config_.milan) {
-        host_.components().aem_handler.set_milan_info(std::nullopt);
-        return;
-    }
-    advertise_milan_capabilities();
-    host_.components().aem_handler.set_milan_info(nanoavb::AemCommandHandler::MilanInfo{
-        .features_flags = milan_features_flags(),
-        .certification_version = milan_version_or(config_.milan_certification_version, 0, "milan.certification_version"),
-        .specification_version =
-            milan_version_or(config_.milan_specification_version, atdecc::mvu_version(1, 3), "milan.specification_version")});
+    adp.update_adpdu_from_model();  // before the entity is advertised
 }
 
 auto AvbEntityKit::milan_features_flags() const noexcept -> uint32_t
 {
-    // MVU_BINDING says that BIND_STREAM and UNBIND_STREAM are implemented
-    // (Milan v1.3 5.4.4.6, 5.4.4.7). They are whenever Milan connection
-    // management runs and never otherwise, so the bit follows the profile
-    // and not the configuration.
+    // MVU_BINDING says that BIND_STREAM and UNBIND_STREAM are implemented (Milan v1.3 5.4.4.6,
+    // 5.4.4.7): whenever Milan connection management runs and never otherwise. Signal presence
+    // when the application reports it (Section 5.3.7.7.1).
     uint32_t const configured = config_.milan_features_flags & ~atdecc::MVU_FEATURE_MVU_BINDING;
-    return configured | (milan_profile() ? atdecc::MVU_FEATURE_MVU_BINDING : 0U);
+    uint32_t const presence = config_.signal_presence ? atdecc::MVU_FEATURE_TALKER_SIGNAL_PRESENCE : 0U;
+    return configured | presence | (milan_profile() ? atdecc::MVU_FEATURE_MVU_BINDING : 0U);
+}
+
+auto AvbEntityKit::state_file(std::string const& named, std::string_view const name, bool const wanted) -> std::string
+{
+    if (!named.empty() || !wanted || entity_state_dir().empty()) {
+        return named;
+    }
+    return entity_state_file_path(entity_state_dir(), name);
+}
+
+auto AvbEntityKit::entity_state_dir() -> std::string const&
+{
+    if (entity_state_dir_.has_value()) {
+        return *entity_state_dir_;
+    }
+    entity_state_dir_.emplace();
+    if (config_.state_dir.empty()) {
+        return *entity_state_dir_;
+    }
+    auto made = ensure_entity_state_dir(config_.state_dir, host_.components().acmp_listener.entity_id());
+    if (made.has_value()) {
+        *entity_state_dir_ = std::move(*made);
+        host_.ctl_log().status("state: saved in {}", logging::embed<56>(*entity_state_dir_));
+    } else {
+        host_.ctl_log().status(
+            "state: no directory for this entity under {} (error {}); nothing is saved that no key names",
+            logging::embed<48>(config_.state_dir),
+            made.error().value());
+    }
+    return *entity_state_dir_;
 }
 
 auto AvbEntityKit::milan_version_or(std::string const& text, uint32_t const fallback, std::string_view const key) -> uint32_t

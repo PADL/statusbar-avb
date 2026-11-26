@@ -375,37 +375,22 @@ class AvbEntityKit
     /// The channels of talker stream @p idx's format now (0 for no such stream).
     [[nodiscard]] auto talker_channels(uint16_t idx) const noexcept -> uint16_t;
     /// The kit reports signal presence: configured and Milan v1.3.
-    [[nodiscard]] auto reports_signal_presence() const noexcept -> bool
-    {
-        return config_.signal_presence && host_.components().profile.milan;
-    }
+    [[nodiscard]] auto reports_signal_presence() const noexcept -> bool { return config_.signal_presence && milan_profile(); }
 
-    // --- Talker Advertise declarations (Milan v1.2 Section 4.3.3.1) -----------
+    // --- Talker Advertise declarations (Milan v1.3 Section 4.3.3.1) -----------
 
-    [[nodiscard]] auto talker_declarations() const noexcept -> TalkerDeclarations const& { return declarations_; }
-    /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx counted at
-    /// steady-clock @p now_ns (the ACMP talker's on_probe lands here): its
-    /// window opens and the declarations are re-evaluated.
-    void notify_talker_probe(uint16_t idx, int64_t now_ns);
-    /// The talker streams a declaration pass re-declares as they stand (a changed TSpec, a new
-    /// Class A VID), by index; the rest only as TalkerDeclarations decides.
-    using RefreshSet = std::bitset<MAX_ENTITY_STREAMS>;
-    /// Reactor thread: declare and withdraw Talker Advertises as TalkerDeclarations decides
-    /// at the reactor's @p now_ns, the streams in @p refresh re-declared, the gate told
-    /// @p gate_now; the kit's timer at each deadline, the reactor's events directly.
-    void update_talker_declarations(int64_t now_ns, GateTimePoint gate_now, RefreshSet refresh);
-    /// As above for a caller with no gate reading in hand (reads the gate's clock once);
-    /// @p refresh re-declares every stream.
-    void update_talker_declarations(int64_t const now_ns, bool const refresh = false)
-    {
-        update_talker_declarations(now_ns, net::rx_clock_now(), refresh ? RefreshSet{}.set() : RefreshSet{});
-    }
+    /// Whether talker stream @p idx's Talker Advertise is declared now: the MSRP handler's,
+    /// which under the Milan profile declares it only while a listener wants the stream.
+    [[nodiscard]] auto talker_declared(uint16_t idx) const noexcept -> bool;
+    /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx arrived at @p now (the
+    /// ACMP talker's on_probe lands here): the MSRP handler declares the stream for 15 s.
+    void notify_talker_probe(uint16_t idx, TimePoint now);
     /// Reactor thread: the talker streams' MAAP addresses became valid (@p valid)
-    /// or were lost to a conflict. Until valid, PROBE_TX / CONNECT_TX are answered
+    /// or were lost to a conflict. Until valid, a Milan probe is answered
     /// TALKER_DEST_MAC_FAIL and nothing is declared.
-    void notify_talker_addresses(bool valid, int64_t now_ns);
-    /// Reactor thread, every pass while started: run the declarations once
-    /// their next deadline (TalkerDeclarations::next_deadline) has come.
+    void notify_talker_addresses(bool valid);
+    /// Reactor thread, every pass while started: the work held for after a command's
+    /// response (a rate change's notifications, a save) and the admission deadline.
     void on_declaration_timer(int64_t now_ns);
 
     // --- Presentation time offset (Milan v1.2 Section 5.3.7.6) ------------------
@@ -905,9 +890,11 @@ class AvbEntityKit
     /// Say in the ENTITY descriptor and in ADP what a Milan PAAD-AE is held
     /// to say of itself (Milan v1.3 5.3.3.1, 5.6.2).
     void advertise_milan_capabilities();
-    /// The features_flags of GET_MILAN_INFO: the configuration's, with
-    /// MVU_BINDING set under the Milan profile and clear under any other.
+    /// The features_flags of GET_MILAN_INFO: the configuration's, with MVU_BINDING set under
+    /// the Milan profile and clear under any other, and signal presence when reported.
     [[nodiscard]] auto milan_features_flags() const noexcept -> uint32_t;
+    /// The CLOCK_DOMAINs the model has, at most AemCommandHandler::MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto clock_domain_count() const -> size_t;
     /// @p text as a Milan version word, or @p fallback (logged against the
     /// configuration key @p key) when it is not dotted numbers.
     [[nodiscard]] auto milan_version_or(std::string const& text, uint32_t fallback, std::string_view key) -> uint32_t;

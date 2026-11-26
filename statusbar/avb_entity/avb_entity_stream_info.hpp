@@ -16,7 +16,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/buffer/span_utils.hpp"
-#include "statusbar/nanoavb/nanoavb_entity_profile.hpp"
+#include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/srp/srp_msrp.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -338,21 +338,21 @@ inline void fill_milan_v13_talker_counters(StreamOutputIntervals const& interval
     }
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index in @p profile's layout: Milan v1.3
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index in a @p milan entity's layout: Milan v1.3
 /// Table 5.14, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
 /// False when the talker has no such stream.
 [[nodiscard]] inline auto fill_talker_stream_counters(
     TalkerStreams const& talker,
     uint16_t const descriptor_index,
     StreamOutputIntervals const& intervals,
-    nanoavb::EntityProfile const profile,
+    bool const milan,
     uint32_t& valid,
     std::array<uint32_t, 32>& out) -> bool
 {
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    if (profile.milan) {
+    if (milan) {
         fill_milan_v13_talker_counters(intervals, valid, out);
     } else {
         fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);

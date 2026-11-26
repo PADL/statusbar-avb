@@ -12,7 +12,6 @@
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
-#include "statusbar/nanoavb/nanoavb_test_support.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -71,7 +70,7 @@ auto temporary_socket_path() -> std::string
 }
 
 /// The test entity: Milan, or classic by its storage's profile symbol.
-auto make_model(bool const milan = true) -> EntityModel
+auto make_model() -> EntityModel
 {
     EntityModelConfig cfg;
     cfg.max_configurations = 1;
@@ -91,9 +90,6 @@ auto make_model(bool const milan = true) -> EntityModel
     (void)model.add_stream_output(DescriptorStream{});
     (void)model.add_stream_input(DescriptorStream{});
     (void)model.add_stream_input(DescriptorStream{});
-    if (!milan) {
-        model.set_descriptor_storage(classic_profile_storage());
-    }
     return model;
 }
 
@@ -101,11 +97,15 @@ auto make_model(bool const milan = true) -> EntityModel
 struct Bench
 {
     explicit Bench(bool const milan = true, AtdeccLocalPort::Config config = {.path = temporary_socket_path()})
-        : components{make_model(milan), AdpAdvertiserConfig{}, 2, 4, 2}
+        : components{make_model(), AdpAdvertiserConfig{}, 2, 4, 2}
         , handlers{"nanoavb-none0", components}
         , reactor{stop, [this] { return now_ns; }, 0}
         , path{config.path}
     {
+        if (milan) {
+            components.aem_handler.set_profile(AemCommandHandler::Profile::milan13);
+            components.aem_handler.set_milan_info(AemCommandHandler::MilanInfo{});
+        }
         handlers.set_local_port_config(std::move(config));
         handlers.add_to_reactor(reactor);
         setup_nanoavb_callbacks(components, handlers);

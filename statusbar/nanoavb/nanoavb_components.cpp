@@ -675,19 +675,13 @@ NanoAvbComponents::NanoAvbComponents(
     size_t const talker_max_listeners,
     size_t const listener_max_streams)
     : entity_model{std::move(model)}
-    , profile{entity_profile_from_model(entity_model.descriptor_storage())}
     , aem_handler{entity_model}
     , adp_advertiser{entity_model.get_entity(), AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity_model.get_entity().entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity_model.get_entity().entity_id, AcmpListenerCallbacks{}, listener_max_streams}
-    , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
-    , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
-{
-    mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
-    mvu_handler.set_clock_domain_count(clock_domain_count(entity_model.descriptor_storage()));
-    mvu_handler.set_stream_input_count(stream_input_count(entity_model.descriptor_storage()));
-    wire_profile();
-}
+    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
+    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
+{}
 
 namespace {
 
@@ -725,42 +719,13 @@ NanoAvbComponents::NanoAvbComponents(
     size_t const talker_max_listeners,
     size_t const listener_max_streams)
     : entity_model{}  // empty: descriptors are served by the handler, not this member
-    , profile{entity_profile_from_model(handler.descriptor_storage())}
     , aem_handler{handler}
     , adp_advertiser{entity, AdpAdvertiserCallbacks{}, adp_config}
     , acmp_talker{entity.entity_id, AcmpTalkerCallbacks{}, talker_max_streams, talker_max_listeners}
     , acmp_listener{entity.entity_id, AcmpListenerCallbacks{}, listener_max_streams}
-    , mvrp_handler{profile_mvrp_config(profile), MvrpCallbacks{}}
-    , msrp_handler{profile_msrp_config(profile, entity_msrp_config(talker_max_streams, listener_max_streams)), MsrpCallbacks{}}
-{
-    mvu_handler.set_aem_handler(&aem_handler);  // the AEM lock gates MVU SETs too
-    mvu_handler.set_clock_domain_count(clock_domain_count(handler.descriptor_storage()));
-    mvu_handler.set_stream_input_count(stream_input_count(handler.descriptor_storage()));
-    wire_profile();
-}
-
-void NanoAvbComponents::wire_mvu_binding()
-{
-    aem_handler.set_entity_profile(profile);
-    mvu_handler.set_profile(profile);
-    // Milan v1.3 Sections 5.4.4.6-8: MVU binding addresses the Milan sinks, and their
-    // GET_STREAM_INPUT_INFO_EX goes to the registered controllers as it changes (Table 5.21).
-    mvu_handler.set_milan_listener(&acmp_listener.milan_sinks());
-    acmp_listener.milan_sinks().set_on_info_ex_changed(
-        [this](uint16_t const index) { mvu_handler.notify_stream_input_info_ex(index); });
-    acmp_listener.milan_sinks().set_configuration_departs(profile.milan);
-}
-
-void NanoAvbComponents::wire_profile()
-{
-    wire_mvu_binding();
-    acmp_talker.set_milan(profile.milan);
-    acmp_listener.set_milan(profile.milan);
-    // Milan v1.3 Section 5.5.3.6.3 step 1: a locked entity accepts bindings
-    // only from the locking controller.
-    acmp_listener.milan_sinks().set_authorized(
-        [this](Eui64 const& controller) { return !aem_handler.exclusive_access_status(controller).has_value(); });
-}
+    , mvrp_handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{}}
+    , msrp_handler{entity_msrp_config(talker_max_streams, listener_max_streams), MsrpCallbacks{}}
+{}
 
 //
 // NanoAvbComponentsBuilder implementation

@@ -491,9 +491,6 @@ struct NanoAvbComponents
     // Declaration order matters: `entity_model` must precede the handlers that
     // reference it so it is fully constructed when they are wired.
     EntityModel entity_model;
-    /// The entity's profile (nanoavb_entity_profile.hpp), shared by every
-    /// handler that has Milan-only behaviour.
-    EntityProfile profile;
     AemCommandHandler aem_handler;
     NanoAvbAdpAdvertiser adp_advertiser;
     NanoAvbAcmpTalker acmp_talker;
@@ -509,11 +506,45 @@ struct NanoAvbComponents
     /// Get total talker connection count
     [[nodiscard]] auto talker_connection_count() const -> size_t;
 
-  private:
-    /// Every reader of profile told it (both constructors); each install is idempotent.
-    void wire_profile();
-    /// The AEM and MVU handlers' profile, and the MVU handler on the Milan sinks (Milan v1.3 Sections 5.4.4.6-8).
-    void wire_mvu_binding();
+    /// Run Milan v1.3 connection management (section 5.5) in place of IEEE
+    /// 1722.1-2021's. A start-up choice: call it before the stream outputs
+    /// are configured and before the net handlers are created. The two
+    /// objects are made here, once, so an entity that never asks carries
+    /// two null pointers and nothing else. Calling it again does nothing.
+    void use_milan_acmp();
+
+    /// True once use_milan_acmp() has been called.
+    [[nodiscard]] auto acmp_is_milan() const noexcept -> bool { return milan_acmp_talker != nullptr; }
+
+    /// ACMP's picture of one stream output: what a PROBE_TX or
+    /// CONNECT_TX response and GET_STREAM_INFO carry.
+    struct TalkerStream
+    {
+        Eui64 stream_id{};
+        Eui48 stream_dest_mac{};
+        uint16_t stream_vlan_id{0};
+    };
+
+    /// ACMP's picture of one stream input. connected is IEEE 1722.1's
+    /// "connected" or Milan's "settled": the stream fields are the talker's.
+    struct ListenerSink
+    {
+        bool connected{false};
+        Eui64 talker_entity_id{};
+        uint16_t talker_unique_id{0};
+        Eui64 stream_id{};
+        Eui48 stream_dest_mac{};
+        uint16_t stream_vlan_id{0};
+    };
+
+    /// Set stream output @p stream_index's parameters in the ACMP talker that runs.
+    [[nodiscard]] auto configure_talker_stream(uint16_t stream_index, Eui64 stream_id, Eui48 dest_mac, uint16_t vlan_id) -> Status;
+
+    /// Stream output @p stream_index as the ACMP talker that runs has it, nullopt when there is none.
+    [[nodiscard]] auto talker_stream(uint16_t stream_index) const noexcept -> std::optional<TalkerStream>;
+
+    /// Stream input @p stream_index as the ACMP listener that runs has it, nullopt when there is none.
+    [[nodiscard]] auto listener_sink(uint16_t stream_index) const noexcept -> std::optional<ListenerSink>;
 };
 
 //
