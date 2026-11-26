@@ -524,6 +524,30 @@ struct AvbEntityAudioIOConfig
     return priorities;
 }
 
+/// The presentation offset of a talker that is given none, by profile: Milan
+/// v1.3 5.3.7.6 has 2 ms as the default of a PAAD; an entity held to 1722.1
+/// alone keeps 1 ms.
+inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
+inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
+
+/// Whether @p config holds the entity to Milan v1.3: said outright by
+/// atdecc_profile ("milan13"), or, when that is empty, by the model being a
+/// Milan one.
+[[nodiscard]] inline auto is_milan_profile(AvbEntityAudioIOConfig const& config) noexcept -> bool
+{
+    return config.atdecc_profile.empty() ? config.milan : config.atdecc_profile == "milan13";
+}
+
+/// The presentation offset the entity's talkers use: what the configuration
+/// gives, or the profile's default when it gives none (0).
+[[nodiscard]] inline auto effective_presentation_offset_ns(AvbEntityAudioIOConfig const& config) noexcept -> uint64_t
+{
+    if (config.presentation_offset_ns != 0) {
+        return config.presentation_offset_ns;
+    }
+    return is_milan_profile(config) ? MILAN_DEFAULT_PRESENTATION_OFFSET_NS : CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS;
+}
+
 /// The ATDECC wire version the entity's descriptors are sent in: what the
 /// configuration gives, or the profile's when it gives none. Milan v1.3 5.3.3
 /// has the descriptors of IEEE 1722.1-2021; an entity held to 1722.1 alone

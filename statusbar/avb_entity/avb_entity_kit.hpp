@@ -939,9 +939,11 @@ class AvbEntityKit
     /// Say in the ENTITY descriptor and in ADP what a Milan PAAD-AE is held
     /// to say of itself (Milan v1.3 5.3.3.1, 5.6.2).
     void advertise_milan_capabilities();
-    /// The features_flags of GET_MILAN_INFO: the configuration's, with
-    /// MVU_BINDING set under the Milan profile and clear under any other.
+    /// The features_flags of GET_MILAN_INFO: the configuration's, with MVU_BINDING set under
+    /// the Milan profile and clear under any other, and signal presence when reported.
     [[nodiscard]] auto milan_features_flags() const noexcept -> uint32_t;
+    /// The CLOCK_DOMAINs the model has, at most AemCommandHandler::MAX_CLOCK_DOMAINS.
+    [[nodiscard]] auto clock_domain_count() const -> size_t;
     /// @p text as a Milan version word, or @p fallback (logged against the
     /// configuration key @p key) when it is not dotted numbers.
     [[nodiscard]] auto milan_version_or(std::string const& text, uint32_t fallback, std::string_view key) -> uint32_t;
