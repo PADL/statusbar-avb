@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <utility>
@@ -359,6 +360,13 @@ auto AemCommandHandler::dispatch_command(AemDu const& header, std::span<uint8_t 
 
         case AEM_COMMAND_GET_AUDIO_MAP:
             return handle_get_audio_map(command_data, out_buffer);
+
+        case AEM_COMMAND_ADD_AUDIO_MAPPINGS:
+        case AEM_COMMAND_REMOVE_AUDIO_MAPPINGS:
+            if (auto const blocked = check_exclusive_access(header)) {
+                return reject_command(*blocked, command_data, out_buffer);
+            }
+            return handle_audio_mappings(cmd == AEM_COMMAND_ADD_AUDIO_MAPPINGS, command_data, out_buffer);
 
         case AEM_COMMAND_GET_COUNTERS:
             return handle_get_counters(header, command_data, out_buffer);
@@ -1436,6 +1444,9 @@ auto AemCommandHandler::handle_get_stream_info(
 
 namespace {
 
+/// The base frequency of an AUDIO_UNIT sampling rate, without its pull (IEEE 1722.1-2021 Clause 7.3.1).
+constexpr uint32_t SAMPLING_RATE_BASE_FREQUENCY_MASK = 0x1FFF'FFFFU;
+
 /// The leading octets of an IEC 61883-6 AM824 stream format code, as decode_am824_stream_format() reads them.
 struct Am824FormatHead
 {
@@ -1479,6 +1490,61 @@ struct FormatChannels
         .stream_channel = mapping.stream_channel,
         .cluster_offset = mapping.cluster_offset,
         .cluster_channel = mapping.cluster_channel};
+}
+
+/// The mappings a command is read with at most: as many as MAX_AEM_RESPONSE_SIZE holds.
+constexpr size_t MAX_COMMAND_MAPPINGS = (MAX_AEM_RESPONSE_SIZE - AemAudioMappingsCommandHeader::LENGTH) / AemAudioMapping::LENGTH;
+using CommandMappings = sg14::inplace_vector<DynamicAudioMapping, MAX_COMMAND_MAPPINGS>;
+
+[[nodiscard]] auto from_wire(AemAudioMapping const& wire) noexcept -> DynamicAudioMapping
+{
+    return {
+        .stream_index = wire.stream_index.get(),
+        .stream_channel = wire.stream_channel.get(),
+        .cluster_offset = wire.cluster_offset.get(),
+        .cluster_channel = wire.cluster_channel.get()};
+}
+
+/// Whether @p a and @p b name the same cluster channel.
+[[nodiscard]] auto same_cluster_channel(DynamicAudioMapping const& a, DynamicAudioMapping const& b) noexcept -> bool
+{
+    return a.cluster_offset == b.cluster_offset && a.cluster_channel == b.cluster_channel;
+}
+
+/// Whether AUDIO_UNIT @p unit holds stream port (@p port_type, @p port_index).
+[[nodiscard]] auto unit_holds_port(DescriptorAudioUnit const& unit, uint16_t const port_type, uint16_t const port_index) noexcept
+    -> bool
+{
+    bool const input = port_type == DESCRIPTOR_STREAM_PORT_INPUT;
+    uint32_t const base = input ? unit.base_stream_input_port.get() : unit.base_stream_output_port.get();
+    uint32_t const count = input ? unit.number_of_stream_input_ports.get() : unit.number_of_stream_output_ports.get();
+    return port_index >= base && port_index < base + count;
+}
+
+/// An ADD/REMOVE_AUDIO_MAPPINGS command's header; nullopt when the command is short of it or of
+/// the mappings it counts, or counts more than MAX_COMMAND_MAPPINGS.
+[[nodiscard]] auto mappings_command(std::span<uint8_t const> const command_data) noexcept
+    -> std::optional<AemAudioMappingsCommandHeader>
+{
+    auto const cmd = load_payload<AemAudioMappingsCommandHeader>(command_data);
+    if (!cmd) {
+        return std::nullopt;
+    }
+    size_t const count = cmd->number_of_mappings.get();
+    bool const listed = count * AemAudioMapping::LENGTH <= command_data.size() - AemAudioMappingsCommandHeader::LENGTH;
+    return listed && count <= MAX_COMMAND_MAPPINGS ? cmd : std::nullopt;
+}
+
+/// The @p count mappings of an ADD/REMOVE_AUDIO_MAPPINGS command body after its header.
+[[nodiscard]] auto parse_mappings(std::span<uint8_t const> const bytes, size_t const count) noexcept -> CommandMappings
+{
+    CommandMappings out{};
+    for (size_t i = 0; i < count; ++i) {
+        AemAudioMapping wire{};
+        span_load(wire, bytes.subspan(i * AemAudioMapping::LENGTH, AemAudioMapping::LENGTH));
+        out.push_back(from_wire(wire));
+    }
+    return out;
 }
 
 }  // namespace
@@ -1655,6 +1721,197 @@ auto AemCommandHandler::store_audio_map_entries(
         ++count;
     }
     return count;
+}
+
+auto AemCommandHandler::check_mapping(
+    uint16_t const port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool const check_channel) const -> uint8_t
+{
+    if (!cluster_ordinal(port, mapping)) {
+        return AEM_STATUS_BAD_ARGUMENTS;  // no such cluster channel
+    }
+    auto const stream = read_model_descriptor<DescriptorStream>(
+        port.port_type == DESCRIPTOR_STREAM_PORT_INPUT ? DESCRIPTOR_STREAM_INPUT : DESCRIPTOR_STREAM_OUTPUT, mapping.stream_index);
+    if (!stream) {
+        return AEM_STATUS_BAD_ARGUMENTS;  // no such stream of the port's direction
+    }
+    return check_channel ? check_stream_channel(port_index, port, stream->current_format.to_uint64(), mapping.stream_channel)
+                         : AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::check_stream_channel(
+    uint16_t const port_index, PortModel const& port, uint64_t const stream_format, uint16_t const stream_channel) const -> uint8_t
+{
+    // Milan v1.3 Section 5.4.2.27: a channel of the stream's current format, at the audio unit's
+    // rate unless the port converts rates.
+    auto const format = format_channels(stream_format);
+    if (stream_channel >= format.channels) {
+        return AEM_STATUS_BAD_ARGUMENTS;
+    }
+    bool const converts = (port.port_flags & (PORT_FLAG_ASYNC_SAMPLE_RATE_CONV | PORT_FLAG_SYNC_SAMPLE_RATE_CONV)) != 0;
+    bool const at_rate =
+        port.port_type != DESCRIPTOR_STREAM_PORT_INPUT || converts || unit_rate_is(port.port_type, port_index, format.rate);
+    return at_rate ? AEM_STATUS_SUCCESS : AEM_STATUS_BAD_ARGUMENTS;
+}
+
+auto AemCommandHandler::unit_rate_is(uint16_t const port_type, uint16_t const port_index, uint32_t const rate) const -> bool
+{
+    for (uint16_t unit = 0; unit < UINT16_MAX; ++unit) {
+        auto const audio_unit = read_model_descriptor<DescriptorAudioUnit>(DESCRIPTOR_AUDIO_UNIT, unit);
+        if (!audio_unit) {
+            return true;
+        }
+        if (unit_holds_port(*audio_unit, port_type, port_index)) {
+            return (audio_unit->current_sampling_rate.get() & SAMPLING_RATE_BASE_FREQUENCY_MASK) == rate;
+        }
+    }
+    return true;
+}
+
+auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const port_index, PortModel& port) const -> uint8_t
+{
+    if (audio_maps_ == nullptr || !callbacks_.on_audio_mappings_changed) {
+        return AEM_STATUS_NOT_IMPLEMENTED;
+    }
+    if (auto const status = dynamic_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    return port_type == DESCRIPTOR_STREAM_PORT_INPUT ? AEM_STATUS_SUCCESS : AEM_STATUS_NOT_IMPLEMENTED;
+}
+
+auto AemCommandHandler::handle_audio_mappings(bool const add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+    -> AemCommandResponse
+{
+    auto const cmd = mappings_command(command_data);
+    if (!cmd) {
+        return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
+    }
+    PortModel port{};
+    if (auto const status = mappable_port(cmd->descriptor_type, cmd->descriptor_index, port); status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
+    }
+    return change_audio_mappings(add, *cmd, port, command_data, out_buffer);
+}
+
+auto AemCommandHandler::change_audio_mappings(
+    bool const add,
+    AemAudioMappingsCommandHeader const& cmd,
+    PortModel const& port,
+    std::span<uint8_t const> const command_data,
+    std::span<uint8_t> const out_buffer) -> AemCommandResponse
+{
+    auto const listed = parse_mappings(command_data.subspan(AemAudioMappingsCommandHeader::LENGTH), cmd.number_of_mappings.get());
+    if (auto const status = next_mappings(add, cmd.descriptor_index, port, listed); status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
+    }
+    return commit_mappings_command(add, port.port_type, cmd, command_data, out_buffer);
+}
+
+auto AemCommandHandler::next_mappings(
+    bool const add, uint16_t const port_index, PortModel const& port, std::span<DynamicAudioMapping const> const listed) -> uint8_t
+{
+    auto const current = audio_maps_->port(port.port_type, port_index);
+    if (add) {
+        audio_maps_->next().assign(current.begin(), current.end());
+        return add_mappings(port_index, port, listed);
+    }
+    // IEEE 1722.1-2021 Clause 7.4.46.1: a REMOVE listing a mapping not held removes nothing.
+    auto const held = [current](DynamicAudioMapping const& m) { return std::ranges::binary_search(current, m, cluster_order); };
+    return std::ranges::all_of(listed, held) ? remove_mappings(port_index, port, current, listed) : AEM_STATUS_BAD_ARGUMENTS;
+}
+
+auto AemCommandHandler::commit_mappings_command(
+    bool const add,
+    uint16_t const port_type,
+    AemAudioMappingsCommandHeader const& cmd,
+    std::span<uint8_t const> const command_data,
+    std::span<uint8_t> const out_buffer) -> AemCommandResponse
+{
+    bool const changed = !std::ranges::equal(audio_maps_->next(), audio_maps_->port(port_type, cmd.descriptor_index));
+    if (auto const status = changed ? admit_and_keep(port_type, cmd.descriptor_index, true) : AEM_STATUS_SUCCESS;
+        status != AEM_STATUS_SUCCESS) {
+        return reject_command(status, command_data, out_buffer);
+    }
+    // The response echoes the command; a change is notified to the other controllers as it.
+    auto const r = reject_command(
+        AEM_STATUS_SUCCESS,
+        command_data.first(AemAudioMappingsCommandHeader::LENGTH + (cmd.number_of_mappings.get() * AemAudioMapping::LENGTH)),
+        out_buffer);
+    if (changed) {
+        notify_on_success(add ? AEM_COMMAND_ADD_AUDIO_MAPPINGS : AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, r, out_buffer);
+    }
+    return r;
+}
+
+auto AemCommandHandler::add_mappings(
+    uint16_t const port_index, PortModel const& port, std::span<DynamicAudioMapping const> const mappings) -> uint8_t
+{
+    for (auto const& mapping : mappings) {
+        if (auto const status = add_mapping(port_index, port, mapping); status != AEM_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    std::ranges::sort(audio_maps_->next(), cluster_order);
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::add_mapping(uint16_t const port_index, PortModel const& port, DynamicAudioMapping const& mapping) -> uint8_t
+{
+    if (auto const status = check_mapping(port_index, port, mapping, true); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    // Milan v1.3 Section 5.4.2.27: a cluster channel maps from at most one stream channel; one
+    // mapped already, or listed twice, from another is BAD_ARGUMENTS, from the same nothing new.
+    auto& next = audio_maps_->next();
+    auto const* const existing =
+        std::ranges::find_if(next, [&mapping](DynamicAudioMapping const& m) { return same_cluster_channel(m, mapping); });
+    if (existing != next.end()) {
+        return *existing == mapping ? AEM_STATUS_SUCCESS : AEM_STATUS_BAD_ARGUMENTS;
+    }
+    return next.try_push_back(mapping) != nullptr ? AEM_STATUS_SUCCESS : AEM_STATUS_NO_RESOURCES;
+}
+
+auto AemCommandHandler::remove_mappings(
+    uint16_t const port_index,
+    PortModel const& port,
+    std::span<DynamicAudioMapping const> const current,
+    std::span<DynamicAudioMapping const> const listed) -> uint8_t
+{
+    // Milan v1.3 Section 5.4.2.28: a mapping listed twice is ignored; one naming nothing in the
+    // model is not a mapping at all.
+    for (auto const& mapping : listed) {
+        if (auto const status = check_mapping(port_index, port, mapping, false); status != AEM_STATUS_SUCCESS) {
+            return status;
+        }
+    }
+    auto& next = audio_maps_->next();
+    next.clear();
+    std::ranges::copy_if(current, std::back_inserter(next), [listed](DynamicAudioMapping const& m) {
+        return std::ranges::find(listed, m) == listed.end();
+    });
+    return AEM_STATUS_SUCCESS;
+}
+
+auto AemCommandHandler::admit_mappings(uint16_t const port_type, uint16_t const port_index, bool const apply) -> uint8_t
+{
+    auto const& next = audio_maps_->next();
+    if (!audio_maps_->fits(port_type, port_index, next.size())) {
+        return AEM_STATUS_NO_RESOURCES;  // every port's together
+    }
+    if (!apply) {
+        return AEM_STATUS_SUCCESS;
+    }
+    // All or nothing: the data plane puts the whole new set in force, or nothing changes.
+    return callbacks_.on_audio_mappings_changed ? callbacks_.on_audio_mappings_changed(port_type, port_index, next)
+                                                : AEM_STATUS_NOT_IMPLEMENTED;
+}
+
+auto AemCommandHandler::admit_and_keep(uint16_t const port_type, uint16_t const port_index, bool const apply) -> uint8_t
+{
+    if (auto const status = admit_mappings(port_type, port_index, apply); status != AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    (void)audio_maps_->replace(port_type, port_index, audio_maps_->next());  // admitted: it fits
+    return AEM_STATUS_SUCCESS;
 }
 
 auto AemCommandHandler::handle_acquire_entity(
