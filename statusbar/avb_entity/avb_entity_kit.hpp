@@ -31,6 +31,7 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
@@ -429,6 +430,8 @@ class AvbEntityKit
     void follow_input_bound(uint16_t index);
     /// End the observation interval of every stream's counters; notify those that changed.
     void fold_stream_counters();
+    /// The stream outputs' half of fold_stream_counters().
+    void fold_output_counters();
     /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
     /// describes: the status of the command. A stream input takes another
     /// channel count (change_input_format); a stream output keeps the one
@@ -570,6 +573,8 @@ class AvbEntityKit
     std::optional<int64_t> next_counters_fold_ns_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
+    /// Each stream output's Milan counters, by observation interval (reactor thread).
+    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

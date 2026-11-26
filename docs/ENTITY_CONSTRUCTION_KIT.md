@@ -323,6 +323,7 @@ Everything not listed here is the same under both.
 | Stream destination addresses when `stream.address_mode` is empty (the default) | `static`: the configured `*_dest_mac` | `maap`: a block acquired and defended by MAAP (4.3.3.1), kept across restarts in `maap-range`; `static` or `maap` given outright is used under either. Where the MAAP socket cannot be opened the entity still falls back to the configured addresses, with a warning |
 | A GET_AUDIO_MAP partition of a port's dynamic mappings | 62 mappings, within an AECPDU's 524 octets of control data (9.2.1.1.7) | 176 mappings, 1420 octets (5.4.1, 5.4.2.26) |
 | GET_COUNTERS of a stream input | the running counts of IEEE 1722.1-2021 Clause 7.4.42, bits 0 to 11: AVTPDUs, locks and losses since the input was opened | Milan v1.3 Table 5.13: MEDIA_LOCKED, MEDIA_UNLOCKED and STREAM_INTERRUPTED count events, the others the observation intervals in which they were seen (Table 5.6); no TIMESTAMP_VALID or TIMESTAMP_NOT_VALID; all zeroed each time the input becomes bound (5.3.8.10) |
+| GET_COUNTERS of a stream output | the running counts of IEEE 1722.1-2021 Table 7-158 at bits 0, 1, 3, 4 and 7: STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN, FRAMES_TX | Milan v1.3 Table 5.14, the same bits: STREAM_START and STREAM_STOP count starts and stops, the others the observation intervals in which an AVTPDU sent toggled mr, had tu set, or was sent, each zeroed at a start (Table 5.4) |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
 
 ### Stream counters
@@ -360,7 +361,11 @@ is not stopped, as the media thread finds at each tick
 sender is the one writer, so the counters are atomics written with a load
 and a store, read by the reactor thread. GET_COUNTERS reports them at the
 bits of IEEE 1722.1-2021 Table 7-158: STREAM_START, STREAM_STOP,
-MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX.
+MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX. Each fold makes the Milan
+values of every output too (`StreamOutputIntervals`), notified as an
+input's are; under the Milan profile GET_COUNTERS answers STREAM_START and
+STREAM_STOP as they stand and the interval counters as of the last fold,
+zero once the stream has started since.
 
 ### The format of a stream input
 

@@ -12,11 +12,13 @@
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 
 namespace statusbar::avb_entity {
@@ -172,6 +174,48 @@ template <typename ListenerSink>
     out[stream_output_media_reset_bit] = c->mr_toggles.load(relaxed);
     out[stream_output_timestamp_uncertain_bit] = c->tu_pdus.load(relaxed);
     out[stream_output_frames_tx_bit] = c->pdus.load(relaxed);
+    return true;
+}
+
+/// What STREAM_OUTPUT @p descriptor_index has sent (TalkerTxCounters) as
+/// StreamOutputTotals, its starts and stops of one instant; zeros for an
+/// index past MAX_ENTITY_STREAMS. Reactor thread.
+[[nodiscard]] inline auto talker_stream_totals(TalkerStreams const& talker, uint16_t const descriptor_index) -> StreamOutputTotals
+{
+    auto const* const c = talker.tx_counters(descriptor_index);
+    if (c == nullptr) {
+        return {};
+    }
+    auto const relaxed = std::memory_order_relaxed;
+    uint32_t const changes = c->streaming_changes.load(relaxed);
+    return {
+        .starts = stream_starts(changes),
+        .stops = stream_stops(changes),
+        .pdus = c->pdus.load(relaxed),
+        .tu_pdus = c->tu_pdus.load(relaxed),
+        .mr_toggles = c->mr_toggles.load(relaxed)};
+}
+
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index as Milan v1.3 Table
+/// 5.14 has them: @p intervals, the stream's StreamOutputIntervals, current()
+/// at what the talker has sent. False for a stream the talker has no slot for. Reactor thread.
+[[nodiscard]] inline auto fill_interval_talker_stream_counters(
+    TalkerStreams const& talker,
+    uint16_t const descriptor_index,
+    StreamOutputIntervals const& intervals,
+    uint32_t& valid,
+    std::array<uint32_t, 32>& out) -> bool
+{
+    if (talker.slot_for(descriptor_index) == nullptr) {
+        return false;
+    }
+    valid |= StreamOutputIntervals::VALID;
+    auto const values = intervals.current(talker_stream_totals(talker, descriptor_index));
+    for (size_t i = 0; i < values.size(); ++i) {
+        if ((StreamOutputIntervals::VALID & (1U << i)) != 0) {
+            out[i] = values[i];
+        }
+    }
     return true;
 }
 

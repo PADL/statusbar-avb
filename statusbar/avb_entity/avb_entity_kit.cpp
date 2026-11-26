@@ -717,7 +717,11 @@ void AvbEntityKit::wire_aem_stream_callbacks()
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
+                // Milan v1.3 Table 5.14 by observation interval; IEEE 1722.1's running counts otherwise.
+                return milan_profile() && descriptor_index < output_counters_.size()
+                    ? fill_interval_talker_stream_counters(
+                          *talker_, descriptor_index, output_counters_[descriptor_index], valid, counters)
+                    : fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
                 // Milan v1.3 Table 5.13 by observation interval; IEEE 1722.1's running counts otherwise.
@@ -1340,12 +1344,22 @@ void AvbEntityKit::poll_counters(int64_t const now_ns)
 void AvbEntityKit::fold_stream_counters()
 {
     // Table 5.20: a notification when a counter changed, one a second per descriptor at most.
+    fold_output_counters();
     if (listener_ == nullptr) {
         return;
     }
     for (auto const& spec : listener_specs_) {
         if (listener_->fold_input_counters(spec.index)) {
             (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
+        }
+    }
+}
+
+void AvbEntityKit::fold_output_counters()
+{
+    for (auto const& spec : talker_specs_) {
+        if (spec.index < output_counters_.size() && output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
+            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
         }
     }
 }
