@@ -466,7 +466,14 @@ store's capacity NO_RESOURCES, with nothing changed. A change goes to the
 entity's `set_on_audio_mappings_changed` hook first, all of the port's
 mappings at once, and is kept only when the hook answers SUCCESS; without
 the hook both commands answer NOT_IMPLEMENTED. The response echoes the
-command and a change is notified as it, after it.
+command and a change is notified as it, after it. The entity changes a
+port itself with `apply_local_audio_mappings` (a REMOVE then an ADD, all
+or nothing, through the same hook, refused while `local_change_refusal()`
+refuses), which notifies every registered controller of what changed as
+REMOVE then ADD in AECPDUs of at most 63 mappings, and seeds a port's
+defaults, or mappings it restores, with `seed_audio_mappings`, which
+notifies nobody. The kit hands the handler no store: an entity that
+routes channels gives `components().aem_handler` its store and hook.
 
 Profile-independent, because both documents agree: only the ENTITY
 descriptor can be acquired or locked (NOT_SUPPORTED otherwise); while

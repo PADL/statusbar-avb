@@ -103,6 +103,18 @@ class Model final : public AemEntityHandler
         return true;
     }
 
+    /// A SET (any) whose hook makes a local mapping change of its own.
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        if (aem != nullptr && !added_on_set.empty()) {
+            (void)aem->apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 0, added_on_set, {});
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    std::vector<DynamicAudioMapping> added_on_set;
     uint32_t unit_rate{48000};
     uint16_t port0_flags{0};
     uint16_t output_flags{0};
@@ -572,6 +584,108 @@ TEST(nanoavb_audio_map, a_controller_maps_an_output_port_by_the_output_rule)
     EXPECT_TRUE(b.get_map(0, 1, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == (std::vector<DynamicAudioMapping>{m(2, 0, 1)}));
     EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 1);
     EXPECT_TRUE(b.get_map(0, 0).mappings.empty());  // the input ports' are apart
+}
+
+// seed_audio_mappings (an entity's default, a restore): validated as an ADD onto an empty port,
+// kept without the data plane hook, notified to nobody; for either direction.
+TEST(nanoavb_audio_map, seeded_mappings_are_kept_untold)
+{
+    Bench b;
+    std::vector<DynamicAudioMapping> const identity{m(0, 0, 0), m(0, 1, 1), m(0, 2, 2), m(0, 3, 3)};
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 0, identity), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings == identity);
+    std::vector<DynamicAudioMapping> const swapped{m(0, 1, 0), m(0, 0, 1)};
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 0, swapped), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings == swapped);
+    std::vector<DynamicAudioMapping> const bad{m(0, 0, 0), m(0, 9, 1)};
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 0, bad), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings == swapped);
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 2, identity), AEM_STATUS_NOT_SUPPORTED);
+    // An output port, by its rule: two cluster channels into one stream channel is refused.
+    std::vector<DynamicAudioMapping> const out{m(0, 0, 0), m(0, 1, 0)};
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_OUTPUT, 0, out), AEM_STATUS_SUCCESS);
+    std::vector<DynamicAudioMapping> const merged{m(0, 0, 0), m(0, 0, 1)};
+    EXPECT_EQ(b.aem.seed_audio_mappings(DESCRIPTOR_STREAM_PORT_OUTPUT, 0, merged), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == out);
+    EXPECT_TRUE(b.applied.empty());
+    EXPECT_TRUE(b.sent.size() == 4 && std::ranges::none_of(b.sent, [](Sent const& s) { return s.header.is_unsolicited(); }));
+}
+
+// apply_local_audio_mappings: a REMOVE then an ADD by the entity, one data plane call,
+// every controller told what changed (63 mappings an AECPDU); locked out.
+TEST(nanoavb_audio_map, a_local_change_is_routed_once_and_told_in_pdus)
+{
+    Bench b;
+    std::vector<DynamicAudioMapping> hundred;
+    hundred.reserve(100);
+    for (uint16_t ch = 0; ch < 100; ++ch) {
+        hundred.push_back(m(0, static_cast<uint16_t>(ch % 4), 0, ch));
+    }
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, hundred, {}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.applied.size(), size_t{1});
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 2);  // 63 + 37
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 2);
+    size_t told = 0;
+    for (auto const& s : b.sent) {
+        AemAudioMappingsCommandHeader header{};
+        span_load(header, std::span<uint8_t const>{s.body}.first(AemAudioMappingsCommandHeader::LENGTH));
+        EXPECT_EQ(s.body.size(), AemAudioMappingsCommandHeader::LENGTH + (size_t{header.number_of_mappings.get()} * 8));
+        told += s.dest == MAC_A ? header.number_of_mappings.get() : 0U;
+    }
+    EXPECT_EQ(told, size_t{100});
+
+    // Remap cluster channel 0 from stream channel 1: a REMOVE and an ADD of one each.
+    b.sent.clear();
+    std::vector<DynamicAudioMapping> const old_one{m(0, 0, 0, 0)};
+    std::vector<DynamicAudioMapping> const new_one{m(0, 1, 0, 0)};
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, new_one, old_one), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.applied.size(), size_t{2});
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_TRUE(b.get_map(1, 0).mappings.front() == new_one.front());
+
+    // The same again changes nothing; a bad ADD refuses the REMOVE with it.
+    b.sent.clear();
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, new_one, {}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(
+        b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, std::vector{m(0, 9, 0, 1)}, new_one),
+        AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 2, new_one, {}), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_TRUE(b.sent.empty());
+    EXPECT_EQ(b.applied.size(), size_t{2});
+    // Only removed: told as a REMOVE alone.
+    EXPECT_EQ(
+        b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, {}, std::vector{m(0, 1, 0, 1)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 0);
+
+    // An output port's own change, by the output rule, through the same hook.
+    EXPECT_EQ(
+        b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_OUTPUT, 0, std::vector{m(0, 0, 0), m(0, 1, 0)}, {}),
+        AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((b.applied_to.back() == std::pair<uint16_t, uint16_t>{DESCRIPTOR_STREAM_PORT_OUTPUT, 0}));
+    EXPECT_EQ(
+        b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_OUTPUT, 0, std::vector{m(0, 0, 1)}, {}), AEM_STATUS_BAD_ARGUMENTS);
+
+    // Under milan13 a controller's lock refuses the entity's own change (Milan v1.3 Section 5.4.2.27).
+    b.lock_for_b();
+    EXPECT_EQ(b.aem.apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 1, {}, new_one), AEM_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(b.get_map(1, 0).mappings.size(), size_t{99});
+}
+
+// IEEE 1722.1-2021 Clause 7.5.2: a hook's local change, told to every controller, leaves the
+// command it runs under still leaving its own controller out of its notification.
+TEST(nanoavb_audio_map, a_local_change_from_a_hook_keeps_the_commands_requester)
+{
+    Bench b;
+    b.model.aem = &b.aem;
+    b.model.added_on_set = {m(0, 0, 0)};
+    std::array<uint8_t, 6> const set_control{0x00, DESCRIPTOR_CONTROL, 0x00, 0x00, 0x01, 0x02};
+    EXPECT_EQ(b.command(CONTROLLER_A, MAC_A, AEM_COMMAND_SET_CONTROL, set_control).header.status(), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_SET_CONTROL, MAC_A), 0);
+    EXPECT_EQ(b.notified(AEM_COMMAND_SET_CONTROL, MAC_B), 1);
 }
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)
