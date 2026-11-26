@@ -261,8 +261,8 @@ struct TalkerStreams
             .grandmaster_lost = gptp_lost_.load(std::memory_order_relaxed),
             .until_ns = tu_until_ns_.load(std::memory_order_relaxed)};
     }
-    /// Told each change of timestamp_uncertainty() on the notifying (reactor) thread: what a data plane outside the
-    /// kit sets tu by, clearing it itself at until_ns. Not for the state in force at install. Before streams flow; it
+    /// Told each change of timestamp_uncertainty() on the notifying (reactor) thread: what an offload data plane
+    /// sets tu by, clearing it itself at until_ns. Not for the state in force at install. Before streams flow; it
     /// must not throw (the notify_* calls are noexcept), and what it captures must outlive this TalkerStreams.
     using TimestampUncertaintyFn = sg14::inplace_function<void(TimestampUncertainty), 32>;
     void set_on_timestamp_uncertainty_changed(TimestampUncertaintyFn fn) noexcept { on_uncertainty_changed_ = std::move(fn); }
@@ -363,17 +363,17 @@ struct TalkerStreams
     }
 
     //
-    // A stream sent outside the kit (docs/AVB_ENTITY_KIT.md): the reporting thread must be the stream's only writer
+    // A talker stream offloaded from the kit (docs/AVB_ENTITY_KIT.md): the reporting thread must be the stream's only writer
     //
 
-    /// The varying header fields a data plane outside the kit gives its next AVTPDU of a stream.
-    struct OutsideHeader
+    /// The varying header fields an offload data plane gives its next AVTPDU of a stream.
+    struct OffloadHeader
     {
         uint8_t sequence_num{0};
         bool mr{false};
     };
-    /// What a data plane outside the kit sent of a stream since it last said.
-    struct SentOutside
+    /// What an offload data plane sent of a stream since it last said.
+    struct OffloadSent
     {
         uint32_t pdus{0};          ///< AVTPDUs sent
         uint32_t tu_pdus{0};       ///< of them, those with tu set
@@ -383,15 +383,15 @@ struct TalkerStreams
         std::optional<bool> last_mr{};
     };
     /// STREAM_OUTPUT @p stream_index's next AVTPDU's sequence_num and mr, a pending media clock restart applied as for an
-    /// AVTPDU the kit sends: what a data plane outside the kit starts the stream with. Errors, nothing applied:
+    /// AVTPDU the kit sends: what an offload data plane starts the stream with. Errors, nothing applied:
     /// no_such_device for no AAF, AM824 or CRF stream there; resource_unavailable_try_again while it is being re-shaped
     /// (ask again). The one thread that sends the stream, while the kit does not.
-    [[nodiscard]] auto outside_header(uint16_t stream_index) noexcept -> StatusValue<OutsideHeader>;
-    /// The data plane outside the kit sent @p sent of STREAM_OUTPUT @p stream_index since outside_header() or the last
+    [[nodiscard]] auto offload_header(uint16_t stream_index) noexcept -> StatusValue<OffloadHeader>;
+    /// The offload data plane sent @p sent of STREAM_OUTPUT @p stream_index since offload_header() or the last
     /// call: counted as the kit's own AVTPDUs are (an mr toggle once an AVTPDU carries it; tu_pdus at most pdus), the mr
     /// hold run down by them, the stream's sequence updated so the kit's own path goes on from it; then
-    /// outside_header(). Its errors count nothing: on resource_unavailable_try_again, say it again.
-    [[nodiscard]] auto notify_sent_outside(uint16_t stream_index, SentOutside const& sent) noexcept -> StatusValue<OutsideHeader>;
+    /// offload_header(). Its errors count nothing: on resource_unavailable_try_again, say it again.
+    [[nodiscard]] auto notify_offload_sent(uint16_t stream_index, OffloadSent const& sent) noexcept -> StatusValue<OffloadHeader>;
 
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
@@ -443,14 +443,14 @@ struct TalkerStreams
     [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
     /// @p slot's next sequence_num, by its serializer's kind; nullopt for none.
     [[nodiscard]] static auto next_sequence(TalkerStreamSlot const& slot) noexcept -> std::optional<uint8_t>;
-    /// outside_header() (@p sent none) or notify_sent_outside().
-    [[nodiscard]] auto report_outside(uint16_t stream_index, std::optional<SentOutside> const& sent) noexcept
-        -> StatusValue<OutsideHeader>;
-    /// report_outside() once the guard is held.
-    [[nodiscard]] auto report_held(TalkerStreamSlot& slot, std::optional<SentOutside> const& sent) noexcept
-        -> StatusValue<OutsideHeader>;
+    /// offload_header() (@p sent none) or notify_offload_sent().
+    [[nodiscard]] auto report_offload(uint16_t stream_index, std::optional<OffloadSent> const& sent) noexcept
+        -> StatusValue<OffloadHeader>;
+    /// report_offload() once the guard is held.
+    [[nodiscard]] auto report_held(TalkerStreamSlot& slot, std::optional<OffloadSent> const& sent) noexcept
+        -> StatusValue<OffloadHeader>;
     /// @p sent counted on @p slot, its mr hold run down and its serializer's sequence updated. Under the guard.
-    void count_sent_outside(TalkerStreamSlot& slot, SentOutside const& sent) noexcept;
+    void count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept;
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
     [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;

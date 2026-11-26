@@ -1447,13 +1447,13 @@ TEST(talker_template, a_patched_template_equals_the_serialized_frame)
 }
 
 //
-// A stream sent outside the kit
+// A talker stream offloaded from the kit
 //
 
-// A data plane outside the kit starts a stream at the kit's sequence and mr; what it sends counts as the kit's own
+// An offload data plane starts a stream at the kit's sequence and mr; what it sends counts as the kit's own
 // AVTPDUs do, runs down the mr hold and leaves the sequence where it stopped. A stream being re-shaped answers "try
 // again" and one that is not there "no such device", and neither counts.
-TEST(talker_outside, the_kit_keeps_the_sequence_and_mr_and_counts_what_was_sent)
+TEST(talker_offload, the_kit_keeps_the_sequence_and_mr_and_counts_what_was_sent)
 {
     avb_entity::StreamPort port;
     auto& wire = open_test_port(port);
@@ -1471,48 +1471,48 @@ TEST(talker_outside, the_kit_keeps_the_sequence_and_mr_and_counts_what_was_sent)
         EXPECT_TRUE(talker.transmit_aaf_raw(*slot, i * 12, 1'000'000 + i, 12, kPatternRender));
         (void)wire.pop_tx();
     }
-    using H = avb_entity::TalkerStreams::OutsideHeader;
+    using H = avb_entity::TalkerStreams::OffloadHeader;
     auto const same = [](StatusValue<H> const& h, uint8_t const sequence, bool const mr) {
         return h.has_value() && h->sequence_num == sequence && h->mr == mr;
     };
-    EXPECT_TRUE(same(talker.outside_header(0), 3, false));
+    EXPECT_TRUE(same(talker.offload_header(0), 3, false));
 
     // A restart pending is applied by the next header; the PDUs reported before it carried mr clear.
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 10, .tu_pdus = 4, .next_sequence = 13}), 13, true));
+    EXPECT_TRUE(same(talker.notify_offload_sent(0, {.pdus = 10, .tu_pdus = 4, .next_sequence = 13}), 13, true));
     auto const* const c = talker.tx_counters(0);
     EXPECT_TRUE(c->pdus.load() == 13 && c->tu_pdus.load() == 4 && c->mr_toggles.load() == 0);
     // Another restart waits for eight PDUs with mr set; the first of them counts the toggle.
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 18}), 18, true));
+    EXPECT_TRUE(same(talker.notify_offload_sent(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 18}), 18, true));
     EXPECT_EQ(c->mr_toggles.load(), 1U);
-    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 3, .tu_pdus = 0, .next_sequence = 21}), 21, false));
-    EXPECT_TRUE(same(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 3, .next_sequence = 22}), 22, false));
+    EXPECT_TRUE(same(talker.notify_offload_sent(0, {.pdus = 3, .tu_pdus = 0, .next_sequence = 21}), 21, false));
+    EXPECT_TRUE(same(talker.notify_offload_sent(0, {.pdus = 1, .tu_pdus = 3, .next_sequence = 22}), 22, false));
     EXPECT_TRUE(c->pdus.load() == 22 && c->tu_pdus.load() == 5 && c->mr_toggles.load() == 2);
 
     // Being re-shaped: nothing applied or counted, and the report can be made again.
     talker.guards_[0].lock();
-    auto const busy = talker.notify_sent_outside(0, {.pdus = 7, .tu_pdus = 0, .next_sequence = 29});
+    auto const busy = talker.notify_offload_sent(0, {.pdus = 7, .tu_pdus = 0, .next_sequence = 29});
     talker.guards_[0].unlock();
     EXPECT_TRUE(!busy && busy.error() == std::errc::resource_unavailable_try_again);
     EXPECT_EQ(c->pdus.load(), 22U);
 
-    // The kit's own path goes on from the outside's sequence and mr.
+    // The kit's own path goes on from the offload's sequence and mr.
     EXPECT_TRUE(talker.transmit_aaf_raw(*slot, 1200, 2'000'000, 12, kPatternRender));
     auto const sent = wire.pop_tx();
     EXPECT_TRUE(
         sent.has_value() && sent->frame[VLAN_HEADER_LENGTH + 2] == 22 && (sent->frame[VLAN_HEADER_LENGTH + 1] & 0x08U) == 0);
     EXPECT_TRUE(c->pdus.load() == 23 && slot->tx_packets == 23);
 
-    auto const none = talker.outside_header(1);
+    auto const none = talker.offload_header(1);
     EXPECT_TRUE(!none && none.error() == std::errc::no_such_device);
-    EXPECT_FALSE(talker.notify_sent_outside(1, {.pdus = 1, .tu_pdus = 0, .next_sequence = 1}).has_value());
+    EXPECT_FALSE(talker.notify_offload_sent(1, {.pdus = 1, .tu_pdus = 0, .next_sequence = 1}).has_value());
 }
 
-// With the mr of the last AVTPDU it sent, a data plane outside the kit has a toggle counted only once the wire carries
+// With the mr of the last AVTPDU it sent, an offload data plane has a toggle counted only once the wire carries
 // it, and the hold run down only by the AVTPDUs known to carry it: none before, the last one when it first shows,
 // every one after. A restart asked for meanwhile waits for eight of them.
-TEST(talker_outside, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
+TEST(talker_offload, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
 {
     ptpclient::MediaClockGenerator const media_clock{};
     std::atomic<int64_t> const last_gptp_ns{0};
@@ -1523,20 +1523,20 @@ TEST(talker_outside, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
         std::pmr::get_default_resource()};
     EXPECT_TRUE(talker.open_stream(spec_of(0, 0x020702200200C000ULL), kStreamId, kDest).has_value());
     auto const mr_for = [](auto const& h) { return h.has_value() && h->mr; };
-    EXPECT_FALSE(mr_for(talker.outside_header(0)));
-    (void)talker.notify_sent_outside(0, {.pdus = 4, .tu_pdus = 0, .next_sequence = 4, .last_mr = false});
+    EXPECT_FALSE(mr_for(talker.offload_header(0)));
+    (void)talker.notify_offload_sent(0, {.pdus = 4, .tu_pdus = 0, .next_sequence = 4, .last_mr = false});
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 4, .last_mr = false})));
+    EXPECT_TRUE(mr_for(talker.notify_offload_sent(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 4, .last_mr = false})));
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());  // waits for the first toggle's hold
     auto const* const c = talker.tx_counters(0);
-    // 20 AVTPDUs latched before the outside sender applied the new mr: no toggle yet, no hold run down.
-    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 20, .tu_pdus = 0, .next_sequence = 24, .last_mr = false})));
+    // 20 AVTPDUs latched before the offload sender applied the new mr: no toggle yet, no hold run down.
+    EXPECT_TRUE(mr_for(talker.notify_offload_sent(0, {.pdus = 20, .tu_pdus = 0, .next_sequence = 24, .last_mr = false})));
     EXPECT_EQ(c->mr_toggles.load(), 0U);
     // The wire shows it: the toggle counted, one AVTPDU of the hold known; six more leave one to go.
-    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 29, .last_mr = true})));
+    EXPECT_TRUE(mr_for(talker.notify_offload_sent(0, {.pdus = 5, .tu_pdus = 0, .next_sequence = 29, .last_mr = true})));
     EXPECT_EQ(c->mr_toggles.load(), 1U);
-    EXPECT_TRUE(mr_for(talker.notify_sent_outside(0, {.pdus = 6, .tu_pdus = 0, .next_sequence = 35, .last_mr = true})));
-    EXPECT_FALSE(mr_for(talker.notify_sent_outside(0, {.pdus = 1, .tu_pdus = 0, .next_sequence = 36, .last_mr = true})));
+    EXPECT_TRUE(mr_for(talker.notify_offload_sent(0, {.pdus = 6, .tu_pdus = 0, .next_sequence = 35, .last_mr = true})));
+    EXPECT_FALSE(mr_for(talker.notify_offload_sent(0, {.pdus = 1, .tu_pdus = 0, .next_sequence = 36, .last_mr = true})));
     EXPECT_EQ(c->mr_toggles.load(), 1U);
     EXPECT_EQ(c->pdus.load(), 36U);
 }
@@ -1544,7 +1544,7 @@ TEST(talker_outside, the_wire_mr_counts_the_toggle_and_runs_down_the_hold)
 // Each change of an open stream's frames is told, its template then the new one: a new VID or PCP for every open
 // stream, a new destination for its stream; a set_vlan() or set_destination() that changes nothing tells nothing,
 // and neither does reformat_stream(), whose change the kit tells once the entity accepted it.
-TEST(talker_outside, a_new_vid_pcp_or_format_is_told_as_a_change_of_the_frames)
+TEST(talker_offload, a_new_vid_pcp_or_format_is_told_as_a_change_of_the_frames)
 {
     ptpclient::MediaClockGenerator const media_clock{};
     std::atomic<int64_t> const last_gptp_ns{0};

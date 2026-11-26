@@ -944,7 +944,7 @@ TEST(avb_entity_kit_maap, an_adopted_vlan_survives_the_acquisition_of_a_block)
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
-// A MAAP block moves the streams' destinations, so it changes their frames: a data plane outside the kit is told of
+// A MAAP block moves the streams' destinations, so it changes their frames: an offload data plane is told of
 // each stream it moves, at the first block and at a new one after a conflict, and of none when the block is the same.
 TEST(avb_entity_kit_maap, a_new_block_is_told_as_a_change_of_the_frames)
 {
@@ -3804,9 +3804,9 @@ TEST(avb_entity_kit_counters, stream_output_start_stop_at_milan_bits)
     EXPECT_EQ(counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0).counters_valid.get(), 0x9BU);
 }
 
-// A data plane outside the kit is told each change of a talker stream's gate, as STREAM_START and STREAM_STOP count
+// An offload data plane is told each change of a talker stream's gate, as STREAM_START and STREAM_STOP count
 // it: a Listener Ready, STOP_STREAMING and START_STREAMING, the grace running out; nothing once the hook is removed.
-TEST(avb_entity_kit_outside, the_gate_hook_follows_stream_start_and_stop)
+TEST(avb_entity_kit_offload, the_gate_hook_follows_stream_start_and_stop)
 {
     std::vector<std::pair<uint16_t, bool>> told;  // outlives the kit, whose stop() closes the gate
     MilanKit m{false, 0x64};
@@ -3834,7 +3834,7 @@ TEST(avb_entity_kit_outside, the_gate_hook_follows_stream_start_and_stop)
 
 // A stream's new format is told as a change of its frames once the entity's hook accepted it, after the kit's stream
 // path has the new shape; a format the hook refuses, and the format in force, tell nothing.
-TEST(avb_entity_kit_outside, an_accepted_format_is_told_as_a_change_of_the_frames)
+TEST(avb_entity_kit_offload, an_accepted_format_is_told_as_a_change_of_the_frames)
 {
     std::vector<uint16_t> told;  // outlives the kit
     MilanKit p{std::nullopt, 0x67, true, make_multirate_blob(false, false, false, true)};
@@ -3862,20 +3862,20 @@ TEST(avb_entity_kit_outside, an_accepted_format_is_told_as_a_change_of_the_frame
     p.kit.talker().set_on_frames_changed({});
 }
 
-// What a data plane outside the kit sent of a talker stream reaches GET_COUNTERS as the kit's own AVTPDUs do: the
+// What an offload data plane sent of a talker stream reaches GET_COUNTERS as the kit's own AVTPDUs do: the
 // classic totals of AVTPDUs, tu AVTPDUs and mr toggles, and Milan v1.3's interval counters.
-TEST(avb_entity_kit_outside, what_was_sent_outside_reaches_get_counters)
+TEST(avb_entity_kit_offload, what_was_sent_offloaded_reaches_get_counters)
 {
     MilanKit classic{false, 0x65};
     EXPECT_TRUE(classic.start_ready());
     auto& talker = classic.kit.talker();
-    auto const first = talker.outside_header(0);
+    auto const first = talker.offload_header(0);
     EXPECT_TRUE(first.has_value() && !first->mr);
-    EXPECT_TRUE(talker.notify_sent_outside(0, {.pdus = 40, .tu_pdus = 8, .next_sequence = 40}).has_value());
+    EXPECT_TRUE(talker.notify_offload_sent(0, {.pdus = 40, .tu_pdus = 8, .next_sequence = 40}).has_value());
     EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    auto const toggled = talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 40});
+    auto const toggled = talker.notify_offload_sent(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 40});
     EXPECT_TRUE(toggled.has_value() && toggled->mr);
-    EXPECT_TRUE(talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 48}).has_value());
+    EXPECT_TRUE(talker.notify_offload_sent(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 48}).has_value());
     auto const c = counters_of(classic, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(c.counters[3].get(), 1U);   // mr toggles
     EXPECT_EQ(c.counters[4].get(), 8U);   // tu AVTPDUs
@@ -3886,11 +3886,11 @@ TEST(avb_entity_kit_outside, what_was_sent_outside_reaches_get_counters)
     int64_t t = MilanKit::steady_ns();
     milan.kit.poll_counters(t);  // the first interval starts
     auto& milan_talker = milan.kit.talker();
-    EXPECT_TRUE(milan_talker.outside_header(0).has_value());
-    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 1, .next_sequence = 8}).has_value());
+    EXPECT_TRUE(milan_talker.offload_header(0).has_value());
+    EXPECT_TRUE(milan_talker.notify_offload_sent(0, {.pdus = 8, .tu_pdus = 1, .next_sequence = 8}).has_value());
     EXPECT_TRUE(milan_talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 8}).has_value());
-    EXPECT_TRUE(milan_talker.notify_sent_outside(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 16}).has_value());
+    EXPECT_TRUE(milan_talker.notify_offload_sent(0, {.pdus = 0, .tu_pdus = 0, .next_sequence = 8}).has_value());
+    EXPECT_TRUE(milan_talker.notify_offload_sent(0, {.pdus = 8, .tu_pdus = 0, .next_sequence = 16}).has_value());
     milan.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     auto const v = counters_of(milan, DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_EQ(v.counters[3].get(), 1U);  // MEDIA_RESET: an interval with an mr toggle
@@ -3994,15 +3994,15 @@ TEST(avb_entity_kit_formats, milan_v1_3_tspec)
     EXPECT_TRUE(m.kit.host().components().aem_handler.stream_info_layout() == atdecc::aem::StreamInfoLayout::ieee_2021);
 }
 
-// What a data plane outside the kit received of an input reaches GET_COUNTERS as the kit's own reception does: Milan
+// What an offload data plane received of an input reaches GET_COUNTERS as the kit's own reception does: Milan
 // v1.2 Table 5.16's interval counters, MEDIA_LOCKED from its check of the lock.
-TEST(avb_entity_kit_outside, what_was_received_outside_reaches_get_counters)
+TEST(avb_entity_kit_offload, what_was_received_offloaded_reaches_get_counters)
 {
     MilanPair p;
     EXPECT_TRUE(p.start());
     int64_t t = MilanKit::steady_ns();
     p.l.kit.poll_counters(t);  // the first interval starts
-    EXPECT_TRUE(p.l.kit.listener()->notify_received_outside(
+    EXPECT_TRUE(p.l.kit.listener()->notify_offload_received(
         0, {.frames_rx = 8, .seq_num_mismatch = 1, .timestamp_uncertain = 2, .timestamp_valid = 8, .media_locked = true}, 48));
     p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     auto const c = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);

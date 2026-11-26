@@ -1161,20 +1161,20 @@ void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const
     }
 }
 
-auto ListenerStreams::notify_received_outside(
+auto ListenerStreams::notify_offload_received(
     uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
 {
     auto* const slot = slot_for(stream_index);
     if (slot == nullptr) {
         return false;
     }
-    count_received_outside(*slot, counts);
+    count_offload_received(*slot, counts);
     slot->rx_packets.add(counts.frames_rx - std::min(counts.unsupported_format, counts.frames_rx));  // those accepted
     slot->rx_samples.add(samples);
     return true;
 }
 
-void ListenerStreams::count_received_outside(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
+void ListenerStreams::count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
 {
     bool const idle = slot.stopped.load(std::memory_order_relaxed) || slot.rx_stream_id.load() == 0;
     if (!idle || counts.media_locked.value_or(true)) {

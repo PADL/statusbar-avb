@@ -420,7 +420,7 @@ struct ListenerStreams
     void set_stream_stopped(uint16_t stream_index, bool stopped) noexcept;
 
     //
-    // A stream received outside the kit (docs/AVB_ENTITY_KIT.md)
+    // A listener stream offloaded from the kit (docs/AVB_ENTITY_KIT.md)
     //
 
     /// Told on the reactor of each change of what STREAM_INPUT @p stream_index receives: the stream ID it matches frames
@@ -428,10 +428,10 @@ struct ListenerStreams
     /// function removes it. It must not throw, and what it captures must outlive the kit: stop() releases every input.
     using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, uint64_t stream_id, bool stopped), 32>;
     void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
-    /// A data plane outside the kit received @p counts of STREAM_INPUT @p stream_index since it last said, @p samples
+    /// An offload data plane received @p counts of STREAM_INPUT @p stream_index since it last said, @p samples
     /// sample frames of them accepted: added to its counters and telemetry. False for no such input. Called by the one
     /// thread that reports the stream, at least once an observation interval, while the kit receives none of it.
-    [[nodiscard]] auto notify_received_outside(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
+    [[nodiscard]] auto notify_offload_received(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
         -> bool;
 
     /// Install the reactor-thread logger for connect/disconnect status lines.
@@ -483,7 +483,7 @@ struct ListenerStreams
     /// on_input_changed_ told of @p slot as it stands, if set.
     void tell_input_changed(ListenerStreamSlot const& slot) const noexcept;
     /// @p counts added to @p slot's counters; a lost lock as unlock_stream_input() while it is stopped or unbound.
-    static void count_received_outside(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
+    static void count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
     [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's deserializers and @p spec's format into @p slot. Under the guard.

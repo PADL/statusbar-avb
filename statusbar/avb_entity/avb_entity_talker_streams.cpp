@@ -160,7 +160,7 @@ void count_pdus(TalkerTxCounters& c, uint32_t const pdus, uint32_t const tu_pdus
 /// How many of @p sent's AVTPDUs are known to carry @p mr, the mr a toggle's hold is for (a hold lasts for PDUs sent
 /// with it): all of them without last_mr; with it, all when the wire carried @p mr before, one (the last) when it
 /// carries it from this report, none while it does not. @p c holds the mr of the last AVTPDU counted before.
-[[nodiscard]] auto pdus_carrying(TalkerTxCounters const& c, bool const mr, TalkerStreams::SentOutside const& sent) noexcept
+[[nodiscard]] auto pdus_carrying(TalkerTxCounters const& c, bool const mr, TalkerStreams::OffloadSent const& sent) noexcept
     -> uint32_t
 {
     if (!sent.last_mr) {
@@ -737,18 +737,18 @@ auto TalkerStreams::next_sequence(TalkerStreamSlot const& slot) noexcept -> std:
     return slot.crf ? std::optional<uint8_t>{slot.crf->sequence_num} : std::nullopt;
 }
 
-auto TalkerStreams::outside_header(uint16_t const stream_index) noexcept -> StatusValue<OutsideHeader>
+auto TalkerStreams::offload_header(uint16_t const stream_index) noexcept -> StatusValue<OffloadHeader>
 {
-    return report_outside(stream_index, std::nullopt);
+    return report_offload(stream_index, std::nullopt);
 }
 
-auto TalkerStreams::notify_sent_outside(uint16_t const stream_index, SentOutside const& sent) noexcept -> StatusValue<OutsideHeader>
+auto TalkerStreams::notify_offload_sent(uint16_t const stream_index, OffloadSent const& sent) noexcept -> StatusValue<OffloadHeader>
 {
-    return report_outside(stream_index, sent);
+    return report_offload(stream_index, sent);
 }
 
-auto TalkerStreams::report_outside(uint16_t const stream_index, std::optional<SentOutside> const& sent) noexcept
-    -> StatusValue<OutsideHeader>
+auto TalkerStreams::report_offload(uint16_t const stream_index, std::optional<OffloadSent> const& sent) noexcept
+    -> StatusValue<OffloadHeader>
 {
     auto* const slot = slot_for(stream_index);
     if (slot == nullptr) {
@@ -761,20 +761,20 @@ auto TalkerStreams::report_outside(uint16_t const stream_index, std::optional<Se
     return report_held(*slot, sent);
 }
 
-auto TalkerStreams::report_held(TalkerStreamSlot& slot, std::optional<SentOutside> const& sent) noexcept
-    -> StatusValue<OutsideHeader>
+auto TalkerStreams::report_held(TalkerStreamSlot& slot, std::optional<OffloadSent> const& sent) noexcept
+    -> StatusValue<OffloadHeader>
 {
     auto const sequence = next_sequence(slot);
     if (!sequence) {
         return failure(std::errc::no_such_device);  // no AAF, AM824 or CRF serializer
     }
     if (sent) {
-        count_sent_outside(slot, *sent);
+        count_offload_sent(slot, *sent);
     }
-    return OutsideHeader{.sequence_num = next_sequence(slot).value_or(*sequence), .mr = next_mr(slot)};
+    return OffloadHeader{.sequence_num = next_sequence(slot).value_or(*sequence), .mr = next_mr(slot)};
 }
 
-void TalkerStreams::count_sent_outside(TalkerStreamSlot& slot, SentOutside const& sent) noexcept
+void TalkerStreams::count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept
 {
     slot.tx_packets += sent.pdus;
     set_sequence(slot, sent.next_sequence);

@@ -505,7 +505,7 @@ Controllers on the same host (la_avdecc's local protocol interface,
 entity over an AF_UNIX datagram socket, without raw-socket privileges
 (`nanoavb_local_port.hpp`).
 
-## Streams carried outside the kit
+## Streams offloaded from the kit
 
 A talker stream's frames may be sent by something beside the stream port (a
 NIC or FPGA that packetises the stream itself), from the stream's
@@ -517,9 +517,9 @@ that data plane follows them and reports back:
   `talker_should_transmit()` on the reactor, as STREAM_START and STREAM_STOP
   count it: a reservation, STOP_STREAMING or START_STREAMING, MAAP, the grace
   running out. The data plane sends while it is open.
-- **Sequence and mr.** `outside_header()` gives the stream's next sequence_num
+- **Sequence and mr.** `offload_header()` gives the stream's next sequence_num
   and mr, a pending `toggle_media_clock_restart` applied as for an AVTPDU the
-  kit sends. `notify_sent_outside()` reports the AVTPDUs sent since, how many
+  kit sends. `notify_offload_sent()` reports the AVTPDUs sent since, how many
   with tu set (at most all of them), and the next sequence_num; they are
   counted as the kit's own (`tx_counters()`, so GET_COUNTERS), run down the mr
   hold, and leave the serializer's sequence there, so the kit's own path goes
@@ -532,7 +532,7 @@ that data plane follows them and reports back:
   all lock it (`transmit_crf_raw()` does not), and its counters are written
   without read-modify-write.
 - **mr at a report boundary.** AVTPDUs counted before the data plane applied a
-  new mr carry the old one. With `SentOutside::last_mr`, the mr of the last
+  new mr carry the old one. With `OffloadSent::last_mr`, the mr of the last
   AVTPDU sent, a toggle is counted once the wire carries it, and the hold runs
   down only by the AVTPDUs known to carry the new mr: none before it shows, one
   in the report where it first shows, all after. The hold may so last longer
@@ -565,7 +565,7 @@ group membership and counters:
   stop() releases it) and of whether it discards them
   (`set_stream_stopped`, Milan v1.2 Section 5.3.8.7), on the reactor. Its
   format follows `set_on_stream_format_changed`.
-- **Counters.** `notify_received_outside()` adds a `StreamInputCounts` (the
+- **Counters.** `notify_offload_received()` adds a `StreamInputCounts` (the
   per-packet counts `tally_stream_input_packet()` keeps, and the media lock as
   the data plane checks it) to the input's counters, so GET_COUNTERS and the
   observation-interval fold go on, and the accepted AVTPDUs and sample frames
@@ -579,7 +579,7 @@ group membership and counters:
 - **Report cadence.** Report each input at least once an observation interval
   (1 s). At a fold a locked input counts as silent, and so stopped, when a
   report arrived and no AVTPDU did, or when no report arrived for
-  `StreamInputIntervals::OUTSIDE_QUIET_INTERVALS` (2) intervals in a row; one
+  `StreamInputIntervals::OFFLOAD_QUIET_INTERVALS` (2) intervals in a row; one
   slow report is no interruption.
 - **Hooks.** As for talkers: `set_on_input_changed` must not throw, and what it
   captures must outlive the kit, since `stop()` releases every input through it.

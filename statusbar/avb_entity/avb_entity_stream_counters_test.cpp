@@ -396,10 +396,10 @@ TEST(stream_output_intervals, start_stop_and_intervals)
 
 // Test runner
 
-// Counts from a data plane outside the kit add to the per-packet counters, and its check of the media lock counts
+// Counts from an offload data plane add to the per-packet counters, and its check of the media lock counts
 // as tally_stream_input_packet()'s does: MEDIA_LOCKED once when gained, MEDIA_UNLOCKED and STREAM_INTERRUPTED once when
 // lost; a report while the reactor's unlock is pending clears it and gains no lock; the interval fold counts them.
-TEST(stream_counters, counts_from_outside_add_and_follow_the_lock)
+TEST(stream_counters, offloaded_counts_add_and_follow_the_lock)
 {
     StreamInputCounters c{};
     StreamInputCounts const counts{
@@ -458,9 +458,9 @@ TEST(stream_counters, after_a_bind_any_report_clears_the_pending_unlock)
     EXPECT_EQ(c.media_locked.load(), 3U);
 }
 
-// A locked input a data plane outside the kit reports is silent at a fold only when a report arrived and no AVTPDU
-// did, or when no report arrived for OUTSIDE_QUIET_INTERVALS intervals in a row: one slow report is no interruption.
-TEST(stream_input_intervals, an_outside_input_is_silent_only_by_its_reports)
+// A locked input an offload data plane reports is silent at a fold only when a report arrived and no AVTPDU
+// did, or when no report arrived for OFFLOAD_QUIET_INTERVALS intervals in a row: one slow report is no interruption.
+TEST(stream_input_intervals, an_offloaded_input_is_silent_only_by_its_reports)
 {
     using statusbar::avb_entity::StreamInputIntervals;
     StreamInputCounters c{};

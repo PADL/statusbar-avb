@@ -221,7 +221,7 @@ void tally_stream_input_packet(
 
 namespace {
 
-/// The media lock of @p c as an outside data plane checks it, @p locked; none gained in a report that cleared the
+/// The media lock of @p c as an offload data plane checks it, @p locked; none gained in a report that cleared the
 /// reactor's pending unlock (@p restarted).
 void follow_media_lock(StreamInputCounters& c, bool const locked, bool const restarted) noexcept
 {
@@ -250,7 +250,7 @@ void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& co
     c.unsupported_format.fetch_add(counts.unsupported_format, relaxed);
     c.late_timestamp.fetch_add(counts.late_timestamp, relaxed);
     c.early_timestamp.fetch_add(counts.early_timestamp, relaxed);
-    c.outside_reports.fetch_add(1, relaxed);
+    c.offload_reports.fetch_add(1, relaxed);
     // As a packet's tally: the reactor's pending unlock is cleared by any report that says something of the stream.
     bool const restarted = (counts.frames_rx != 0 || counts.media_locked) && c.restart_run.exchange(false, relaxed);
     if (counts.media_locked) {
@@ -373,11 +373,11 @@ auto StreamOutputIntervals::fold_presence() noexcept -> bool
 auto StreamInputIntervals::silent(StreamInputCounters const& c) noexcept -> bool
 {
     auto const relaxed = std::memory_order_relaxed;
-    uint32_t const reports = c.outside_reports.load(relaxed);
+    uint32_t const reports = c.offload_reports.load(relaxed);
     bool const reported = std::exchange(last_reports, reports) != reports;
-    quiet_intervals = reported ? 0 : static_cast<uint8_t>(std::min<unsigned>(quiet_intervals + 1U, OUTSIDE_QUIET_INTERVALS));
+    quiet_intervals = reported ? 0 : static_cast<uint8_t>(std::min<unsigned>(quiet_intervals + 1U, OFFLOAD_QUIET_INTERVALS));
     bool const unmoved = c.frames_rx.load(relaxed) == last[FRAMES_RX];
-    return unmoved && (reports == 0 || reported || quiet_intervals >= OUTSIDE_QUIET_INTERVALS);
+    return unmoved && (reports == 0 || reported || quiet_intervals >= OFFLOAD_QUIET_INTERVALS);
 }
 
 void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
@@ -395,7 +395,7 @@ void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
     last[LATE_TIMESTAMP] = c.late_timestamp.load(relaxed);
     last[EARLY_TIMESTAMP] = c.early_timestamp.load(relaxed);
     last[FRAMES_RX] = c.frames_rx.load(relaxed);
-    last_reports = c.outside_reports.load(relaxed);
+    last_reports = c.offload_reports.load(relaxed);
     quiet_intervals = 0;
 }
 

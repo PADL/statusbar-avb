@@ -276,7 +276,7 @@ class AvbEntityKit
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
     /// Called on the reactor thread with talker stream @p idx's talker_should_transmit() at each change (STREAM_START,
-    /// STREAM_STOP), not for the state at install: what a data plane outside the kit gates the stream by. It must not
+    /// STREAM_STOP), not for the state at install: what an offload data plane gates the stream by. It must not
     /// throw, and what it captures must outlive the kit (or pass an empty function first): stop() closes every gate.
     using TalkerGateFn = sg14::inplace_function<void(uint16_t idx, bool open), 32>;
     void set_on_talker_gate_changed(TalkerGateFn fn) noexcept { on_talker_gate_changed_ = std::move(fn); }
