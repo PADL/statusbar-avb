@@ -233,8 +233,14 @@ struct TalkerStreams
     /// serializer for @p stream_id. CRF timing (base frequency, interval,
     /// timestamps per PDU) comes from the spec's decoded format word — the
     /// blob is the single source. Errors: unknown/unsupported format kind or
-    /// rate, or more than MAX_ENTITY_STREAMS slots.
+    /// rate, a CRF format with no timestamp per AVTPDU or more than
+    /// MAX_CRF_TIMESTAMPS_PER_PDU, or more than MAX_ENTITY_STREAMS slots.
     auto open_stream(StreamSpec const& spec, tsn::StreamId stream_id, ieee::Eui48 dest_mac) -> Status;
+
+    /// The most timestamps one CRF AVTPDU of this talker carries: the frame
+    /// transmit_crf() builds has room for these and no more. A stream format
+    /// can ask for up to 255.
+    static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
 
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.

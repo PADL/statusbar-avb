@@ -71,7 +71,9 @@ auto open_aaf(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId cons
 /// One slot's serializer for a CRF spec.
 auto open_crf(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
 {
-    if (spec.format.crf_base_frequency_hz == 0 || spec.format.crf_timestamps_per_pdu == 0) {
+    // More timestamps than transmit_crf()'s frame holds would be sent from beyond it.
+    uint16_t const timestamps = spec.format.crf_timestamps_per_pdu;
+    if (spec.format.crf_base_frequency_hz == 0 || timestamps == 0 || timestamps > TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU) {
         return failure(std::errc::invalid_argument);
     }
     slot.crf.emplace(
@@ -271,7 +273,7 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     // interval/base seconds regardless of the base we advertise.
     uint32_t const sample_stride = crf_sample_stride(interval, slot.crf->base_frequency, config_.sample_rate);
 
-    static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (64 * avtp::CrfPdu::TIMESTAMP_SIZE);
+    static constexpr size_t MAX_FRAME = avtp::CrfPdu::HEADER_LENGTH + (MAX_CRF_TIMESTAMPS_PER_PDU * avtp::CrfPdu::TIMESTAMP_SIZE);
     std::array<uint8_t, MAX_FRAME> frame{};
 
     avtp::CrfPdu pdu{};

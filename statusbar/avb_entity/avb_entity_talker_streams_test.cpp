@@ -387,6 +387,32 @@ TEST(talker_mr, a_media_clock_re_anchored_on_a_stepped_gptp_timeline_toggles_mr)
     EXPECT_EQ(talker.tx_counters(2)->mr_toggles.load(), 2U);
 }
 
+// A CRF stream format names up to 255 timestamps per AVTPDU; the talker's frame holds
+// MAX_CRF_TIMESTAMPS_PER_PDU. A format that asks for more is refused when the stream is opened,
+// since its AVTPDU would be sent from beyond the frame.
+TEST(talker_streams, a_crf_stream_with_more_timestamps_than_the_frame_holds_is_refused)
+{
+    constexpr uint64_t CRF_48K_NO_COUNT = 0x041060010000BB80ULL & ~(0xFFULL << 32);
+    auto const open_with = [](uint64_t const timestamps) {
+        ptpclient::MediaClockGenerator const mc{};
+        std::atomic<int64_t> const gptp_now{0};
+        avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+        avb_entity::StreamSpec spec{};
+        spec.index = 2;
+        spec.format_word = CRF_48K_NO_COUNT | (timestamps << 32);
+        spec.format = avb_entity::decode_stream_format(spec.format_word);
+        EXPECT_TRUE(spec.format.kind == avb_entity::StreamKind::crf);
+        EXPECT_EQ(uint64_t{spec.format.crf_timestamps_per_pdu}, timestamps);
+        return talker.open_stream(spec, {}, {}).has_value();
+    };
+    constexpr uint64_t most = avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU;
+    EXPECT_TRUE(open_with(1));
+    EXPECT_TRUE(open_with(most));
+    EXPECT_FALSE(open_with(most + 1));
+    EXPECT_FALSE(open_with(255));
+    EXPECT_FALSE(open_with(0));
+}
+
 // --- AVTP tu: IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1 ---
 
 TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_none_is_in_force)
