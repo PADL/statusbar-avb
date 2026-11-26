@@ -9,7 +9,6 @@
 
 #include "statusbar/avtp/avtp.hpp"
 #include "statusbar/buffer/buffer.hpp"
-#include "statusbar/net/net_message_reactor.hpp"
 
 #include <array>
 #include <atomic>
@@ -193,7 +192,7 @@ void TalkerStreams::transmit_am824(
         return;
     }
 
-    pdu.stream_header.set_tu(timestamp_uncertain(net::monotonic_ns()));
+    pdu.stream_header.set_tu(wake_timestamp_uncertain());
     pdu.stream_header.set_mr(next_mr(slot));
     span_store(std::span<uint8_t>{frame}.first(avtp::Am824Pdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::Am824Pdu::HEADER_LENGTH + audio_bytes;
@@ -231,7 +230,7 @@ void TalkerStreams::transmit_aaf(
         return;
     }
 
-    pdu.set_tu(timestamp_uncertain(net::monotonic_ns()));
+    pdu.set_tu(wake_timestamp_uncertain());
     pdu.set_mr(next_mr(slot));
     span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::AafPdu::HEADER_LENGTH + audio_bytes;
@@ -285,7 +284,7 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     slot.crf->sequence_num = static_cast<uint8_t>((slot.crf->sequence_num + 1U) & 0xFFU);
     ++slot.crf->packets_sent;
 
-    pdu.set_tu(timestamp_uncertain(net::monotonic_ns()));
+    pdu.set_tu(wake_timestamp_uncertain());
     pdu.set_mr(next_mr(slot));
     span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);

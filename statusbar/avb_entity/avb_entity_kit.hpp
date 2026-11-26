@@ -193,10 +193,13 @@ class AvbEntityKit
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
     /// tick (gating disabled, or a downstream listener is ready/connected), told
     /// the wake's CLOCK_MONOTONIC_RAW instant @p now (the gate's grace clock).
-    /// Also gated on MAAP-address readiness in "maap" mode.
+    /// Also gated on MAAP-address readiness in "maap" mode. The talker is told
+    /// that instant too (TalkerStreams::tell_wake_time): it is what the AVTPDUs
+    /// of this wake take their tu at, so call this before transmit_if_due().
     [[nodiscard]] auto talker_should_transmit(uint16_t const idx, realtime::MonotonicRawClock::time_point const now) noexcept
         -> bool
     {
+        talker_->tell_wake_time(now);
         if (!maap_.ready()) {
             return false;
         }

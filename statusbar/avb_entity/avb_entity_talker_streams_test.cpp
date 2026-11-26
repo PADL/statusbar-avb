@@ -417,7 +417,33 @@ TEST(talker_streams, a_crf_stream_with_more_timestamps_than_the_frame_holds_is_r
 
 TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_none_is_in_force)
 {
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{1}}));  // nothing told: certain
+
+    talker.notify_grandmaster_changed(Raw{seconds{10}});
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{10}}));
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{10}} + WINDOW - nanoseconds{1}));
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{10}} + WINDOW));
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{100}}));  // until one is in force, however long
+    talker.notify_grandmaster_changed(Raw{seconds{200}});
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{200}} + nanoseconds{1}));
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{200}} + WINDOW));
+}
+
+// The calls that take nanoseconds are as they were: the same window, on whatever clock the caller
+// times tu on, with 0 for an instant never told.
+TEST(talker_tu, the_calls_that_take_nanoseconds_time_the_same_window)
+{
     constexpr int64_t SECOND_NS = 1'000'000'000;
+    constexpr int64_t WINDOW_NS = avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS;
     ptpclient::MediaClockGenerator const mc{};
     std::atomic<int64_t> const gptp_now{0};
     avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
@@ -425,14 +451,47 @@ TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_no
 
     talker.notify_grandmaster_changed(10 * SECOND_NS);
     EXPECT_TRUE(talker.timestamp_uncertain(10 * SECOND_NS));
-    EXPECT_TRUE(talker.timestamp_uncertain((10 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS - 1));
-    EXPECT_FALSE(talker.timestamp_uncertain((10 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain((10 * SECOND_NS) + WINDOW_NS - 1));
+    EXPECT_FALSE(talker.timestamp_uncertain((10 * SECOND_NS) + WINDOW_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain(avb_entity::TalkerStreams::RawTimePoint{std::chrono::seconds{10}}));  // one state
+    EXPECT_FALSE(talker.timestamp_uncertain(0));  // an instant never told is in no window
 
     talker.notify_grandmaster_lost();
-    EXPECT_TRUE(talker.timestamp_uncertain(100 * SECOND_NS));  // until one is in force, however long
-    talker.notify_grandmaster_changed(200 * SECOND_NS);
-    EXPECT_TRUE(talker.timestamp_uncertain((200 * SECOND_NS) + 1));
-    EXPECT_FALSE(talker.timestamp_uncertain((200 * SECOND_NS) + avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain(100 * SECOND_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain(0));
+    talker.notify_grandmaster_changed(int64_t{0});  // stamped by a caller told no time: no window
+    EXPECT_FALSE(talker.timestamp_uncertain(int64_t{1}));
+}
+
+// The talker reads no clock: the AVTPDUs of a media wake take their tu at the instant the wake was
+// told, and an instant never told is in no window.
+TEST(talker_tu, an_avtpdu_takes_its_tu_at_the_wake_the_talker_was_told)
+{
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());  // told nothing at all
+
+    talker.notify_grandmaster_changed(Raw{seconds{50}});
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());  // a window, and no wake told: not in it
+    talker.tell_wake_time(Raw{seconds{50}} + nanoseconds{125'000});
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());
+    talker.tell_wake_time(Raw{seconds{50}} + WINDOW);
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());  // no grandmaster: tu whatever the wake
+    talker.tell_wake_time(Raw{});
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());
+
+    // A grandmaster change stamped by a reactor that was told no time opens no window.
+    talker.notify_grandmaster_changed(Raw{});
+    talker.tell_wake_time(Raw{nanoseconds{1}});
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

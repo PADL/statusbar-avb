@@ -1095,7 +1095,7 @@ void AvbEntityKit::follow_grandmaster()
 void AvbEntityKit::notify_talker_of_grandmaster(bool const in_force) noexcept
 {
     if (in_force) {
-        talker_->notify_grandmaster_changed(net::monotonic_ns());  // the steady clock the media thread reads
+        talker_->notify_grandmaster_changed(gate_.told_time());  // the reactor cycle's instant, as the loop told it
         return;
     }
     talker_->notify_grandmaster_lost();

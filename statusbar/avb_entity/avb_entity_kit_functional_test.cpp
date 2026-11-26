@@ -2415,12 +2415,18 @@ TEST(avb_entity_kit_tu, the_talker_follows_the_announced_grandmaster_whatever_th
     auto* const slot = talker.slot_for(AAF_STREAM);
     EXPECT_TRUE(slot != nullptr);
     constexpr int64_t LATER_NS = 1'000'000'000;  // past the window
-    auto send = [&](int64_t const ahead_ns) {    // what transmit_* stores and counts
-        talker.count_sent(*slot, talker.timestamp_uncertain(net::monotonic_ns() + ahead_ns), false);
+    constexpr auto CYCLE = realtime::MonotonicRawClock::time_point{std::chrono::seconds{500}};
+    // A media wake @p ahead_ns after CYCLE: the kit is asked about the stream, which tells the
+    // talker the wake's instant, and the AVTPDU takes its tu at it, as transmit_* stores and counts.
+    auto send = [&](int64_t const ahead_ns) {
+        (void)pair.talker->talker_should_transmit(AAF_STREAM, CYCLE + std::chrono::nanoseconds{ahead_ns});
+        talker.count_sent(*slot, talker.wake_timestamp_uncertain(), false);
     };
     send(0);
     send(LATER_NS);
 
+    // The reactor cycle the Announce arrives in, as the loop tells it: the window opens there.
+    pair.talker->tell_cycle_time(2'000'000'000, CYCLE);
     auto& announces = pair.talker->host().net_handlers()->gptp_handler();
     announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{});
     gptp::AnnounceMessage announce{};

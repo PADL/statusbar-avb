@@ -158,27 +158,54 @@ struct TalkerStreams
 
     /// How long every AVTPDU carries tu after a change of grandmaster (Milan v1.3 Annex B.1.1).
     static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
-    /// When the AVTPDUs carry tu: while no grandmaster is in force, and before steady-clock until_ns.
+    /// The clock tu is timed on, CLOCK_MONOTONIC_RAW: the one a media wake is told on, and not
+    /// gPTP time, which may step at the change. The talker reads no clock: each instant is told
+    /// it, the reactor cycle's by notify_grandmaster_changed() and the media wake's by
+    /// tell_wake_time().
+    using RawTimePoint = realtime::MonotonicRawClock::time_point;
+    /// When the AVTPDUs carry tu: while no grandmaster is in force, and before RAW until_ns.
     struct TimestampUncertainty
     {
         bool grandmaster_lost{false};
         int64_t until_ns{0};
     };
-    /// A grandmaster came into force at steady-clock @p now_ns (net::monotonic_ns()), another or
-    /// the first after none: tu for TU_AFTER_GM_CHANGE_NS. Reactor thread, the one writer.
+    /// A grandmaster came into force at @p now_ns, another or the first after none: tu for
+    /// TU_AFTER_GM_CHANGE_NS. @p now_ns is nanoseconds on the clock tu is timed on, the one the
+    /// wakes are told on; 0 is an instant never told and opens no window. Reactor thread, the
+    /// one writer.
     void notify_grandmaster_changed(int64_t const now_ns) noexcept
     {
-        uncertainty_.store({.grandmaster_lost = false, .until_ns = now_ns + TU_AFTER_GM_CHANGE_NS});
+        uncertainty_.store({.grandmaster_lost = false, .until_ns = now_ns == 0 ? 0 : now_ns + TU_AFTER_GM_CHANGE_NS});
+    }
+    /// The same, told the instant as a RawTimePoint.
+    void notify_grandmaster_changed(RawTimePoint const now) noexcept
+    {
+        notify_grandmaster_changed(RawTimePoint::clock::to_ns(now));
     }
     /// No grandmaster is in force: tu until one is. Reactor thread, the one writer.
     void notify_grandmaster_lost() noexcept { uncertainty_.store({.grandmaster_lost = true}); }
-    /// Whether an AVTPDU sent at steady-clock @p now_ns carries tu: never before the first
-    /// notify_grandmaster_*. Any thread; lock-free (itc::SeqlockValue), so the media thread too.
+    /// Whether an AVTPDU sent at @p now_ns, on the same clock, carries tu: never before the first
+    /// notify_grandmaster_*, and 0, an instant never told, is in no window, so a talker that is
+    /// told no time sends tu only while no grandmaster is in force. Any thread; lock-free
+    /// (itc::SeqlockValue), so the media thread too.
     [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
     {
         auto const uncertainty = uncertainty_.load();
-        return uncertainty.grandmaster_lost || now_ns < uncertainty.until_ns;
+        return uncertainty.grandmaster_lost || (now_ns != 0 && now_ns < uncertainty.until_ns);
     }
+    /// The same, asked with a RawTimePoint.
+    [[nodiscard]] auto timestamp_uncertain(RawTimePoint const now) const noexcept -> bool
+    {
+        return timestamp_uncertain(RawTimePoint::clock::to_ns(now));
+    }
+    /// Media thread: the RAW instant of the media wake now being served, as the wake was told
+    /// it. Every AVTPDU sent in this wake takes its tu at that instant (wake_timestamp_uncertain()).
+    /// The kit tells it from talker_should_transmit(), which an entity calls with the wake's
+    /// instant before each transmit_if_due(); an entity that drives a TalkerStreams itself and
+    /// tells it of grandmaster changes calls this once per wake.
+    void tell_wake_time(RawTimePoint const now) noexcept { wake_now_ = now; }
+    /// The tu of an AVTPDU sent in the wake last told (tell_wake_time). Media thread.
+    [[nodiscard]] auto wake_timestamp_uncertain() const noexcept -> bool { return timestamp_uncertain(wake_now_); }
 
     /// TX pcap capture knobs for open_tx (see TxPcapRecorder). Empty path =
     /// capture disabled.
@@ -334,6 +361,8 @@ struct TalkerStreams
     std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
     /// When the AVTPDUs carry tu (notify_grandmaster_*): the reactor writes, the media thread reads.
     itc::SeqlockValue<TimestampUncertainty> uncertainty_{};
+    /// The media wake now being served (tell_wake_time). Media thread only.
+    RawTimePoint wake_now_{};
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;

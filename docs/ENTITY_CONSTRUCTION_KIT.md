@@ -378,10 +378,17 @@ Announce. The kit follows the Announce handler's grandmaster through its
 own observer (`GptpAnnounceHandler::set_on_grandmaster_changed`), which an
 integrator replacing the `GptpAnnounceCallbacks` leaves in place, and
 tells its talker (`notify_grandmaster_changed`, `notify_grandmaster_lost`).
-The window is timed on the steady clock, as gPTP time may step at the
-change. The reactor thread writes the state, one `itc::SeqlockValue`, and
-the media thread reads it for each AVTPDU without a lock. A
-`TalkerStreams` used without the kit sends tu clear until it is told.
+The window is timed on CLOCK_MONOTONIC_RAW, the clock a media wake is told
+on, as gPTP time may step at the change. The talker reads no clock. The
+kit gives `notify_grandmaster_changed()` the instant of the reactor cycle
+(`tell_cycle_time()`), and `talker_should_transmit()`, which an entity
+calls with the wake's instant before each `transmit_if_due()`, passes
+that instant on (`TalkerStreams::tell_wake_time()`); each AVTPDU of the
+wake takes its tu at it. An instant never told is in no window, so a
+talker told no time sends tu only while no grandmaster is in force. The
+reactor thread writes the state, one `itc::SeqlockValue`, and the media
+thread reads it for each AVTPDU without a lock. A `TalkerStreams` used
+without the kit sends tu clear until it is told.
 
 mr (IEEE 1722-2016 Clause 4.4.4.3; Clause 10.4.3 for CRF) toggles on a
 media clock restart of the stream. The talker owes one on every stream
