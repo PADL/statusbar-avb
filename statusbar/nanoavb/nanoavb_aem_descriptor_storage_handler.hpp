@@ -768,6 +768,33 @@ class DescriptorStorageHandler : public AemEntityHandler
         return authored;
     }
 
+    /// Whether @p format is one the stream's descriptor lists (its authored current_format or its
+    /// stream_formats), as SET_STREAM_FORMAT requires (IEEE 1722.1-2021 Clause 7.4.9); false
+    /// when the blob has no such stream.
+    [[nodiscard]] auto stream_format_listed(DescriptorRef ref, ieee::Eui64 const& format) const noexcept -> bool
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        return blob.has_value() && blob->size() >= atdecc::aem::DescriptorStream::MINIMUM_LENGTH &&
+            stream_format_supported(*blob, format);
+    }
+
+    /// Make listed @p format the stream's runtime current_format without the stream-format
+    /// callback, for a change the entity's data plane has already made. False, with nothing
+    /// changed, when the descriptor does not list it or the blob has no such stream.
+    [[nodiscard]] auto set_runtime_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
+    {
+        if (!stream_format_listed(ref, format)) {
+            return false;
+        }
+        auto* const state = find_or_init_stream_state(ref);
+        if (state == nullptr) {
+            return false;
+        }
+        state->format = format;
+        state->has_format = true;
+        return true;
+    }
+
     /// Called when START/STOP_STREAMING flips a stream's streaming state —
     /// this is where the application gates its transmitter. Return
     /// AEM_STATUS_SUCCESS to accept, any other AEM_STATUS_* to reject.

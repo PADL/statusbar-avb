@@ -7,6 +7,7 @@
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
 
+#include <bit>
 #include <system_error>
 
 namespace statusbar::avb_entity {
@@ -14,6 +15,9 @@ namespace statusbar::avb_entity {
 namespace {
 
 using atdecc::aem::DescriptorStream;
+
+/// The nsr bits of an AAF format word's second octet (IEEE 1722-2016 Clause 7.3.4).
+constexpr uint8_t AAF_NSR_MASK = 0x0F;
 
 auto stream_specs(atdecc::aem::DescriptorStorage const& storage, uint16_t const config_idx, uint16_t const descriptor_type)
     -> StatusValue<StreamSpecs>
@@ -122,6 +126,21 @@ auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t const fallback_
         return failure(std::errc::no_message);  // no audio stream and no fallback
     }
     return success(rate);
+}
+
+auto aaf_format_at_rate(uint64_t const word, uint32_t const rate_hz) noexcept -> std::optional<uint64_t>
+{
+    auto const nsr = avtp::aaf_sample_rate_from_hz(rate_hz);
+    if (decode_stream_format(word).kind != StreamKind::aaf || !nsr) {
+        return std::nullopt;
+    }
+    auto fields = avtp::AafStreamFormat::from_u64(word);
+    fields.nsr_field.set_bits(AAF_NSR_MASK, 0, static_cast<uint8_t>(*nsr));
+    if (fields.samples_per_frame() != 0) {
+        fields.packing.set_bits(
+            avtp::AafStreamFormat::SAMPLES_MASK, avtp::AafStreamFormat::SAMPLES_SHIFT, aaf_table_samples_per_pdu(rate_hz));
+    }
+    return std::bit_cast<ieee::octlet_t>(fields).get();
 }
 
 auto find_stream(StreamSpecs const& specs, StreamKind const kind) noexcept -> std::optional<uint16_t>

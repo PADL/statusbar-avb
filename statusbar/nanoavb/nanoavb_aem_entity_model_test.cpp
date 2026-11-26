@@ -2512,6 +2512,40 @@ TEST(stream_lifecycle, a_format_the_model_no_longer_describes_is_not_restored)
     EXPECT_EQ(response_stream_format(get.bytes), STREAM_FMT_A);
 }
 
+TEST(stream_lifecycle, a_listed_format_is_put_in_force_without_the_hook)
+{
+    auto blob = make_blob_with_stream_output();
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    AemCommandHandler cmd_handler{handler};
+    size_t hook_calls = 0;
+    handler.set_on_stream_format_changed([&hook_calls](uint16_t, uint16_t, uint64_t) -> uint8_t {
+        ++hook_calls;
+        return AEM_STATUS_SUCCESS;
+    });
+    DescriptorRef const stream{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0};
+    DescriptorRef const missing{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 7};
+
+    // The authored current_format and the trailer's formats are listed; nothing else is.
+    EXPECT_TRUE(handler.stream_format_listed(stream, ieee::Eui64{}.from_uint64(STREAM_FMT_A)));
+    EXPECT_TRUE(handler.stream_format_listed(stream, ieee::Eui64{}.from_uint64(STREAM_FMT_B)));
+    EXPECT_FALSE(handler.stream_format_listed(stream, ieee::Eui64{}.from_uint64(STREAM_FMT_X)));
+    EXPECT_FALSE(handler.stream_format_listed(missing, ieee::Eui64{}.from_uint64(STREAM_FMT_A)));
+
+    // A listed format is in force for GET_STREAM_FORMAT, the hook not asked.
+    EXPECT_TRUE(handler.set_runtime_stream_format(stream, ieee::Eui64{}.from_uint64(STREAM_FMT_B)));
+    EXPECT_EQ(hook_calls, size_t{0});
+    auto const get_b = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(get_b.bytes), STREAM_FMT_B);
+
+    // One not listed, or a stream the blob lacks, changes nothing.
+    EXPECT_FALSE(handler.set_runtime_stream_format(stream, ieee::Eui64{}.from_uint64(STREAM_FMT_X)));
+    EXPECT_FALSE(handler.set_runtime_stream_format(missing, ieee::Eui64{}.from_uint64(STREAM_FMT_A)));
+    auto const still_b = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(still_b.bytes), STREAM_FMT_B);
+}
+
 TEST(stream_lifecycle, start_stop_streaming_latches_and_gates)
 {
     auto blob = make_blob_with_stream_output();
