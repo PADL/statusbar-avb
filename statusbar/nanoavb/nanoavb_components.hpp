@@ -435,6 +435,9 @@ struct GptpAnnounceCallbacks
 /// Called when GptpAnnounceHandler::path_trace() changes, to another path or to none.
 using PathTraceChangedFn = statusbar::sg14::inplace_function<void(int64_t now_ns), 64>;
 
+/// Called when GptpAnnounceHandler::grandmaster_identity() changes, to another or to none.
+using GrandmasterChangedFn = statusbar::sg14::inplace_function<void(int64_t now_ns), 64>;
+
 /// The PATH_TRACE TLV of the gPTP Announce message @p announce (IEEE 802.1AS-2020 Clause
 /// 10.6.3.3), read only as far as its messageLength; empty when it has none or the TLVs
 /// are cut short. Identities past MAX_AS_PATH_LENGTH are dropped.
@@ -470,6 +473,10 @@ class GptpAnnounceHandler : public net::Pollable
     /// Observe path_trace() changes. Kept apart from GptpAnnounceCallbacks, so an
     /// integrator replacing those with set_callbacks() does not silence it.
     void set_on_path_trace_changed(PathTraceChangedFn fn) { on_path_trace_changed_ = std::move(fn); }
+
+    /// Observe grandmaster_identity() changes, after the callbacks are told. Kept apart from
+    /// GptpAnnounceCallbacks for the same reason; has_grandmaster() says which change it was.
+    void set_on_grandmaster_changed(GrandmasterChangedFn fn) { on_grandmaster_changed_ = std::move(fn); }
 
     /// The grandmaster in force: named by the Announces, unset when they have
     /// stopped for announceReceiptTimeout (or never came).
@@ -527,6 +534,7 @@ class GptpAnnounceHandler : public net::Pollable
     net::RawnetContext context_{};
     GptpAnnounceCallbacks callbacks_;
     PathTraceChangedFn on_path_trace_changed_;
+    GrandmasterChangedFn on_grandmaster_changed_;
     AsPath path_trace_{};
     gptp::ClockIdentity grandmaster_identity_{};
     int64_t last_announce_time_ns_{0};
