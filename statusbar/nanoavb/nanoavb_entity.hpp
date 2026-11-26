@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <optional>
@@ -406,7 +407,9 @@ class AemCommandHandler
         locking_controller_ = {};
     }
 
-    /// Set the current event time (used by lock timeout tracking)
+    /// Set the current event time, which the lock, the deferred commands and the controller monitor
+    /// time what a packet starts from: call it before process_packet(). tick() moves it to its own
+    /// time when that is later, so a packet handled without it is timed no earlier than the last tick.
     void set_event_time(sm::TimePoint now) noexcept { event_time_ = now; }
 
     /// Notify that the current owner responded to CONTROLLER_AVAILABLE (is alive)
@@ -423,6 +426,12 @@ class AemCommandHandler
     /// Maximum number of unsolicited notification registrations (Milan v1.3
     /// Section 5.3.4.2: at least 16 per AVB interface).
     static constexpr size_t MAX_UNSOLICITED_REGISTRATIONS = 16;
+
+    /// The controller monitor's period under milan13 (Milan v1.3 Section 5.4.5.4): a random time
+    /// between these after a registered controller's last AECP command, tick() sends it
+    /// CONTROLLER_AVAILABLE, and deregisters it when neither that nor its one retry is answered.
+    static constexpr auto CONTROLLER_MONITOR_MIN = std::chrono::seconds(30);
+    static constexpr auto CONTROLLER_MONITOR_MAX = std::chrono::seconds(60);
 
     /// Get the number of active unsolicited registrations
     [[nodiscard]] auto unsolicited_registration_count() const noexcept -> size_t;
@@ -561,7 +570,8 @@ class AemCommandHandler
 
     /// Periodic tick: lock timeout (with its unsolicited LOCK_ENTITY release
     /// notification), pending acquire timeout, the IN_PROGRESS repeats of
-    /// deferred commands and the deadline of those nobody completed.
+    /// deferred commands and the deadline of those nobody completed, and under
+    /// milan13 the controller monitor.
     void tick(sm::TimePoint now);
 
     /// Get the current configuration index
@@ -893,6 +903,24 @@ class AemCommandHandler
     [[nodiscard]] static auto mvu_command_for(std::span<uint8_t const> payload, Eui64 const& our_entity_id) noexcept
         -> std::optional<MvuCommand>;
 
+    /// An AEM response addressed to us as its controller arrived: CONTROLLER_AVAILABLE's
+    /// answers the acquire handshake and the controller monitor; any other is dropped.
+    void handle_aem_response(AemDu const& header);
+
+    /// A valid AECP command from @p controller_entity_id arrived: its monitor timer starts
+    /// again, and a CONTROLLER_AVAILABLE outstanding for it is forgotten (Milan v1.3 Section 5.4.5.4).
+    void restart_controller_monitor(Eui64 const& controller_entity_id);
+
+    /// A random monitor period in [CONTROLLER_MONITOR_MIN, CONTROLLER_MONITOR_MAX].
+    [[nodiscard]] auto monitor_period() noexcept -> sm::Clock::duration;
+
+    /// The controller monitor, from tick() under milan13.
+    void tick_controller_monitor(sm::TimePoint now);
+
+    /// Send CONTROLLER_AVAILABLE (IEEE 1722.1-2021 Clause 7.4.4, no payload) to @p controller_id
+    /// at @p dest_mac with @p sequence_id, this entity its controller.
+    void send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t sequence_id);
+
     /// An AEM command addressed to us arrived: dispatch it and send the response.
     [[nodiscard]] auto process_aem_command(
         Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, Eui64 const& our_entity_id) -> bool;
@@ -1002,7 +1030,7 @@ class AemCommandHandler
     Eui64 locking_controller_;
     sm::TimePoint lock_expiry_time_{};
 
-    // Current event time (set by process_packet or set_event_time)
+    // Current event time (set_event_time(), or a later tick())
     sm::TimePoint event_time_{};
 
     // Source MAC of the request currently being dispatched. Stashed by
@@ -1089,8 +1117,24 @@ class AemCommandHandler
         Eui48 controller_mac{};       ///< Source MAC of the REGISTER command, for unicast notifications
         uint16_t sequence_id{0};      ///< of its next AEM notification (Milan v1.3 Section 5.3.4.2)
         uint16_t mvu_sequence_id{0};  ///< of its next MVU notification
+        /// When the monitor next sends CONTROLLER_AVAILABLE or, with one outstanding, when that times out.
+        sm::TimePoint monitor_deadline{};
+        uint8_t available_tries{0};         ///< CONTROLLER_AVAILABLE sent and unanswered: 0, 1, or 2 with the retry
+        uint16_t available_sequence_id{0};  ///< of the one outstanding
     };
     SlotTable<UnsolicitedRegistration, MAX_UNSOLICITED_REGISTRATIONS> unsolicited_registrations_{};
+
+    /// Whether @p reg stays registered at @p now: its timer has not run out, or CONTROLLER_AVAILABLE
+    /// or its one retry (IEEE 1722.1-2021 Clause 9.3.6) is sent to it now.
+    [[nodiscard]] auto keep_monitoring(UnsolicitedRegistration& reg, sm::TimePoint now) -> bool;
+
+    /// Send @p reg CONTROLLER_AVAILABLE, or its retry with the same sequence id, at @p now.
+    void ask_controller_available(UnsolicitedRegistration& reg, sm::TimePoint now);
+
+    // Sequence ids of the commands this entity sends as a controller (CONTROLLER_AVAILABLE).
+    uint16_t command_sequence_id_{0};
+    // The monitor period's xorshift32 state.
+    uint32_t monitor_random_{0x2545F491U};
 
     // Our own entity_id, needed as the target_entity_id of unsolicited
     // notifications. Stashed by process_packet (always current) and settable

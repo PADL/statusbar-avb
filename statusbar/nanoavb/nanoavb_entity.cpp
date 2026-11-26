@@ -90,6 +90,22 @@ namespace {
     return header;
 }
 
+/// The AEM header in @p payload when it is a response to a command this entity
+/// sent as a controller (its controller_entity_id is ours); nullopt otherwise.
+[[nodiscard]] auto aem_response_for(std::span<uint8_t const> const payload, Eui64 const& our_entity_id) noexcept
+    -> std::optional<AemDu>
+{
+    if (payload.size() < AemDu::LENGTH || our_entity_id == Eui64{}) {
+        return std::nullopt;
+    }
+    AemDu header{};
+    span_load(header, payload);
+    if (!header.is_valid() || !header.is_response() || header.controller_entity_id != our_entity_id) {
+        return std::nullopt;
+    }
+    return header;
+}
+
 /// The command data of the AEM command @p header in @p payload: as long as its
 /// control_data_length says (IEEE 1722.1-2021 Clause 9.2.1.1.7), not the octets behind it.
 [[nodiscard]] auto aem_command_data(AemDu const& header, std::span<uint8_t const> const payload) noexcept
@@ -108,10 +124,15 @@ auto AemCommandHandler::process_packet(Eui48 const& src_mac, std::span<uint8_t c
     if (is_vendor_unique_command(payload)) {
         return process_mvu_packet(src_mac, payload, our_entity_id);
     }
+    if (auto const response = aem_response_for(payload, our_entity_id)) {
+        handle_aem_response(*response);
+        return false;
+    }
     auto const header = aem_command_for(payload, our_entity_id);
     if (!header) {
         return false;
     }
+    restart_controller_monitor(header->controller_entity_id);
     return process_aem_command(src_mac, *header, aem_command_data(*header, payload), our_entity_id);
 }
 
@@ -727,6 +748,7 @@ auto AemCommandHandler::completion_body(
 
 void AemCommandHandler::tick(sm::TimePoint const now)
 {
+    event_time_ = std::max(event_time_, now);
     if (locked_ && now >= lock_expiry_time_) {
         release_lock();
         emit_lock_released();
@@ -744,6 +766,9 @@ void AemCommandHandler::tick(sm::TimePoint const now)
             (void)send_response(p.mac, p.header, AEM_STATUS_IN_PROGRESS, std::span<uint8_t const>{p.body}.first(p.body_size));
             p.next_in_progress = now + std::chrono::milliseconds(AEM_IN_PROGRESS_TIMEOUT_MS);
         }
+    }
+    if (profile_ == Profile::milan13) {
+        tick_controller_monitor(now);
     }
 }
 
@@ -1581,6 +1606,19 @@ namespace {
     return header;
 }
 
+/// CONTROLLER_AVAILABLE (IEEE 1722.1-2021 Clause 7.4.4, no payload) to @p controller_id with
+/// @p sequence_id: @p entity_id is the command's controller, the registered controller its target.
+[[nodiscard]] auto controller_available_command(
+    Eui64 const& entity_id, Eui64 const& controller_id, uint16_t const sequence_id) noexcept -> AemDu
+{
+    AemDu command{};
+    command.init_command(AEM_COMMAND_CONTROLLER_AVAILABLE, AemDu::AEM_DATA_LENGTH);
+    command.target_entity_id = controller_id;
+    command.controller_entity_id = entity_id;
+    command.sequence_id = doublet_t{sequence_id};
+    return command;
+}
+
 /// The response a command gets when the entity does not implement it
 /// (Table 5.16): the command's data goes back as it came, as an AEM
 /// response to an unimplemented command carries its command's.
@@ -1699,6 +1737,7 @@ auto AemCommandHandler::process_mvu_packet(Eui48 const& src_mac, std::span<uint8
         return false;
     }
     our_entity_id_ = our_entity_id;  // the target_entity_id of the notifications it raises
+    restart_controller_monitor(command->header.common.controller_entity_id);
     return dispatch_mvu_command(src_mac, *command);
 }
 
@@ -1855,7 +1894,10 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
     // The source MAC (set by process_packet) is where its notifications are unicast; its
     // sequence ids start at zero (Milan v1.3 Section 5.4.2.21). Registering again is idempotent
     // from the same station, and starts afresh from another one.
-    UnsolicitedRegistration const fresh{.controller_entity_id = header.controller_entity_id, .controller_mac = current_src_mac_};
+    UnsolicitedRegistration const fresh{
+        .controller_entity_id = header.controller_entity_id,
+        .controller_mac = current_src_mac_,
+        .monitor_deadline = event_time_ + monitor_period()};
     auto const existing = unsolicited_registrations_.find_if(
         [&header](UnsolicitedRegistration const& r) { return r.controller_entity_id == header.controller_entity_id; });
     if (existing < unsolicited_registrations_.capacity()) {
@@ -1869,6 +1911,93 @@ auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemC
         return {.status = AEM_STATUS_NO_RESOURCES, .size = 0};
     }
     return {.status = AEM_STATUS_SUCCESS, .size = 0};
+}
+
+void AemCommandHandler::restart_controller_monitor(Eui64 const& controller_entity_id)
+{
+    auto const idx = unsolicited_registrations_.find_if(
+        [&](UnsolicitedRegistration const& r) { return r.controller_entity_id == controller_entity_id; });
+    if (auto* const reg = unsolicited_registrations_.get(idx)) {
+        reg->monitor_deadline = event_time_ + monitor_period();
+        reg->available_tries = 0;
+    }
+}
+
+auto AemCommandHandler::monitor_period() noexcept -> sm::Clock::duration
+{
+    // xorshift32: spreading the controllers' timers is all the period asks of it.
+    monitor_random_ ^= monitor_random_ << 13U;
+    monitor_random_ ^= monitor_random_ >> 17U;
+    monitor_random_ ^= monitor_random_ << 5U;
+    auto const span = std::chrono::duration_cast<std::chrono::milliseconds>(CONTROLLER_MONITOR_MAX - CONTROLLER_MONITOR_MIN);
+    auto const offset = std::chrono::milliseconds{monitor_random_ % (static_cast<uint32_t>(span.count()) + 1U)};
+    return std::chrono::duration_cast<sm::Clock::duration>(CONTROLLER_MONITOR_MIN + offset);
+}
+
+void AemCommandHandler::tick_controller_monitor(sm::TimePoint const now)
+{
+    // An entry removed has the last one moved into its slot (SlotTable::remove): i stays.
+    for (size_t i = 0; i < unsolicited_registrations_.size();) {
+        if (keep_monitoring(unsolicited_registrations_[i], now)) {
+            ++i;
+            continue;
+        }
+        // Neither answered: deregistered, and told so alone (Milan v1.3 Section 5.4.5.4).
+        auto const gone = unsolicited_registrations_[i];
+        unsolicited_registrations_.remove(i);
+        send_unsolicited_to(
+            gone.controller_mac, gone.controller_entity_id, gone.sequence_id, AEM_COMMAND_DEREGISTER_UNSOLICITED_NOTIFICATION, {});
+    }
+}
+
+auto AemCommandHandler::keep_monitoring(UnsolicitedRegistration& reg, sm::TimePoint const now) -> bool
+{
+    if (now < reg.monitor_deadline) {
+        return true;
+    }
+    if (reg.available_tries >= 2) {
+        return false;
+    }
+    ask_controller_available(reg, now);
+    return true;
+}
+
+void AemCommandHandler::ask_controller_available(UnsolicitedRegistration& reg, sm::TimePoint const now)
+{
+    // The command, then its one retry with the same sequence_id.
+    reg.available_sequence_id = reg.available_tries == 0 ? command_sequence_id_++ : reg.available_sequence_id;
+    ++reg.available_tries;
+    reg.monitor_deadline = now + std::chrono::milliseconds(AEM_TIMEOUT_MS);
+    send_controller_available_to(reg.controller_mac, reg.controller_entity_id, reg.available_sequence_id);
+}
+
+void AemCommandHandler::send_controller_available_to(Eui48 const& dest_mac, Eui64 const& controller_id, uint16_t const sequence_id)
+{
+    if (!callbacks_.send_response) {
+        return;
+    }
+    std::array<uint8_t, AemDu::LENGTH> buffer{};
+    span_store(buffer, controller_available_command(our_entity_id_, controller_id, sequence_id));
+    (void)callbacks_.send_response(dest_mac, buffer);
+}
+
+void AemCommandHandler::handle_aem_response(AemDu const& header)
+{
+    if (header.command_code() != AEM_COMMAND_CONTROLLER_AVAILABLE) {
+        return;
+    }
+    // The acquire handshake asked the holder whether it is still there: it is.
+    if (pending_acquire_.active && acquired_ && header.target_entity_id == acquiring_controller_) {
+        controller_available_response_received();
+    }
+    // The monitor's question, answered with any status (Milan v1.3 Section 5.4.5.4).
+    for (auto& reg : unsolicited_registrations_) {
+        if (reg.available_tries > 0 && reg.controller_entity_id == header.target_entity_id &&
+            reg.available_sequence_id == header.sequence_id.get()) {
+            reg.available_tries = 0;
+            reg.monitor_deadline = event_time_ + monitor_period();
+        }
+    }
 }
 
 auto AemCommandHandler::handle_deregister_unsolicited(AemDu const& header) -> AemCommandResponse
