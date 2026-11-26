@@ -14,6 +14,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
 #include <algorithm>
@@ -95,6 +96,7 @@ AvbEntityKit::AvbEntityKit(
           media_clock,
           last_gptp_ns,
           memory_resource)}
+    , admitted_{admitted_talker_streams(RawTimePoint{})}  // a new gate has no stamp: any instant will do
 {
     active_clock_source_.store(initial_clock_source, std::memory_order_relaxed);
     crf_clock_source_index_ = crf_clock_source_index;
@@ -553,9 +555,50 @@ void AvbEntityKit::wire_srp_callbacks()
             (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(spec).stream_id, time);
         }
     });
-    // The per-stream transmit gate tracks MSRP Listener Ready.
-    host_.set_on_listener_ready(
-        [this](nanoavb::StreamId const& stream_id, bool ready) { gate_.note_listener_ready(stream_id, ready); });
+    // The per-stream transmit gate tracks MSRP Listener Ready, stamped on the gate's clock.
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool const ready) {
+        notify_listener_ready(stream_id, ready, net::rx_clock_now());
+    });
+}
+
+void AvbEntityKit::notify_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, RawTimePoint const now)
+{
+    gate_.note_listener_ready(stream_id, ready, now);
+    notify_admission(now);
+}
+
+void AvbEntityKit::publish_talker_connections(uint16_t const idx)
+{
+    gate_.note_acmp_connections(idx, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(idx)));
+    notify_admission(net::rx_clock_now());
+}
+
+auto AvbEntityKit::admitted_talker_streams(RawTimePoint const now) const noexcept -> AdmittedStreams
+{
+    AdmittedStreams admitted{};
+    for (auto const& spec : talker_specs_) {
+        if (gate_.admitted(spec.index, now)) {
+            (void)admitted.try_push_back(spec.index);
+        }
+    }
+    return admitted;
+}
+
+auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
+{
+    return admitted_talker_streams(net::rx_clock_now());
+}
+
+void AvbEntityKit::notify_admission(RawTimePoint const now)
+{
+    auto const admitted = admitted_talker_streams(now);
+    if (std::ranges::equal(admitted, admitted_)) {
+        return;
+    }
+    admitted_ = admitted;
+    if (on_admission_changed_) {
+        on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    }
 }
 
 void AvbEntityKit::note_talker_probe(uint16_t const stream_index, TimePoint const now)
@@ -706,8 +749,7 @@ void AvbEntityKit::wire_ieee_acmp_callbacks()
                 logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+            publish_talker_connections(stream_index);
         },
         [this](uint16_t stream_index, ieee::Eui64 listener_entity_id, uint16_t listener_unique_id) {
             host_.ctl_log().status(
@@ -716,8 +758,7 @@ void AvbEntityKit::wire_ieee_acmp_callbacks()
                 logging::static_str(stream_kind_name(talker_kind_of(stream_index))),
                 listener_entity_id.to_uint64(),
                 listener_unique_id);
-            gate_.note_acmp_connections(
-                stream_index, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(stream_index)));
+            publish_talker_connections(stream_index);
         });
     wire_listener_connections(host_.components().acmp_listener);
 }

@@ -186,6 +186,28 @@ class AvbEntityKit
         return gate_.should_transmit(idx, now);
     }
 
+    // --- Talker admission (reactor thread) ------------------------------------
+    /// The gate's clock, CLOCK_MONOTONIC_RAW (TalkerGate::RawTimePoint).
+    using RawTimePoint = TalkerGate::RawTimePoint;
+    /// Talker stream indices, in table order.
+    using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
+    /// The talker streams the gate admits at @p now (TalkerGate::admitted), in table order: a Listener
+    /// Ready registered or within the grace, plus the ACMP connection where the gate needs one; every
+    /// stream when the gate is off. A stream STOP_STREAMING stopped, or waiting for MAAP, stays in it.
+    [[nodiscard]] auto admitted_talker_streams(RawTimePoint now) const noexcept -> AdmittedStreams;
+    /// As above, at the gate's clock's now, read once.
+    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
+    /// The hook told the admitted set each time it changes: the reactor thread calls it, at a gate
+    /// input. It is not called for the set in force at install (admitted_talker_streams() has it);
+    /// a later install replaces an earlier one, an empty function removes it. The span is the kit's,
+    /// valid only during the call. It must not throw, install a hook or feed a gate input.
+    using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
+    void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
+    /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
+    /// known at the RAW instant @p now (the host's hook reads it once). Stamps the gate, then
+    /// re-evaluates admission.
+    void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
+
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
     /// 1.0 for gPTP-locked, or its GPS tracker ratio) unless the CRF-input
     /// clock source is active AND the recovery is locked, in which case the
@@ -303,6 +325,11 @@ class AvbEntityKit
     void wire_srp_callbacks();
     /// The ACMP third, for whichever ACMP the components run.
     void wire_acmp_callbacks();
+    /// Talker stream @p idx's IEEE 1722.1 ACMP connection count to the gate, then admission re-evaluated.
+    void publish_talker_connections(uint16_t idx);
+    /// Recompute the admitted set at @p now after a gate input changed; tell on_admission_changed_
+    /// when it differs from the one last told.
+    void notify_admission(RawTimePoint now);
     /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
     void wire_ieee_acmp_callbacks();
     /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
@@ -578,6 +605,9 @@ class AvbEntityKit
     UnitRateFn on_unit_rate_changed_{};
     /// The streams a SET_SAMPLING_RATE re-timed, notified after its response.
     RetimedFormats retimed_notices_{};
+    /// The admitted set last told (notify_admission), and the hook told it.
+    AdmittedStreams admitted_{};
+    AdmissionChangedFn on_admission_changed_{};
     /// The end of the counters' observation interval (poll_counters), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).

@@ -422,6 +422,17 @@ out. Only `note_listener_ready()` writes the stamp: the Listener's
 registration alone decides the gate, and a Talker withdrawal leaves it as
 it is.
 
+The kit keeps the admitted set on the reactor thread:
+`admitted_talker_streams()` lists, in table order, the talker streams the
+gate admits, and `set_on_admission_changed()` installs the hook told the
+set each time it changes. It is re-evaluated at each gate input: a
+Listener Ready registered or withdrawn (`notify_listener_ready()`, which
+the host's MSRP hook calls with the RAW instant it read) and an ACMP
+connection count changing. The hook is not told the set in force when it
+is installed; a later install replaces an earlier one. STOP_STREAMING
+stops the talker's slot, not the gate: the reservation stands, so the
+stream stays in the set.
+
 ### The format of a stream input
 
 A stream input starts on the format its model authors and takes any other

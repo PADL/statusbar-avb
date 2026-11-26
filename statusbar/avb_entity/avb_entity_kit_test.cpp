@@ -8,6 +8,7 @@
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
+#include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
@@ -17,6 +18,7 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
+#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
@@ -825,6 +827,138 @@ TEST(avb_entity_kit_rate, a_retimed_stream_output_toggles_mr)
     data_plane.answer = atdecc::AEM_STATUS_SUCCESS;
     EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
     EXPECT_TRUE(talker.next_mr(*slot));
+}
+
+namespace {
+
+/// A RAW instant the kit's gate is told in the admission tests.
+constexpr auto ADMIT_T0 = AvbEntityKit::RawTimePoint{std::chrono::seconds{100}};
+
+/// Talker stream @p idx's StreamID as MSRP reports it.
+auto talker_sid(KitUnderTest& kit, uint16_t const idx) -> nanoavb::StreamId
+{
+    nanoavb::StreamId sid{};
+    auto const stream = kit->host().components().talker_stream(idx);
+    EXPECT_TRUE(stream.has_value());
+    sid.from_uint64(stream.has_value() ? stream->stream_id.to_uint64() : 0);
+    return sid;
+}
+
+/// A controller's CONNECT_TX_COMMAND (or DISCONNECT_TX_COMMAND) for talker stream @p idx.
+void acmp_tx_command(KitUnderTest& kit, uint8_t const type, uint16_t const idx)
+{
+    atdecc::AcmpCommandResponse cmd{};
+    cmd.set_message_type(type);
+    cmd.talker_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
+    cmd.talker_unique_id = idx;
+    cmd.listener_entity_id = Eui64{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, 0x33};
+    cmd.listener_unique_id = idx;
+    cmd.sequence_id = 1;
+    (void)kit->host().components().acmp_talker.receive_command(cmd, TimePoint{});
+}
+
+/// Each admitted set the kit's hook is told.
+struct AdmissionRecorder
+{
+    std::vector<std::vector<uint16_t>> told{};
+
+    void install(KitUnderTest& kit)
+    {
+        kit->set_on_admission_changed(
+            [this](std::span<uint16_t const> const admitted) { told.emplace_back(admitted.begin(), admitted.end()); });
+    }
+};
+
+}  // namespace
+
+// IEEE 1722.1-2021 Clause 8.2.1: a classic talker stream is admitted while it is connected and its
+// Listener Ready registered; the hook hears each change of the set, not the set at install.
+TEST(avb_entity_kit_admission, the_hook_follows_the_listener_and_the_acmp_connection)
+{
+    using V = std::vector<uint16_t>;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0) == AvbEntityKit::AdmittedStreams{1});
+    AdmissionRecorder first;
+    first.install(kit);
+    EXPECT_TRUE(first.told.empty());  // the set in force at install is not told
+
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
+    EXPECT_TRUE(first.told.empty());  // connected, no Listener Ready: no change
+    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
+    EXPECT_TRUE((first.told == std::vector<V>{V{1, 2}}));
+    EXPECT_TRUE(kit->talker_should_transmit(2, ADMIT_T0));
+
+    AdmissionRecorder second;
+    second.install(kit);  // replaces the first
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND, 1);
+    EXPECT_TRUE(second.told == std::vector<V>{V{2}});
+    EXPECT_EQ(first.told.size(), size_t{1});
+    EXPECT_FALSE(kit->talker_should_transmit(1, ADMIT_T0));
+    kit->set_on_admission_changed({});
+}
+
+// IEEE 802.1Q-2022 Clause 35.2.4.4: a Listener Ready a bridge declares over MSRP reaches the gate through
+// the host, stamped on the gate's clock as it arrives, and admits the connected stream.
+TEST(avb_entity_kit_admission, a_listener_ready_over_msrp_admits_the_connected_stream)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto& msrp = kit->host().components().msrp_handler;
+    TimePoint now{std::chrono::seconds{2}};
+    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), now).has_value());
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, kit.talker_specs()[0].index);
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    std::vector<std::vector<uint8_t>> out;
+    nanoavb::MsrpHandler<> bridge{
+        statusbar::srp::msrp::MsrpConfig{}, nanoavb::MsrpCallbacks{.send_packet = [&out](std::span<uint8_t const> p) {
+            out.emplace_back(p.begin(), p.end());
+            return true;
+        }}};
+    EXPECT_TRUE(bridge.listener_ready(talker_sid(kit, kit.talker_specs()[0].index), now).has_value());
+    for (int round = 0; round < 6 && recorder.told.empty(); ++round) {
+        now += std::chrono::milliseconds{120};
+        bridge.tick(now);
+        for (auto const& p : std::exchange(out, {})) {
+            msrp.receive_packet(p, now);
+        }
+    }
+    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{kit.talker_specs()[0].index}});
+    EXPECT_TRUE(kit->talker_should_transmit(kit.talker_specs()[0].index, net::rx_clock_now()));
+    kit->set_on_admission_changed({});
+}
+
+// Milan v1.3 Section 5.5.4.1: a Milan talker streams while its Listener is registered, with no
+// connection and no grace, so the stream leaves the admitted set at the Listener's withdrawal.
+TEST(avb_entity_kit_admission, a_milan_stream_closes_at_the_listener_leave)
+{
+    using V = std::vector<uint16_t>;
+    KitUnderTest kit{make_config(2, "milan13")};
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    kit->notify_listener_ready(talker_sid(kit, 0), true, ADMIT_T0);
+    EXPECT_TRUE(recorder.told == std::vector<V>{V{0}});
+    kit->notify_listener_ready(talker_sid(kit, 0), false, ADMIT_T0 + std::chrono::seconds{1});
+    EXPECT_TRUE(recorder.told == (std::vector<V>{V{0}, V{}}));
+    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0 + std::chrono::seconds{1}).empty());
+    kit->set_on_admission_changed({});
+}
+
+// With the gate off every talker stream transmits from the start: that is the set in force, so
+// nothing is told until a stream leaves it, which none does.
+TEST(avb_entity_kit_admission, a_kit_without_a_gate_admits_every_stream_and_tells_nothing)
+{
+    auto config = make_config(2, "classic");
+    config.gate_talker_on_listener = false;
+    KitUnderTest kit{std::move(config)};
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    kit->notify_listener_ready(talker_sid(kit, 0), true, ADMIT_T0);
+    EXPECT_EQ(kit->admitted_talker_streams(ADMIT_T0).size(), kit.talker_specs().size());
+    EXPECT_TRUE(recorder.told.empty());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
