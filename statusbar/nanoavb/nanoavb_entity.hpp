@@ -129,6 +129,12 @@ struct AvbInfo
 /// its gPTP state so entities built on it need not.
 using GetAvbInfoFn = statusbar::sg14::inplace_function<bool(uint16_t descriptor_index, AvbInfo& out), 64>;
 
+/// The most clock identities an AS path holds here: the grandmaster, each time-aware
+/// bridge, and this system (IEEE 802.1AS-2020 Clause 10.3.9.23).
+constexpr size_t MAX_AS_PATH_LENGTH = 32;
+/// The clock identities of an AS path, grandmaster first (IEEE 802.1AS-2020 Clause 10.3.9.23).
+using AsPath = statusbar::sg14::inplace_vector<Eui64, MAX_AS_PATH_LENGTH>;
+
 /// Notified when a SET_CONTROL targeting the entity's IDENTIFY control is
 /// applied (see set_identify_control_index). @p active is true when the new
 /// value is non-zero (a controller is identifying this entity), false when
