@@ -17,10 +17,12 @@
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avb_entity/avb_entity_tone_generator.hpp"
+#include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/net/net_test_port.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
@@ -1192,6 +1194,54 @@ TEST(avb_entity_kit_admission, a_kit_without_a_gate_admits_every_stream_and_tell
     kit->notify_listener_ready(talker_sid(kit, 0), true, ADMIT_T0);
     EXPECT_EQ(kit->admitted_talker_streams(ADMIT_T0).size(), kit.talker_specs().size());
     EXPECT_TRUE(recorder.told.empty());
+}
+
+//
+// Stream port
+//
+
+namespace {
+
+/// The 802.1Q-tagged Ethernet header build_stream_frame writes ahead of each AVTPDU.
+constexpr size_t TAGGED_HEADER_LENGTH = 18;
+Eui48 const TEST_PORT_MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+
+/// @p kit started at @p now on an in-process test port opened before the start: that port, or
+/// nullptr when the start did not keep it.
+auto start_on_test_port(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
+{
+    EXPECT_TRUE(kit->stream_port().open_test({.hardware_address = TEST_PORT_MAC}).has_value());
+    EXPECT_TRUE(kit.start(now));
+    return kit->stream_port().test_port();
+}
+
+}  // namespace
+
+// The host's port is the streams': the start keeps it, the talker's frames reach it tagged with
+// the configured VLAN, and the stop closes it as it would one the kit opened.
+TEST(avb_entity_kit_stream_port, a_port_opened_before_the_start_carries_the_talkers_frames)
+{
+    KitUnderTest kit{make_config(7, "classic")};
+    auto* const wire = start_on_test_port(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    EXPECT_EQ(kit->stream_port().generation(), 1U);  // not opened again
+    auto* const slot = kit->talker().slot_of(StreamKind::aaf);
+    EXPECT_TRUE(slot != nullptr);
+    if (wire == nullptr || slot == nullptr) {
+        return;
+    }
+    std::vector<float> const audio(size_t{slot->aaf_samples} * slot->spec.format.channels);
+    kit->talker().transmit_aaf(*slot, kit->talker().presentation_for(0), slot->aaf_samples, audio);
+    auto const sent = wire->pop_tx();
+    EXPECT_TRUE(sent.has_value());
+    if (sent.has_value()) {
+        std::array<uint8_t, TAGGED_HEADER_LENGTH> header{};
+        EXPECT_EQ(build_stream_frame(header, slot->dest_mac, TEST_PORT_MAC, 7, 3, {}), TAGGED_HEADER_LENGTH);
+        EXPECT_TRUE(std::ranges::equal(std::span<uint8_t const>{sent->frame}.first(TAGGED_HEADER_LENGTH), header));
+        EXPECT_TRUE(avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(TAGGED_HEADER_LENGTH)).has_value());
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+    EXPECT_FALSE(kit->stream_port().valid());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

@@ -1134,6 +1134,10 @@ void AvbEntityKit::open_stream_port()
     // The stream port, backend by name. Not fatal: an entity whose port
     // would not open keeps its control plane and has no streams, which is
     // what it did before when the socket would not open.
+    if (stream_port_.valid()) {  // the host opened it before the start (a test port): kept
+        host_.ctl_log().status("stream port: {}, opened by the host", logging::embed<48>(stream_port_.describe()));
+        return;
+    }
     if (auto status = stream_port_.open(
             {.backend = config_.net_backend,
              .interface_name = config_.interface_name,

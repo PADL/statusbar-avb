@@ -335,6 +335,9 @@ class AvbEntityKit
     [[nodiscard]] auto host() const noexcept -> AvbEntityHost const& { return host_; }
     [[nodiscard]] auto talker() noexcept -> TalkerStreams& { return *talker_; }
     [[nodiscard]] auto talker() const noexcept -> TalkerStreams const& { return *talker_; }
+    /// The port the streams go through. One the host opened before start() (a test port,
+    /// StreamPort::open_test) is kept by it; stop() closes it either way.
+    [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return stream_port_; }
     /// nullptr when the blob declares no stream inputs.
     [[nodiscard]] auto listener() noexcept -> ListenerStreams* { return listener_.get(); }
     [[nodiscard]] auto listener() const noexcept -> ListenerStreams const* { return listener_.get(); }
@@ -554,7 +557,8 @@ class AvbEntityKit
     void follow_grandmaster();
     /// The talker told whether a grandmaster is in force (@p in_force), as of now.
     void notify_talker_of_grandmaster(bool in_force) noexcept;
-    /// Not fatal when it does not open: the entity keeps its control plane.
+    /// On config_.net_backend unless the host opened it already. Not fatal when it does not
+    /// open: the entity keeps its control plane.
     void open_stream_port();
     [[nodiscard]] auto claim_stream_addresses(net::MessageReactor& reactor, TimePoint now) -> Status;
     [[nodiscard]] auto open_streams(net::MessageReactor& reactor) -> Status;
@@ -614,7 +618,7 @@ class AvbEntityKit
     TalkerGate gate_;
 
     /// The one port every stream frame goes through, backend from
-    /// config_.net_backend. Declared before the talker, the listener and the
+    /// config_.net_backend or opened by the host (stream_port()). Declared before the talker, the listener and the
     /// RX handler, which hold it by reference.
     StreamPort stream_port_{};
 
