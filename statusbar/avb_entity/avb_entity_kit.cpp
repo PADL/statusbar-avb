@@ -1465,6 +1465,12 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
     }
 }
 
+void AvbEntityKit::end_cycle(int64_t const now_ns)
+{
+    poll_counters(now_ns);
+    on_admission_timer(raw_at(now_ns));
+}
+
 void AvbEntityKit::poll_counters(int64_t const now_ns)
 {
     if (next_counters_fold_ns_.has_value() && now_ns < *next_counters_fold_ns_) {

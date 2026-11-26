@@ -330,7 +330,7 @@ Everything not listed here is the same under both.
 ### Stream counters
 
 A stream input counts each AVTPDU it receives (`StreamInputCounters`, on
-the RX thread). `AvbEntityKit::poll_counters(now_ns)` ends an
+the RX thread). `AvbEntityKit::end_cycle(now_ns)` ends an
 observation interval on the reactor thread once `COUNTERS_INTERVAL_NS`,
 half a second, has passed since the last: `StreamInputIntervals::fold()`
 makes the Milan values from the running counts, and an input still locked
@@ -349,7 +349,7 @@ Under the Milan profile GET_COUNTERS answers MEDIA_LOCKED,
 MEDIA_UNLOCKED and STREAM_INTERRUPTED as they stand and the interval
 counters as of the last fold; a bind's reset is answered at once and
 notified at the end of its interval. The entity runner calls
-`poll_counters()` each reactor cycle; an entity with a loop of its own
+`end_cycle()` once each reactor cycle; an entity with a loop of its own
 does the same and bounds its wait by `poll_timeout_ms()`, which counts
 the end of the interval among its deadlines. A loop that never calls it
 ends no interval: a Milan input then answers its event counters and zero
@@ -457,13 +457,14 @@ event at all, so each evaluation also arms one deadline, on the gate's
 clock, at the earliest `grace_ends()` of a stream still admitted whose
 Listener was withdrawn (`admission_deadline()`; none under Milan, which
 has no grace).
-`on_admission_timer(now)` evaluates the set again once it is reached.
-The entity runner calls it each reactor cycle while a deadline is armed,
-reading the gate's clock for it only then, and `poll_timeout_ms()` counts the
-deadline among the ones it does not sleep past. From the deadline until
-`on_admission_timer()` runs it answers 0, so an entity that forwards
-`poll_timeout_ms()` forwards both admission calls, and an entity with a
-loop of its own calls the timer as the runner does. The hook is not told the set in force when it is
+`end_cycle(now_ns)` evaluates the set again once it is reached, at the
+gate's clock carried forward to `now_ns` (`raw_at()`), in the same call
+that ends the counters' interval: one call per reactor cycle, after the
+reactor served it, so there is one thing for an entity to forward.
+`poll_timeout_ms()` counts the deadline among the ones it does not sleep
+past, and from the deadline until `end_cycle()` runs it answers 0, so an
+entity that forwards `poll_timeout_ms()` forwards `end_cycle()`, and an
+entity with a loop of its own calls it as the runner does. The hook is not told the set in force when it is
 installed; a later install replaces an earlier one. STOP_STREAMING
 stops the talker's slot, not the gate: the reservation stands, so the
 stream stays in the set.

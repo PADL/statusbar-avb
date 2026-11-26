@@ -370,11 +370,11 @@ TEST(avb_entity_kit_counters, the_loop_wakes_for_the_end_of_an_observation_inter
     KitUnderTest kit{make_config(2, "classic")};
     int64_t const start_ns = 5'000'000'000;
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns), 100);  // no interval begun
-    kit->poll_counters(start_ns);
+    kit->end_cycle(start_ns);
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + interval - (50 * ms)), 50);
-    kit->poll_counters(start_ns + interval - ms);  // not yet over
+    kit->end_cycle(start_ns + interval - ms);  // not yet over
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + interval - ms), 1);
-    kit->poll_counters(start_ns + interval);  // over: the next one begins
+    kit->end_cycle(start_ns + interval);  // over: the next one begins
     EXPECT_EQ(kit->poll_timeout_ms(100, start_ns + (2 * interval) - (50 * ms)), 50);
 }
 
@@ -870,6 +870,13 @@ namespace {
 /// A RAW instant the kit's gate is told in the admission tests.
 constexpr auto ADMIT_T0 = AvbEntityKit::RawTimePoint{std::chrono::seconds{100}};
 
+/// The end of a reactor cycle the loop told at reactor-clock @p now_ns and @p raw on the gate's clock.
+void end_cycle_at(KitUnderTest& kit, int64_t const now_ns, AvbEntityKit::RawTimePoint const raw)
+{
+    kit->tell_cycle_time(now_ns, raw);
+    kit->end_cycle(now_ns);
+}
+
 /// Talker stream @p idx's StreamID as MSRP reports it.
 auto talker_sid(KitUnderTest& kit, uint16_t const idx) -> nanoavb::StreamId
 {
@@ -1044,14 +1051,14 @@ TEST(avb_entity_kit_admission, a_withdrawal_over_msrp_is_known_at_the_cycle_the_
     EXPECT_TRUE(kit->poll_timeout_ms(60'000, later_ns) <= 4960);  // the deadline is 4960 ms off, or a timer sooner
     EXPECT_EQ(kit->poll_timeout_ms(60'000, later_ns), kit->poll_timeout_ms(60'000, later_ns, stamped + milliseconds{40}));
     int64_t const at_deadline_ns = BridgeOverMsrp::ns_of(wire.now) + 5'000'000'000;
-    EXPECT_EQ(kit->poll_timeout_ms(60'000, at_deadline_ns), 0);  // due: no wait until the timer has run
+    EXPECT_EQ(kit->poll_timeout_ms(60'000, at_deadline_ns), 0);  // due: no wait until end_cycle() has run
 
     // A cycle told at the deadline: the set asked for with no instant is the set of that cycle.
     AdmissionRecorder recorder;
     recorder.install(kit);
-    kit->tell_cycle_time(BridgeOverMsrp::ns_of(wire.now) + 5'000'000'000, stamped + TalkerGate::GRACE);
+    kit->tell_cycle_time(at_deadline_ns, stamped + TalkerGate::GRACE);
     EXPECT_TRUE(kit->admitted_talker_streams().empty());
-    kit->on_admission_timer(stamped + TalkerGate::GRACE);
+    kit->end_cycle(at_deadline_ns);
     EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
     EXPECT_FALSE(kit->admission_deadline().has_value());
     kit->set_on_admission_changed({});
@@ -1135,14 +1142,14 @@ TEST(avb_entity_kit_admission, the_deadline_is_armed_at_the_grace_end_and_disarm
     kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + nanoseconds{10});
     auto const ends = ADMIT_T0 + nanoseconds{10} + grace;
     EXPECT_TRUE(kit->admission_deadline() == ends);
-    kit->on_admission_timer(ends - nanoseconds{1});
+    end_cycle_at(kit, 1, ends - nanoseconds{1});
     EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});  // still within the grace
     EXPECT_TRUE(kit->talker_should_transmit(1, ends - nanoseconds{1}));
-    kit->on_admission_timer(ends);
+    end_cycle_at(kit, 2, ends);
     EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
     EXPECT_FALSE(kit->talker_should_transmit(1, ends));
     EXPECT_FALSE(kit->admission_deadline().has_value());
-    kit->on_admission_timer(ends + 10 * grace);
+    end_cycle_at(kit, 3, ends + 10 * grace);
     EXPECT_EQ(recorder.told.size(), size_t{2});
 
     kit->notify_listener_ready(talker_sid(kit, 1), true, ends + 11 * grace);  // registered again: back in
@@ -1151,7 +1158,7 @@ TEST(avb_entity_kit_admission, the_deadline_is_armed_at_the_grace_end_and_disarm
 }
 
 // The loop does not sleep past a grace's end: its wait is cut to what is left of the deadline on
-// the gate's clock, as it is for an MRP timer, and is 0 from the deadline until the timer runs.
+// the gate's clock, as it is for an MRP timer, and is 0 from the deadline until end_cycle() runs.
 TEST(avb_entity_kit_admission, the_loop_wakes_for_the_admission_deadline)
 {
     using std::chrono::milliseconds;
@@ -1167,8 +1174,31 @@ TEST(avb_entity_kit_admission, the_loop_wakes_for_the_admission_deadline)
     EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{50}), 50);
     EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends - milliseconds{150}), 100);
     EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 0);
-    kit->on_admission_timer(ends);
+    end_cycle_at(kit, now_ns, ends);
     EXPECT_EQ(kit->poll_timeout_ms(100, now_ns, ends), 100);  // disarmed
+}
+
+// end_cycle() finds the gate's clock as poll_timeout_ms() does, from the pair told for the cycle
+// carried forward by the reactor clock, and runs the deadline once that reaches it.
+TEST(avb_entity_kit_admission, the_end_of_a_cycle_runs_the_deadline_on_the_pair_carried_forward)
+{
+    using std::chrono::milliseconds;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0);  // the grace runs to T0 + GRACE
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    int64_t const told_ns = 9'000'000'000;
+    kit->tell_cycle_time(told_ns, ADMIT_T0 + TalkerGate::GRACE - milliseconds{40});
+    kit->end_cycle(told_ns + 39'000'000);
+    EXPECT_TRUE(recorder.told.empty());  // 1 ms short of the grace's end
+    EXPECT_TRUE(kit->admission_deadline().has_value());
+    kit->end_cycle(told_ns + 40'000'000);
+    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
+    EXPECT_FALSE(kit->admission_deadline().has_value());
+    kit->set_on_admission_changed({});
 }
 
 // Two streams' graces that end apart: the timer at the first end closes that stream and arms the
@@ -1189,21 +1219,21 @@ TEST(avb_entity_kit_admission, the_timer_at_one_grace_end_arms_the_next)
     kit->notify_listener_ready(talker_sid(kit, 2), false, ADMIT_T0 + seconds{2});
     kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + seconds{3});
     EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{2} + grace);
-    kit->on_admission_timer(ADMIT_T0 + seconds{2} + grace);
+    end_cycle_at(kit, 1, ADMIT_T0 + seconds{2} + grace);
     EXPECT_TRUE(recorder.told == std::vector<V>{V{1}});
     EXPECT_TRUE(kit->admission_deadline() == ADMIT_T0 + seconds{3} + grace);
-    kit->on_admission_timer(ADMIT_T0 + seconds{3} + grace);
+    end_cycle_at(kit, 2, ADMIT_T0 + seconds{3} + grace);
     EXPECT_TRUE((recorder.told == std::vector<V>{V{1}, V{}}));
     EXPECT_FALSE(kit->admission_deadline().has_value());
     kit->set_on_admission_changed({});
 }
 
-// An entity that forwards poll_timeout_ms() forwards both admission calls, or its loop would wake
-// at once from the deadline on: the runner calls on_admission_timer() only where they exist.
+// An entity that forwards poll_timeout_ms() forwards end_cycle(), or its loop would wake at once
+// from the admission deadline on: the runner calls end_cycle() only where it exists.
 template <typename Entity>
-concept ForwardsAdmission = requires(Entity& entity) { entity.on_admission_timer(*entity.admission_deadline()); };
-static_assert(ForwardsAdmission<AvbEntityAudioIO>);
-static_assert(ForwardsAdmission<AvbEntityToneGenerator>);
+concept EndsCycle = requires(Entity& entity) { entity.end_cycle(int64_t{}); };
+static_assert(EndsCycle<AvbEntityAudioIO>);
+static_assert(EndsCycle<AvbEntityToneGenerator>);
 
 // An entity whose gate is stamped from an MSRP hook is told the reactor cycle's time by its loop
 // (entity_reactor_clock): the kit's two entities forward it to the kit.

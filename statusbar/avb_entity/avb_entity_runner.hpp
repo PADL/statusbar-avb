@@ -19,10 +19,10 @@
 /// on_timeout, state_string, print_state, components(), net_handlers(),
 /// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors, and
 /// optionally poll_timeout_ms(max_ms, now_ns), which bounds each reactor
-/// wait by the entity's next control-plane deadline, poll_counters(now_ns),
-/// called each reactor cycle to end its counters' observation interval,
-/// admission_deadline() with on_admission_timer(now), called at the deadline,
-/// and tell_cycle_time(now_ns, raw_now), called by the reactor's clock
+/// wait by the entity's next control-plane deadline, end_cycle(now_ns),
+/// called once each reactor cycle after it was served (its counters'
+/// observation interval and its talker admission deadline), and
+/// tell_cycle_time(now_ns, raw_now), called by the reactor's clock
 /// (entity_reactor_clock) so that the entity itself reads none.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
@@ -428,25 +428,13 @@ template <typename Entity>
     }
 }
 
-/// End @p entity's counters' observation interval when it is due, for an
-/// entity that has one (AvbEntityKit::poll_counters).
+/// The end of a reactor cycle to @p entity, for an entity that asks for it
+/// (AvbEntityKit::end_cycle: its counters' interval and its admission deadline).
 template <typename Entity>
-void entity_poll_counters(Entity& entity)
+void entity_end_cycle(Entity& entity)
 {
-    if constexpr (requires { entity.poll_counters(int64_t{}); }) {
-        entity.poll_counters(net::monotonic_ns());
-    }
-}
-
-/// Re-evaluate @p entity's talker admission once its deadline is armed (AvbEntityKit::on_admission_timer),
-/// for an entity that has one; the loop reads the gate's clock for it only while it is.
-template <typename Entity>
-void entity_admission_timer(Entity& entity)
-{
-    if constexpr (requires { entity.on_admission_timer(*entity.admission_deadline()); }) {
-        if (entity.admission_deadline().has_value()) {
-            entity.on_admission_timer(net::rx_clock_now());
-        }
+    if constexpr (requires { entity.end_cycle(int64_t{}); }) {
+        entity.end_cycle(net::monotonic_ns());
     }
 }
 
@@ -582,8 +570,7 @@ auto run_entity_main_loop(
     auto reactor_cycle = [&] {
         (void)log_collector.poll(log_sink);
         (void)reactor.poll_once(entity_poll_timeout_ms(entity, REACTOR_POLL_MS));
-        entity_poll_counters(entity);
-        entity_admission_timer(entity);
+        entity_end_cycle(entity);
         if (hooks.poll) {
             hooks.poll();
         }
