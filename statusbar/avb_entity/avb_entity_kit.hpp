@@ -422,6 +422,11 @@ class AvbEntityKit
     void set_input_stopped(uint16_t index, bool stopped);
     /// Every stream input given the stopped state input_stopped() says.
     void apply_input_stopped_states();
+    /// A Milan sink's binding changed: each input's stopped state, and its
+    /// counters zeroed when it became bound.
+    void follow_milan_bindings();
+    void follow_inputs_bound();
+    void follow_input_bound(uint16_t index);
     /// End the observation interval of every stream's counters; notify those that changed.
     void fold_stream_counters();
     /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
@@ -563,6 +568,8 @@ class AvbEntityKit
     RetimedFormats retimed_notices_{};
     /// The end of the counters' observation interval (poll_counters), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
+    /// Each Milan stream input's bound state as last followed (follow_input_bound).
+    std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

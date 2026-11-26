@@ -818,6 +818,13 @@ auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bo
     return slot->intervals.fold(slot->counters);
 }
 
+void ListenerStreams::reset_input_counters(uint16_t const descriptor_index)
+{
+    if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
+        slot->intervals.reset(slot->counters);
+    }
+}
+
 namespace {
 
 auto to_stream_id(ieee::Eui64 const& id) -> tsn::StreamId
