@@ -613,7 +613,7 @@ TEST(avb_entity_host_counters, the_parent_data_set_outranks_the_announce_handler
 // AVTP tu follows the gPTP stack's grandmaster (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Annex B.1.1): none yet and
 // none named are losses, the first named, another or one after none a change, a repeat nothing, and the integrator's
 // own clock (a boundary clock's, not this NIC's) its own transition once; the Announce handler tells nothing then.
-TEST(avb_entity_host_counters, parent_reports_tell_their_grandmaster_transition)
+TEST(avb_entity_host_counters, parent_reports_notify_their_grandmaster_transition)
 {
     using statusbar::avb_entity::GrandmasterTransition;
     auto const blob = make_interface_blob(248);
