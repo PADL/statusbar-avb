@@ -44,6 +44,7 @@ statusbar_add_module(
   avb_entity_avb_info_mirror_test.cpp
   avb_entity_host_test.cpp
   avb_entity_kit_test.cpp
+  avb_entity_talker_gate_test.cpp
   avb_entity_state_dir_test.cpp
   avb_entity_talker_streams_test.cpp
   avb_entity_udptun_bridge_test.cpp

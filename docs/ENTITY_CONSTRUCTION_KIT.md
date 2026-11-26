@@ -314,7 +314,7 @@ Everything not listed here is the same under both.
 | START_STREAMING and STOP_STREAMING on a stream input | the input takes or discards its frames (7.4.35, 7.4.36); the state is not saved | the started/stopped state of the input's sink (5.3.8.7), saved with its binding and also set by a bind's STREAMING_WAIT; no effect on an input that is not bound. A stopped input discards its frames and keeps its reservation |
 | START_STREAMING and STOP_STREAMING on a stream output | the talker's stream is stopped and started; GET_STREAM_INFO reports STREAMING_WAIT (7.4.35, 7.4.36, Table 7-145) | NOT_SUPPORTED, nothing changed: an output cannot be stopped (5.4.2.19, 5.4.2.20, 5.3.7.3) |
 | BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX, on a Milan model (`entity.milan`) | NOT_IMPLEMENTED, and MVU_BINDING clear in GET_MILAN_INFO | answered by the stream inputs' sinks (5.4.4.6 to 5.4.4.8), a bind from a controller the lock shuts out ENTITY_LOCKED; MVU_BINDING set |
-| When a talker stream is put on the wire (`stream.gate_talker_on_listener`) | an ACMP connection, the stream started and MSRP Listener Ready, held five seconds past the last Listener Ready seen | the stream started and MSRP Listener Ready, with no grace: a Milan talker has no connections (5.5.4.1) and hears of no disconnect |
+| When a talker stream is put on the wire (`stream.gate_talker_on_listener`) | an ACMP connection, the stream started and MSRP Listener Ready, held five seconds past the withdrawal of its Listener Ready | the stream started and MSRP Listener Ready, with no grace: a Milan talker has no connections (5.5.4.1) and hears of no disconnect |
 | Which Talker attribute a stream input's Listener declaration follows | any of the stream's StreamID (IEEE 802.1Q 35.1.2.2) | the one on the destination address and VLAN the talker's PROBE_TX_RESPONSE gave (5.3.8.5) |
 | `listener.bindings` | off when empty; set, each successful connect is remembered and fast-connected again after a restart (file form v1) | the binding parameters of 5.3.8.3, written at every bind and unbind before the controller is answered, and each saved sink starts in PRB_W_AVAIL (file form v2; either form is read). Empty, they go to `listener-bindings` in the entity's state directory (below); with no state directory either, they last as long as the process |
 | When a stream output's Talker attribute is declared | once the entity is ready and its stream addresses are final | only while a listener wants the stream: a PROBE_TX_COMMAND for it arrived in the last 15 s, or a Listener attribute for its StreamID is registered on the port; withdrawn when neither holds, and while MAAP reports the address lost (4.3.3.1). `MsrpHandler::set_talker_waits_for_listener` |
@@ -402,6 +402,25 @@ restart on each stream output of clock domain 0 when SET_CLOCK_SOURCE
 makes another source active there (the source in force named again is
 none), and on each stream output a SET_SAMPLING_RATE re-times, once the
 entity's data plane has accepted the rate.
+
+### The talker's transmit gate
+
+`TalkerGate` decides, stream by stream, whether the talker sends: an ACMP
+connection (not under Milan), the stream started, and an MSRP Listener
+Ready registered or withdrawn less than the grace ago (five seconds; none
+under Milan). The reactor thread writes it. At each Listener Ready
+registered or withdrawn it stores the instant on CLOCK_MONOTONIC_RAW, read
+once for the event, when the declaration was last known registered, then
+the flag, with release. `admitted(idx, now)` loads the flag with acquire,
+then that stamp; `should_transmit()` is `admitted()`, told the media
+wake's RAW instant. The media thread and the reactor therefore read one
+predicate and agree on when a grace runs out however the wakes fall: a
+Ready registered and withdrawn between two wakes still opens its grace,
+and one missed over a long gap without wakes is checked against its
+stamp. `grace_ends(idx)` is the instant a withdrawn Listener's grace runs
+out. Only `note_listener_ready()` writes the stamp: the Listener's
+registration alone decides the gate, and a Talker withdrawal leaves it as
+it is.
 
 ### The format of a stream input
 
