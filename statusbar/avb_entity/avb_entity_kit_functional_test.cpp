@@ -19,8 +19,10 @@
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
+#include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -30,6 +32,7 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/test/test_data.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -723,6 +726,88 @@ void lock_entity(KitUnderTest& kit, Eui64 const& controller)
 }
 
 }  // namespace
+
+//
+// GET_AS_PATH - IEEE 1722.1-2021 Clause 7.4.41
+//
+
+namespace {
+
+/// The unsolicited GET_AS_PATH responses among @p sent.
+auto as_path_notifications(std::vector<std::vector<uint8_t>> const& sent) -> std::vector<std::vector<uint8_t>>
+{
+    std::vector<std::vector<uint8_t>> found;
+    for (auto const& frame : sent) {
+        atdecc::AemDu header{};
+        span_load(header, std::span<uint8_t const>{frame});
+        if (header.is_unsolicited() && header.command_code() == atdecc::AEM_COMMAND_GET_AS_PATH) {
+            found.emplace_back(frame.begin() + atdecc::AemDu::LENGTH, frame.end());
+        }
+    }
+    return found;
+}
+
+/// The path a GET_AS_PATH response @p body carries.
+auto path_of(std::span<uint8_t const> const body) -> std::vector<Eui64>
+{
+    atdecc::aem::AemAsPathResponseHeader header{};
+    span_load(header, body);
+    std::vector<Eui64> path(header.count.get());
+    for (size_t i = 0; i < path.size(); ++i) {
+        span_load(path[i], body.subspan(atdecc::aem::AemAsPathResponseHeader::LENGTH + (i * Eui64::LENGTH)));
+    }
+    return path;
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_as_path, a_new_path_trace_is_notified_after_the_gptp_callbacks_are_replaced)
+{
+    KitUnderTest kit{make_io_config(TALKER_ID, "milan13")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto& aem = kit->host().components().aem_handler;
+    std::vector<std::vector<uint8_t>> sent;
+    aem.set_send_response([&sent](Eui48 const&, std::span<uint8_t const> const frame) {
+        sent.emplace_back(frame.begin(), frame.end());
+        return true;
+    });
+    atdecc::AemDu reg{};
+    reg.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
+    reg.target_entity_id = TALKER_ID;
+    reg.controller_entity_id = CONTROLLER_ID;
+    std::array<uint8_t, atdecc::AemDu::LENGTH> reg_frame{};
+    span_store(reg_frame, reg);
+    (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x77}, reg_frame, TALKER_ID);
+
+    // An integrator's own gPTP callbacks, installed whole after start, as the tools do.
+    auto& announces = kit->host().net_handlers()->gptp_handler();
+    announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{});
+    Eui64 const gm{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55};
+    Eui64 const bridge{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x02};
+    nanoavb::AsPath trace{};
+    trace.push_back(gm);
+    trace.push_back(bridge);
+    gptp::AnnounceMessage announce{};
+    announce.init(1);
+    announce.grandmaster_identity = gptp::ClockIdentity{gm};
+    announces.observe_announce(2'000'000'000, announce, trace);
+    announces.observe_announce(3'000'000'000, announce, trace);  // the same path: nothing new
+
+    auto const notified = as_path_notifications(sent);
+    EXPECT_EQ(notified.size(), size_t{1});
+    nanoavb::AsPath answered{};
+    EXPECT_TRUE(kit->host().as_path(0, answered));
+    std::array const announced{gm, bridge};
+    EXPECT_TRUE(std::ranges::equal(std::span{answered}.first(std::min(answered.size(), announced.size())), announced));
+    auto const notified_path = notified.empty() ? std::vector<Eui64>{} : path_of(notified.back());
+    EXPECT_TRUE(std::ranges::equal(notified_path, answered));
+
+    // Announces stop: the path is gone, and that is notified too.
+    announces.tick(10'000'000'000);
+    EXPECT_EQ(as_path_notifications(sent).size(), size_t{2});
+    EXPECT_TRUE(path_of(as_path_notifications(sent).back()).empty());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
 
 TEST(avb_entity_kit_acmp, the_profile_chooses_which_acmp_runs)
 {

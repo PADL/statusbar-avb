@@ -19,10 +19,12 @@
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -415,6 +417,45 @@ TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
 
     // An index the model does not author is NO_SUCH_DESCRIPTOR.
     std::array<uint8_t, 4> const other{0x00, 0x09, 0x00, 0x05};
+    EXPECT_EQ(host->components().aem_handler.handle_command(header, other, out).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
+}
+
+TEST(avb_entity_host_as_path, the_path_ends_with_this_entitys_clock_unless_it_is_the_grandmaster)
+{
+    using statusbar::avb_entity::compose_as_path;
+    using statusbar::ieee::Eui64;
+    Eui64 const gm{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55};
+    Eui64 const self{0x70, 0xB3, 0xD5, 0xFF, 0xFE, 0xED, 0x00, 0x01};
+    statusbar::nanoavb::AsPath trace{};
+    EXPECT_TRUE(compose_as_path(trace, self).empty());  // no grandmaster: no path
+    trace.push_back(gm);
+    EXPECT_TRUE(std::ranges::equal(compose_as_path(trace, self), std::array{gm, self}));
+    EXPECT_TRUE(std::ranges::equal(compose_as_path(trace, std::nullopt), std::array{gm}));
+    statusbar::nanoavb::AsPath own{};
+    own.push_back(self);  // this system is the grandmaster
+    EXPECT_TRUE(std::ranges::equal(compose_as_path(own, self), std::array{self}));
+}
+
+TEST(avb_entity_host_as_path, the_host_answers_get_as_path_for_the_interfaces_the_model_authors)
+{
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    // Before the control plane is up no Announce has been seen: an empty path.
+    statusbar::nanoavb::AsPath path{};
+    path.push_back(statusbar::ieee::Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55});
+    EXPECT_TRUE(host->as_path(0, path));
+    EXPECT_TRUE(path.empty());
+    EXPECT_FALSE(host->as_path(5, path));
+
+    // The AEM handler serves GET_AS_PATH through the host.
+    std::array<uint8_t, 4> const request{0x00, 0x00, 0x00, 0x00};  // AVB_INTERFACE 0
+    AemDu header{};
+    header.init_command(statusbar::atdecc::AEM_COMMAND_GET_AS_PATH, AemDu::AEM_DATA_LENGTH + 4);
+    std::array<uint8_t, 256> out{};
+    auto const r = host->components().aem_handler.handle_command(header, request, out);
+    EXPECT_EQ(r.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(r.size, statusbar::atdecc::aem::AemAsPathResponseHeader::LENGTH);
+    std::array<uint8_t, 4> const other{0x00, 0x05, 0x00, 0x00};
     EXPECT_EQ(host->components().aem_handler.handle_command(header, other, out).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
 }
 
