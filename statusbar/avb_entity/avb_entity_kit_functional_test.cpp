@@ -2184,4 +2184,38 @@ TEST(avb_entity_kit_input_counters, a_stopped_milan_input_loses_its_lock_without
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
+TEST(avb_entity_kit_input_counters, a_milan_input_counts_intervals_and_a_classic_one_avtpdus)
+{
+    // Milan v1.3 Table 5.6: an interval counter counts the observation
+    // intervals in which its condition was seen, an event counter each event
+    // at once, and GET_COUNTERS answers Table 5.13's bits; IEEE 1722.1-2021
+    // Clause 7.4.42 counts AVTPDUs.
+    for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
+        bool const milan = profile == "milan13";
+        KitPair pair{profile};
+        auto const input = aaf_input_of(pair);
+        pair.bind();
+        pair.run(2 * ROUNDS_PER_SECOND);
+        AafSender talker{pair};
+        int64_t const t = 1'000'000'000;
+        pair.listener->poll_counters(t);  // the first interval starts
+
+        talker.send(50);
+        talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
+        auto counters = counters_of(input);
+        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);  // at once
+        EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), milan ? 0U : 99U);
+        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+        counters = counters_of(input);
+        EXPECT_EQ(counters.counters_valid.get(), milan ? I::VALID : 0x0000'0FFFU);
+        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
+        EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 1U);
+        EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 1U);
+        EXPECT_EQ(counters.counters[I::SEQ_NUM_MISMATCH].get(), 1U);
+        EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), milan ? 1U : 99U);
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)
