@@ -192,7 +192,7 @@ void AvbEntityKit::configure_talker_streams()
     for (auto const& spec : talker_specs_) {
         (void)host_.components().configure_talker_stream(
             spec.index, stream_id_for(stream_base_mac, spec.index), talker_dest_mac(config_, spec.format.kind), config_.vlan_id);
-        notify_talker_interface(spec.index);
+        check_talker_interface(spec.index);
     }
     // Milan v1.2 Section 5.3.7.6: every stream output starts at the
     // configured presentation offset (2 ms by default), within the range a
@@ -232,18 +232,15 @@ void AvbEntityKit::lose_announced_grandmaster()
     talker_->notify_grandmaster_lost();
 }
 
-void AvbEntityKit::notify_talker_interface(uint16_t const index)
+void AvbEntityKit::check_talker_interface(uint16_t const index)
 {
+    // The entity runs on one AVB interface (0); its Milan talker does not check a probe's interface.
     auto const stream = load_descriptor<atdecc::aem::DescriptorStream>(host_, DESCRIPTOR_STREAM_OUTPUT, index);
-    if (index >= talker_interface_.size() || !stream) {
-        return;
-    }
-    talker_interface_[index] = stream->avb_interface_index.get();
-    if (talker_interface_[index] != 0) {
-        // The entity runs on one AVB interface (0): probes for this
-        // output will be refused INCOMPATIBLE_REQUEST.
+    if (stream && stream->avb_interface_index.get() != 0) {
         host_.ctl_log().warning(
-            "kit: STREAM_OUTPUT {} names AVB_INTERFACE {}; the entity has only interface 0", index, talker_interface_[index]);
+            "kit: STREAM_OUTPUT {} names AVB_INTERFACE {}; the entity has only interface 0",
+            index,
+            stream->avb_interface_index.get());
     }
 }
 
