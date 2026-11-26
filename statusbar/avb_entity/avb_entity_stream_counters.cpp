@@ -183,6 +183,14 @@ void unlock_stream_input(StreamInputCounters& c) noexcept
     }
 }
 
+void restart_stream_input(StreamInputCounters& c) noexcept
+{
+    // Asked before the lock is dropped, so an AVTPDU that locks the input
+    // again after the drop finds the restart waiting at the next one.
+    c.restart_run.store(true);
+    unlock_stream_input(c);
+}
+
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
 {
     c.frames_rx.fetch_add(1, relaxed);
@@ -204,6 +212,9 @@ void tally_stream_input_packet(
     uint32_t const lock_tolerance_ns,
     uint32_t const sample_rate_hz)
 {
+    if (c.restart_run.load(relaxed) && c.restart_run.exchange(false)) {
+        forget_run(c);  // the input lost its stream since the last AVTPDU: this one starts a new one
+    }
     c.frames_rx.fetch_add(1, relaxed);
     if (!format_ok) {
         c.unsupported_format.fetch_add(1, relaxed);

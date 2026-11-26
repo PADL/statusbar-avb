@@ -22,9 +22,9 @@ namespace statusbar::avb_entity {
 /// IEEE 1722.1 STREAM_INPUT counters (Clause 7.4.42) for incoming-stream
 /// health, queryable via AECP GET_COUNTERS. Published values are atomic
 /// (written on the RX thread, read by the AECP handler); the lock/sequence
-/// detector state below is touched only on the RX thread, but for is_locked,
-/// which the reactor thread clears when the input loses its stream
-/// (unlock_stream_input).
+/// detector state below is touched only on the RX thread, but for is_locked
+/// and restart_run, which either thread sets when the input loses its stream
+/// (restart_stream_input).
 struct StreamInputCounters
 {
     std::atomic<uint32_t> media_locked{0};
@@ -83,6 +83,10 @@ struct StreamInputCounters
     /// MEDIA_LOCKED; cleared by an exchange on either thread, whose winner
     /// counts MEDIA_UNLOCKED. So MEDIA_UNLOCKED never runs ahead.
     std::atomic<bool> is_locked{false};
+    /// Set when the input loses its stream (restart_stream_input); the RX
+    /// thread clears it at its next AVTPDU and forgets the packets before it,
+    /// so that AVTPDU starts a stream.
+    std::atomic<bool> restart_run{false};
 };
 
 /// Update one StreamInputCounters from a received stream packet.
@@ -131,6 +135,12 @@ void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept;
 /// case, the input stream is not synchronized on the media clock), or
 /// MEDIA_LOCKED=MEDIA_UNLOCKED+1". Either thread.
 void unlock_stream_input(StreamInputCounters& c) noexcept;
+
+/// The input lost its stream: unlock_stream_input(), and the RX thread's next
+/// AVTPDU is the first of a stream, compared with none before it (no
+/// SEQ_NUM_MISMATCH, MEDIA_RESET or timestamp step from the old stream's last
+/// packet). Either thread; safe to call twice.
+void restart_stream_input(StreamInputCounters& c) noexcept;
 
 /// Append the presentation-margin report for one STREAM_INPUT to @p out:
 /// late/early counts, margin and lateness statistics, and the margin histogram
