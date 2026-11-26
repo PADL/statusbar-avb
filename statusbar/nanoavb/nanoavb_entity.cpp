@@ -559,6 +559,9 @@ auto AemCommandHandler::answered_before_hook(
     if (pending_commands_.size() >= pending_commands_.capacity()) {
         return refused_set(AEM_STATUS_NO_RESOURCES, command_type, command_data, out_buffer);
     }
+    if (auto const refusal = mappings_refusal(command_type, command_data)) {
+        return refused_set(*refusal, command_type, command_data, out_buffer);
+    }
     return unchanged_set_answer(command_type, command_data, out_buffer);
 }
 
@@ -1921,6 +1924,90 @@ auto AemCommandHandler::admit_and_keep(uint16_t const port_type, uint16_t const 
     return AEM_STATUS_SUCCESS;
 }
 
+auto AemCommandHandler::mappings_hold() const -> bool
+{
+    if (audio_maps_ == nullptr) {
+        return true;
+    }
+    bool holds = true;
+    uint32_t read_for = UINT32_MAX;
+    PortModel port{};
+    audio_maps_->for_each([&](uint16_t const type, uint16_t const index, DynamicAudioMapping const& mapping) {
+        if (std::exchange(read_for, (uint32_t{type} << 16U) | index) != read_for && !port_model(type, index, port)) {
+            port = PortModel{};  // a port the model lacks: nothing on it holds
+        }
+        holds = holds && check_mapping(index, port, mapping, true) == AEM_STATUS_SUCCESS;
+    });
+    return holds;
+}
+
+auto AemCommandHandler::mappings_refusal(uint16_t const command_type, std::span<uint8_t const> const command_body) const
+    -> std::optional<uint8_t>
+{
+    if (audio_maps_ == nullptr || audio_maps_->size() == 0) {
+        return std::nullopt;
+    }
+    if (command_type == AEM_COMMAND_SET_STREAM_FORMAT) {
+        auto const cmd = load_payload<AemStreamFormatPayload>(command_body);
+        return cmd ? format_change_refusal(*cmd) : std::nullopt;  // a short SET is refused as it is
+    }
+    if (command_type == AEM_COMMAND_SET_SAMPLING_RATE) {
+        auto const cmd = load_payload<AemSamplingRatePayload>(command_body);
+        return cmd ? rate_change_refusal(*cmd) : std::nullopt;
+    }
+    return std::nullopt;
+}
+
+auto AemCommandHandler::format_change_refusal(AemStreamFormatPayload const& cmd) const -> std::optional<uint8_t>
+{
+    // Milan v1.3 Section 5.4.2.7: every channel a mapping names stays; and, as Section 5.4.2.27
+    // checks an ADD, at the unit's rate unless the port converts rates.
+    bool const input = cmd.descriptor_type.get() == DESCRIPTOR_STREAM_INPUT;
+    uint16_t const port_type = input ? DESCRIPTOR_STREAM_PORT_INPUT : DESCRIPTOR_STREAM_PORT_OUTPUT;
+    auto const format = format_channels(std::bit_cast<ieee::octlet_t>(cmd.stream_format).get());
+    bool holds = true;
+    audio_maps_->for_each([&](uint16_t const type, uint16_t const index, DynamicAudioMapping const& mapping) {
+        if (type == port_type && mapping.stream_index == cmd.descriptor_index.get()) {
+            holds = holds && mapping.stream_channel < format.channels &&
+                (port_converts(type, index) || unit_rate_is(type, index, format.rate));
+        }
+    });
+    return holds ? std::nullopt : std::optional<uint8_t>{AEM_STATUS_BAD_ARGUMENTS};
+}
+
+auto AemCommandHandler::rate_change_refusal(AemSamplingRatePayload const& cmd) const -> std::optional<uint8_t>
+{
+    // Milan v1.3 Section 5.4.2.13: a mapping whose stream runs at another rate, on a port without
+    // the SRC bits, may refuse the rate: the mapping held would no longer hold (Section 5.4.2.27).
+    auto const unit = cmd.descriptor_type.get() == DESCRIPTOR_AUDIO_UNIT
+        ? read_model_descriptor<DescriptorAudioUnit>(DESCRIPTOR_AUDIO_UNIT, cmd.descriptor_index)
+        : std::nullopt;
+    if (!unit) {
+        return std::nullopt;
+    }
+    uint32_t const rate = cmd.sampling_rate.get() & SAMPLING_RATE_BASE_FREQUENCY_MASK;
+    bool holds = true;
+    audio_maps_->for_each([&](uint16_t const type, uint16_t const index, DynamicAudioMapping const& mapping) {
+        if (unit_holds_port(*unit, type, index)) {
+            holds = holds && (port_converts(type, index) || stream_rate(type, mapping.stream_index) == rate);
+        }
+    });
+    return holds ? std::nullopt : std::optional<uint8_t>{AEM_STATUS_NOT_SUPPORTED};
+}
+
+auto AemCommandHandler::port_converts(uint16_t const port_type, uint16_t const port_index) const -> bool
+{
+    auto const port = read_model_descriptor<DescriptorStreamPort>(port_type, port_index);
+    return port && (port->port_flags.get() & (PORT_FLAG_ASYNC_SAMPLE_RATE_CONV | PORT_FLAG_SYNC_SAMPLE_RATE_CONV)) != 0;
+}
+
+auto AemCommandHandler::stream_rate(uint16_t const port_type, uint16_t const stream_index) const -> uint32_t
+{
+    auto const stream = read_model_descriptor<DescriptorStream>(
+        port_type == DESCRIPTOR_STREAM_PORT_INPUT ? DESCRIPTOR_STREAM_INPUT : DESCRIPTOR_STREAM_OUTPUT, stream_index);
+    return stream ? format_channels(stream->current_format.to_uint64()).rate : 0;
+}
+
 auto AemCommandHandler::seed_audio_mappings(
     uint16_t const port_type, uint16_t const port_index, std::span<DynamicAudioMapping const> const mappings) -> uint8_t
 {
@@ -3114,6 +3201,9 @@ void AemCommandHandler::emit_held(QueuedNotification const& n)
 auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t
 {
     if (auto const refusal = local_change_refusal()) {
+        return *refusal;
+    }
+    if (auto const refusal = mappings_refusal(command_type, command_body)) {
         return *refusal;
     }
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told

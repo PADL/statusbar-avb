@@ -103,10 +103,21 @@ class Model final : public AemEntityHandler
         return true;
     }
 
-    /// A SET (any) whose hook makes a local mapping change of its own.
-    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
-        -> uint8_t override
+    /// SET_STREAM_FORMAT and SET_SAMPLING_RATE change the model; any SET may make a local mapping
+    /// change of its own.
+    auto on_set_descriptor_value(uint16_t const command_type, DescriptorId id, std::span<uint8_t const> value) -> uint8_t override
     {
+        if (command_type == AEM_COMMAND_SET_STREAM_FORMAT && value.size() >= 8) {
+            ieee::octlet_t word{};
+            span_load(word, value.first(8));
+            auto& formats = id.ref.descriptor_type == DESCRIPTOR_STREAM_OUTPUT ? output_formats : input_formats;
+            formats.at(id.ref.descriptor_index) = word.get();
+        }
+        if (command_type == AEM_COMMAND_SET_SAMPLING_RATE && value.size() >= 4) {
+            ieee::quadlet_t rate{};
+            span_load(rate, value.first(4));
+            unit_rate = rate.get();
+        }
         if (aem != nullptr && !added_on_set.empty()) {
             (void)aem->apply_local_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, 0, added_on_set, {});
         }
@@ -254,6 +265,24 @@ struct Bench
             n += (s.header.is_unsolicited() && s.header.command_code() == type && s.dest == dest) ? 1 : 0;
         }
         return n;
+    }
+
+    /// SET_STREAM_FORMAT of STREAM_INPUT @p index to @p format: its status.
+    auto set_input_format(uint16_t const index, uint64_t const format) -> uint8_t
+    {
+        std::array<uint8_t, AemStreamFormatPayload::LENGTH> body{};
+        span_store(body, AemStreamFormatPayload{.descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = index});
+        span_store(std::span{body}.subspan(4), ieee::octlet_t{format});
+        return command(CONTROLLER_A, MAC_A, AEM_COMMAND_SET_STREAM_FORMAT, body).header.status();
+    }
+
+    /// SET_SAMPLING_RATE of AUDIO_UNIT 0 to @p rate: its status.
+    auto set_unit_rate(uint32_t const rate) -> uint8_t
+    {
+        std::array<uint8_t, AemSamplingRatePayload::LENGTH> body{};
+        span_store(
+            body, AemSamplingRatePayload{.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0, .sampling_rate = rate});
+        return command(CONTROLLER_A, MAC_A, AEM_COMMAND_SET_SAMPLING_RATE, body).header.status();
     }
 
     /// Lock the entity for controller B.
@@ -704,6 +733,51 @@ TEST(nanoavb_audio_map, a_configuration_switch_forgets_the_mappings)
     EXPECT_TRUE(b.get_map(0, 0).mappings.empty());
     EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings.empty());
     EXPECT_EQ(b.maps->size(), size_t{0});
+}
+
+// Milan v1.3 Section 5.4.2.7: a SET_STREAM_FORMAT that leaves a channel a held mapping names is
+// BAD_ARGUMENTS; so is one that moves the stream off its unit's rate (the rule of Section
+// 5.4.2.27); a format that keeps both is accepted.
+TEST(nanoavb_audio_map, a_stream_format_that_breaks_a_held_mapping_is_refused)
+{
+    Bench b;
+    constexpr uint64_t AAF_2CH_48K = 0x0205022000806000ULL;
+    constexpr uint64_t AAF_8CH_48K = 0x0205022002006000ULL;
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 3, 0)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.set_input_format(0, AAF_2CH_48K), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.set_input_format(0, AAF_8CH_96K), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(b.model.input_formats[0], AAF_4CH_48K);
+    EXPECT_EQ(b.set_input_format(0, AAF_8CH_48K), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.model.input_formats[0], AAF_8CH_48K);
+    EXPECT_EQ(b.set_input_format(1, AAF_2CH_48K), AEM_STATUS_SUCCESS);  // a stream nothing maps
+    EXPECT_TRUE(b.aem.mappings_hold());
+    // Once the mapping is gone the format is free.
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 3, 0)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.set_input_format(0, AAF_2CH_48K), AEM_STATUS_SUCCESS);
+}
+
+// Milan v1.3 Section 5.4.2.13: a SET_SAMPLING_RATE to a rate a held mapping's stream does not run
+// at, on a port without the SRC bits, is NOT_SUPPORTED; the entity's own change the same.
+TEST(nanoavb_audio_map, a_rate_that_breaks_a_held_mapping_is_refused)
+{
+    Bench b;
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 0, 0)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.set_unit_rate(96000), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(b.model.unit_rate, 48000U);
+    std::array<uint8_t, AemSamplingRatePayload::LENGTH> local{};
+    span_store(
+        local, AemSamplingRatePayload{.descriptor_type = DESCRIPTOR_AUDIO_UNIT, .descriptor_index = 0, .sampling_rate = 96000U});
+    EXPECT_EQ(b.aem.apply_local_descriptor_value(AEM_COMMAND_SET_SAMPLING_RATE, local), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(b.model.unit_rate, 48000U);
+    EXPECT_TRUE(b.aem.mappings_hold());
+
+    // On a rate-converting port the mapping holds at any rate.
+    b.model.port0_flags = PORT_FLAG_ASYNC_SAMPLE_RATE_CONV;
+    EXPECT_EQ(b.set_unit_rate(96000), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.model.unit_rate, 96000U);
+    EXPECT_TRUE(b.aem.mappings_hold());
+    b.model.port0_flags = 0;
+    EXPECT_FALSE(b.aem.mappings_hold());  // what the check would have let through
 }
 
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)

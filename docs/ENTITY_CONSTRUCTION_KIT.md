@@ -445,6 +445,12 @@ refuses), which notifies every registered controller of what changed as
 REMOVE then ADD in AECPDUs of at most 63 mappings, and seeds a port's
 defaults, or mappings it restores, with `seed_audio_mappings`, which
 notifies nobody. A configuration switch forgets every port's mappings.
+A SET_STREAM_FORMAT that would leave a channel a held mapping names, or
+move its stream off the unit's rate, is BAD_ARGUMENTS (5.4.2.7), and a
+SET_SAMPLING_RATE to a rate a held mapping's stream does not run at, on a
+port that does not convert rates, NOT_SUPPORTED (5.4.2.13), from a
+controller or the entity alike, so every mapping held still holds
+(`mappings_hold()`).
 The kit hands the handler no store: an entity that
 routes channels gives `components().aem_handler` its store and hook.
 
