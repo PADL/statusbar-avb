@@ -9,6 +9,7 @@
 
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
+#include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/udptun/udptun_csv_record.hpp"  // udptun::default_colbin_capacity_bytes
 
 #include <charconv>
@@ -380,10 +381,27 @@ struct AvbEntityAudioIOConfig
     /// into the right SR class / credit-based shaper. Default 3 = SR Class A.
     uint8_t stream_pcp{3};
 
-    /// Presentation-time offset (ns) added to gPTP time for transmitted AVTP
-    /// timestamps; must exceed talker + network transit. Default 2 ms (Milan v1.2
-    /// Section 5.3.7.6); a controller may change it per output.
-    uint64_t presentation_offset_ns{2'000'000};
+    /// Presentation-time offset in nanoseconds added to the gPTP time to form the
+    /// AVTP timestamp of transmitted stream packets (how far in the future the
+    /// listener should present the samples). Must exceed the worst-case talker +
+    /// network transit time or the listener flags LATE_TIMESTAMP, and it is all
+    /// the room a late media-timer wake has: a wake later than this puts frames
+    /// on the wire past their presentation time, and a listener that takes its
+    /// media clock from the stream may stop to lock again. 0 (the default)
+    /// takes the profile's: 2 ms under the Milan profile (Milan v1.3 5.3.7.6,
+    /// "By default, the PAAD-AE shall use a 2ms Presentation time offset"),
+    /// 1 ms otherwise. Any other value is used as given under either profile;
+    /// see effective_presentation_offset_ns(). (The deterministic GPS-rate
+    /// media clock owns this lead; see ptpclient::MediaClockGenerator.)
+    uint64_t presentation_offset_ns{0};
+
+    /// The kit's own engines are the entity's data plane: a SET_STREAM_FORMAT re-shapes a talker (and,
+    /// with the entity's format hook, a listener) stream, a SET_SAMPLING_RATE re-shapes them after the
+    /// UnitRateFn (sample_rate() and the TSpecs follow), the kit refuses a streaming output's new
+    /// presentation offset, and each dynamic STREAM_PORT starts at the identity its engines route.
+    /// Off (the default): an output keeps its format, an input's goes to the listener alone, the
+    /// UnitRateFn moves the entity's own data plane, and dynamic ports start unmapped.
+    bool kit_data_plane{false};
 
     /// Number of stream packets emitted per stream per media-timer wake. Default 1
     /// = strict SR Class A (one 12-sample/125 us packet per 125 us wake, evenly

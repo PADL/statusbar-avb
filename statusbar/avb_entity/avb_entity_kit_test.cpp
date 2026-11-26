@@ -2914,7 +2914,7 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
     m.format_status = atdecc::AEM_STATUS_SUCCESS;
 
     // Milan v1.2 Section 5.4.2.7: a streaming output keeps its format.
-    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 0);
     m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
     EXPECT_TRUE(m.kit.output_streaming(0, MilanKit::raw_now()));
     size_t const asked = m.formats.size();
@@ -2930,7 +2930,7 @@ TEST(avb_entity_kit_formats, set_stream_format_reshapes_the_stream)
 TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
 {
     auto const dir = state_dir("stage8-formats");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x70);
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -2940,27 +2940,24 @@ TEST(avb_entity_kit_formats, bound_inputs_and_saved_formats)
         auto const saved = load_persistent_state(path, 0, {});
         EXPECT_EQ(saved.state.stream_formats.size(), size_t{1});
     }
-    PersistentState state = load_persistent_state(path, 0, {}).state;
-    state.listener_bindings.push_back(
-        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 6)});
-    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
         EXPECT_EQ(m.formats.size(), size_t{1});  // the saved format, through the hook
         EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 6));
         EXPECT_EQ(m.kit.listener()->slot_for(0)->spec.format.channels, uint16_t{6});
-        EXPECT_TRUE(m.kit.input_running(0));  // the saved binding
+        EXPECT_TRUE(m.kit.host().components().milan_acmp_listener->restore_binding(
+            atdecc::MilanBinding{.listener_unique_id = 0, .talker_entity_id = ieee::Eui64{}.from_uint64(0x0200001111110001ULL)},
+            sm::Clock::now()));
+        EXPECT_TRUE(m.kit.input_running(0));
         EXPECT_EQ(
             m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_INPUT, 0, base_format(48000, 8))),
             atdecc::AEM_STATUS_STREAM_IS_RUNNING);
-        // Milan v1.3 Section 5.4.2.13: the bound input, which no port maps here, keeps its format; the idle output
-        // follows; the rate in force is a no-op.
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
-        EXPECT_EQ(m.kit.sample_rate(), 96000U);
-        EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_96K);
+        // Milan v1.3 Section 5.4.2.7: the bound input refuses the unit's re-time as its own SET_STREAM_FORMAT would.
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+        EXPECT_EQ(m.kit.sample_rate(), 48000U);
         EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_INPUT, 0), base_format(48000, 6));
-        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_SUCCESS);
     }
     std::filesystem::remove_all(dir);
 }
@@ -2986,16 +2983,13 @@ TEST(avb_entity_kit_formats, an_idle_rate_change_retimes_the_unit_streams)
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
 }
 
-// The re-timed streams are notified as SET_STREAM_FORMATs to every registered controller, after the response
+// The re-timed streams are notified as SET_STREAM_FORMATs to every other registered controller, after the response
 TEST(avb_entity_kit_formats, a_rate_change_notifies_the_retimed_formats)
 {
     RateKit m;
     EXPECT_TRUE(m.start_ready());
-    std::array<uint8_t, 0> none{};
-    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    register_other_controller(m);
     EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT).empty());
-    m.kit.on_declaration_timer(MilanKit::steady_ns());
     auto const sent = unsolicited(m.aem, atdecc::AEM_COMMAND_SET_STREAM_FORMAT);
     EXPECT_EQ(sent.size(), size_t{2});
     EXPECT_TRUE(sent.size() == 2 && sent[0].size() >= 12 && sent[0][1] == DESCRIPTOR_STREAM_OUTPUT && sent[0][6] == 0x03);
@@ -3092,28 +3086,6 @@ TEST(avb_entity_kit_formats, a_running_output_under_the_kits_identity_refuses_th
     EXPECT_EQ(m.kit.sample_rate(), 48000U);
     EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
     EXPECT_TRUE(m.unit_rates.empty() && m.formats.empty());
-}
-
-// With nothing to re-time the data plane is still asked, and its refusal stands; without the hook the unit keeps its rate
-TEST(avb_entity_kit_formats, an_empty_retime_still_asks_the_data_plane)
-{
-    constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
-    RateKit m{"", 0x73, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
-    EXPECT_TRUE(m.start_ready());
-    (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
-    m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
-    auto& sinks = m.kit.host().components().acmp_listener.milan_sinks();
-    EXPECT_TRUE(sinks.restore(0, {.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200001111110001ULL)}));
-    m.unit_status = atdecc::AEM_STATUS_NO_RESOURCES;
-    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_NO_RESOURCES);
-    EXPECT_TRUE(m.unit_rates == (std::vector<std::pair<uint32_t, size_t>>{{96000, 0}}));
-    EXPECT_EQ(m.kit.sample_rate(), 48000U);
-    m.unit_status = atdecc::AEM_STATUS_SUCCESS;
-    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(m.kit.sample_rate(), 96000U);
-    EXPECT_TRUE(m.formats.empty());
-    m.kit.set_on_unit_rate_changed({});
-    EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(48000)), atdecc::AEM_STATUS_NOT_SUPPORTED);
 }
 
 // IEEE 802.1Q-2022 Clause 34.3.1: a re-time past the class A budget is refused before the data plane moves

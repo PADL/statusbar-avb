@@ -421,8 +421,8 @@ auto AvbEntityKit::identity_spec(uint16_t const port_type, uint16_t const port_i
     auto const& specs = output ? talker_specs_ : listener_specs_;
     auto const* const spec = std::ranges::find(specs, port_index, &StreamSpec::index);
     // Milan v1.2 Section 5.4.2.27: none at another rate than the unit's, unless the port converts rates (Milan v1.3
-    // Section 5.3.3.7) or outputs opted out.
-    bool const at_rate = spec != specs.end() &&
+    // Section 5.3.3.7) or outputs opted out; none unless the kit's engines route the port.
+    bool const at_rate = config_.kit_data_plane && spec != specs.end() &&
         (spec->format.sample_rate_hz == unit_rate_of(output, port_index) || port_converts(port_type, port_index) ||
          (output && output_mappings_across_rates_));
     return at_rate ? &*spec : nullptr;
@@ -715,8 +715,17 @@ auto AvbEntityKit::reshape_stream(bool const output, StreamSpec const& spec) -> 
     return listener_ != nullptr ? listener_->reformat_stream(spec) : Status{};
 }
 
+auto AvbEntityKit::engines_follow_format(uint16_t const type) const noexcept -> bool
+{
+    // Without kit_data_plane, or for an input the entity has no hook for, the listener alone follows.
+    return config_.kit_data_plane && (type == DESCRIPTOR_STREAM_OUTPUT || static_cast<bool>(on_stream_format_changed_));
+}
+
 auto AvbEntityKit::change_stream_format(uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t
 {
+    if (!engines_follow_format(type)) {
+        return on_stream_format_changed(type, index, format);
+    }
     auto& specs = type == DESCRIPTOR_STREAM_OUTPUT ? talker_specs_ : listener_specs_;
     auto* const spec = std::ranges::find(specs, index, &StreamSpec::index);
     if (spec == specs.end()) {
@@ -908,6 +917,104 @@ auto AvbEntityKit::talkers_fit(std::span<RetimedFormat const> const changed) con
     return after <= before || after <= static_cast<uint64_t>(sr_budget_kbps(link_mbps_ * 1000U));
 }
 
+auto AvbEntityKit::on_stream_format_changed(uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t
+{
+    // The format in force named again changes nothing and is refused by nothing.
+    if (current_stream_format(type, index) == format) {
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+    // A stream output's serializer is made once, for the format its model authors (Milan v1.3 Section 5.3.3.4).
+    return type == DESCRIPTOR_STREAM_INPUT ? change_input_format(index, format) : atdecc::AEM_STATUS_NOT_SUPPORTED;
+}
+
+auto AvbEntityKit::change_input_format(uint16_t const index, uint64_t const format) -> uint8_t
+{
+    // Milan v1.3 Section 5.4.2.7, IEEE 1722.1-2021 Clause 7.4.9.2: not while the input is bound or streaming.
+    if (input_running(index)) {
+        return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    }
+    if (listener_ == nullptr || !listener_->set_stream_format(index, format)) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    host_.ctl_log().status(
+        "aem: stream input {} now receives {} channels (format {:016x})", index, decode_stream_format(format).channels, format);
+    save_input_formats(index, format);
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::current_stream_format(uint16_t const type, uint16_t const index) const -> uint64_t
+{
+    return storage_handler_.current_stream_format({.configuration_index = 0, .descriptor_type = type, .descriptor_index = index})
+        .value_or(ieee::Eui64{})
+        .to_uint64();
+}
+
+auto AvbEntityKit::stream_formats_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::STREAM_FORMATS, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::STREAM_FORMATS);
+}
+
+void AvbEntityKit::save_input_formats(uint16_t const index, uint64_t const format)
+{
+    // Milan v1.3 Section 5.3.8.1: "The current format shall be saved in a non-volatile memory".
+    auto const path = stream_formats_file(true);
+    if (path.empty()) {
+        return;
+    }
+    SavedStreamFormats formats{};
+    for (auto const& spec : listener_specs_) {
+        uint64_t const word = spec.index == index ? format : current_stream_format(DESCRIPTOR_STREAM_INPUT, spec.index);
+        (void)formats.try_push_back(
+            SavedStreamFormat{.descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = spec.index, .format = word});
+    }
+    if (auto const saved = save_stream_formats(path, formats); !saved) {
+        host_.ctl_log().error("state: the stream formats were not saved (error {})", saved.error().value());
+    }
+}
+
+void AvbEntityKit::restore_input_formats()
+{
+    auto const path = stream_formats_file(false);
+    if (listener_ == nullptr || path.empty()) {
+        return;
+    }
+    auto const saved = load_stream_formats(path);
+    if (!saved.has_value()) {
+        host_.ctl_log().error(
+            "state: the saved stream formats cannot be read (error {}); the inputs keep their authored formats",
+            saved.error().value());
+        return;
+    }
+    for (auto const& one : *saved) {
+        restore_input_format(one);
+    }
+}
+
+void AvbEntityKit::restore_input_format(SavedStreamFormat const& saved)
+{
+    nanoavb::DescriptorRef const ref{
+        .configuration_index = 0, .descriptor_type = saved.descriptor_type, .descriptor_index = saved.descriptor_index};
+    // In this order, so that nothing changes unless both accept it: the listener can, the model still
+    // describes it, the listener does.
+    bool const kept = saved.descriptor_type == DESCRIPTOR_STREAM_INPUT &&
+        listener_->can_take_stream_format(saved.descriptor_index, saved.format) &&
+        storage_handler_.set_runtime_stream_format(ref, ieee::Eui64{}.from_uint64(saved.format)) &&
+        listener_->set_stream_format(saved.descriptor_index, saved.format);
+    if (!kept) {
+        host_.ctl_log().status(
+            "state: the saved format {:016x} of stream {} is not one it has now; it keeps its authored format",
+            saved.format,
+            saved.descriptor_index);
+    }
+}
+
 auto AvbEntityKit::change_sampling_rate(uint16_t const audio_unit, uint32_t const rate) -> uint8_t
 {
     // IEEE 1722.1-2021 Clause 7.4.21: the rate in force is a no-op; the kit re-times AUDIO_UNIT 0 alone.
@@ -928,20 +1035,73 @@ auto AvbEntityKit::retimed_formats(uint32_t const from, uint32_t const rate) con
     RetimedFormats out{};
     for (bool const output : {true, false}) {
         for (auto const& spec : output ? talker_specs_ : listener_specs_) {
-            if (auto const status = add_retimed(output, spec, from, rate, out); status != atdecc::AEM_STATUS_SUCCESS) {
+            auto const status = config_.kit_data_plane ? add_own_retimed(output, spec, from, rate, out)
+                                                       : add_retimed(output, spec.index, from, rate, out);
+            if (status != atdecc::AEM_STATUS_SUCCESS) {
                 return std::unexpected(status);
             }
         }
     }
-    // IEEE 802.1Q-2022 Clause 34.3.1, checked before the data plane moves (as each SET_STREAM_FORMAT would be).
-    return talkers_fit(out) ? std::expected<RetimedFormats, uint8_t>{out} : std::unexpected(atdecc::AEM_STATUS_NO_RESOURCES);
+    // IEEE 802.1Q-2022 Clause 34.3.1, checked before the kit's engines move (as each SET_STREAM_FORMAT would be).
+    bool const fits = !config_.kit_data_plane || talkers_fit(out);
+    return fits ? std::expected<RetimedFormats, uint8_t>{out} : std::unexpected(atdecc::AEM_STATUS_NO_RESOURCES);
 }
 
 auto AvbEntityKit::add_retimed(
+    bool const output, uint16_t const index, uint32_t const from, uint32_t const rate, RetimedFormats& out) const -> uint8_t
+{
+    auto const word = retimed_from(output, index, from);
+    if (!word) {
+        return atdecc::AEM_STATUS_SUCCESS;  // a CRF's format stays, as does one at another rate or in another domain
+    }
+    auto const to = retimed_to(output, index, *word, rate);
+    if (!to) {
+        return to.error();
+    }
+    (void)out.try_push_back(
+        {.type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT, .index = index, .from = *word, .to = *to});
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::retimed_from(bool const output, uint16_t const index, uint32_t const from) const -> std::optional<uint64_t>
+{
+    auto const in_force = storage_handler_.current_stream_format(
+        {.configuration_index = 0,
+         .descriptor_type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT,
+         .descriptor_index = index});
+    uint64_t const word = in_force.value_or(ieee::Eui64{}).to_uint64();
+    auto const format = decode_stream_format(word);
+    bool const moves = is_audio_kind(format.kind) && format.sample_rate_hz == from && in_unit_zero(output, index);
+    return moves ? std::optional<uint64_t>{word} : std::nullopt;
+}
+
+auto AvbEntityKit::retimed_to(bool const output, uint16_t const index, uint64_t const word, uint32_t const rate) const
+    -> std::expected<uint64_t, uint8_t>
+{
+    auto const to = aaf_format_at_rate(word, rate);
+    nanoavb::DescriptorRef const ref{
+        .configuration_index = 0,
+        .descriptor_type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT,
+        .descriptor_index = index};
+    if (!to || !storage_handler_.stream_format_listed(ref, ieee::Eui64{}.from_uint64(*to))) {
+        return std::unexpected(atdecc::AEM_STATUS_NOT_SUPPORTED);  // AM824, or a stream that lists no such format
+    }
+    // Milan v1.3 Section 5.4.2.7: refused as the input's own SET_STREAM_FORMAT would be; an output is the hook's.
+    if (!output && input_running(index)) {
+        return std::unexpected(atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    }
+    return *to;
+}
+
+auto AvbEntityKit::add_own_retimed(
     bool const output, StreamSpec const& spec, uint32_t const from, uint32_t const rate, RetimedFormats& out) const -> uint8_t
 {
     if (!is_audio_kind(spec.format.kind) || spec.format.sample_rate_hz != from || !in_unit_zero(output, spec.index)) {
         return atdecc::AEM_STATUS_SUCCESS;  // a CRF's format stays, as does one at another rate or of another unit
+    }
+    // Milan v1.3 Section 5.4.2.7: a stream input's format does not change while it runs.
+    if (!output && input_running(spec.index)) {
+        return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     // Milan v1.3 Section 5.4.2.13: one that cannot follow (running, or listing no such format) stays, unless a
     // port that converts no rates maps it, the identity the kit installed on an output port included.
@@ -992,10 +1152,38 @@ auto AvbEntityKit::retime_streams(uint32_t const rate, RetimedFormats const& ret
     if (auto const status = on_unit_rate_changed_(rate, retimed); status != atdecc::AEM_STATUS_SUCCESS) {
         return status;
     }
+    // Without kit_data_plane the entity's own data plane moved: the kit's engines keep their rate.
+    return config_.kit_data_plane ? retime_engines(rate, retimed) : retime_descriptors(rate, retimed);
+}
+
+auto AvbEntityKit::retime_engines(uint32_t const rate, RetimedFormats const& retimed) -> uint8_t
+{
     uint32_t const before = std::exchange(sample_rate_, rate);
     auto const status = retime_all(before, retimed);
     refresh_output_mappings();
+    notify_after_response();
     return status;
+}
+
+auto AvbEntityKit::retime_descriptors(uint32_t const rate, RetimedFormats const& retimed) -> uint8_t
+{
+    // The descriptors, reactor-side state, follow the data plane; the kit's specs and engines are not
+    // touched (the media thread reads them unguarded).
+    for (auto const& r : retimed) {
+        (void)storage_handler_.set_runtime_stream_format(
+            {.configuration_index = 0, .descriptor_type = r.type, .descriptor_index = r.index}, ieee::Eui64{}.from_uint64(r.to));
+        (void)format_notifications_.try_push_back({r.type, r.index});
+    }
+    notify_after_response();
+    host_.ctl_log().status("aem: AUDIO_UNIT 0 at {} Hz, {} streams re-timed", rate, retimed.size());
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+void AvbEntityKit::notify_after_response()
+{
+    if (!format_notifications_.empty()) {
+        host_.components().aem_handler.call_after_response([this] { flush_format_notifications(); });
+    }
 }
 
 auto AvbEntityKit::retime_all(uint32_t const before, RetimedFormats const& retimed) -> uint8_t
@@ -1474,6 +1662,12 @@ void AvbEntityKit::wire_aecp_queries()
             }
             return filled;
         });
+}
+
+void AvbEntityKit::wire_presentation_offsets()
+{
+    // The presentation time offset (Milan v1.2 Sections 5.4.2.9-10, v1.3 5.4.2.30-31): refused
+    // while the output is streaming and when the entity cannot apply it.
     host_.components().aem_handler.set_presentation_offset_hooks(
         [this](uint16_t const idx) -> std::optional<uint32_t> {
             return is_talker_index(idx) ? std::optional<uint32_t>{presentation_offset_ns(idx)} : std::nullopt;
@@ -1746,120 +1940,28 @@ auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const
 auto AvbEntityKit::commit_presentation_offset(uint16_t const idx, uint32_t const before, uint32_t const offset_ns) -> uint8_t
 {
     if (auto const status = on_presentation_offset_changed_(idx, offset_ns); status != atdecc::AEM_STATUS_SUCCESS) {
-        return status;
+        // The kit keeps no deferred offset to finish later: IN_PROGRESS is not an answer here.
+        return status == atdecc::AEM_STATUS_IN_PROGRESS ? atdecc::AEM_STATUS_ENTITY_MISBEHAVING : status;
     }
     presentation_offset_ns_[idx].store(offset_ns, std::memory_order_relaxed);
     host_.ctl_log().status("aem: talker stream {} presentation offset {} -> {} ns", idx, before, offset_ns);
     return atdecc::AEM_STATUS_SUCCESS;
 }
 
-void AvbEntityKit::wire_milan_listener()
-{
-    auto& components = host_.components();
-    auto& sinks = components.acmp_listener.milan_sinks();
-    // A binding change is saved after the reactor pass that made it (after the
-    // ACMP response); a stopped input discards its stream (Milan v1.2 5.3.8.7).
-    sinks.set_on_binding_changed([this](uint16_t const index) {
-        persist_pending_ = true;
-        if (listener_ != nullptr) {
-            auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
-            // An unbound sink's started is the default, true.
-            listener_->set_stream_stopped(index, sink != nullptr && !sink->binding.started);
-            // Milan v1.2 Section 5.3.8.10: bound from unbound zeroes the
-            // input's counters; an unbind is no interruption.
-            bool const bound = sink != nullptr && sink->bound();
-            if (index < input_bound_.size() && bound != input_bound_[index]) {
-                input_bound_[index] = bound;
-                if (bound) {
-                    listener_->reset_input_counters(index);
-                } else {
-                    listener_->notify_input_unbound(index);
-                }
-                (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, index);
-            }
-        }
-    });
-    sinks.set_on_status_changed([this](uint16_t const index) {
-        auto const* sink = host_.components().acmp_listener.milan_sinks().sink(index);
-        if (sink == nullptr) {
-            return;
-        }
-        if (!sink->bound()) {
-            host_.ctl_log().status("acmp: listener stream {} unbound", index);
-        } else {
-            host_.ctl_log().status(
-                "acmp: listener stream {} bound to {:016x}:{} {}{} (acmp status {}){}",
-                index,
-                sink->binding.talker_entity_id.to_uint64(),
-                sink->binding.talker_unique_id,
-                logging::static_str(atdecc::milan_sink_state_name(sink->state)),
-                sink->registration == atdecc::MilanTalkerRegistration::failed ? logging::lit(" talker failed") : logging::lit(""),
-                sink->acmp_status,
-                sink->binding.started ? logging::lit("") : logging::lit(", stopped"));
-        }
-        (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
-    });
-    // EVT_TK_REGISTERED / EVT_TK_UNREGISTERED: every change of a talker's
-    // registration is matched against the settled sinks.
-    components.msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& sid, TimePoint const now) {
-        auto const& sinks = host_.components().acmp_listener.milan_sinks();
-        for (size_t i = 0; i < sinks.sink_count(); ++i) {
-            auto const index = static_cast<uint16_t>(i);
-            auto const* sink = sinks.sink(index);
-            if (sink->settled() && sink->stream.stream_id.to_uint64() == sid.to_uint64()) {
-                refresh_sink_registration(index, now);
-            }
-        }
-    });
-}
-
-void AvbEntityKit::refresh_sink_registration(uint16_t const index, TimePoint const now)
-{
-    auto& sinks = host_.components().acmp_listener.milan_sinks();
-    auto const* sink = sinks.sink(index);
-    if (sink == nullptr || !sink->settled()) {
-        return;
-    }
-    join_input_vlan(index, *sink, now);
-    sinks.set_registration(index, talker_registration(*sink), now);
-}
-
-void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSink const& sink, TimePoint const now)
+void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSrpParameters const& srp, TimePoint const now)
 {
     // Once per settle; a probe answer naming no VID (0) uses the matched Talker attribute's, when registered.
-    uint16_t const vid = sink.stream.vlan_id != 0 ? sink.stream.vlan_id : matched_talker_vid(sink);
+    uint16_t const vid = srp.stream_vlan_id != 0 ? srp.stream_vlan_id : matched_talker_vid(srp);
     if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
         input_vid_[index] = vid;
         join_sink_vlan(vid, now);
     }
 }
 
-auto AvbEntityKit::matched_talker_vid(atdecc::MilanSink const& sink) const -> uint16_t
+auto AvbEntityKit::matched_talker_vid(atdecc::MilanSrpParameters const& srp) const -> uint16_t
 {
-    statusbar::tsn::StreamId sid{};
-    (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
-    auto const& msrp = host_.components().msrp_handler;
-    auto const* const failed = msrp.peer_talker_failed(sid);
-    auto const* const fv = failed != nullptr ? &failed->advertise : msrp.peer_talker_advertise(sid);
-    return fv != nullptr && fv->destination_address == sink.stream.dest_mac ? fv->vlan_identifier.get() : uint16_t{0};
-}
-
-auto AvbEntityKit::talker_registration(atdecc::MilanSink const& sink) const -> atdecc::MilanTalkerRegistration
-{
-    // Milan v1.2 Section 5.5.3.3: a Talker attribute matching the stream ID,
-    // destination address and VLAN ID the probe returned.
-    statusbar::tsn::StreamId sid{};
-    (void)statusbar::tsn::load_unchecked(sink.stream.stream_id.span(), &sid);
-    auto const matches = [&sink](srp::msrp::TalkerAdvertiseFirstValue const& fv) {
-        return fv.destination_address == sink.stream.dest_mac && fv.vlan_identifier.get() == sink.stream.vlan_id;
-    };
-    if (auto const* failed = host_.components().msrp_handler.peer_talker_failed(sid);
-        failed != nullptr && matches(failed->advertise)) {
-        return atdecc::MilanTalkerRegistration::failed;
-    }
-    auto const* advertise = host_.components().msrp_handler.peer_talker_advertise(sid);
-    return advertise != nullptr && matches(*advertise) ? atdecc::MilanTalkerRegistration::advertise
-                                                       : atdecc::MilanTalkerRegistration::none;
+    auto const registered = host_.components().msrp_handler.registered_talker(srp_stream_id(srp.stream_id));
+    return registered.has_value() && registered->dest_address == srp.stream_dest_mac ? registered->vlan_id : uint16_t{0};
 }
 
 void AvbEntityKit::join_sink_vlan(uint16_t const vid, TimePoint const now)
@@ -2528,9 +2630,6 @@ void AvbEntityKit::close_data_plane()
 
 void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
 {
-    if (!format_notifications_.empty()) {
-        flush_format_notifications();  // a rate change's, after its response
-    }
     // A listener goal change during this pass is saved now, after its ACMP
     // response.
     if (persist_pending_) {
@@ -2852,16 +2951,9 @@ void AvbEntityKit::collect_entity_settings(PersistentState& state) const
 
 void AvbEntityKit::collect_stream_settings(PersistentState& state) const
 {
-    storage_handler_.for_each_runtime_stream_format([this,
-                                                     &state](uint16_t const type, uint16_t const index, ieee::Eui64 const& format) {
-        // A stream's own format is the model's: nothing to keep.
-        auto const authored =
-            storage_handler_.authored_stream_format({.configuration_index = 0, .descriptor_type = type, .descriptor_index = index});
-        if (!authored || *authored != format) {
-            state.stream_formats.push_back({.descriptor_type = type, .descriptor_index = index, .format = format.to_uint64()});
-        }
-    });
-    collect_unit_formats(state);
+    if (config_.kit_data_plane) {
+        collect_stream_formats(state);  // else the inputs' formats are in the stream-formats file
+    }
     storage_handler_.for_each_runtime_sampling_rate(
         [&state](uint16_t const unit, uint32_t const rate) { state.sampling_rates.push_back({.audio_unit = unit, .rate = rate}); });
     storage_handler_.for_each_runtime_clock_source([&state](uint16_t const domain, uint16_t const source) {

@@ -250,6 +250,24 @@ inline constexpr uint32_t CLASS_A_PACKETS_PER_SEC = 8000;
 /// The byte Milan v1.3 Table 4.4 adds for a sampling clock a little faster than nominal, to the
 /// frame after the minimum-size rule (step 3).
 inline constexpr uint16_t MILAN_TSPEC_SPARE_BYTES = 1;
+/// The most channels an AAF stream input decodes.
+inline constexpr uint16_t MAX_AAF_INPUT_CHANNELS = 64;
+
+/// Whether an AAF stream input opened as @p opened can be brought to the
+/// format @p word: an AAF format with its "up to" bit clear that differs
+/// from the opened one in channels_per_frame alone, and has from one channel
+/// to MAX_AAF_INPUT_CHANNELS. The sample rate is the media clock's, and the
+/// sample format, bit depth and samples per AVTPDU stay as the input was
+/// opened; a format that changes one of them is not one this input takes.
+[[nodiscard]] constexpr auto aaf_input_can_take(StreamFormatFields const& opened, uint64_t const word) noexcept -> bool
+{
+    auto const wanted = decode_stream_format(word);
+    bool const both_aaf = opened.kind == StreamKind::aaf && wanted.kind == StreamKind::aaf;
+    bool const same_but_channels = wanted.sample_rate_hz == opened.sample_rate_hz && wanted.aaf_format == opened.aaf_format &&
+        wanted.bit_depth == opened.bit_depth && wanted.aaf_samples_per_frame == opened.aaf_samples_per_frame;
+    bool const channels_ok = wanted.channels >= 1 && wanted.channels <= MAX_AAF_INPUT_CHANNELS;
+    return both_aaf && same_but_channels && channels_ok && !avtp::AafStreamFormat::from_u64(word).ut();
+}
 
 /// The MSRP TSpec max_frame_size implied by @p format at the Class A cadence:
 /// L2 payload bytes of the largest AVTP frame the stream can emit. Audio
@@ -381,9 +399,9 @@ struct TalkerPort
 /// when nonzero.
 [[nodiscard]] auto common_audio_sample_rate(StreamSpecs const& specs, uint32_t fallback_hz = 0) -> StatusValue<uint32_t>;
 
-/// The AAF format word @p word at @p rate_hz (nominal rate and class A framing; sample
-/// format, depth and channels kept), as a SET_SAMPLING_RATE re-times it. nullopt for a
-/// word not AAF or a rate AAF has no code for.
+/// The AAF format word @p word at @p rate_hz: its nsr, and a samples_per_frame it names set to
+/// the rate's aaf_table_samples_per_pdu(); sample format, depth and channels kept. nullopt for a
+/// word that is not AAF or a rate with no nsr code (IEEE 1722-2016 Table 11).
 [[nodiscard]] auto aaf_format_at_rate(uint64_t word, uint32_t rate_hz) noexcept -> std::optional<uint64_t>;
 
 /// The StreamSpec @p spec with the format word @p word (decoded into its
