@@ -11,6 +11,7 @@
 #include "statusbar/buffer/buffer.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <span>
 #include <system_error>
@@ -18,6 +19,26 @@
 namespace statusbar::avb_entity {
 
 namespace {
+
+/// One more in a counter that one thread writes: a load and a store, no read-modify-write.
+void bump(std::atomic<uint32_t>& counter) noexcept
+{
+    counter.store(counter.load(std::memory_order_relaxed) + 1U, std::memory_order_relaxed);
+}
+
+/// One AVTPDU sent, with @p tu and @p mr: an mr that differs from the last AVTPDU's is a toggle.
+void count_pdu(TalkerTxCounters& c, bool const tu, bool const mr) noexcept
+{
+    bump(c.pdus);
+    if (tu) {
+        bump(c.tu_pdus);
+    }
+    if (c.have_mr && mr != c.last_mr) {
+        bump(c.mr_toggles);
+    }
+    c.last_mr = mr;
+    c.have_mr = true;
+}
 
 /// One slot's serializer for an AM824 spec.
 auto open_am824(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId const stream_id) -> Status
@@ -178,7 +199,7 @@ void TalkerStreams::transmit_am824(
     // (avtp_ts - wall_clock = presentation_offset).
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
-    ++slot.tx_packets;
+    count_sent(slot, pdu.stream_header.tu(), pdu.stream_header.mr());
 }
 
 void TalkerStreams::transmit_aaf(
@@ -210,7 +231,7 @@ void TalkerStreams::transmit_aaf(
     // presentation time is the media-clock timestamp written into the AVTP header.
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);
     send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
-    ++slot.tx_packets;
+    count_sent(slot, pdu.tu(), pdu.mr());
 }
 
 void fill_crf_timestamps(
@@ -260,7 +281,7 @@ void TalkerStreams::transmit_crf(TalkerStreamSlot& slot, uint64_t const base_ind
     size_t const frame_len = avtp::CrfPdu::HEADER_LENGTH + (static_cast<size_t>(n_ts) * avtp::CrfPdu::TIMESTAMP_SIZE);
     last_tx_gptp_ns_ = last_gptp_ns_.load(std::memory_order_relaxed);  // gPTP timestamp for the optional TX pcap tap
     send_stream_frame(slot.dest_mac, std::span<uint8_t const>{frame.data(), frame_len});
-    ++slot.tx_packets;
+    count_sent(slot, pdu.tu(), pdu.mr());
 }
 
 auto TalkerStreams::open_tx(StreamPort& port, TxPcapConfig const& pcap) -> Status
@@ -283,8 +304,30 @@ void TalkerStreams::close_tx() noexcept
     slots_.clear();
     port_ = nullptr;
     external_kick_ = false;
-    for (auto& stopped : stream_stopped_) {
-        stopped.store(false, std::memory_order_release);
+    for (uint16_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
+        stream_stopped_[idx].store(false, std::memory_order_release);
+        follow_streaming(idx, false);       // the media thread has stopped: so has the stream
+        tx_counters_[idx].have_mr = false;  // a reopened stream's first mr is no toggle
+    }
+}
+
+void TalkerStreams::count_sent(TalkerStreamSlot& slot, bool const tu, bool const mr) noexcept
+{
+    ++slot.tx_packets;
+    if (slot.spec.index < tx_counters_.size()) {
+        count_pdu(tx_counters_[slot.spec.index], tu, mr);
+    }
+}
+
+void TalkerStreams::follow_streaming(uint16_t const stream_index, bool const on) noexcept
+{
+    if (stream_index >= tx_counters_.size()) {
+        return;
+    }
+    auto& changes = tx_counters_[stream_index].streaming_changes;
+    bool const streaming = (changes.load(std::memory_order_relaxed) % 2U) != 0;
+    if (on != streaming) {
+        bump(changes);
     }
 }
 
@@ -349,6 +392,7 @@ void TalkerStreams::transmit_if_due(
     // A STOP_STREAMING'd stream behaves exactly like a closed SRP gate:
     // no emission, AAF FIFO cleared, CRF phase reset for a clean restart.
     bool const gate_open = srp_gate_open && !stream_stopped(slot.spec.index);
+    follow_streaming(slot.spec.index, gate_open);
     switch (slot.spec.format.kind) {
         case StreamKind::am824: {
             if (gate_open && samples > 0) {

@@ -76,6 +76,33 @@ struct TalkerStreamSlot
     std::optional<AafReframer> reframer{};
 };
 
+/// What one STREAM_OUTPUT has sent, for GET_COUNTERS: its AVTPDUs, those with
+/// tu set, the mr toggles among them, and each start and stop of the stream.
+/// The kit's sender (the media thread) is the one writer, a relaxed load and
+/// store, no read-modify-write; the reactor thread reads.
+struct TalkerTxCounters
+{
+    std::atomic<uint32_t> pdus{0};
+    std::atomic<uint32_t> tu_pdus{0};
+    std::atomic<uint32_t> mr_toggles{0};
+    /// Each start and each stop, in turn: odd while the stream streams. One
+    /// count, so a reader sees STREAM_START and STREAM_STOP of one instant.
+    std::atomic<uint32_t> streaming_changes{0};
+    bool last_mr{false};  ///< writer only
+    bool have_mr{false};  ///< writer only
+};
+
+/// STREAM_START of @p streaming_changes (TalkerTxCounters): one per start.
+[[nodiscard]] constexpr auto stream_starts(uint32_t const streaming_changes) noexcept -> uint32_t
+{
+    return (streaming_changes / 2U) + (streaming_changes % 2U);
+}
+/// STREAM_STOP of @p streaming_changes: one per stop.
+[[nodiscard]] constexpr auto stream_stops(uint32_t const streaming_changes) noexcept -> uint32_t
+{
+    return streaming_changes / 2U;
+}
+
 struct TalkerStreams
 {
     TalkerStreams(
@@ -120,7 +147,8 @@ struct TalkerStreams
     /// back in flush_tx, every stream streaming again. One call from the
     /// owning entity's stop(), once the media timer that transmits has
     /// stopped; the entity's next start() opens the streams afresh, as a
-    /// first start does, instead of over the ones a previous run left.
+    /// first start does, instead of over the ones a previous run left. A
+    /// stream that was streaming counts a stop (TalkerTxCounters).
     void close_tx() noexcept;
 
     /// Push this tick's frames to the wire. The ring backends batch what
@@ -163,14 +191,22 @@ struct TalkerStreams
     [[nodiscard]] auto slot_of(StreamKind kind) noexcept -> TalkerStreamSlot*;
     [[nodiscard]] auto slot_of(StreamKind kind) const noexcept -> TalkerStreamSlot const*;
 
+    /// The transmit counters of STREAM_OUTPUT @p stream_index, kept across
+    /// close_tx() and open_stream(); nullptr past MAX_ENTITY_STREAMS. Any thread.
+    [[nodiscard]] auto tx_counters(uint16_t const stream_index) const noexcept -> TalkerTxCounters const*
+    {
+        return stream_index < tx_counters_.size() ? &tx_counters_[stream_index] : nullptr;
+    }
+
     /// Emit this tick's traffic for @p slot from @p src (this stream's
     /// interleaved audio for the tick — per-stream sources are the entity's
     /// business; CRF slots ignore it): AM824 sends the tick's samples
     /// directly; AAF reframes to constant blocks of the format's samples per
     /// AVTPDU (gate closed clears the FIFO); CRF emits a PDU whenever the
     /// media clock reaches the one it owes (gate closed forgets the schedule,
-    /// so the next PDU starts from the live position). Media-timer
-    /// (SCHED_FIFO) thread.
+    /// so the next PDU starts from the live position). The stream streams
+    /// while @p gate_open and not stopped: a change counts a start or a stop.
+    /// Media-timer (SCHED_FIFO) thread.
     void transmit_if_due(
         TalkerStreamSlot& slot,
         ptpclient::MediaClockGenerator::Emit const& tick,
@@ -214,6 +250,13 @@ struct TalkerStreams
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
     void transmit_crf(TalkerStreamSlot& slot, uint64_t base_index);
 
+    /// One AVTPDU of @p slot sent, its tu and mr as given: tx_packets and the
+    /// stream's TalkerTxCounters. The sender's thread.
+    void count_sent(TalkerStreamSlot& slot, bool tu, bool mr) noexcept;
+    /// STREAM_OUTPUT @p stream_index streams (@p on) or not from this tick:
+    /// a change counts a start or a stop. The sender's thread.
+    void follow_streaming(uint16_t stream_index, bool on) noexcept;
+
     /// The AAF and CRF halves of transmit_if_due.
     void serve_aaf(
         TalkerStreamSlot& slot,
@@ -238,6 +281,8 @@ struct TalkerStreams
     sg14::inplace_vector<TalkerStreamSlot, MAX_ENTITY_STREAMS> slots_{};
     /// Per-stream STOP_STREAMING latches (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
+    /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
+    std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
     /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
     /// the port's address, recorded to the pcap tap when that is armed.
     void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload);
