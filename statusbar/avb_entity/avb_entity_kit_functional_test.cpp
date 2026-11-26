@@ -29,11 +29,15 @@
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/net/net_test_port.hpp"
+#include "statusbar/net/net_vlan_link.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
 #include "statusbar/sm/sm.hpp"
+#include "statusbar/srp/srp_msrp_participant.hpp"
 #include "statusbar/test/test.hpp"
 #include "statusbar/test/test_data.hpp"
+#include "statusbar/tsn/tsn_stream_id.hpp"
 
 #include <unistd.h>
 
@@ -2167,551 +2171,209 @@ TEST(avb_entity_kit_format, with_no_state_directory_the_format_is_set_and_nothin
 }
 
 //
-// Stream counters - Milan v1.3 Sections 5.3.8.10, 5.4.2.25; IEEE 1722.1-2021 Clause 7.4.42
+// The kit's Milan inputs on the NIC: VLANs and multicast groups - Milan v1.3 Section 4.4.1
 //
 
 namespace {
 
-using atdecc::aem::AemCountersPayload;
-using I = StreamInputIntervals;
+/// A talker the pair has no kit for: the test answers the sink's probe for it.
+constexpr Eui64 ANSWERED_TALKER_ID{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x0C};
 
-/// GET_COUNTERS of stream @p stream as its kit answers CONTROLLER_ID.
-auto counters_of(StreamOf const stream) -> AemCountersPayload
+/// Bind @p pair's input to stream 0 of @p talker and answer the sink's probe with @p stream_id
+/// to @p group on VLAN @p vid: the input settles on those.
+void bind_answered(
+    KitPair& pair, uint64_t const stream_id, Eui48 const& group, uint16_t const vid, Eui64 const& talker = ANSWERED_TALKER_ID)
 {
-    atdecc::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_GET_COUNTERS, atdecc::aem::AemGetCountersCommandPayload::LENGTH);
-    header.controller_entity_id = CONTROLLER_ID;
-    atdecc::aem::AemGetCountersCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
-    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
-    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
-    AemCountersPayload counters{};
-    span_load(counters, std::span<uint8_t const>{out}.first(AemCountersPayload::LENGTH));
-    return counters;
+    pair.controller_sends(controller_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, talker, 0, LISTENER_ID, pair.sink));
+    auto answer = pair.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    EXPECT_TRUE(answer.has_value() && answer->talker_entity_id == talker);
+    if (answer.has_value()) {
+        answer->set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+        answer->stream_id = Eui64{}.from_uint64(stream_id);
+        answer->stream_dest_mac = group;
+        answer->stream_vlan_id = vid;
+        receive_acmp(pair.listener, *answer, pair.now);
+    }
 }
 
-/// A controller registered for a kit's notifications: the GET_COUNTERS ones it is sent.
-struct CountersWatcher
+/// Start @p pair's stopped listener kit again at the pair's time and take it to Ready, its sends hooked again.
+void restart_listener(KitPair& pair)
 {
-    std::vector<AemCountersPayload> notified{};
+    EXPECT_TRUE(pair.listener.start(pair.now));
+    pair.listener->on_link_up(pair.now);
+    pair.listener->on_gptp_announce(pair.now, true);
+    EXPECT_TRUE(pair.listener->host().is_ready());
+    pair.hook(pair.listener, pair.acmp_to_talker, pair.msrp_to_talker);
+}
 
-    explicit CountersWatcher(KitUnderTest& kit, Eui64 const& entity = LISTENER_ID)
-    {
-        auto& aem = kit->host().components().aem_handler;
-        aem.set_send_response([this](Eui48 const&, std::span<uint8_t const> const frame) {
-            atdecc::AemDu header{};
-            span_load(header, frame);
-            if (header.is_unsolicited() && header.command_code() == atdecc::AEM_COMMAND_GET_COUNTERS) {
-                AemCountersPayload body{};
-                span_load(body, frame.subspan(atdecc::AemDu::LENGTH));
-                notified.push_back(body);
-            }
-            return true;
-        });
-        atdecc::AemDu reg{};
-        reg.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
-        reg.target_entity_id = entity;
-        reg.controller_entity_id = OTHER_CONTROLLER_ID;
-        std::array<uint8_t, atdecc::AemDu::LENGTH> frame{};
-        span_store(frame, reg);
-        (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x99}, frame, entity);
-    }
-
-    /// The notifications of stream (@p type, @p index).
-    [[nodiscard]] auto of(uint16_t const index, uint16_t const type) const -> size_t
-    {
-        return static_cast<size_t>(std::ranges::count_if(notified, [index, type](AemCountersPayload const& c) {
-            return c.descriptor_type.get() == type && c.descriptor_index.get() == index;
-        }));
-    }
-    [[nodiscard]] auto of_input(uint16_t const index) const -> size_t { return of(index, atdecc::aem::DESCRIPTOR_STREAM_INPUT); }
-};
-
-/// The pair's AAF stream as its talker numbers and stamps it, handed to the
-/// listener kit's input as received a millisecond before presentation.
-struct AafSender
+/// @p pair's listener kit stopped and started again on a test port, every join and leave in @p log; that port.
+auto listener_on_test_port(KitPair& pair, std::vector<net::TestPortContext::MembershipChange>* const log = nullptr)
+    -> net::TestPortContext&
 {
-    KitPair& pair;
-    avtp::AafStreamOutputContext context;
-    int64_t next_ns{1'000'000'000};
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.listener->stream_port().open_test({.hardware_address = Eui48{0x02, 0, 0, 0, 0, 0x0A}}).has_value());
+    auto& port = *pair.listener->stream_port().test_port();
+    port.record_memberships(log);
+    restart_listener(pair);
+    return port;
+}
 
-    explicit AafSender(KitPair& sending)
-        : pair{sending}
-        , context{context_for(sending)}
-    {}
-
-    /// The talker kit's AAF stream, eight channels at 96 kHz.
-    static auto context_for(KitPair& pair) -> avtp::AafStreamOutputContext
-    {
-        tsn::StreamId sid{};
-        for (auto const& spec : pair.talker.talker_specs()) {
-            sid = spec.index == AAF_STREAM ? pair.talker->make_talker_srp_info(spec).stream_id : sid;
-        }
-        auto const format = decode_stream_format(AAF_96K_8CH);
-        return avtp::AafStreamOutputContext{
-            sid,
-            format.aaf_format,
-            avtp::aaf_sample_rate_from_hz(format.sample_rate_hz).value_or(avtp::AafSampleRate::rate_96_khz),
-            format.channels,
-            format.bit_depth,
-            0};
-    }
-
-    /// @p count AVTPDUs, 125 us apart, after @p skip more the talker sent and the network lost.
-    void send(int const count, int const skip = 0)
-    {
-        for (int i = 0; i < count + skip; ++i, next_ns += 125'000) {
-            std::vector<uint8_t> frame(avtp::AafPdu::HEADER_LENGTH + (size_t{12} * 8 * 4), 0);
-            avtp::AafPdu pdu{};
-            auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
-            (void)avtp::aaf_stream_serialize(
-                context, pdu, payload, 12, avtp::Nanoseconds{next_ns}, [](uint8_t, std::span<float>) {});
-            span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
-            if (i >= skip) {
-                pair.listener->listener()->on_stream_rx_frame(frame, next_ns - 1'000'000);
-            }
+/// A bridge port declaring @p declare to @p pair's listener kit over MSRP, until it is registered.
+template <typename Declare>
+void bridge_declares(KitPair& pair, Declare&& declare)
+{
+    std::vector<std::vector<uint8_t>> out;
+    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
+    bridge.set_send_pdu([&out](std::span<uint8_t const> const pdu) {
+        out.emplace_back(pdu.begin(), pdu.end());
+        return true;
+    });
+    bridge.start(pair.now);
+    std::forward<Declare>(declare)(bridge);
+    for (int i = 0; i < 4; ++i) {
+        pair.now += std::chrono::milliseconds{250};
+        bridge.tick(pair.now);
+        for (auto const& pdu : std::exchange(out, {})) {
+            pair.listener->host().components().msrp_handler.receive_packet(pdu, pair.now);
         }
     }
+}
+
+#if defined(__linux__)
+/// The NIC's VLAN links as the kit asks for them: "add <link>" and "del <link>", in order.
+class VlanRecorder final : public net::vlan::VlanControl
+{
+  public:
+    std::vector<std::string> requests;
+
+    auto add_vlan(int /*parent_ifindex*/, std::string_view const name, uint16_t /*vid*/)
+        -> StatusValue<net::vlan::LinkOwnership> override
+    {
+        requests.push_back("add " + std::string{name});
+        return net::vlan::LinkOwnership::created;
+    }
+    auto remove_link(std::string_view const name) -> Status override
+    {
+        requests.push_back("del " + std::string{name});
+        return success();
+    }
+    auto bring_up(std::string_view /*name*/) -> Status override { return success(); }
+    [[nodiscard]] auto last_message() const noexcept -> std::string const& override { return message_; }
+
+  private:
+    std::string message_{};
 };
+
+/// @p pair's listener kit stopped and started again with its VLAN filter on @p vlans.
+void listener_on_vlans(KitPair& pair, VlanRecorder& vlans)
+{
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    pair.listener->bind_listener_vlan(vlans, 9);
+    restart_listener(pair);
+}
+#endif
 
 }  // namespace
 
-TEST(avb_entity_kit_input_counters, a_milan_input_whose_talker_withdraws_is_interrupted_and_an_unbound_one_is_not)
+TEST(avb_entity_kit_input_vlan, an_input_settled_on_another_vid_joins_it_with_mvrp_and_leaves_it_at_its_unbind)
 {
-    // Milan v1.3 Table 5.6: STREAM_INTERRUPTED "for any reason other than a
-    // Controller Unbind operation", the Talker attribute withdrawn among them.
     KitPair pair{"milan13"};
-    pair.no_leave_alls();  // the withdrawal below is timed
-    (void)aaf_input_of(pair);
-    auto const& counters = pair.listener->listener()->slot_for(AAF_STREAM)->counters;
-    AafSender talker{pair};
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    talker.send(20);
-    EXPECT_TRUE(counters.is_locked.load());
+    auto const& mvrp = pair.listener->host().components().mvrp_handler;
+    bind_answered(pair, 0x0200000000000777ULL, Eui48{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x77}, 5);
+    EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->sink(pair.sink)->is_settled());
+    EXPECT_TRUE(mvrp.get_vlan_state(5) != nanoavb::VlanState::Unregistered);
     pair.controller_sends(
-        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
-    EXPECT_EQ(counters.media_unlocked.load(), 1U);
-    EXPECT_EQ(counters.stream_interrupted.load(), 0U);
-
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    talker.send(20);
-    EXPECT_TRUE(counters.is_locked.load());
-    EXPECT_TRUE(pair.talker->host().components().msrp_handler.talker_withdraw(talker.context.stream_id, pair.now).has_value());
-    pair.run(2 * ROUNDS_PER_SECOND);
-    EXPECT_EQ(counters.media_locked.load(), 2U);
-    EXPECT_EQ(counters.media_unlocked.load(), 2U);
-    EXPECT_EQ(counters.stream_interrupted.load(), 1U);
-}
-
-TEST(avb_entity_kit_input_counters, a_milan_input_is_notified_at_every_second_interval_and_an_ieee_one_never)
-{
-    // Milan v1.3 Table 5.20: a GET_COUNTERS notification when a counter is updated, at most one a
-    // second per descriptor. The interval is half a second (Tables 5.4 and 5.6 allow a second), so a
-    // change is told at every second end of one. IEEE 1722.1 asks for no such notification: its
-    // controller reads the counters. Under either profile a locked input that receives nothing for an
-    // interval has lost its stream (Table 5.6).
-    static_assert(AvbEntityKit::COUNTERS_INTERVAL_NS == 500'000'000 && AvbEntityKit::COUNTERS_NOTIFY_FOLDS == 2);
-    for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
-        size_t const told = profile == "milan13" ? 1 : 0;  // a Milan entity tells, an IEEE 1722.1 one does not
-        KitPair pair{profile};
-        auto const input = aaf_input_of(pair);
-        pair.bind();
-        pair.run(2 * ROUNDS_PER_SECOND);
-        CountersWatcher const watcher{pair.listener};
-        AafSender talker{pair};
-        int64_t t = 1'000'000'000;
-        pair.listener->end_cycle(t);  // the first interval starts
-
-        talker.send(50);
-        talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
-        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS - 1);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the interval is not over
-        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the first end of an interval: half a second
-
-        // A second interval with nothing received: the stream stopped while locked. Its end is the
-        // second, and the changes of both are told at once.
-        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
-        auto const counters = counters_of(input);
-        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
-        EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 2U);
-        EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 2U);
-
-        // Two more that change nothing: nothing is told.
-        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
-
-        // A change in the interval after a notification waits for the second end after it.
-        talker.send(50);
-        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
-        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-        EXPECT_EQ(watcher.of_input(AAF_STREAM), 2 * told);
-        EXPECT_TRUE(pair.listener.stop(pair.now));
-        EXPECT_TRUE(pair.talker.stop(pair.now));
-    }
-}
-
-TEST(avb_entity_kit_input_counters, a_stopped_milan_input_loses_its_lock_without_an_interruption)
-{
-    // STOP_STREAMING discards the stream on purpose (5.3.8.7): when nothing
-    // arrives after it, the lock goes as MEDIA_UNLOCKED alone.
-    KitPair pair{"milan13"};
-    auto const input = aaf_input_of(pair);
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    AafSender talker{pair};
-    int64_t t = 1'000'000'000;
-    pair.listener->end_cycle(t);
-    talker.send(30);
-    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
-    pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto const counters = counters_of(input);
-    EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 1U);
-    EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 1U);
-    EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 0U);
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, ANSWERED_TALKER_ID, 0, LISTENER_ID, pair.sink));
+    EXPECT_TRUE(mvrp.get_vlan_state(5) == nanoavb::VlanState::Unregistered);
+    EXPECT_TRUE(mvrp.get_vlan_state(2) != nanoavb::VlanState::Unregistered);  // the Class A VID stays
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
-TEST(avb_entity_kit_input_counters, a_milan_input_counts_intervals_and_a_classic_one_avtpdus)
-{
-    // Milan v1.3 Table 5.6: an interval counter counts the observation
-    // intervals in which its condition was seen, an event counter each event
-    // at once, and GET_COUNTERS answers Table 5.13's bits; IEEE 1722.1-2021
-    // Clause 7.4.42 counts AVTPDUs.
-    for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
-        bool const milan = profile == "milan13";
-        KitPair pair{profile};
-        auto const input = aaf_input_of(pair);
-        pair.bind();
-        pair.run(2 * ROUNDS_PER_SECOND);
-        AafSender talker{pair};
-        int64_t const t = 1'000'000'000;
-        pair.listener->end_cycle(t);  // the first interval starts
 
-        talker.send(50);
-        talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
-        auto counters = counters_of(input);
-        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);  // at once
-        EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), milan ? 0U : 99U);
-        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-        counters = counters_of(input);
-        EXPECT_EQ(counters.counters_valid.get(), milan ? I::VALID : 0x0000'0FFFU);
-        EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
-        EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 1U);
-        EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 1U);
-        EXPECT_EQ(counters.counters[I::SEQ_NUM_MISMATCH].get(), 1U);
-        EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), milan ? 1U : 99U);
-        EXPECT_TRUE(pair.listener.stop(pair.now));
-        EXPECT_TRUE(pair.talker.stop(pair.now));
-    }
+TEST(avb_entity_kit_input_vlan, a_rebound_input_leaves_its_group_before_it_joins_the_next)
+{
+    KitPair pair{"milan13"};
+    auto const& port = listener_on_test_port(pair);
+    Eui48 const first{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x01};
+    Eui48 const second{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x02};
+    auto const joins = [&port](Eui48 const& group) { return std::ranges::count(port.joined_multicast_groups(), group); };
+    bind_answered(pair, 0x0200000000000777ULL, first, 2);
+    EXPECT_EQ(joins(first), 1);
+    bind_answered(pair, 0x0200000000000042ULL, second, 2, Eui64{}.from_uint64(0x0200000000000042ULL));
+    EXPECT_EQ(joins(first), 0);
+    EXPECT_EQ(joins(second), 1);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
-TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an_unbind_keeps_them)
+TEST(avb_entity_kit_input_vlan, a_stop_leaves_the_connected_group_and_closes_the_port)
 {
-    // Milan v1.3 Section 5.3.8.10: reset each time the input changes from not
-    // bound to bound, not when it changes from bound to not bound.
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port
     KitPair pair{"milan13"};
-    auto const input = aaf_input_of(pair);
+    (void)listener_on_test_port(pair, &log);
+    Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x03};
+    auto const held = [&log](Eui48 const& g) {
+        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = true}) -
+            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = false});
+    };
+    bind_answered(pair, 0x0200000000000777ULL, group, 2);
+    EXPECT_EQ(held(group), 1);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_FALSE(pair.listener->stream_port().valid());
+    EXPECT_EQ(held(group), 0);
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_input_vlan, a_restarted_input_joins_its_group_again_once_its_saved_binding_settles)
+{
+    // stop() leaves the group with the connection, not the binding: after a restart the input is
+    // unconnected until the binding settles again, then reserves and joins anew (Milan v1.3 Section 5.3.8.3).
+    KitPair pair{"milan13"};
     pair.bind();
     pair.run(2 * ROUNDS_PER_SECOND);
-    CountersWatcher const watcher{pair.listener};
-    AafSender talker{pair};
-    int64_t t = 1'000'000'000;
-    pair.listener->end_cycle(t);
-    talker.send(20);
-    talker.send(20, 1);
-    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(counters_of(input).counters[I::FRAMES_RX].get(), 1U);
-    EXPECT_EQ(counters_of(input).counters[I::SEQ_NUM_MISMATCH].get(), 1U);
+    EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
+    auto const group = pair.listener->host().components().milan_acmp_listener->sink(pair.sink)->context().srp.stream_dest_mac;
 
+    auto const& port = listener_on_test_port(pair);
+    auto const joins = [&port, &group] { return std::ranges::count(port.joined_multicast_groups(), group); };
+    auto const static_joins = joins();  // the model's pre-joined group of the input may be the same
+    auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
+    EXPECT_TRUE(sink.is_bound());
+    EXPECT_FALSE(sink.is_settled());
+    talker_advertises(pair, 1);
+    pair.run(3 * ROUNDS_PER_SECOND);  // TMR_DELAY, the probe, the reservation
+    EXPECT_EQ(sink.state(), atdecc::MilanSinkState::SettledRsvOk);
+    EXPECT_EQ(pair.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
+    EXPECT_EQ(joins(), static_joins + 1);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+#if defined(__linux__)
+TEST(avb_entity_kit_input_vlan, an_input_settled_on_another_vlan_holds_its_vid_on_the_filter)
+{
+    // VID 3 beside the Class A VID 2. When an adopted Domain moves Class A onto 3, the link both
+    // use stays and 2's goes; the input's unbind leaves 3 to the Class A VID.
+    VlanRecorder vlans;  // first: it outlives the kit, which deletes its links through it
+    KitPair pair{"milan13"};
+    listener_on_vlans(pair, vlans);
+    auto const link = [](uint16_t const vid) { return net::vlan::vlan_link_name("no-such-interface-0", vid); };
+    bind_answered(pair, 0x0200000000000777ULL, Eui48{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x10}, 3);
+    EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
+
+    bridge_declares(pair, [&pair](srp::msrp::MsrpParticipant& bridge) {
+        srp::msrp::DomainFirstValue class_a{};
+        class_a.sr_class_vid = 3;
+        (void)bridge.declare_domain(class_a, pair.now);
+    });
+    EXPECT_EQ(pair.listener->host().components().msrp_handler.domain().sr_class_vid, 3);
     pair.controller_sends(
-        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
-    EXPECT_EQ(counters_of(input).counters[I::MEDIA_UNLOCKED].get(), 2U);  // at once, not at the interval's end
-    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    auto counters = counters_of(input);
-    EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), 1U);
-    EXPECT_EQ(counters.counters[I::SEQ_NUM_MISMATCH].get(), 1U);
-    EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
-    EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 2U);      // the unbind drops the lock
-    EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 1U);  // the lost AVTPDU's alone
-
-    size_t const notified = watcher.of_input(AAF_STREAM);
-    pair.bind();
-    counters = counters_of(input);
-    EXPECT_TRUE(std::ranges::all_of(counters.counters, [](ieee::quadlet_t const v) { return v.get() == 0; }));
-    // Told at the second end of an interval after the last notification, as any change is.
-    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(watcher.of_input(AAF_STREAM), notified);
-    pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(watcher.of_input(AAF_STREAM), notified + 1);
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, ANSWERED_TALKER_ID, 0, LISTENER_ID, pair.sink));
+    EXPECT_TRUE(vlans.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(2)}));
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
-
-TEST(avb_entity_kit_output_counters, a_classic_output_counts_its_starts_stops_and_avtpdus)
-{
-    // IEEE 1722.1-2021 Table 7-158: STREAM_START, STREAM_STOP, MEDIA_RESET,
-    // TIMESTAMP_UNCERTAIN and FRAMES_TX, counted as the talker's media
-    // thread sends: here the tick is driven by hand, with the gate it is told.
-    KitPair pair{"classic"};
-    (void)aaf_input_of(pair);
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    auto& talker = pair.talker->talker();
-    auto* const slot = talker.slot_for(AAF_STREAM);
-    EXPECT_TRUE(slot != nullptr);
-    auto media_tick = [&] { talker.transmit_if_due(*slot, {}, pair.talker_transmits(), 0, {}); };
-    media_tick();
-    auto counters = counters_of(output);
-    EXPECT_EQ(counters.counters_valid.get(), 0x0000'009BU);
-    EXPECT_EQ(counters.counters[0].get(), 0U);  // not yet streaming
-
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    media_tick();
-    for (int i = 0; i < 10; ++i) {
-        talker.count_sent(*slot, /*tu=*/i >= 8, /*mr=*/i >= 5);
-    }
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters[0].get(), 1U);   // STREAM_START
-    EXPECT_EQ(counters.counters[1].get(), 0U);   // STREAM_STOP
-    EXPECT_EQ(counters.counters[3].get(), 1U);   // MEDIA_RESET: one toggle
-    EXPECT_EQ(counters.counters[4].get(), 2U);   // TIMESTAMP_UNCERTAIN
-    EXPECT_EQ(counters.counters[7].get(), 10U);  // FRAMES_TX
-
-    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
-    media_tick();
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters[0].get(), 1U);
-    EXPECT_EQ(counters.counters[1].get(), 1U);
-    EXPECT_EQ(counters.counters[7].get(), 10U);
-    EXPECT_TRUE(pair.listener.stop(pair.now));
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
-
-TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_them_again_at_each_start)
-{
-    // Milan v1.3 Table 5.4: MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX
-    // count observation intervals and are reset to 0 at each start,
-    // STREAM_START and STREAM_STOP each start and stop at once; GET_COUNTERS
-    // answers Table 5.14's bits.
-    using O = StreamOutputIntervals;
-    KitPair pair{"milan13"};
-    pair.no_leave_alls();  // the unbind below is timed
-    (void)aaf_input_of(pair);
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    CountersWatcher const watcher{pair.talker, TALKER_ID};
-    auto& talker = pair.talker->talker();
-    auto* const slot = talker.slot_for(AAF_STREAM);
-    EXPECT_TRUE(slot != nullptr);
-    auto media_tick = [&](int const sent) {
-        talker.transmit_if_due(*slot, {}, pair.talker_transmits(), 0, {});
-        for (int i = 0; i < sent; ++i) {
-            talker.count_sent(*slot, /*tu=*/false, /*mr=*/false);
-        }
-    };
-    int64_t t = 1'000'000'000;
-    pair.talker->end_cycle(t);
-
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    media_tick(100);
-    auto counters = counters_of(output);
-    EXPECT_EQ(counters.counters[O::STREAM_START].get(), 1U);  // at once
-    EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 0U);     // when the interval ends
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters_valid.get(), O::VALID);
-    EXPECT_EQ(counters.counters[O::STREAM_START].get(), 1U);
-    EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{0});  // the first end of an interval
-    media_tick(100);
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(counters_of(output).counters[O::FRAMES_TX].get(), 2U);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{1});  // the second: told
-
-    // Unbound, the listener's registration goes and the talker stops streaming.
-    pair.controller_sends(
-        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
-    pair.run(ROUNDS_PER_SECOND);
-    media_tick(0);
-    EXPECT_EQ(counters_of(output).counters[O::STREAM_STOP].get(), 1U);  // at once
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters[O::STREAM_STOP].get(), 1U);
-    EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 2U);
-
-    // Bound again: a second start, and FRAMES_TX counts from zero.
-    pair.bind();
-    pair.run(2 * ROUNDS_PER_SECOND);
-    media_tick(100);
-    pair.talker->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters[O::STREAM_START].get(), 2U);
-    EXPECT_EQ(counters.counters[O::STREAM_STOP].get(), 1U);
-    EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{2});  // four intervals, each with a change: told twice
-    EXPECT_TRUE(pair.listener.stop(pair.now));
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
-
-TEST(avb_entity_kit_output_counters, signal_presence_puts_channel_0_at_the_msb_within_the_streams_channels)
-{
-    // Milan v1.3 Section 5.3.7.7.1: ENTITY_SPECIFIC_9 for channels 0-31, _10 for 32-59, channel 0
-    // at the MSB; bits for channels the output does not have stay 0.
-    uint64_t const ends = (uint64_t{1} << 0U) | (uint64_t{1} << 31U) | (uint64_t{1} << 32U) | (uint64_t{1} << 59U);
-    EXPECT_EQ(signal_presence_quadlet(ends, 0), 0x8000'0001U);
-    EXPECT_EQ(signal_presence_quadlet(ends, 32), 0x8000'0010U);
-    EXPECT_EQ(signal_presence_quadlet(~uint64_t{0} << 60U, 32), 0U);  // no channel past 59
-    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 8), uint64_t{0xFF});
-    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 64), (uint64_t{1} << 60U) - 1U);
-    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 0), uint64_t{0});
-
-    std::array<uint32_t, 32> out{};
-    EXPECT_EQ(store_signal_presence(std::nullopt, 8, out), 0U);  // not reported: nothing valid
-    EXPECT_EQ(store_signal_presence(ends, 8, out), (1U << 23U) | (1U << 22U));
-    EXPECT_EQ(out[23], 0x8000'0000U);  // channel 0 alone of the eight
-    EXPECT_EQ(out[22], 0U);
-}
-
-TEST(avb_entity_kit_output_counters, a_milan_output_answers_the_signal_presence_reported_when_asked)
-{
-    // Milan v1.3 Section 5.3.7.7.1: GET_COUNTERS answers the latest report, within the eight
-    // channels of the stream; a change is told as any counter's is (Table 5.20).
-    using O = StreamOutputIntervals;
-    constexpr uint32_t presence_valid = (1U << 23U) | (1U << 22U);
-    KitPair pair{"milan13"};
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    CountersWatcher const watcher{pair.talker, TALKER_ID};
-    int64_t t = 1'000'000'000;
-    pair.talker->end_cycle(t);
-    EXPECT_EQ(counters_of(output).counters_valid.get(), O::VALID);  // not reported
-    size_t const notified = watcher.of(AAF_STREAM, output.type);
-
-    auto& talker = pair.talker->talker();
-    uint64_t const channels = (uint64_t{1} << 0U) | (uint64_t{1} << 7U) | (uint64_t{1} << 8U) | (uint64_t{1} << 59U);
-    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, channels).has_value());
-    auto counters = counters_of(output);  // at once, no fold between
-    EXPECT_EQ(counters.counters_valid.get(), O::VALID | presence_valid);
-    EXPECT_EQ(counters.counters[23].get(), 0x8100'0000U);  // channels 0 and 7; 8 and 59 dropped
-    EXPECT_EQ(counters.counters[22].get(), 0U);
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified);  // the first end of an interval
-    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, uint64_t{1} << 7U).has_value());
-    EXPECT_EQ(counters_of(output).counters[23].get(), 0x0100'0000U);  // the latest, between folds
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);  // the second: told once
-    EXPECT_EQ(watcher.notified.back().counters[23].get(), 0x0100'0000U);
-
-    // A channel the stream does not have is no change.
-    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, (uint64_t{1} << 7U) | (uint64_t{1} << 40U)).has_value());
-    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    pair.talker->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
-
-TEST(avb_entity_kit_output_counters, a_classic_output_reports_no_signal_presence)
-{
-    // IEEE 1722.1-2021 Table 7-158 has no signal presence: the running counts alone.
-    KitPair pair{"classic"};
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    EXPECT_TRUE(pair.talker->talker().set_signal_presence(AAF_STREAM, 1).has_value());
-    pair.talker->end_cycle(1'000'000'000);
-    pair.talker->end_cycle(1'000'000'000 + AvbEntityKit::COUNTERS_INTERVAL_NS);
-    EXPECT_EQ(counters_of(output).counters_valid.get(), stream_output_counters_valid);
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
-
-//
-// AVTP tu - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1
-//
-
-TEST(avb_entity_kit_tu, the_talker_follows_the_announced_grandmaster_whatever_the_callbacks)
-{
-    // A start knows no grandmaster: tu. One announced opens the 0.25 s window, after an
-    // integrator replaced the gPTP callbacks whole, as the tools do; the receipt timeout sets tu again.
-    KitPair pair{"classic"};
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    auto& talker = pair.talker->talker();
-    auto* const slot = talker.slot_for(AAF_STREAM);
-    EXPECT_TRUE(slot != nullptr);
-    constexpr int64_t LATER_NS = 1'000'000'000;  // past the window
-    constexpr auto CYCLE = realtime::MonotonicRawClock::time_point{std::chrono::seconds{500}};
-    // A media wake @p ahead_ns after CYCLE: the kit is asked about the stream, which tells the
-    // talker the wake's instant, and the AVTPDU takes its tu at it, as transmit_* stores and counts.
-    auto send = [&](int64_t const ahead_ns) {
-        (void)pair.talker->talker_should_transmit(AAF_STREAM, CYCLE + std::chrono::nanoseconds{ahead_ns});
-        talker.count_sent(*slot, talker.wake_timestamp_uncertain(), false);
-    };
-    send(0);
-    send(LATER_NS);
-
-    // The reactor cycle the Announce arrives in, as the loop tells it: the window opens there.
-    pair.talker->tell_cycle_time(2'000'000'000, CYCLE);
-    auto& announces = pair.talker->host().net_handlers()->gptp_handler();
-    announces.set_callbacks(nanoavb::GptpAnnounceCallbacks{});
-    gptp::AnnounceMessage announce{};
-    announce.init(1);
-    announce.grandmaster_identity = gptp::ClockIdentity{Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55}};
-    announces.observe_announce(2'000'000'000, announce);
-    send(0);
-    send(LATER_NS);
-    send(LATER_NS);
-    auto counters = counters_of(output);
-    EXPECT_EQ(counters.counters[4].get(), 3U);  // TIMESTAMP_UNCERTAIN: none, none, the window
-    EXPECT_EQ(counters.counters[7].get(), 5U);  // FRAMES_TX
-
-    announces.tick(10'000'000'000);  // the Announces stopped
-    send(LATER_NS);
-    counters = counters_of(output);
-    EXPECT_EQ(counters.counters[4].get(), 4U);
-    EXPECT_TRUE(pair.listener.stop(pair.now));
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
-
-//
-// AVTP mr - IEEE 1722-2016 Clause 4.4.4.3
-//
-
-TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_the_domains_outputs_as_media_reset)
-{
-    KitPair pair{"classic"};
-    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
-    auto& talker = pair.talker->talker();
-    auto* const slot = talker.slot_for(AAF_STREAM);
-    EXPECT_TRUE(slot != nullptr);
-    auto send = [&](int const count) {  // what transmit_* stores and counts
-        for (int i = 0; i < count; ++i) {
-            talker.count_sent(*slot, false, talker.next_mr(*slot));
-        }
-    };
-    auto set_clock_source = [&](uint16_t const source) {
-        atdecc::AemDu header{};
-        header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
-        header.controller_entity_id = CONTROLLER_ID;
-        atdecc::aem::AemClockSourcePayload const asked{
-            .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
-        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
-        return pair.talker->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
-    };
-    send(2);
-    EXPECT_EQ(set_clock_source(1), atdecc::AEM_STATUS_SUCCESS);
-    send(TalkerStreams::MR_HOLD_PDUS);
-    EXPECT_EQ(set_clock_source(1), atdecc::AEM_STATUS_SUCCESS);  // the source in force: no restart
-    send(TalkerStreams::MR_HOLD_PDUS);
-    auto const counters = counters_of(output);
-    EXPECT_EQ(counters.counters[3].get(), 1U);                                       // MEDIA_RESET
-    EXPECT_EQ(counters.counters[7].get(), 2U + (2U * TalkerStreams::MR_HOLD_PDUS));  // FRAMES_TX
-    EXPECT_TRUE(slot->mr);
-    EXPECT_TRUE(pair.listener.stop(pair.now));
-    EXPECT_TRUE(pair.talker.stop(pair.now));
-}
+#endif
 
 //
 // GET_STREAM_INFO of a Milan stream input (Milan v1.3 5.4.2.10.1, Table 5.8)
