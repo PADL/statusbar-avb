@@ -7,7 +7,7 @@
 
 #include "statusbar/avb_entity/avb_entity_kit.hpp"
 
-#include "statusbar/atdecc/atdecc.hpp"
+#include "statusbar/atdecc/atdecc_acmp.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_descriptor_storage.hpp"
@@ -4706,6 +4706,62 @@ TEST(avb_entity_kit_kind, a_port_reopened_before_start_holds_each_static_group_o
     EXPECT_TRUE(log.empty());
     EXPECT_TRUE(m.start_ready());
     EXPECT_EQ(std::ranges::count(m.kit.stream_port().test_port()->joined_multicast_groups(), group), 1);
+}
+
+// A Milan input settled on its own output's pre-joined group holds two memberships of it: the output's kind
+// change leaves the static one, the unbind the connection's (one leave per join)
+TEST(avb_entity_kit_kind, a_static_group_shared_with_a_connection_is_left_by_each)
+{
+    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
+    RateKit m{{}, 0x79, false, false, /*am824=*/true};
+    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x79}}).has_value());
+    m.kit.stream_port().test_port()->record_memberships(&log);
+    EXPECT_TRUE(m.start_ready());
+    auto const group = m.kit.talker().slot_for(0)->dest_mac;
+    auto const held = [&log, group] {
+        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = true}) -
+            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = false});
+    };
+    EXPECT_EQ(held(), 1);  // pre-joined
+
+    std::vector<atdecc::AcmpCommandResponse> sent;
+    auto const keep = [&sent](atdecc::AcmpCommandResponse const& pdu) {
+        sent.push_back(pdu);
+        return true;
+    };
+    m.kit.host().components().milan_acmp_listener->set_senders(keep, keep);
+    auto const receive = [&m](atdecc::AcmpCommandResponse const& pdu) {
+        std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+        m.kit.host().net_handlers()->atdecc_handler().dispatch_frame(
+            MilanKit::steady_ns(), ieee::Eui48{0x02, 0, 0, 0, 0, 0x09}, atdecc::acmp_serialize_2016(pdu, buf));
+    };
+    atdecc::AcmpCommandResponse bind{};
+    bind.init_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);  // BIND_RX
+    bind.controller_entity_id = TEST_CONTROLLER;
+    bind.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200000000000042ULL);
+    bind.listener_entity_id = m.config.entity_id;
+    receive(bind);
+    auto probe = std::ranges::find_if(
+        sent, [](auto const& pdu) { return pdu.message_type() == atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND; });
+    EXPECT_TRUE(probe != sent.end());
+    if (probe != sent.end()) {
+        auto answer = *probe;
+        answer.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+        answer.stream_id = ieee::Eui64{}.from_uint64(0x0200000000000777ULL);
+        answer.stream_dest_mac = group;
+        answer.stream_vlan_id = uint16_t{2};
+        receive(answer);
+    }
+    EXPECT_TRUE(m.kit.host().components().milan_acmp_listener->sink(0)->is_settled());
+    EXPECT_EQ(held(), 2);
+
+    EXPECT_EQ(
+        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, AM824_8CH_48K)),
+        atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(held(), 1);
+    bind.set_message_type(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND);  // UNBIND_RX
+    receive(bind);
+    EXPECT_EQ(held(), 0);
 }
 
 // ---- Clock sources and clock domain lock (IEEE 1722.1-2021 Clauses 7.2.32, 7.4.23-24, 7.4.42) ----

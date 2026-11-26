@@ -2850,4 +2850,111 @@ TEST(avb_entity_kit_stream_info, a_stopped_milan_talker_withdraws_and_a_restarte
     EXPECT_TRUE(kit.stop(now));
 }
 
+//
+// Saved state over a restart - Milan v1.3 Sections 5.3.8.3, 5.3.8.7, 7.6.1.1
+//
+
+namespace {
+
+/// The MVU command @p command with @p body to @p kit, as a controller sends it: the response's status.
+auto mvu_command(KitUnderTest& kit, uint16_t const command, std::span<uint8_t const> const body) -> uint8_t
+{
+    auto& aem = kit->host().components().aem_handler;
+    atdecc::AecpMvuDu header{};
+    header.init_command(command, static_cast<uint16_t>(body.size()));
+    header.common.target_entity_id = LISTENER_ID;
+    header.common.controller_entity_id = CONTROLLER_ID;
+    std::vector<uint8_t> frame(atdecc::AecpMvuDu::LENGTH + body.size());
+    span_store(std::span<uint8_t>{frame}.first(atdecc::AecpMvuDu::LENGTH), header);
+    std::ranges::copy(body, frame.begin() + atdecc::AecpMvuDu::LENGTH);
+    std::vector<uint8_t> response;
+    aem.set_send_response([&response](Eui48 const&, std::span<uint8_t const> const bytes) {
+        response.assign(bytes.begin(), bytes.end());
+        return true;
+    });
+    (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x77}, frame, LISTENER_ID);
+    atdecc::AecpMvuDu reply{};
+    if (response.size() < atdecc::AecpMvuDu::LENGTH) {
+        return atdecc::MVU_STATUS_NOT_IMPLEMENTED;  // no answer
+    }
+    span_load(reply, std::span<uint8_t const>{response});
+    return reply.common.status();
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_state, the_configured_default_mcr_priority_holds_until_a_controller_sets_one)
+{
+    // Milan v1.3 Section 7.6.1.1: the configured priority is the clock domain's default and its user
+    // priority's; unset keeps MVU_MCR_PRIO_DEFAULT. A user priority is saved only away from the default,
+    // so one a controller set survives another default.
+    StateDir const dir{"statusbar_state_dir_mcr_default_functional_test"};
+    auto const milan_config = [&dir](std::vector<uint8_t> priorities) {
+        auto config = dir.listener_config("milan13");
+        config.milan = true;  // a Milan model: GET_MILAN_INFO and the MVU commands answered
+        config.default_mcr_priorities = std::move(priorities);
+        return config;
+    };
+    {
+        KitUnderTest kit{milan_config({})};
+        bring_up(kit);
+        auto const info = kit->host().components().aem_handler.media_clock_reference_info(0);
+        EXPECT_EQ(info.default_mcr_prio.get(), atdecc::MVU_MCR_PRIO_DEFAULT);
+        EXPECT_EQ(info.user_mcr_prio.get(), atdecc::MVU_MCR_PRIO_DEFAULT);
+        EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+    }
+    {
+        KitUnderTest kit{milan_config({atdecc::MVU_MCR_PRIO_ROUTER, uint8_t{100}})};
+        bring_up(kit);
+        auto const info = kit->host().components().aem_handler.media_clock_reference_info(0);
+        EXPECT_EQ(info.default_mcr_prio.get(), atdecc::MVU_MCR_PRIO_ROUTER);
+        EXPECT_EQ(info.user_mcr_prio.get(), atdecc::MVU_MCR_PRIO_ROUTER);
+        atdecc::MvuMediaClockReferenceInfoPayload mcr{};
+        mcr.flags = atdecc::MVU_MCR_FLAGS_MEDIA_CLOCK_REFERENCE_PRIORITY_VALID;
+        mcr.user_mcr_prio = atdecc::MVU_MCR_PRIO_AUDIO_INTERFACE;
+        EXPECT_EQ(
+            mvu_command(kit, atdecc::MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, make_const_span(mcr)), atdecc::MVU_STATUS_SUCCESS);
+        EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+    }
+    KitUnderTest kit{milan_config({atdecc::MVU_MCR_PRIO_ROUTER})};
+    bring_up(kit);
+    EXPECT_EQ(
+        kit->host().components().aem_handler.media_clock_reference_info(0).user_mcr_prio.get(),
+        atdecc::MVU_MCR_PRIO_AUDIO_INTERFACE);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+}
+
+TEST(avb_entity_kit_state, a_binding_saved_stopped_starts_stopped_and_settles_after_its_talkers_adp)
+{
+    // The binding comes back with its stopped state: STREAMING_WAIT, probing PASSIVE until the
+    // talker's ADP, then probed and reserved, still stopped (Milan v1.3 Sections 5.3.8.3, 5.3.8.7).
+    using atdecc::MilanSinkState;
+    StateDir const dir{"statusbar_state_dir_stopped_binding_functional_test"};
+    {
+        KitPair pair{"milan13", dir.listener_config("milan13")};
+        pair.bind();
+        pair.run(2 * ROUNDS_PER_SECOND);
+        EXPECT_EQ(streaming_command(pair.listener, atdecc::AEM_COMMAND_STOP_STREAMING, pair.sink), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+    KitPair pair{"milan13", dir.listener_config("milan13")};
+    auto const& sink = *pair.listener->host().components().milan_acmp_listener->sink(pair.sink);
+    EXPECT_EQ(sink.state(), MilanSinkState::PrbWAvail);
+    EXPECT_TRUE(pair.listener->listener()->stream_stopped(pair.sink));
+    auto [info, ext] = milan_stream_info(pair.listener, pair.sink);
+    EXPECT_EQ(info.flags.get(), sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAMING_WAIT);
+    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::PASSIVE);
+    pair.run(3 * ROUNDS_PER_SECOND);  // no ADP from the talker: it waits
+    EXPECT_EQ(sink.state(), MilanSinkState::PrbWAvail);
+
+    talker_advertises(pair, 1);
+    pair.run(3 * ROUNDS_PER_SECOND);  // TMR_DELAY (at most 1 s), the probe, the reservation
+    EXPECT_EQ(sink.state(), MilanSinkState::SettledRsvOk);
+    EXPECT_TRUE(pair.listener->listener()->stream_stopped(pair.sink));
+    EXPECT_TRUE(reports_streaming_wait(pair.listener, pair.sink));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)
