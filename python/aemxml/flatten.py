@@ -1204,10 +1204,13 @@ def flatten(entity: Entity) -> tuple[list[FlatDescriptor], list[FlatSymbol]]:
         add_count(DESCRIPTOR_TIMING, len(config.timings))
         add_count(DESCRIPTOR_PTP_INSTANCE, len(config.ptp_instances))
 
-        # Only top-level descriptors (IEEE 1722.1-2021 7.2.2): stream,
-        # external and internal ports, clusters, maps, STRINGS and PTP_PORTs
-        # are reached through their owners' base/count fields, and a
-        # controller (la_avdecc) flags an entity that lists them here.
+        # Nothing else is counted. IEEE 1722.1-2021 7.2.2 has descriptor_counts
+        # list the top level descriptors only, the types above. STRINGS, the
+        # stream, external and internal ports, the clusters, the maps and the
+        # PTP_PORTs are reached from the descriptor that owns them (a LOCALE's
+        # base_strings, a unit's base_stream_input_port, a stream port's
+        # base_cluster and base_map, a PTP_INSTANCE's base_ptp_port), and a
+        # count of them here would give each a second parent.
 
         # Serialize configuration descriptor
         descriptors.append(

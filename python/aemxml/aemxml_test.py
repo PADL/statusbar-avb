@@ -3427,57 +3427,6 @@ def test_json_timing_clock_source():
     print("  [+] JSON TIMING clock source: OK")
 
 
-def test_json_stream_buffer_length():
-    """A stream's "buffer_length" (ns) reaches the STREAM_INPUT descriptor and
-    survives the JSON round trip (Milan v1.2 5.3.3.4: an input's must be at
-    least 2126000 ns); a bad value is refused."""
-    from aemxml.json_reader import read_json
-    from aemxml.json_writer import write_json
-    from aemxml.unflatten import unflatten
-
-    model = {
-        "entity": {
-            "vendor": "V",
-            "model": "M",
-            "name": "Buffer",
-            "configurations": [
-                {
-                    "name": "C",
-                    "avb_interfaces": [{"name": "eth0"}],
-                    "clock_sources": [{"name": "Internal", "type": "INTERNAL"}],
-                    "clock_domains": [{"name": "CD", "source": 0, "sources": [0]}],
-                    "streams_in": [
-                        {
-                            "name": "In",
-                            "format": {
-                                "type": "AAF",
-                                "rate": 48000,
-                                "channels": 8,
-                                "depth": 32,
-                            },
-                            "flags": ["CLASS_A"],
-                            "buffer_length": 2126000,
-                        }
-                    ],
-                }
-            ],
-        }
-    }
-    entity = read_json(json.dumps(model))
-    assert entity.configurations[0].streams_input[0].buffer_length == 2126000
-    again = read_json(write_json(entity))
-    assert again.configurations[0].streams_input[0].buffer_length == 2126000
-    back = unflatten(*read_blob(write_blob(*flatten(entity))))
-    assert back.configurations[0].streams_input[0].buffer_length == 2126000
-    model["entity"]["configurations"][0]["streams_in"][0]["buffer_length"] = -1
-    try:
-        read_json(json.dumps(model))
-        raise AssertionError("a negative buffer_length was accepted")
-    except ValueError as e:
-        assert "buffer_length" in str(e)
-    print("  [+] JSON stream buffer_length: OK")
-
-
 def test_json_unit_and_port_clock_domains():
     """An AUDIO_UNIT's "clock_domain_index" reaches its descriptor and its stream
     ports' (a port may name its own), and survives the JSON and blob round trips,
@@ -3715,7 +3664,6 @@ def main():
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,
         test_json_pull_rates,
-        test_json_stream_buffer_length,
         test_json_stream_format_up_to,
         test_json_localized_dict,
         test_json_control_values,

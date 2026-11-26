@@ -875,7 +875,7 @@
           "minimum": 0,
           "maximum": 4294967295,
           "default": 0,
-          "description": "buffer_length in nanoseconds (IEEE 1722.1-2021 7.2.6.1). Milan v1.2 5.3.3.4: at least 2126000 on a STREAM_INPUT."
+          "description": "STREAM_INPUT buffer_length: how much audio the input can hold, in nanoseconds (IEEE 1722.1-2021 Table 7.8). Milan v1.3 5.3.3.4 has at least 2126000."
         },
         "symbol": {
           "$ref": "#/$defs/symbol"
