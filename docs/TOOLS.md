@@ -145,6 +145,17 @@ socket (default) or, on macOS, the system AVB framework (needed to reach the
 Mac's own virtual entities); `statusbar-atdecc-controller` takes the same
 `--backend`.
 
+Every `atdecc-ctl` command starts with an ENTITY_DISCOVER and a discovery
+window (`--discover-ms`, 1.5 s). An entity may answer later than that: IEEE
+1722.1-2021 6.2.4.2.2 has it wait a random time up to 1/5 of its valid time,
+which is up to 4 s for a Milan device and 12.4 s at most. So an entity that a
+command names (`--talker`, `--listener`, `--entity`, or an operation of a
+`batch` file) and that has not been seen yet is waited for, until 13 s after
+the start, and the command goes on as soon as it is there. `list` without
+`--entity` names nothing and shows what answered inside the window: give it a
+longer `--discover-ms` on a network of Milan devices. `supervise` resolves its
+names once a pass and does not wait.
+
 ## AVTP, capture & audio
 
 | Tool | Purpose | Platform |

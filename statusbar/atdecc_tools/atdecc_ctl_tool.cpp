@@ -145,7 +145,11 @@ void add_op_specs(args::ArgumentSpecs& specs, Config& config)
     specs.add_choice("state", "identify: desired state", {"on", "off"}, "on", [&](auto v) { config.state = std::string{v}; });
     specs.add<std::string>(
         "file", "Batch/supervise TOML file (command=batch|supervise)", "", [&](auto v) { config.file = std::string{v}; });
-    specs.add<int64_t>("discover-ms", "Discovery window in ms", 1500, [&](auto v) { config.discover_ms = v; });
+    specs.add<int64_t>(
+        "discover-ms",
+        "Discovery window in ms. An entity the command names is waited for beyond it, up to 13 s after the start",
+        1500,
+        [&](auto v) { config.discover_ms = v; });
     specs.add<int64_t>("clock-domain", "CLOCK_DOMAIN index (clock-source ops)", 0, [&](auto v) { config.clock_domain = v; });
     specs.add<int64_t>("clock-source", "CLOCK_SOURCE index (set-clock-source)", 0, [&](auto v) { config.clock_source = v; });
 }
@@ -232,6 +236,34 @@ auto resolve_or_report(std::string_view name, std::vector<EntityDisplayInfo> con
         std::println(stderr, "Error: {}", err);
     }
     return id;
+}
+
+/// @p names in one line, for a message.
+auto listed(std::span<std::string const> names) -> std::string
+{
+    std::string text;
+    for (auto const& name : names) {
+        text += std::format("{}'{}'", text.empty() ? "" : ", ", name);
+    }
+    return text;
+}
+
+/// The discovery snapshot, taken once every entity of @p names is in it. An
+/// entity may take seconds to answer the ENTITY_DISCOVER this tool starts
+/// with (atdecc_tools::NAMED_ENTITY_WAIT_MS), longer than the discovery
+/// window; one that is named and not there yet is waited for until it is, or
+/// until no entity can still be on its way. Nothing is waited for when every
+/// name is known.
+auto snapshot_with(MessageReactor& reactor, ControllerSimple& ctrl, std::vector<std::string> const& names)
+    -> std::vector<EntityDisplayInfo>
+{
+    auto const missing = [&] { return atdecc_tools::unknown_entities(names, ctrl.get_display_entities()); };
+    int64_t const left_ms = atdecc_tools::named_entity_wait_left_ms(elapsed_ns() / 1'000'000);
+    if (left_ms > 0 && !missing().empty()) {
+        std::println(stderr, "discovery: {} not seen yet, waiting up to {} ms more", listed(missing()), left_ms);
+        (void)pump(reactor, ctrl, left_ms, [&] { return missing().empty(); }, [](auto const&) {});
+    }
+    return ctrl.get_display_entities();
 }
 
 // Print the leg-by-leg verdict for a (dis)connect handshake. `done` is whether
@@ -486,7 +518,7 @@ auto execute_stream_op(
 
 auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, bool trace = false) -> bool
 {
-    auto const snap = ctrl.get_display_entities();
+    auto const snap = snapshot_with(reactor, ctrl, atdecc_tools::op_entity_names(op));
 
     switch (op.kind) {
         case OpKind::Connect:
@@ -667,13 +699,31 @@ auto discover_action() -> ControllerAction
     return discover;
 }
 
+/// The entities the command line names: the talker and the listener of an
+/// endpoint option, and --entity.
+auto named_entities(Config const& config) -> std::vector<std::string>
+{
+    std::vector<std::string> names;
+    for (auto const* token : {&config.talker, &config.listener}) {
+        if (auto const endpoint = atdecc_tools::parse_endpoint(*token)) {
+            names.push_back(endpoint->name);
+        }
+    }
+    if (!config.entity.empty()) {
+        names.push_back(config.entity);
+    }
+    return names;
+}
+
 /// DISCOVER phase: announce + read every entity's ENTITY descriptor (the
-/// controller auto-enqueues that on ENTITY_AVAILABLE, populating names).
+/// controller auto-enqueues that on ENTITY_AVAILABLE, populating names). The
+/// discovery window is always spent; an entity the command line names is
+/// waited for beyond it (snapshot_with()).
 auto discover_entities(MessageReactor& reactor, ControllerSimple& ctrl, Config const& config) -> std::vector<EntityDisplayInfo>
 {
     ctrl.dispatch(discover_action(), elapsed_ns());
     (void)pump(reactor, ctrl, config.discover_ms, [] { return false; }, [](auto const&) {});
-    return ctrl.get_display_entities();
+    return snapshot_with(reactor, ctrl, named_entities(config));
 }
 
 /// The commands that ask and change nothing: list, validate, get-rx-state and

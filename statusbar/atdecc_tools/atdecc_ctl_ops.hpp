@@ -19,7 +19,9 @@
 #include <cctype>
 #include <cstdint>
 #include <format>
+#include <iterator>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -196,6 +198,63 @@ struct Op
     uint16_t signal_index{0};   ///< set_signal_selector: source signal_index
     uint16_t signal_output{0};  ///< set_signal_selector: source signal_output
 };
+
+//
+// Discovery: the entities a command names (pure, network-free)
+//
+
+/// How long an entity a command names is looked for, counted from the
+/// ENTITY_DISCOVER the tool starts with. IEEE 1722.1-2021 6.2.4.2.2 has an
+/// entity wait a random time before it answers one, "across the range of zero
+/// (0) to 1/5 of the valid time of the ATDECC Entity": up to 12.4 s for the
+/// largest valid time, 62 s, and up to 4 s for the 20 s of a Milan device
+/// (Milan v1.3 5.6.2: valid_time 10, in units of 2 s). The rest is for
+/// reading the entity's name.
+constexpr int64_t NAMED_ENTITY_WAIT_MS = 13'000;
+
+/// Whether @p name is an entity of @p entities, by resolve_entity()'s
+/// matching: an EUI-64 literal is itself, any other name is a
+/// case-insensitive part of a discovered entity's name. An entity is in the
+/// snapshot from its ENTITY_AVAILABLE on, but nameless until its ENTITY
+/// descriptor is read, so its name is not known before that. No name at all
+/// is nothing to look for.
+[[nodiscard]] inline auto entity_known(std::string_view name, std::vector<EntityDisplayInfo> const& entities) -> bool
+{
+    ieee::Eui64 direct{};
+    if (name.empty() || parse_eui64(name, direct)) {
+        return true;
+    }
+    auto const needle = detail::to_lower(name);
+    return std::any_of(entities.begin(), entities.end(), [&](auto const& e) {
+        return detail::to_lower(e.name).find(needle) != std::string::npos;
+    });
+}
+
+/// Those of @p names that are no entity of @p entities yet.
+[[nodiscard]] inline auto unknown_entities(std::span<std::string const> names, std::vector<EntityDisplayInfo> const& entities)
+    -> std::vector<std::string>
+{
+    std::vector<std::string> unknown;
+    std::copy_if(
+        names.begin(), names.end(), std::back_inserter(unknown), [&](auto const& name) { return !entity_known(name, entities); });
+    return unknown;
+}
+
+/// How much of NAMED_ENTITY_WAIT_MS is left, @p since_discover_ms after the
+/// ENTITY_DISCOVER went out: an entity that has not answered by the end of it
+/// is not going to.
+[[nodiscard]] constexpr auto named_entity_wait_left_ms(int64_t const since_discover_ms) noexcept -> int64_t
+{
+    return std::clamp<int64_t>(NAMED_ENTITY_WAIT_MS - since_discover_ms, 0, NAMED_ENTITY_WAIT_MS);
+}
+
+/// The entities @p op names: the talker and the listener of a connect or a
+/// disconnect, the target entity of anything else.
+[[nodiscard]] inline auto op_entity_names(Op const& op) -> std::vector<std::string>
+{
+    bool const is_stream_op = op.kind == OpKind::Connect || op.kind == OpKind::Disconnect;
+    return is_stream_op ? std::vector<std::string>{op.talker.name, op.listener.name} : std::vector<std::string>{op.entity};
+}
 
 namespace detail {
 /// Parse a `[[connect]]`/`[[disconnect]]` table into an Op. Requires

@@ -141,6 +141,77 @@ TEST(atdecc_ctl_resolve, same_id_twice_is_not_ambiguous)
 // parse_batch_ops
 //
 
+//
+// Discovery: the entities a command names
+//
+
+TEST(atdecc_ctl_discovery, a_name_is_known_once_an_entity_carries_it)
+{
+    std::vector<EntityDisplayInfo> entities;
+    EXPECT_FALSE(entity_known("stage", entities));
+
+    // Seen by its ENTITY_AVAILABLE, its ENTITY descriptor not read yet: no name.
+    entities.push_back(make_entity(Eui64{0, 1, 2, 3, 4, 5, 6, 7}, ""));
+    EXPECT_FALSE(entity_known("stage", entities));
+
+    entities[0].name = "Stage Left";
+    EXPECT_TRUE(entity_known("stage", entities));
+    EXPECT_TRUE(entity_known("LEFT", entities));
+    EXPECT_FALSE(entity_known("right", entities));
+}
+
+TEST(atdecc_ctl_discovery, an_eui64_literal_and_no_name_need_no_discovery)
+{
+    std::vector<EntityDisplayInfo> const none;
+    EXPECT_TRUE(entity_known("00:01:02:03:04:05:06:07", none));
+    EXPECT_TRUE(entity_known("", none));
+}
+
+TEST(atdecc_ctl_discovery, unknown_entities_lists_the_names_still_missing)
+{
+    std::vector<EntityDisplayInfo> entities;
+    entities.push_back(make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 1}, "node-a"));
+    std::vector<std::string> const names{"node-a", "node-d", "00:01:02:03:04:05:06:07"};
+    auto const missing = unknown_entities(names, entities);
+    EXPECT_EQ(missing.size(), size_t{1});
+    EXPECT_TRUE(missing[0] == "node-d");
+
+    entities.push_back(make_entity(Eui64{0, 0, 0, 0, 0, 0, 0, 2}, "node-d"));
+    EXPECT_TRUE(unknown_entities(names, entities).empty());
+    EXPECT_TRUE(unknown_entities({}, entities).empty());
+}
+
+TEST(atdecc_ctl_discovery, the_wait_runs_from_the_discover_and_ends)
+{
+    // IEEE 1722.1-2021 6.2.4.2.2: an entity answers within 1/5 of its valid
+    // time, 12.4 s for the largest. The wait covers that.
+    EXPECT_TRUE(NAMED_ENTITY_WAIT_MS >= 12'400);
+    EXPECT_EQ(named_entity_wait_left_ms(0), NAMED_ENTITY_WAIT_MS);
+    EXPECT_EQ(named_entity_wait_left_ms(1500), NAMED_ENTITY_WAIT_MS - 1500);
+    EXPECT_EQ(named_entity_wait_left_ms(NAMED_ENTITY_WAIT_MS - 1), int64_t{1});
+    EXPECT_EQ(named_entity_wait_left_ms(NAMED_ENTITY_WAIT_MS), int64_t{0});
+    EXPECT_EQ(named_entity_wait_left_ms(NAMED_ENTITY_WAIT_MS + 60'000), int64_t{0});
+    EXPECT_EQ(named_entity_wait_left_ms(-5), NAMED_ENTITY_WAIT_MS);
+}
+
+TEST(atdecc_ctl_discovery, an_op_names_its_endpoints_or_its_entity)
+{
+    Op connect{};
+    connect.kind = OpKind::Connect;
+    connect.talker = {.name = "node-a", .unique_id = 0};
+    connect.listener = {.name = "node-d", .unique_id = 1};
+    connect.entity = "ignored";
+    EXPECT_TRUE(op_entity_names(connect) == (std::vector<std::string>{"node-a", "node-d"}));
+    connect.kind = OpKind::Disconnect;
+    EXPECT_TRUE(op_entity_names(connect) == (std::vector<std::string>{"node-a", "node-d"}));
+
+    Op identify{};
+    identify.kind = OpKind::Identify;
+    identify.entity = "node-f";
+    identify.talker = {.name = "ignored", .unique_id = 0};
+    EXPECT_TRUE(op_entity_names(identify) == (std::vector<std::string>{"node-f"}));
+}
+
 TEST(atdecc_ctl_batch, parses_connect_clock_disconnect_in_order)
 {
     auto doc = toml::parse("[[connect]]\n"
