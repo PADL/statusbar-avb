@@ -724,6 +724,9 @@ class AvbEntityKit
     [[nodiscard]] static auto probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch;
     /// The stream outputs have destination addresses that are theirs to use (Milan v1.3 4.3.3.1, 5.5.4.1 step 3).
     [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool;
+    /// talker_addresses_valid() and stream output @p stream_index has a non-zero destination: else the
+    /// Milan talker answers a probe TALKER_DEST_MAC_FAIL (Milan v1.3 Section 5.5.4.1 step 3).
+    [[nodiscard]] auto talker_dest_mac_valid(uint16_t stream_index) const -> bool;
     /// REGISTERING_FAILED for stream output @p stream_index (Milan v1.3 Table 5.23).
     [[nodiscard]] auto talker_registering_failed(uint16_t stream_index) const -> bool;
     /// The entity is locked by a controller other than @p controller.

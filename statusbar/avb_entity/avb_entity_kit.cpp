@@ -1739,6 +1739,13 @@ auto AvbEntityKit::talker_addresses_valid() const noexcept -> bool
     return maap_.ready() && host_.components().msrp_handler.talker_addresses_valid();
 }
 
+auto AvbEntityKit::talker_dest_mac_valid(uint16_t const stream_index) const -> bool
+{
+    // As talker_addresses_valid(), for a stream that has an address: a kind with no static one has none.
+    auto const stream = host_.components().talker_stream(stream_index);
+    return talker_addresses_valid() && stream.has_value() && stream->stream_dest_mac != ieee::Eui48{};
+}
+
 auto AvbEntityKit::talker_registering_failed(uint16_t const stream_index) const -> bool
 {
     auto const stream = host_.components().talker_stream(stream_index);
@@ -1751,7 +1758,7 @@ void AvbEntityKit::wire_milan_talker_callbacks()
     // is told to SRP, the address comes from MAAP, REGISTERING_FAILED from SRP.
     auto& talker = *host_.components().milan_acmp_talker;
     talker.set_on_probe([this](uint16_t const stream_index, TimePoint const now) { notify_talker_probe(stream_index, now); });
-    talker.set_dest_mac_valid([this](uint16_t /*stream_index*/) { return talker_addresses_valid(); });
+    talker.set_dest_mac_valid([this](uint16_t const stream_index) { return talker_dest_mac_valid(stream_index); });
     talker.set_registering_failed([this](uint16_t const stream_index) { return talker_registering_failed(stream_index); });
 }
 

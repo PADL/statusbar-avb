@@ -1137,6 +1137,30 @@ TEST(avb_entity_kit_acmp, a_milan_talker_without_a_valid_address_says_so_to_a_pr
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{7}}));
 }
 
+TEST(avb_entity_kit_acmp, a_milan_talker_stream_without_a_destination_says_so_to_a_probe)
+{
+    // 5.5.4.1 step 3: a stream with no destination address (none configured for its kind) has no
+    // valid one, whatever MAAP says.
+    auto config = make_config(2, "milan13");
+    config.aaf_talker_dest_mac = Eui48{};
+    config.am824_talker_dest_mac = Eui48{};
+    config.crf_talker_dest_mac = Eui48{};
+    KitUnderTest kit{std::move(config)};
+    bring_up(kit);
+    std::vector<atdecc::AcmpCommandResponse> sent{};
+    kit->host().components().milan_acmp_talker->set_tx_response([&sent](atdecc::AcmpCommandResponse const& pdu) {
+        sent.push_back(pdu);
+        return true;
+    });
+    uint16_t const index = kit.talker_specs().front().index;
+    auto const stream = kit->host().components().talker_stream(index);
+    EXPECT_TRUE(stream.has_value() && stream->stream_dest_mac == Eui48{});
+    probe_talker_stream(kit, index, TimePoint{std::chrono::seconds{4}});
+    EXPECT_FALSE(sent.empty());
+    EXPECT_EQ(sent.back().status(), atdecc::ACMP_STATUS_TALKER_DEST_MAC_FAIL);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
 TEST(avb_entity_kit_acmp, a_locked_milan_entity_refuses_another_controllers_bind)
 {
     // 5.5.2.4: the lock is the AEM handler's; ACMP asks it.
