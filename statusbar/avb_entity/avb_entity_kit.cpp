@@ -29,6 +29,12 @@ using statusbar::nanoavb::DomainInfo;
 
 namespace {
 
+/// Whether a Milan sink's binding, when it has one, is in the stopped state (Milan v1.3 Section 5.3.8.7).
+[[nodiscard]] auto binding_waits(std::optional<atdecc::MilanBinding> const& binding) noexcept -> bool
+{
+    return binding.has_value() && binding->streaming_wait;
+}
+
 /// An ACMP stream_id as the StreamID SRP knows the stream by.
 [[nodiscard]] auto srp_stream_id(ieee::Eui64 const& acmp_stream_id) noexcept -> nanoavb::StreamId
 {
@@ -1897,7 +1903,7 @@ auto AvbEntityKit::input_stopped(uint16_t const index) const noexcept -> bool
 {
     if (host_.components().acmp_is_milan()) {
         auto const* const sink = host_.components().milan_acmp_listener->sink(index);
-        return sink != nullptr && sink->is_bound() && sink->context().binding->streaming_wait;
+        return sink != nullptr && sink->is_bound() && binding_waits(sink->context().binding);
     }
     return !storage_handler_.is_streaming(DESCRIPTOR_STREAM_INPUT, index);
 }

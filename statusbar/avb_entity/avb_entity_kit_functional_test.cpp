@@ -2461,7 +2461,10 @@ struct CrfPair
         pair.bind();
         pair.run(2 * ROUNDS_PER_SECOND);
         inputs = pair.listener->listener();
-        EXPECT_TRUE(inputs != nullptr && inputs->slot_for(CRF_STREAM) != nullptr);
+        EXPECT_TRUE(inputs != nullptr);
+        if (inputs != nullptr) {
+            EXPECT_TRUE(inputs->slot_for(CRF_STREAM) != nullptr);
+        }
         pair.listener->poll_counters(poll_ns);  // the first interval starts
     }
     CrfPair(CrfPair const&) = delete;
@@ -2537,7 +2540,7 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_an_inputs_counters_and_an_unbi
     slot->counters.frames_rx.store(20);
     pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS - 1);  // not yet a second
     EXPECT_EQ(input_counters(pair.listener, pair.sink).counters[FRAMES_RX].get(), 0U);
-    pair.listener->poll_counters(t += 1);
+    pair.listener->poll_counters(t + 1);
     EXPECT_EQ(input_counters(pair.listener, pair.sink).counters[FRAMES_RX].get(), 1U);
 
     pair.controller_sends(
@@ -2580,7 +2583,7 @@ TEST(avb_entity_kit_input_counters, an_unbind_of_a_restored_binding_is_no_interr
     pair.controller_sends(bind);
     c.media_locked.fetch_add(1);
     c.is_locked.store(true);
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     counters = input_counters(pair.listener, pair.sink);
     EXPECT_EQ(counters.counters[STREAM_INTERRUPTED].get(), 0U);
     EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), counters.counters[MEDIA_UNLOCKED].get());
@@ -2593,13 +2596,13 @@ TEST(avb_entity_kit_input_counters, what_an_offload_received_reaches_get_counter
     // An offload data plane's reception of an input counts as the kit's own: Table 5.16's
     // interval counters, MEDIA_LOCKED from its check of the lock.
     KitPair pair{"milan13"};
-    int64_t t = 1'000'000'000;
+    int64_t const t = 1'000'000'000;
     pair.listener->poll_counters(t);
     EXPECT_TRUE(pair.listener->listener()->notify_offload_received(
         pair.sink,
         {.frames_rx = 8, .seq_num_mismatch = 1, .timestamp_uncertain = 2, .timestamp_valid = 8, .media_locked = true},
         48));
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     auto const counters = input_counters(pair.listener, pair.sink);
     EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), 1U);
     EXPECT_EQ(counters.counters[SEQ_NUM_MISMATCH].get(), 1U);  // one interval
@@ -2758,7 +2761,9 @@ TEST(avb_entity_kit_stream_info, a_bound_milan_input_says_how_far_it_has_come)
     pair.run(2 * ROUNDS_PER_SECOND);
     std::tie(info, ext) = milan_stream_info(pair.listener, pair.sink);
     EXPECT_EQ(info.flags.get(), settled | sif::MSRP_ACC_LAT_VALID);
-    EXPECT_EQ(info.stream_id, pair.talker->host().components().talker_stream(pair.source)->stream_id);
+    EXPECT_EQ(
+        info.stream_id,
+        pair.talker->host().components().talker_stream(pair.source).value_or(nanoavb::NanoAvbComponents::TalkerStream{}).stream_id);
     EXPECT_EQ(info.stream_vlan_id.get(), 2);
     EXPECT_EQ(ext.flags_ex.get(), atdecc::aem::stream_info_flags_ex::REGISTERING);
     EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::COMPLETED);
@@ -2778,7 +2783,7 @@ TEST(avb_entity_kit_stream_info, a_probed_milan_output_says_it_declares_until_it
     KitUnderTest kit{make_io_config(TALKER_ID, "milan13")};
     bring_up(kit);
     auto const& spec = kit.talker_specs().front();
-    TimePoint now{std::chrono::seconds{4}};
+    TimePoint const now{std::chrono::seconds{4}};
     probe_talker_stream(kit, spec.index, now);
     EXPECT_EQ(talker_state(kit, spec), nanoavb::TalkerReservationState::Advertising);
     auto const [info, ext] = milan_stream_info(kit, spec.index, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT);
