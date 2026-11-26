@@ -38,6 +38,7 @@
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
+#include "statusbar/sg14/inplace_function.h"
 #include "statusbar/sg14/inplace_vector.h"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/status/status.hpp"
@@ -346,12 +347,7 @@ struct ListenerStreams
     /// stopped input is still bound and still reserves. Kept by stream index,
     /// so it outlives close_rx() and open_stream(). Reactor thread; the RX
     /// thread reads it for each frame.
-    void set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
-    {
-        if (stream_index < stream_stopped_.size()) {
-            stream_stopped_[stream_index].store(stopped, std::memory_order_release);
-        }
-    }
+    void set_stream_stopped(uint16_t stream_index, bool stopped) noexcept;
     [[nodiscard]] auto stream_stopped(uint16_t const stream_index) const noexcept -> bool
     {
         return stream_index < stream_stopped_.size() && stream_stopped_[stream_index].load(std::memory_order_acquire);
@@ -382,6 +378,25 @@ struct ListenerStreams
     /// The format word the input receives: the one set, else the one it was
     /// opened with; 0 for an input that is not open.
     [[nodiscard]] auto stream_format(uint16_t stream_index) const noexcept -> uint64_t;
+
+    //
+    // A listener stream received beside the stream port (docs/ENTITY_CONSTRUCTION_KIT.md)
+    //
+
+    /// What a STREAM_INPUT receives, as a data plane beside the port that receives its stream needs it.
+    struct InputState
+    {
+        uint64_t stream_id{0};  ///< the stream whose frames it receives (frame_is_for_listener()); 0: none
+        bool stopped{false};    ///< its AVTPDUs discarded unread (set_stream_stopped())
+        uint64_t format{0};     ///< the format in force (stream_format())
+    };
+    /// Called on the reactor thread with an open input's InputState at open_stream(), at each change and, stream ID 0,
+    /// at close_rx(). A later install replaces an earlier one; it must not throw. The data plane discards an AAF AVTPDU
+    /// not of the format itself, counted UNSUPPORTED_FORMAT (Milan v1.3 4.4.2.2).
+    using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, InputState const& state), 32>;
+    void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
+    /// STREAM_INPUT @p stream_index's InputState now; nullopt for an input that is not open. Reactor thread.
+    [[nodiscard]] auto input_state(uint16_t stream_index) const noexcept -> std::optional<InputState>;
 
     /// The group a listener joins for a talker destination: the address when
     /// it is multicast, nothing otherwise (8.2.1.13).
@@ -415,7 +430,11 @@ struct ListenerStreams
     /// as its connection; false for a frame too short to carry one. RX thread.
     [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;
     /// The stream the slot now receives, for the RX thread, and whether a Milan sink settled on it.
-    static void publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool settled);
+    void publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool settled);
+    /// @p slot receives the frames of @p stream_id (0: none) from now on, told to on_input_changed_ when that moved.
+    void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
+    /// on_input_changed_ told @p slot's InputState, if set.
+    void notify_input_changed(ListenerStreamSlot const& slot) const noexcept;
     /// The status line of a connect: log_settled with a match, log_connected without.
     void log_attached(uint16_t stream_index, ieee::Eui48 dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool ready);
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
@@ -430,6 +449,8 @@ struct ListenerStreams
     void defer_consume_timed(uint16_t stream_index, StreamTimedConsumeFn fn);
     void defer_crf(uint16_t stream_index, StreamCrfFn fn);
 
+    /// open_stream() but for the notice: the slot and its deserializer.
+    auto open_slot(StreamSpec const& spec) -> Status;
     /// A fresh slot for @p spec, its margin histogram sized for this listener.
     auto new_slot(StreamSpec const& spec) -> ListenerStreamSlot&;
 
@@ -441,6 +462,8 @@ struct ListenerStreams
     uint32_t sample_rate_;                    ///< stream sample rate (Hz) for the media-lock nominal step
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
     std::atomic<int64_t> const& last_gptp_ns_;
+    /// Told what each input receives (set_on_input_changed). Reactor thread.
+    InputChangedFn on_input_changed_{};
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
     /// not know what the sink does with it. Nullable.
     StreamRxAudioSink* audio_sink_{nullptr};

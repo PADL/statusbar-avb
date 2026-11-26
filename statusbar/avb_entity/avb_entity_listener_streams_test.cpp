@@ -1169,4 +1169,84 @@ TEST(listener_counters, get_counters_reports_each_running_counter_at_its_own_bit
     EXPECT_EQ(out[12], 0U);
 }
 
+// --- A listener stream received beside the stream port ---
+
+namespace {
+
+/// Each (input, state) the input hook is told.
+struct InputRecorder
+{
+    std::vector<std::pair<uint16_t, ListenerStreams::InputState>> told{};
+    bool agreed{true};  ///< input_state() in the hook said the stream told
+
+    void install(ListenerStreams& ls)
+    {
+        ls.set_on_input_changed([this, &ls](uint16_t const index, ListenerStreams::InputState const& state) {
+            told.emplace_back(index, state);
+            auto const now = ls.input_state(index).value_or(ListenerStreams::InputState{.stream_id = 1});
+            agreed = agreed && now.stream_id == state.stream_id;
+        });
+    }
+    [[nodiscard]] auto last_is(uint16_t const index, uint64_t const stream_id, bool const stopped, uint64_t const format) const
+        -> bool
+    {
+        if (told.empty()) {
+            return false;
+        }
+        auto const& [i, state] = told.back();
+        return i == index && state.stream_id == stream_id && state.stopped == stopped && state.format == format;
+    }
+};
+
+}  // namespace
+
+// What a data plane beside the port needs to receive an input: the stream it receives, whether it is
+// stopped (Milan v1.3 5.3.8.7) and the format in force (5.3.8.1), at open, at each change and at close.
+TEST(listener_offload, the_hook_is_told_what_each_input_receives)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    InputRecorder recorder;
+    recorder.install(ls);
+    ls.set_stream_stopped(1, true);
+    EXPECT_TRUE(recorder.told.empty());  // no slot: no notice
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(1)).has_value());
+    EXPECT_TRUE(recorder.last_is(1, 0, true, AAF_96K_INT32_8CH));  // the state in force at open
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(recorder.last_is(0, 0, false, AAF_96K_INT32_8CH));
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), false, AAF_96K_INT32_8CH));
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});  // the same stream: no change
+    EXPECT_EQ(recorder.told.size(), size_t{3});
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), true, AAF_96K_INT32_8CH));
+    ls.set_stream_stopped(0, true);
+    EXPECT_EQ(recorder.told.size(), size_t{4});
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    EXPECT_TRUE(recorder.last_is(0, STREAM_1.to_uint64(), true, aaf_96k_of(2)));
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    EXPECT_FALSE(ls.set_stream_format(0, CRF_MILAN_48K));  // refused: nothing changes
+    EXPECT_EQ(recorder.told.size(), size_t{5});
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
+    EXPECT_TRUE(recorder.last_is(0, 0, true, aaf_96k_of(2)));
+    EXPECT_FALSE(ls.input_state(2).has_value());
+    auto const state = ls.input_state(0);
+    EXPECT_TRUE(state.has_value());
+    EXPECT_EQ(state.value_or(ListenerStreams::InputState{}).format, aaf_96k_of(2));
+
+    ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+    recorder.told.clear();
+    ls.close_rx();  // each input it releases, with stream ID 0
+    EXPECT_EQ(recorder.told.size(), size_t{2});
+    EXPECT_TRUE(recorder.last_is(0, 0, true, aaf_96k_of(2)));
+    EXPECT_EQ(recorder.told.front().first, uint16_t{1});
+    EXPECT_EQ(recorder.told.front().second.stream_id, uint64_t{0});
+    EXPECT_TRUE(recorder.agreed);
+    ls.set_stream_stopped(0, false);  // no slot any more
+    EXPECT_EQ(recorder.told.size(), size_t{2});
+    ls.set_on_input_changed({});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

@@ -56,6 +56,15 @@ auto kind_lit(ListenerStreamSlot const* slot)
 
 auto ListenerStreams::open_stream(StreamSpec const& spec) -> Status
 {
+    auto opened = open_slot(spec);
+    if (opened) {
+        notify_input_changed(slots_.back());
+    }
+    return opened;
+}
+
+auto ListenerStreams::open_slot(StreamSpec const& spec) -> Status
+{
     if (slots_.size() == MAX_ENTITY_STREAMS) {
         return failure(std::errc::result_out_of_range);
     }
@@ -126,7 +135,11 @@ auto ListenerStreams::set_stream_format(uint16_t const stream_index, uint64_t co
     // The opened word is kept as 0: a slot opened from fields alone has no
     // word of its own to be decoded again.
     bool const as_opened = format_word == slot_for(stream_index)->spec.format_word;
+    uint64_t const before = stream_format(stream_index);
     stream_format_[stream_index].store(as_opened ? 0 : format_word, std::memory_order_release);
+    if (format_word != before) {
+        notify_input_changed(*slot_for(stream_index));
+    }
     return true;
 }
 
@@ -343,6 +356,8 @@ auto ListenerStreams::attach_rx(
 void ListenerStreams::close_rx() noexcept
 {
     for (auto& slot : slots_) {
+        slot.rx_stream_id.publish(0);  // released: the hook and input_state() agree on it
+        notify_input_changed(slot);
         if (slot.consume) {
             defer_consume(slot.spec.index, std::move(slot.consume));
         }
@@ -989,7 +1004,44 @@ void ListenerStreams::on_listener_connected(
 void ListenerStreams::publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool const settled)
 {
     slot.connection.settled = settled;
-    slot.rx_stream_id.publish(stream_id.to_uint64());  // the RX thread may match its frames from here on
+    publish_rx_stream(slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
+}
+
+void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
+{
+    bool const moved = slot.rx_stream_id.load() != stream_id;
+    slot.rx_stream_id.publish(stream_id);
+    if (moved) {
+        notify_input_changed(slot);
+    }
+}
+
+void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
+{
+    if (auto const state = input_state(slot.spec.index); state && on_input_changed_) {
+        on_input_changed_(slot.spec.index, *state);
+    }
+}
+
+auto ListenerStreams::input_state(uint16_t const stream_index) const noexcept -> std::optional<InputState>
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return std::nullopt;
+    }
+    return InputState{
+        .stream_id = slot->rx_stream_id.load(), .stopped = stream_stopped(stream_index), .format = stream_format(stream_index)};
+}
+
+void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+{
+    if (stream_index >= stream_stopped_.size() ||
+        stream_stopped_[stream_index].exchange(stopped, std::memory_order_acq_rel) == stopped) {
+        return;
+    }
+    if (auto const* const slot = slot_for(stream_index); slot != nullptr) {
+        notify_input_changed(*slot);
+    }
 }
 
 void ListenerStreams::log_attached(
@@ -1009,7 +1061,7 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
     bool settled = false;
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
         settled = slot->connection.settled;
-        slot->rx_stream_id.publish(0);  // no frame is this input's any more
+        publish_rx_stream(*slot, 0);  // no frame is this input's any more
         // With no stream it is not synchronized: a held lock is dropped here (Milan
         // v1.3 5.3.8.10), as an interruption unless the stream was released. After
         // the id, see update_stream_input_counters.
