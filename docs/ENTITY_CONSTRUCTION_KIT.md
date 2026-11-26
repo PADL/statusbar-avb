@@ -429,7 +429,9 @@ above gives, and answers map_index P with the mappings of partition P.
 On an input port, ADD_AUDIO_MAPPINGS accepts a command whose every mapping
 names a cluster channel of the port and a channel of a stream input's
 current format at the audio unit's rate (unless the port converts rates),
-no cluster channel mapped from two stream channels; REMOVE_AUDIO_MAPPINGS
+no cluster channel mapped from two stream channels; on an output port the
+same, but no stream channel fed from two cluster channels (a cluster
+channel may feed several stream channels); REMOVE_AUDIO_MAPPINGS
 removes what it lists, a mapping listed twice ignored, one not held
 refusing the whole command. Anything else is BAD_ARGUMENTS, past the
 store's capacity NO_RESOURCES, with nothing changed. A change goes to the
