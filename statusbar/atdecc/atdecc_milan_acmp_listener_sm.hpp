@@ -89,6 +89,15 @@ enum class MilanTalkerRegistration : uint8_t
     Failed,
 };
 
+/// Why a sink last stopped SRP: a controller's bind or unbind, or a restart,
+/// released it; its talker's Talker attribute went or never came (5.5.3.6.36
+/// and .48), which Table 5.6 counts as an interrupted stream.
+enum class MilanSrpStop : uint8_t
+{
+    Released,
+    TalkerLost,
+};
+
 //
 // Sink state machine - Milan v1.3 5.5.3.3 and 5.5.3.4
 //
@@ -191,6 +200,9 @@ struct MilanSinkContext
 
     /// start_srp has been called for srp and stop_srp not yet.
     bool srp_active{false};
+
+    /// Why stop_srp was last called, set before it is.
+    MilanSrpStop srp_stop{MilanSrpStop::Released};
 
     /// The deadline of the one timer the current state runs: TMR_DELAY,
     /// TMR_NO_RESP, TMR_RETRY or TMR_NO_TK.

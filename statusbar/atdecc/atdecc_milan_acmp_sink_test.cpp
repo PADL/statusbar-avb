@@ -70,6 +70,7 @@ struct Rig
     std::vector<AcmpCommandResponse> responses{};
     int started{0};
     int stopped{0};
+    std::vector<MilanSrpStop> stop_reasons{};
     MilanTalkerRegistration registration{MilanTalkerRegistration::None};
 
     Rig()
@@ -84,7 +85,10 @@ struct Rig
             return true;
         };
         env.start_srp = [this](uint16_t, MilanSrpParameters const&, TimePoint) { ++started; };
-        env.stop_srp = [this](uint16_t, TimePoint) { ++stopped; };
+        env.stop_srp = [this](uint16_t, TimePoint) {
+            ++stopped;
+            stop_reasons.push_back(sink.context().srp_stop);
+        };
         env.random_delay = []() { return std::chrono::milliseconds{100}; };
         env.talker_registration = [this](MilanSrpParameters const& srp) {
             return srp.stream_id == STREAM ? registration : MilanTalkerRegistration::None;
@@ -196,6 +200,29 @@ TEST(milan_sink_wiring, an_attribute_that_stops_matching_sends_the_sink_back_to_
     EXPECT_EQ(rig.sink.state(), State::PrbWResp);
     EXPECT_EQ(rig.probes.size(), 2U);
     EXPECT_NE(rig.probes[1].sequence_id.get(), rig.probes[0].sequence_id.get());
+}
+
+TEST(milan_sink_wiring, a_sink_says_whether_its_talker_or_a_controller_ended_its_reservation)
+{
+    // 5.5.3.6.48 against 5.5.3.6.45: Milan v1.3 Table 5.6 counts the first as
+    // an interrupted stream, not the controller's unbind.
+    Rig rig;
+    rig.registration = MilanTalkerRegistration::Advertise;
+    rig.bind(TALKER, at(0));
+    rig.answer_probe(at(5));
+    rig.sink.on_adp(available(TALKER, 1), OWN, at(10));
+    rig.registration = MilanTalkerRegistration::None;
+    rig.sink.on_srp_changed(at(1'000));
+    EXPECT_EQ(rig.stop_reasons.size(), 1U);
+    EXPECT_TRUE(rig.stop_reasons.back() == MilanSrpStop::TalkerLost);
+
+    rig.registration = MilanTalkerRegistration::Advertise;
+    rig.sink.tick(at(1'100));
+    rig.answer_probe(at(1'105));
+    EXPECT_EQ(rig.sink.state(), State::SettledRsvOk);
+    rig.sink.on_command(rig.command(ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER), false, at(2'000));
+    EXPECT_EQ(rig.stop_reasons.size(), 2U);
+    EXPECT_TRUE(rig.stop_reasons.back() == MilanSrpStop::Released);
 }
 
 TEST(milan_sink_wiring, ten_seconds_settled_with_no_talker_attribute_and_the_sink_waits_for_adp_again)
