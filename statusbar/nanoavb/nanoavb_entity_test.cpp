@@ -4406,6 +4406,86 @@ TEST(nanoavb_entity_notification_order, a_notification_longer_than_an_aecpdu_fol
     EXPECT_EQ(body_of(*long_one).size(), MAX_AEM_RESPONSE_SIZE);
 }
 
+namespace {
+
+/// Accepts every SET, its hook leaving @p side_effects notifications for after the response.
+class AfterResponseHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        aem->call_after_response([this] {
+            for (size_t n = 0; n < side_effects; ++n) {
+                std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, static_cast<uint8_t>(n)};  // STREAM_OUTPUT n
+                aem->emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, body);
+            }
+        });
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    size_t side_effects{0};
+};
+
+/// The STREAM_OUTPUT indexes of the GET_STREAM_INFO notifications in @p sends, in order.
+auto stream_info_indexes(std::vector<CapturedSend> const& sends) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> raised;
+    for (auto const& s : sends) {
+        if (header_of(s).is_unsolicited() && header_of(s).command_code() == AEM_COMMAND_GET_STREAM_INFO) {
+            raised.push_back(body_of(s)[3]);
+        }
+    }
+    return raised;
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_notification_order, work_left_for_after_the_response_follows_it_and_its_notifications)
+{
+    AfterResponseHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 7;  // more than the queue holds
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerA, kMacA);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_EQ(sends.size(), size_t{9});
+    if (sends.size() != 9) {
+        return;
+    }
+    EXPECT_TRUE(first_response(sends) == sends.begin());
+    EXPECT_EQ(sends[0].dest, kMacA);
+    EXPECT_EQ(header_of(sends[1]).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);  // its own, held
+    EXPECT_TRUE(stream_info_indexes(sends) == (std::vector<uint8_t>{0, 1, 2, 3, 4, 5, 6}));
+    EXPECT_TRUE(std::ranges::all_of(sends.begin() + 1, sends.end(), [](CapturedSend const& s) { return s.dest == kMacB; }));
+}
+
+TEST(nanoavb_entity_notification_order, work_left_outside_a_command_runs_at_once)
+{
+    AfterResponseHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 2;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // The entity's own change: the hook's work, then the change's own notification, as raised.
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{3});
+    EXPECT_TRUE(stream_info_indexes(sends) == (std::vector<uint8_t>{0, 1}));
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_CONTROL);
+}
+
 //
 // GET_AS_PATH - IEEE 1722.1-2021 Clause 7.4.41
 //

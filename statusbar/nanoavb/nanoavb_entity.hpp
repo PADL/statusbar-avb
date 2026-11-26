@@ -639,6 +639,18 @@ class AemCommandHandler
     /// or a send_response callback.
     void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
 
+    /// Work a hook leaves for after its command's response, such as more notifications than
+    /// MAX_QUEUED_NOTIFICATIONS holds.
+    using AfterResponseFn = statusbar::sg14::inplace_function<void(), 32>;
+    /// How many AfterResponseFn one command holds.
+    static constexpr size_t MAX_AFTER_RESPONSE = 4;
+
+    /// Run @p fn once the command being dispatched is answered and its held notifications are
+    /// sent, in the order given, the command's controller left out of what it notifies. Outside
+    /// a command off the wire (a local change, tick()), or past MAX_AFTER_RESPONSE, it runs at
+    /// once. Reactor thread.
+    void call_after_response(AfterResponseFn fn);
+
     /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
     /// @p descriptor_index) to the registered controllers. IEEE 1722.1 7.5.2 has
     /// the entity notify when counters change (stream reception, SRP and gPTP
@@ -1296,6 +1308,10 @@ class AemCommandHandler
     /// Send every held notification, after the command's response.
     void flush_notifications();
 
+    /// Run what call_after_response() held, @p requester (the command's controller) left out of
+    /// what it notifies.
+    void run_after_response(Eui64 const& requester);
+
     /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
         -> bool;
@@ -1517,6 +1533,8 @@ class AemCommandHandler
     statusbar::sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
     // A command off the wire is being dispatched (dispatch_aem_command); a read_back() does not set it.
     bool dispatching_{false};
+    // What the dispatched command's hooks left for after its response (call_after_response).
+    statusbar::sg14::inplace_vector<AfterResponseFn, MAX_AFTER_RESPONSE> after_response_{};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will
