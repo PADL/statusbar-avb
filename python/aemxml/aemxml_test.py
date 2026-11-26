@@ -1851,6 +1851,81 @@ def test_json_stream_buffer_length():
     print("  [+] JSON stream buffer_length: OK")
 
 
+def test_json_stream_format_up_to():
+    """An AAF entry of a formats list can say "up to" its channel count."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+    from aemxml.stream_formats import (
+        decode_aaf_stream_format,
+        encode_aaf_stream_format,
+        stream_format_covers,
+    )
+
+    # 96 kHz, 32 bit, 8 channels of 12 samples; the ut bit is bit 4 of octet 1.
+    assert encode_aaf_stream_format(96000, 8, 32) == 0x020702200200C000
+    assert encode_aaf_stream_format(96000, 8, 32, up_to=True) == 0x021702200200C000
+    assert "up_to" not in decode_aaf_stream_format(0x020702200200C000)
+    assert decode_aaf_stream_format(0x021702200200C000)["up_to"] is True
+    assert decode_aaf_stream_format(0x021702200200C000)["rate"] == 96000
+
+    # What an entry describes: itself, or with the bit one to its channel count.
+    up_to_8 = 0x021702200200C000
+    for channels in range(1, 9):
+        assert stream_format_covers(
+            up_to_8, encode_aaf_stream_format(96000, channels, 32)
+        )
+    assert not stream_format_covers(up_to_8, encode_aaf_stream_format(96000, 9, 32))
+    assert not stream_format_covers(up_to_8, encode_aaf_stream_format(48000, 2, 32))
+    assert not stream_format_covers(up_to_8, encode_aaf_stream_format(96000, 2, 24))
+    assert not stream_format_covers(up_to_8, up_to_8)  # a range is not a format
+    assert stream_format_covers(0x020702200200C000, 0x020702200200C000)
+    assert not stream_format_covers(
+        0x020702200200C000, encode_aaf_stream_format(96000, 2, 32)
+    )
+    assert stream_format_covers(0x041060010000BB80, 0x041060010000BB80)  # CRF
+    assert not stream_format_covers(0x041060010000BB80, 0x020702200200C000)
+
+    eight = {"type": "AAF", "rate": 96000, "channels": 8, "depth": 32}
+    json_str = json.dumps(
+        {
+            "entity": {
+                "name": "Up To Test",
+                "capabilities": ["AEM_SUPPORTED"],
+                "configuration": {
+                    "streams_in": [
+                        {
+                            "name": "In",
+                            "format": eight,
+                            "formats": [dict(eight, up_to=True)],
+                        },
+                        {"name": "Plain", "format": eight},
+                    ],
+                },
+            }
+        }
+    )
+    entity = read_json(json_str)
+    streams = entity.configurations[0].streams_input
+    assert streams[0].current_format == 0x020702200200C000
+    assert streams[0].formats == [0x021702200200C000]
+    assert streams[1].formats == [0x020702200200C000]
+
+    # The formats list of the descriptor carries the entry as authored.
+    descs, _ = flatten(entity)
+    inputs = [d for d in descs if d.descriptor_type == DESCRIPTOR_STREAM_INPUT]
+    assert inputs[0].wire_bytes[138:146] == bytes.fromhex("021702200200C000")
+
+    # The writer says the list where it differs from the format, and it reads back.
+    written = json.loads(write_json(entity))["entity"]["configuration"]["streams_in"]
+    assert written[0]["formats"][0]["up_to"] is True
+    assert "formats" not in written[1]
+    again = read_json(write_json(entity)).configurations[0].streams_input
+    assert again[0].formats == [0x021702200200C000]
+    assert again[0].current_format == 0x020702200200C000
+
+    print("  [+] JSON stream format up_to: OK")
+
+
 def test_json_localized_dict():
     """Dict-form localized strings: {locale: text} authored at the field site
     generates the LOCALE + STRINGS descriptors and the wire references."""
@@ -2801,6 +2876,7 @@ def main():
         test_json_symbols_to_blob,
         test_json_pull_rates,
         test_json_stream_buffer_length,
+        test_json_stream_format_up_to,
         test_json_localized_dict,
         test_json_control_values,
         test_json_signal_selector_and_control_grouping,

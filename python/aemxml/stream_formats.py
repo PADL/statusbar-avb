@@ -20,6 +20,8 @@ _RATE_TO_NSR: dict[int, int] = {
 _NSR_TO_RATE: dict[int, int] = {v: k for k, v in _RATE_TO_NSR.items()}
 
 AAF_SUBTYPE = 0x02
+# The "up to" bit in byte 1 of an AAF stream format (IEEE 1722-2025 I.2.4).
+AAF_UT_BIT = 0x10
 
 # AAF "format" (sample-format) field, IEEE 1722-2016 Table 20.
 AAF_FORMAT_USER = 0x00
@@ -35,19 +37,24 @@ def encode_aaf_stream_format(
     depth: int,
     aaf_format: int = AAF_FORMAT_INT_32,
     samples_per_frame: int | None = None,
+    up_to: bool = False,
 ) -> int:
     """Encode AAF-PCM parameters into an 8-byte IEEE 1722-2016 stream format value (v=0).
 
     Wire layout (byte 0 = MSB), matching the authoritative C++ aaf_8ch_96k_32bit()
     (0x020702200200C000):
       byte 0            : 0x02 (AAF subtype)
-      byte 1            : nsr in the LOW nibble (0x07 = 96 kHz)
+      byte 1            : ut in bit 4, nsr in the LOW nibble (0x07 = 96 kHz)
       byte 2            : format -- sample format (0x02 = INT_32)
       byte 3            : bit_depth (0x20 = 32)
       bytes 4-7 (BE 32) : channels_per_frame[9:0] << 22 | samples_per_frame[9:0] << 12
 
     samples_per_frame defaults to the SR class A value rate/8000 (one 125 us packet;
     12 @ 96 kHz).
+
+    up_to sets the ut bit (IEEE 1722-2025 I.2.4): the stream takes any channel
+    count from one to `channels`. It belongs in a formats list only; a current
+    format never has it.
     """
     if rate not in _RATE_TO_NSR:
         raise ValueError(
@@ -64,6 +71,8 @@ def encode_aaf_stream_format(
 
     b0 = AAF_SUBTYPE
     b1 = _RATE_TO_NSR[rate] & 0x0F  # nsr in the low nibble
+    if up_to:
+        b1 |= AAF_UT_BIT
     b2 = aaf_format & 0xFF
     b3 = depth & 0xFF
     lower = ((channels & 0x3FF) << 22) | ((samples_per_frame & 0x3FF) << 12)
@@ -74,7 +83,8 @@ def decode_aaf_stream_format(fmt: int) -> dict | None:
     """Decode an 8-byte stream format to AAF parameters.
 
     Returns {"type": "AAF", "rate": int, "channels": int, "depth": int} or None
-    if the format is not AAF.
+    if the format is not AAF. A format with the ut bit set has "up_to": True
+    as well.
     """
     if ((fmt >> 56) & 0xFF) != AAF_SUBTYPE:
         return None
@@ -87,7 +97,7 @@ def decode_aaf_stream_format(fmt: int) -> dict | None:
     lower = fmt & 0xFFFFFFFF
     channels = (lower >> 22) & 0x3FF
     samples_per_frame = (lower >> 12) & 0x3FF
-    return {
+    decoded = {
         "type": "AAF",
         "rate": rate,
         "channels": channels,
@@ -95,6 +105,33 @@ def decode_aaf_stream_format(fmt: int) -> dict | None:
         "format": aaf_format,
         "samples_per_frame": samples_per_frame,
     }
+    if (fmt >> 48) & AAF_UT_BIT:
+        decoded["up_to"] = True
+    return decoded
+
+
+def stream_format_covers(listed: int, wanted: int) -> bool:
+    """Whether the formats-list entry `listed` describes the format `wanted`.
+
+    An AAF entry with the ut bit set describes every format that differs from
+    it in channels_per_frame alone and has from one channel to as many as the
+    entry names; any other entry describes itself. A `wanted` with the ut bit
+    set is described by nothing: the bit is zero in a current format and in a
+    SET_STREAM_FORMAT (IEEE 1722-2025 I.2.4). The C++ twin is
+    avtp::stream_format_covers.
+    """
+    ut_bit = AAF_UT_BIT << 48
+    if (listed >> 56) != AAF_SUBTYPE or (wanted >> 56) != AAF_SUBTYPE:
+        return listed == wanted
+    if wanted & ut_bit:
+        return False
+    if not listed & ut_bit:
+        return listed == wanted
+    apart = ut_bit | (0x3FF << 22)
+    channels = (wanted >> 22) & 0x3FF
+    return (listed & ~apart) == (wanted & ~apart) and (
+        1 <= channels <= (listed >> 22) & 0x3FF
+    )
 
 
 def parse_stream_format(fmt_obj) -> int:
@@ -105,7 +142,10 @@ def parse_stream_format(fmt_obj) -> int:
         fmt_type = fmt_obj.get("type", "")
         if fmt_type == "AAF":
             return encode_aaf_stream_format(
-                fmt_obj["rate"], fmt_obj["channels"], fmt_obj["depth"]
+                fmt_obj["rate"],
+                fmt_obj["channels"],
+                fmt_obj["depth"],
+                up_to=bool(fmt_obj.get("up_to", False)),
             )
         raise ValueError(f"Unsupported stream format type: {fmt_type!r}")
     raise ValueError(f"Stream format must be object or hex string, got {type(fmt_obj)}")

@@ -271,6 +271,10 @@
             32
           ],
           "description": "Bit depth per sample."
+        },
+        "up_to": {
+          "type": "boolean",
+          "description": "In a formats list: the stream takes any channel count from one to channels (the ut bit, IEEE 1722-2025 I.2.4). Never set in format."
         }
       },
       "required": [
