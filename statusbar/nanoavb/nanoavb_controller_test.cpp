@@ -287,6 +287,40 @@ TEST(nanoavb_controller, unsolicited_response_reaches_callback)
     EXPECT_FALSE(solicited_response_seen);
 }
 
+TEST(nanoavb_controller, a_response_longer_than_524_octets_is_handed_on_whole)
+{
+    // Milan v1.3 5.4.1: "A PAAD-AE is allowed to transmit AECP response
+    // packets with no limitation of the control_data_length field", against
+    // IEEE 1722.1-2021 9.2.2.6 and its 524. A full GET_AUDIO_MAP partition is
+    // 176 mappings, 1420 octets after the AEM header. The controller does
+    // not ask AemDu::is_valid(), which holds a PDU to the 524, and hands the
+    // whole body on.
+    constexpr size_t MILAN_AUDIO_MAP_BODY = 1420;
+    std::vector<uint8_t> body_seen;
+    AemControllerEntityCallbacks callbacks;
+    callbacks.on_unsolicited = [&](Eui64, uint16_t, uint8_t, std::span<uint8_t const> data, sm::TimePoint) {
+        body_seen.assign(data.begin(), data.end());
+    };
+    NanoAvbAemController controller{CONTROLLER_ID, callbacks};
+    controller.start();
+
+    AemDu du{};
+    du.init_response(
+        AEM_COMMAND_GET_AUDIO_MAP, AEM_STATUS_SUCCESS, static_cast<uint16_t>(AemDu::AEM_DATA_LENGTH + MILAN_AUDIO_MAP_BODY), true);
+    du.controller_entity_id = CONTROLLER_ID;
+    du.target_entity_id = TARGET_ID;
+    EXPECT_FALSE(du.is_valid());  // over the 524 of 9.2.2.6
+    std::vector<uint8_t> frame;
+    auto const header = make_const_span(du);
+    frame.assign(header.begin(), header.end());
+    frame.resize(frame.size() + MILAN_AUDIO_MAP_BODY, 0x5A);
+    frame.back() = 0xA5;
+    controller.receive_aecp(frame, test_time(10));
+
+    EXPECT_EQ(body_seen.size(), MILAN_AUDIO_MAP_BODY);
+    EXPECT_TRUE(!body_seen.empty() && body_seen.front() == 0x5A && body_seen.back() == 0xA5);
+}
+
 TEST(nanoavb_controller, tick_expires_entities)
 {
     std::vector<Eui64> departed;
