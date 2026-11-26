@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <format>
+#include <functional>
 
 namespace statusbar::atdecc_tools {
 
@@ -31,14 +32,12 @@ namespace {
     return static_cast<size_t>(std::count_if(d.begin(), d.end(), [&](auto const& r) { return r.type == type; }));
 }
 
-}  // namespace
+/// Takes one finding: its severity, where it is and what it is.
+using Add = std::function<void(Severity, std::string, std::string)>;
 
-auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<ModelFinding>
+/// ENTITY: a usable static model id is what controllers cache the model under.
+void check_entity(std::vector<RawDescriptor> const& descs, Add const& add)
 {
-    std::vector<ModelFinding> out;
-    auto add = [&](Severity s, std::string where, std::string msg) { out.push_back({s, std::move(where), std::move(msg)}); };
-
-    // ENTITY: a usable static model id is what controllers cache the model under.
     if (auto const* e = find_desc(descs, DESCRIPTOR_ENTITY, 0); (e != nullptr) && e->data.size() >= DescriptorEntity::LENGTH) {
         DescriptorEntity d{};
         span_load_padded(d, make_const_span(e->data));
@@ -54,8 +53,11 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
     } else {
         add(Severity::Error, "ENTITY", "ENTITY descriptor missing or truncated.");
     }
+}
 
-    // AVB_INTERFACE: the descriptor a controller reads for network + gPTP identity.
+/// AVB_INTERFACE: the descriptor a controller reads for network + gPTP identity.
+void check_avb_interfaces(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     if (count_type(descs, DESCRIPTOR_AVB_INTERFACE) == 0) {
         add(Severity::Error, "AVB_INTERFACE", "no AVB_INTERFACE descriptor.");
     }
@@ -87,9 +89,12 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
                     a.clock_accuracy.get()));
         }
     }
+}
 
-    // CLOCK_SOURCE: INTERNAL needs a location; an INPUT_STREAM source enables
-    // "lock to incoming stream" selection.
+/// CLOCK_SOURCE: INTERNAL needs a location; an INPUT_STREAM source enables
+/// "lock to incoming stream" selection.
+void check_clock_sources(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     bool has_input_stream_clock = false;
     for (auto const& r : descs) {
         if (r.type != DESCRIPTOR_CLOCK_SOURCE) {
@@ -117,15 +122,21 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
             "CLOCK_SOURCE",
             "no INPUT_STREAM clock source — a controller cannot select 'lock to incoming stream' on this entity.");
     }
+}
 
-    // JACKs: optional in the spec, but several controllers expect them.
+/// JACKs: optional in the spec, but several controllers expect them.
+void check_jacks(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     if (count_type(descs, DESCRIPTOR_JACK_INPUT) == 0 && count_type(descs, DESCRIPTOR_JACK_OUTPUT) == 0) {
         add(Severity::Info,
             "JACK",
             "no JACK_INPUT/JACK_OUTPUT descriptors — some controllers expect physical jacks to render the routing UI.");
     }
+}
 
-    // STREAMs: a usable current_format and a format list.
+/// STREAMs: a usable current_format and a format list.
+void check_streams(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     for (auto const& r : descs) {
         if (r.type != DESCRIPTOR_STREAM_INPUT && r.type != DESCRIPTOR_STREAM_OUTPUT) {
             continue;
@@ -145,9 +156,12 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
             add(Severity::Warn, where, "number_of_formats is 0 — no advertised format list.");
         }
     }
+}
 
-    // CONFIGURATION declared counts vs what was actually readable: a shortfall
-    // means a controller's descriptor crawl stalls on the missing ones.
+/// CONFIGURATION declared counts vs what was actually readable: a shortfall
+/// means a controller's descriptor crawl stalls on the missing ones.
+void check_configuration(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     if (auto const* cfg = find_desc(descs, DESCRIPTOR_CONFIGURATION, 0);
         (cfg != nullptr) && cfg->data.size() >= DescriptorConfiguration::LENGTH) {
         DescriptorConfiguration d{};
@@ -164,7 +178,18 @@ auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<
             }
         }
     }
+}
 
+}  // namespace
+
+auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<ModelFinding>
+{
+    std::vector<ModelFinding> out;
+    Add const add = [&](Severity s, std::string where, std::string msg) { out.push_back({s, std::move(where), std::move(msg)}); };
+    for (auto* const check :
+         {&check_entity, &check_avb_interfaces, &check_clock_sources, &check_jacks, &check_streams, &check_configuration}) {
+        check(descs, add);
+    }
     std::stable_sort(out.begin(), out.end(), [](ModelFinding const& a, ModelFinding const& b) {
         return static_cast<int>(a.severity) > static_cast<int>(b.severity);
     });
