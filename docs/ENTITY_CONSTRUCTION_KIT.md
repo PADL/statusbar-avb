@@ -383,6 +383,19 @@ change. The reactor thread writes the state, one `itc::SeqlockValue`, and
 the media thread reads it for each AVTPDU without a lock. A
 `TalkerStreams` used without the kit sends tu clear until it is told.
 
+mr (IEEE 1722-2016 Clause 4.4.4.3; Clause 10.4.3 for CRF) toggles on a
+media clock restart of the stream. `TalkerStreams::toggle_media_clock_restart`
+asks for one on an open STREAM_OUTPUT: its next AVTPDU carries the
+toggled mr, and so does every one after it until the next restart. A
+toggle holds for at least `MR_HOLD_PDUS` (eight) AVTPDUs sent; a restart
+asked within the hold toggles mr on the first AVTPDU after it, and
+restarts asked before an AVTPDU carries them toggle it once. The reactor
+thread is the one that asks: it counts the requests, and the media thread
+compares that count with the one it last followed, so neither side waits
+or writes the other's state. A stream opened again after a stop starts
+with mr clear, and a restart asked of the run that stopped is not carried
+into the next. MEDIA_RESET counts each toggle sent.
+
 ### The format of a stream input
 
 A stream input starts on the format its model authors and takes any other

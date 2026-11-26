@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstdint>
 #include <memory_resource>
+#include <vector>
 
 using namespace statusbar;
 using statusbar::avb_entity::crf_aligned_base;
@@ -294,6 +295,75 @@ TEST(talker_tx_counters, a_stream_starts_when_its_gate_opens_and_stops_when_it_c
     // The streams end with the run: a streaming one counts its stop.
     talker.close_tx();
     EXPECT_EQ(starts_stops(), (std::array{3U, 3U}));
+}
+
+// --- AVTP mr: IEEE 1722-2016 Clauses 4.4.4.3 and 10.4.3 ---
+
+namespace {
+
+/// An AAF STREAM_OUTPUT @p index opened on @p talker, with no port behind it.
+auto open_aaf_output(avb_entity::TalkerStreams& talker, uint16_t const index) -> avb_entity::TalkerStreamSlot&
+{
+    avb_entity::StreamSpec spec{};
+    spec.index = index;
+    spec.format_word = 0x0205022002006000ULL;  // AAF 48k int32 2ch, 6 frames
+    spec.format = avb_entity::decode_stream_format(spec.format_word);
+    EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+    return *talker.slot_for(index);
+}
+
+/// The mr of @p count AVTPDUs of @p slot, each stored and counted as transmit_* does.
+auto send_mr(avb_entity::TalkerStreams& talker, avb_entity::TalkerStreamSlot& slot, int const count) -> std::vector<bool>
+{
+    std::vector<bool> sent;
+    for (int i = 0; i < count; ++i) {
+        sent.push_back(talker.next_mr(slot));
+        talker.count_sent(slot, false, sent.back());
+    }
+    return sent;
+}
+
+}  // namespace
+
+TEST(talker_mr, a_restart_toggles_mr_on_the_next_avtpdu_and_holds_it_for_eight)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+
+    // A second restart inside the hold toggles mr back on the first AVTPDU after it, not sooner.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 1) == std::vector<bool>{true});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 7) == std::vector<bool>(7, true));
+    EXPECT_TRUE(send_mr(talker, slot, 9) == std::vector<bool>(9, false));
+
+    // Restarts asked before the AVTPDU that carries them toggle mr once.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 10) == std::vector<bool>(10, true));
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 3U);  // MEDIA_RESET
+}
+
+TEST(talker_mr, a_stream_not_open_refuses_a_restart_and_a_reopened_one_starts_clear)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    EXPECT_FALSE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)).has_value());
+
+    // A restart asked of a run that ended before its AVTPDU went is not the next run's.
+    (void)open_aaf_output(talker, 3);
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    talker.close_tx();
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 3) == std::vector<bool>(3, false));
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 0U);
 }
 
 // --- AVTP tu: IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1 ---

@@ -75,6 +75,12 @@ struct TalkerStreamSlot
     std::optional<avtp::AafStreamOutputContext> aaf{};
     std::optional<avtp::CrfStreamOutputContext> crf{};
     std::optional<AafReframer> reframer{};
+    /// The mr bit the stream sends (IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3). Media thread.
+    bool mr{false};
+    /// AVTPDUs still to send before mr may toggle again (TalkerStreams::MR_HOLD_PDUS). Media thread.
+    uint8_t mr_hold{0};
+    /// The media clock restart requests mr has followed (toggle_media_clock_restart). Media thread.
+    uint32_t mr_requests_seen{0};
 };
 
 /// What one STREAM_OUTPUT has sent, for GET_COUNTERS: its AVTPDUs, those with
@@ -127,6 +133,20 @@ struct TalkerStreams
     }
     [[nodiscard]] auto vlan_id() const noexcept -> uint16_t { return vlan_id_.load(std::memory_order_relaxed); }
     [[nodiscard]] auto stream_pcp() const noexcept -> uint8_t { return stream_pcp_.load(std::memory_order_relaxed); }
+
+    //
+    // AVTP mr - IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3
+    //
+
+    /// The AVTPDUs a toggled mr keeps its new state for, at least (IEEE 1722-2016 Clause 4.4.4.3).
+    static constexpr uint8_t MR_HOLD_PDUS = 8;
+    /// A media clock restart on open STREAM_OUTPUT @p stream_index: mr toggles on its next AVTPDU,
+    /// or the first after MR_HOLD_PDUS since the last toggle, and keeps its new state; requests
+    /// before then toggle it once. invalid_argument for a stream not open. Reactor thread, the one writer.
+    [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
+    /// The mr bit @p slot's next AVTPDU carries, toggled when a restart is owed and the hold is over.
+    /// Media thread; call once per AVTPDU sent (count_sent runs the hold down).
+    [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
 
     //
     // AVTP tu - IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2
@@ -314,6 +334,10 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
+    /// Per-stream media clock restart requests, counted by the reactor (toggle_media_clock_restart).
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_requests_{};
+    /// The requests counted for STREAM_OUTPUT @p stream_index, 0 past MAX_ENTITY_STREAMS.
+    [[nodiscard]] auto mr_requests(uint16_t stream_index) const noexcept -> uint32_t;
     /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
     /// the port's address, recorded to the pcap tap when that is armed.
     void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload);
