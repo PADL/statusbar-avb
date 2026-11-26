@@ -2989,6 +2989,44 @@ TEST(nanoavb_entity_profile, milan13_locked_entity_refuses_a_local_identify)
     }
 }
 
+TEST(nanoavb_entity_profile, milan13_locked_entity_refuses_a_local_value_and_applies_nothing)
+{
+    // Milan v1.3 5.3.4.1 / 5.4.2.17: one refusal for every local change, which a host can ask too.
+    for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
+        bool const milan = profile == AemCommandHandler::Profile::milan13;
+        StoringControlHandler app;
+        AemCommandHandler handler{app};
+        handler.set_profile(profile);
+        handler.set_entity_id(kEntity);
+        std::vector<CapturedSend> sends;
+        capture_sends(handler, sends);
+        register_controller(handler, kEntity, kControllerB, kMacB);
+        auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+        lock.controller_entity_id = kControllerA;
+        std::array<uint8_t, 16> const lock_body{};
+        EXPECT_EQ(make_test_result(handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+        EXPECT_EQ(handler.local_change_refusal().has_value(), milan);
+        sends.clear();
+
+        // CONTROL 5 := 0xFF, by the entity itself.
+        EXPECT_EQ(
+            handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl5),
+            milan ? AEM_STATUS_ENTITY_LOCKED : AEM_STATUS_SUCCESS);
+        std::array<uint8_t, 4> const get_control5{0x00, DESCRIPTOR_CONTROL, 0x00, 0x05};
+        auto const get = make_test_result(handler, create_aem_header(AEM_COMMAND_GET_CONTROL), get_control5);
+        EXPECT_EQ(get.response_data().back(), milan ? 0x40 : 0xFF);
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), milan ? 0 : 1);
+
+        // Unlocked, the change goes through under either profile.
+        std::array<uint8_t, 16> unlock_body{};
+        unlock_body[3] = 0x01;  // UNLOCK
+        EXPECT_EQ(make_test_result(handler, lock, unlock_body).status, AEM_STATUS_SUCCESS);
+        EXPECT_FALSE(handler.local_change_refusal().has_value());
+        EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl5), AEM_STATUS_SUCCESS);
+        EXPECT_EQ(app.current, 0xFF);
+    }
+}
+
 TEST(nanoavb_entity_profile, the_requesting_controller_is_left_out_of_the_fan_out_under_both_profiles)
 {
     // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
