@@ -364,10 +364,9 @@ TEST(aaf_stream_input, a_full_frame_of_mono_int16_decodes_with_the_default_scrat
 
 TEST(aaf_stream_input_safety, format_mismatch_silently_uses_ctx_format)
 {
-    // Documenting current behavior: aaf_stream_deserialize never compares
-    // pdu.format against ctx.format. A peer that switches encoding mid
-    // stream will be silently mis-decoded. If we ever add a runtime check
-    // that rejects format-change packets, this test should be updated.
+    // aaf_stream_deserialize never compares pdu.format against ctx.format: it
+    // decodes what it is handed by the context. The caller asks
+    // aaf_pdu_is_of_format() first and hands on only what that accepts.
     AafStreamInputContext ctx{AafFormat::int_24bit, AafSampleRate::rate_48_khz, 2, 24};
     auto pdu = build_aaf_pdu(AafFormat::int_32bit, AafSampleRate::rate_48_khz, 2, 32, 4, true, 0, 0);
     // Sized for ctx (int24=3 bytes/sample): 2ch * 4samples * 3 = 24 bytes.
@@ -376,6 +375,100 @@ TEST(aaf_stream_input_safety, format_mismatch_silently_uses_ctx_format)
     aaf_stream_deserialize(
         ctx, pdu, std::span<uint8_t const>{payload}, 0U, [&](uint8_t, std::span<float>, uint64_t, uint64_t) { ++callbacks; });
     EXPECT_EQ(callbacks, 2);  // one per channel; decoded as int24 per ctx
+}
+
+// A context for the Milan Base format at 96 kHz with @p channels channels,
+// and an AVTPDU header of @p samples samples of @p pdu_channels channels.
+static auto base_96k_ctx(uint16_t const channels) -> AafStreamInputContext
+{
+    AafStreamInputContext ctx{AafFormat::int_32bit, AafSampleRate::rate_96_khz, channels, 32};
+    ctx.samples_per_pdu = 12;
+    return ctx;
+}
+
+static auto base_96k_pdu(uint16_t const pdu_channels, uint16_t const samples) -> AafPdu
+{
+    return build_aaf_pdu(AafFormat::int_32bit, AafSampleRate::rate_96_khz, pdu_channels, 32, samples, true, 0, 0);
+}
+
+TEST(aaf_pdu_is_of_format, an_avtpdu_of_the_contexts_format_is)
+{
+    EXPECT_TRUE(aaf_pdu_is_of_format(base_96k_ctx(8), base_96k_pdu(8, 12), size_t{12} * 8 * 4));
+    EXPECT_TRUE(aaf_pdu_is_of_format(base_96k_ctx(2), base_96k_pdu(2, 12), size_t{12} * 2 * 4));
+}
+
+TEST(aaf_pdu_is_of_format, another_channel_count_is_not)
+{
+    EXPECT_FALSE(aaf_pdu_is_of_format(base_96k_ctx(8), base_96k_pdu(2, 12), size_t{12} * 2 * 4));
+    EXPECT_FALSE(aaf_pdu_is_of_format(base_96k_ctx(2), base_96k_pdu(8, 12), size_t{12} * 8 * 4));
+}
+
+TEST(aaf_pdu_is_of_format, another_rate_sample_format_or_depth_is_not)
+{
+    auto const ctx = base_96k_ctx(2);
+    size_t const size = size_t{12} * 2 * 4;
+    EXPECT_FALSE(
+        aaf_pdu_is_of_format(ctx, build_aaf_pdu(AafFormat::int_32bit, AafSampleRate::rate_48_khz, 2, 32, 12, true, 0, 0), size));
+    EXPECT_FALSE(
+        aaf_pdu_is_of_format(ctx, build_aaf_pdu(AafFormat::float_32bit, AafSampleRate::rate_96_khz, 2, 32, 12, true, 0, 0), size));
+    EXPECT_FALSE(
+        aaf_pdu_is_of_format(ctx, build_aaf_pdu(AafFormat::int_32bit, AafSampleRate::rate_96_khz, 2, 24, 12, true, 0, 0), size));
+}
+
+TEST(aaf_pdu_is_of_format, another_count_of_samples_is_not_when_the_format_names_one)
+{
+    EXPECT_FALSE(aaf_pdu_is_of_format(base_96k_ctx(2), base_96k_pdu(2, 6), size_t{6} * 2 * 4));
+    EXPECT_FALSE(aaf_pdu_is_of_format(base_96k_ctx(2), base_96k_pdu(2, 12), (size_t{12} * 2 * 4) - 1));
+}
+
+TEST(aaf_pdu_is_of_format, any_count_of_samples_is_when_the_format_names_none)
+{
+    auto ctx = base_96k_ctx(2);
+    ctx.samples_per_pdu = 0;
+    EXPECT_TRUE(aaf_pdu_is_of_format(ctx, base_96k_pdu(2, 6), size_t{6} * 2 * 4));
+    EXPECT_TRUE(aaf_pdu_is_of_format(ctx, base_96k_pdu(2, 64), size_t{64} * 2 * 4));
+}
+
+TEST(aaf_pdu_is_of_format, a_float_streams_depth_is_not_compared)
+{
+    // The format code of a float stream carries bit_depth 0, its AVTPDUs 32.
+    AafStreamInputContext const ctx{AafFormat::float_32bit, AafSampleRate::rate_48_khz, 2, 0};
+    auto const pdu = build_aaf_pdu(AafFormat::float_32bit, AafSampleRate::rate_48_khz, 2, 32, 6, true, 0, 0);
+    EXPECT_TRUE(aaf_pdu_is_of_format(ctx, pdu, size_t{6} * 2 * 4));
+}
+
+TEST(aaf_frames_to_width, a_narrow_payload_is_widened_with_silence)
+{
+    // Three frames of two 16 bit channels, to four channels.
+    std::array<uint8_t, 12> const payload{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
+    std::array<uint8_t, 24> out{};
+    out.fill(0xEE);
+    EXPECT_EQ(aaf_frames_to_width(payload, 2, 2, 4, out), size_t{24});
+    std::array<uint8_t, 24> const expected{1, 2, 3, 4, 0, 0, 0, 0, 5, 6, 7, 8, 0, 0, 0, 0, 9, 10, 11, 12, 0, 0, 0, 0};
+    EXPECT_TRUE(out == expected);
+}
+
+TEST(aaf_frames_to_width, a_wide_payload_keeps_its_first_channels)
+{
+    // Two frames of four 16 bit channels, to two channels.
+    std::array<uint8_t, 16> const payload{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    std::array<uint8_t, 8> out{};
+    EXPECT_EQ(aaf_frames_to_width(payload, 2, 4, 2, out), size_t{8});
+    std::array<uint8_t, 8> const expected{1, 2, 3, 4, 9, 10, 11, 12};
+    EXPECT_TRUE(out == expected);
+}
+
+TEST(aaf_frames_to_width, nothing_is_written_when_it_does_not_fit_or_a_count_is_zero)
+{
+    std::array<uint8_t, 8> const payload{1, 2, 3, 4, 5, 6, 7, 8};
+    std::array<uint8_t, 15> out{};
+    out.fill(0xEE);
+    EXPECT_EQ(aaf_frames_to_width(payload, 2, 2, 4, out), size_t{0});  // needs 16
+    EXPECT_EQ(aaf_frames_to_width(payload, 2, 0, 4, out), size_t{0});
+    EXPECT_EQ(aaf_frames_to_width(payload, 2, 2, 0, out), size_t{0});
+    EXPECT_EQ(aaf_frames_to_width(payload, 0, 2, 4, out), size_t{0});
+    EXPECT_EQ(aaf_frames_to_width(std::span<uint8_t const>{payload}.first(3), 2, 2, 4, out), size_t{0});  // no whole frame
+    EXPECT_TRUE(std::ranges::all_of(out, [](uint8_t octet) { return octet == 0xEE; }));
 }
 
 TEST_MAIN(statusbar_avtp, avtp_aaf_stream_input_test)

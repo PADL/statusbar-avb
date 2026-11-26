@@ -74,6 +74,44 @@ struct AafStreamFormat
 
 static_assert(sizeof(AafStreamFormat) == 8, "AafStreamFormat must overlay the 8-byte format code");
 
+/// The "up to" bit of an AAF format code (octet 1, bit 4).
+inline constexpr uint64_t AAF_STREAM_FORMAT_UT_BIT = 0x0010'0000'0000'0000ULL;
+/// The channels_per_frame field of an AAF format code.
+inline constexpr uint64_t AAF_STREAM_FORMAT_CHANNELS_MASK = uint64_t{AafStreamFormat::CHANNELS_MASK};
+
+/// Whether the AAF formats-list entry @p listed describes the AAF format
+/// @p wanted, whose ut bit is clear. An entry with its ut bit set describes
+/// every format that differs from it in channels_per_frame alone and has
+/// from one channel to as many as the entry names (IEEE 1722-2025 I.2.4:
+/// "the stream source or sink is capable of using fewer channels than
+/// specified"). An entry with the bit clear describes itself.
+[[nodiscard]] constexpr auto aaf_stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
+{
+    if ((listed & AAF_STREAM_FORMAT_UT_BIT) == 0) {
+        return listed == wanted;
+    }
+    uint64_t const apart = AAF_STREAM_FORMAT_UT_BIT | AAF_STREAM_FORMAT_CHANNELS_MASK;
+    uint16_t const channels = AafStreamFormat::from_u64(wanted).channels_per_frame();
+    return (listed & ~apart) == (wanted & ~apart) && channels >= 1 &&
+        channels <= AafStreamFormat::from_u64(listed).channels_per_frame();
+}
+
+/// Whether the formats-list entry @p listed of a STREAM_INPUT or
+/// STREAM_OUTPUT descriptor describes the format @p wanted, as a current
+/// format or a SET_STREAM_FORMAT names it. Such a format never has the "up
+/// to" bit set (IEEE 1722-2025 I.2.4: "The ut field shall be set to zero (0)
+/// when the stream format is the current format of the stream and when used
+/// in a SET_STREAM_FORMAT command"), so an AAF @p wanted with the bit set is
+/// described by no entry. An AAF entry is read by aaf_stream_format_covers();
+/// an entry of any other subtype describes itself.
+[[nodiscard]] constexpr auto stream_format_covers(uint64_t const listed, uint64_t const wanted) noexcept -> bool
+{
+    if (stream_format_bytes(listed)[0] != AvtpSubtype::aaf || stream_format_bytes(wanted)[0] != AvtpSubtype::aaf) {
+        return listed == wanted;
+    }
+    return (wanted & AAF_STREAM_FORMAT_UT_BIT) == 0 && aaf_stream_format_covers(listed, wanted);
+}
+
 /// AAF nsr (nominal sample rate) codes → Hz (IEEE 1722-2016 Table 11)
 [[nodiscard]] constexpr auto aaf_nsr_to_hz(uint8_t nsr) noexcept -> uint32_t
 {

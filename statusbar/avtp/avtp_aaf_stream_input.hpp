@@ -15,6 +15,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_stream_common.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <span>
@@ -42,6 +43,11 @@ struct AafStreamInputContext
     uint16_t channel_count;
     uint8_t bit_depth;
     uint64_t sample_period_ns;
+    /// Samples per channel every AVTPDU of the stream carries, when its
+    /// format names a count (the samples_per_frame of an IEEE 1722-2025
+    /// I.2.4.1 format code); 0 when it names none. Only aaf_pdu_is_of_format()
+    /// reads it: the decoder takes whatever count a packet holds.
+    uint16_t samples_per_pdu{0};
 
     // Running state
     uint8_t last_sequence_num{0};
@@ -92,6 +98,51 @@ struct AafStreamInputContext
     /// @param sample_count Number of samples per channel in the packet just processed
     void advance_samples(uint16_t sample_count) noexcept;
 };
+
+/// Whether an AVTPDU is of the format @p ctx was made for: its nsr, format,
+/// bit_depth and channels_per_frame are the context's, and its @p payload_size
+/// octets of audio are samples_per_pdu samples of every channel when the
+/// context names a count. A float stream's bit_depth is not compared: its
+/// format code carries 0 there (IEEE 1722-2025 I.2.4.1) and its AVTPDUs 32.
+/// A listener discards an AVTPDU this refuses (Milan v1.3 4.4.2.2: "A
+/// Listener PAAD shall discard the incoming AVTPDUs that don't respect the
+/// format which is configured in the associated STREAM_INPUT descriptor").
+[[nodiscard]] constexpr auto aaf_pdu_is_of_format(
+    AafStreamInputContext const& ctx, AafPdu const& pdu, size_t const payload_size) noexcept -> bool
+{
+    bool const depth_ok = ctx.format == AafFormat::float_32bit || pdu.get_bit_depth() == ctx.bit_depth;
+    size_t const named = size_t{ctx.samples_per_pdu} * ctx.channel_count * aaf_bytes_per_sample(ctx.format);
+    return pdu.nsr() == ctx.sample_rate && pdu.get_format() == ctx.format && depth_ok &&
+        pdu.channels_per_frame() == ctx.channel_count && (named == 0 || payload_size == named);
+}
+
+/// Copy the sample frames of an AAF payload of @p channels channels into
+/// @p out as frames of @p width channels: each frame keeps its first
+/// channels, and the channels the payload does not carry are zero, which is
+/// silence in every PCM sample format. Returns the octets written; 0, with
+/// nothing written, when the payload holds no whole frame, a count is zero
+/// or @p out is too small.
+[[nodiscard]] constexpr auto aaf_frames_to_width(
+    std::span<uint8_t const> const payload,
+    size_t const bytes_per_sample,
+    uint16_t const channels,
+    uint16_t const width,
+    std::span<uint8_t> const out) noexcept -> size_t
+{
+    size_t const from = bytes_per_sample * channels;
+    size_t const to = bytes_per_sample * width;
+    size_t const frames = from != 0 ? payload.size() / from : 0;
+    if (frames == 0 || to == 0 || frames * to > out.size()) {
+        return 0;
+    }
+    for (size_t frame = 0; frame < frames; ++frame) {
+        size_t const kept = std::min(from, to);
+        auto const wide = out.subspan(frame * to, to);
+        std::copy_n(payload.subspan(frame * from, kept).begin(), kept, wide.begin());
+        std::fill(wide.begin() + static_cast<std::ptrdiff_t>(kept), wide.end(), uint8_t{0});
+    }
+    return frames * to;
+}
 
 /// The shape of a packet the deserializer accepts: its samples per channel, 0 when it
 /// is empty, malformed for the context or over the scratch's capacity. The scratch is
