@@ -494,4 +494,21 @@ TEST(talker_tu, an_avtpdu_takes_its_tu_at_the_wake_the_talker_was_told)
     EXPECT_FALSE(talker.wake_timestamp_uncertain());
 }
 
+TEST(talker_tx_counters, signal_presence_is_unreported_until_set_and_kept_to_sixty_channels)
+{
+    // Milan v1.3 Section 5.3.7.7.1: channels 0-59 in two counters; nothing until the entity reports.
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.signal_presence(3).has_value());
+    EXPECT_TRUE(talker.set_signal_presence(3, 0).has_value());
+    EXPECT_EQ(talker.signal_presence(3), std::optional<uint64_t>{0});  // reported: no signal
+    EXPECT_TRUE(talker.set_signal_presence(3, ~uint64_t{0}).has_value());
+    EXPECT_EQ(talker.signal_presence(3), std::optional<uint64_t>{(uint64_t{1} << 60U) - 1U});
+    EXPECT_FALSE(talker.signal_presence(4).has_value());  // each stream its own
+    auto const past = static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS);
+    EXPECT_FALSE(talker.set_signal_presence(past, 1).has_value());
+    EXPECT_FALSE(talker.signal_presence(past).has_value());
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

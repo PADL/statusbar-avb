@@ -329,6 +329,23 @@ auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noex
     return success();
 }
 
+auto TalkerStreams::set_signal_presence(uint16_t const stream_index, uint64_t const channels) noexcept -> Status
+{
+    if (stream_index >= signal_presence_.size()) {
+        return failure(std::errc::invalid_argument);
+    }
+    uint64_t const reported = channels & ((uint64_t{1} << SIGNAL_PRESENCE_CHANNELS) - 1U);
+    signal_presence_[stream_index].store(SIGNAL_PRESENCE_REPORTED | reported, std::memory_order_relaxed);
+    return success();
+}
+
+auto TalkerStreams::signal_presence(uint16_t const stream_index) const noexcept -> std::optional<uint64_t>
+{
+    uint64_t const word =
+        stream_index < signal_presence_.size() ? signal_presence_[stream_index].load(std::memory_order_relaxed) : 0U;
+    return (word & SIGNAL_PRESENCE_REPORTED) != 0 ? std::optional<uint64_t>{word & ~SIGNAL_PRESENCE_REPORTED} : std::nullopt;
+}
+
 auto TalkerStreams::mr_requests(uint16_t const stream_index) const noexcept -> uint32_t
 {
     return stream_index < mr_requests_.size() ? mr_requests_[stream_index].load(std::memory_order_relaxed) : 0U;

@@ -16,10 +16,12 @@
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::avb_entity {
 
@@ -33,6 +35,10 @@ inline constexpr unsigned stream_output_stream_start_bit = 0;
 inline constexpr unsigned stream_output_stream_stop_bit = 1;
 inline constexpr unsigned stream_output_media_reset_bit = 3;
 inline constexpr unsigned stream_output_timestamp_uncertain_bit = 4;
+/// Where a Milan STREAM_OUTPUT reports signal presence (Milan v1.3 Section 5.3.7.7.1):
+/// ENTITY_SPECIFIC_9 for channels 0-31, ENTITY_SPECIFIC_10 for 32-59.
+inline constexpr unsigned stream_output_signal_presence_0_31_bit = 23;
+inline constexpr unsigned stream_output_signal_presence_32_59_bit = 22;
 
 /// Copy a stream descriptor's current_format into @p out (read from the blob
 /// via the symbol-aware host); true when the descriptor exists.
@@ -203,13 +209,51 @@ inline void store_stream_output_totals(StreamOutputTotals const& totals, std::ar
     return true;
 }
 
+/// The signal presence @p channels (bit k channel k) a STREAM_OUTPUT of @p stream_channels
+/// reports: the bits past its channels, and past TalkerStreams::SIGNAL_PRESENCE_CHANNELS, clear
+/// (Milan v1.3 Section 5.3.7.7.1).
+[[nodiscard]] constexpr auto reported_signal_presence(uint64_t const channels, size_t const stream_channels) noexcept -> uint64_t
+{
+    size_t const reported = std::min(stream_channels, TalkerStreams::SIGNAL_PRESENCE_CHANNELS);
+    return channels & ((uint64_t{1} << reported) - 1U);
+}
+
+/// The signal presence of channels @p first to @p first + 31 of @p channels (bit k channel k) as
+/// one counter: channel first + i at bit i counted from the MSB, channels past 59 clear (Milan v1.3
+/// Section 5.3.7.7.1).
+[[nodiscard]] constexpr auto signal_presence_quadlet(uint64_t const channels, size_t const first) noexcept -> uint32_t
+{
+    uint32_t quadlet = 0;
+    for (size_t i = 0; i < 32 && first + i < TalkerStreams::SIGNAL_PRESENCE_CHANNELS; ++i) {
+        quadlet |= ((channels >> (first + i)) & 1U) != 0 ? 0x8000'0000U >> i : 0U;
+    }
+    return quadlet;
+}
+
+/// @p presence, within a stream of @p stream_channels, into its two counters of @p out; the
+/// counters_valid bits that makes valid, none while the output reports no signal presence.
+[[nodiscard]] inline auto store_signal_presence(
+    std::optional<uint64_t> const presence, size_t const stream_channels, std::array<uint32_t, 32>& out) noexcept -> uint32_t
+{
+    if (!presence) {
+        return 0;
+    }
+    uint64_t const reported = reported_signal_presence(*presence, stream_channels);
+    out[stream_output_signal_presence_0_31_bit] = signal_presence_quadlet(reported, 0);
+    out[stream_output_signal_presence_32_59_bit] = signal_presence_quadlet(reported, 32);
+    return (1U << stream_output_signal_presence_0_31_bit) | (1U << stream_output_signal_presence_32_59_bit);
+}
+
 /// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index as Milan v1.3 Table
 /// 5.14 has them: @p intervals, the stream's StreamOutputIntervals, current()
-/// at what the talker has sent. False for a stream the talker has no slot for. Reactor thread.
+/// at what the talker has sent, and the signal presence the talker holds now within the stream's
+/// @p stream_channels, once the output reports it. False for a stream the talker has no slot for.
+/// Reactor thread.
 [[nodiscard]] inline auto fill_interval_talker_stream_counters(
     TalkerStreams const& talker,
     uint16_t const descriptor_index,
     StreamOutputIntervals const& intervals,
+    size_t const stream_channels,
     uint32_t& valid,
     std::array<uint32_t, 32>& out) -> bool
 {
@@ -223,6 +267,7 @@ inline void store_stream_output_totals(StreamOutputTotals const& totals, std::ar
             out[i] = values[i];
         }
     }
+    valid |= store_signal_presence(talker.signal_presence(descriptor_index), stream_channels, out);
     return true;
 }
 

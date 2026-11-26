@@ -143,6 +143,18 @@ struct TalkerStreams
 
     /// The AVTPDUs a toggled mr keeps its new state for, at least (IEEE 1722-2016 Clause 4.4.4.3).
     static constexpr uint8_t MR_HOLD_PDUS = 8;
+    /// The most channels of a STREAM_OUTPUT whose signal presence GET_COUNTERS reports: 32 in
+    /// ENTITY_SPECIFIC_9, 28 in ENTITY_SPECIFIC_10 (Milan v1.3 Section 5.3.7.7.1).
+    static constexpr size_t SIGNAL_PRESENCE_CHANNELS = 60;
+    /// Report the signal presence of STREAM_OUTPUT @p stream_index, bit k for channel k: bits past
+    /// SIGNAL_PRESENCE_CHANNELS are dropped here, bits past the stream's channels by the kit. Until
+    /// the first report the output reports none. Any one thread per output, a real-time one too: a
+    /// store, no clock, no lock. invalid_argument past MAX_ENTITY_STREAMS.
+    [[nodiscard]] auto set_signal_presence(uint16_t stream_index, uint64_t channels) noexcept -> Status;
+    /// The signal presence last reported for STREAM_OUTPUT @p stream_index, nullopt before the first
+    /// report or past MAX_ENTITY_STREAMS. Any thread.
+    [[nodiscard]] auto signal_presence(uint16_t stream_index) const noexcept -> std::optional<uint64_t>;
+
     /// A media clock restart on open STREAM_OUTPUT @p stream_index: mr toggles on its next AVTPDU,
     /// or the first after MR_HOLD_PDUS since the last toggle, and keeps its new state; requests
     /// before then toggle it once. invalid_argument for a stream not open. Reactor thread, the one writer.
@@ -373,6 +385,9 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
+    /// Per-stream signal presence (set_signal_presence), SIGNAL_PRESENCE_REPORTED set once reported.
+    std::array<std::atomic<uint64_t>, MAX_ENTITY_STREAMS> signal_presence_{};
+    static constexpr uint64_t SIGNAL_PRESENCE_REPORTED = uint64_t{1} << 63U;
     /// Per-stream media clock restart requests, counted by the reactor (toggle_media_clock_restart).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_requests_{};
     /// The requests counted for STREAM_OUTPUT @p stream_index, 0 past MAX_ENTITY_STREAMS.

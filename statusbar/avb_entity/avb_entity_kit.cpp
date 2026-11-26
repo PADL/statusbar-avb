@@ -808,7 +808,12 @@ void AvbEntityKit::wire_aem_stream_callbacks()
                 // Milan v1.3 Table 5.14 by observation interval; IEEE 1722.1's running counts otherwise.
                 return milan_profile() && descriptor_index < output_counters_.size()
                     ? fill_interval_talker_stream_counters(
-                          *talker_, descriptor_index, output_counters_[descriptor_index], valid, counters)
+                          *talker_,
+                          descriptor_index,
+                          output_counters_[descriptor_index],
+                          output_channels(descriptor_index),
+                          valid,
+                          counters)
                     : fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
@@ -1485,7 +1490,11 @@ void AvbEntityKit::fold_stream_counters()
 void AvbEntityKit::fold_output_counters()
 {
     for (auto const& spec : talker_specs_) {
-        if (spec.index < output_counters_.size() && output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
+        if (spec.index >= output_counters_.size()) {
+            continue;
+        }
+        bool const presence_changed = fold_output_presence(spec);
+        if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index)) || presence_changed) {
             output_counters_changed_[spec.index] = true;
         }
     }
@@ -1523,6 +1532,21 @@ void AvbEntityKit::notify_changed_counters()
             (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
         }
     }
+}
+
+auto AvbEntityKit::fold_output_presence(StreamSpec const& spec) noexcept -> bool
+{
+    // For change detection alone: GET_COUNTERS reads the presence when it answers.
+    auto const reported = talker_->signal_presence(spec.index).transform([&spec](uint64_t const channels) {
+        return reported_signal_presence(channels, spec.format.channels);
+    });
+    return std::exchange(output_presence_[spec.index], reported) != reported;
+}
+
+auto AvbEntityKit::output_channels(uint16_t const index) const noexcept -> uint16_t
+{
+    auto const* const it = std::ranges::find(talker_specs_, index, &StreamSpec::index);
+    return it == talker_specs_.end() ? uint16_t{0} : it->format.channels;
 }
 
 }  // namespace statusbar::avb_entity
