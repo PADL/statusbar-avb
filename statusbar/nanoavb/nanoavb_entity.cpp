@@ -1684,6 +1684,7 @@ auto AemCommandHandler::set_stream_info(
     AemStreamInfoPayload const& cmd, uint32_t const current, std::span<uint8_t const> const response) -> AemCommandResponse
 {
     if (auto const refused = set_stream_info_refusal(cmd.flags.get())) {
+        setting_unchanged_ = true;  // nothing asked, or refused: nothing to save
         return {.status = *refused, .size = response.size()};
     }
     uint32_t const offset = cmd.msrp_accumulated_latency.get();
@@ -3746,8 +3747,8 @@ auto AemCommandHandler::apply_local_name(std::span<uint8_t const> const command_
     requester_ = {};  // nobody asked over ATDECC: every registered controller is told
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> echo{};
     auto const r = handle_set_name(command_body, echo);
-    if (r.status == AEM_STATUS_SUCCESS) {
-        report_setting_changed(AEM_COMMAND_SET_NAME);
+    if (r.status == AEM_STATUS_SUCCESS && !setting_unchanged_) {
+        report_setting_changed(AEM_COMMAND_SET_NAME);  // a rename to the name in force has nothing to save
     }
     return r.status;
 }
