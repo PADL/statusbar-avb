@@ -1110,8 +1110,8 @@ class AvbEntityKit
     /// Bind the listener's VLAN filter control (rtnetlink), warning when it cannot.
     void open_listener_vlan_filter();
 #endif
-    /// Join settled Milan input @p index's VID once: the probe answer's, or with none (0) the matched
-    /// Talker attribute's once it is registered (matched_talker_vid).
+    /// Join settled Milan input @p index's VID: the probe answer's, or with none (0) the matched Talker
+    /// attribute's while one is registered (matched_talker_vid), a new one joined and the old one left.
     void join_input_vlan(uint16_t index, atdecc::MilanSrpParameters const& srp, TimePoint now);
     /// After a change of @p stream_id's Talker registration at @p now: join_input_vlan() for each
     /// settled Milan input on that StreamID.

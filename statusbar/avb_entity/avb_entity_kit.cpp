@@ -2030,12 +2030,13 @@ auto AvbEntityKit::commit_presentation_offset(uint16_t const idx, uint32_t const
 
 void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSrpParameters const& srp, TimePoint const now)
 {
-    // Once per settle; a probe answer naming no VID (0) uses the matched Talker attribute's, when registered.
+    // A probe answer naming no VID (0) follows the matched Talker attribute's while one is registered.
     uint16_t const vid = srp.stream_vlan_id != 0 ? srp.stream_vlan_id : matched_talker_vid(srp);
-    if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
-        input_vid_[index] = vid;
-        join_sink_vlan(vid, now);
+    if (index >= input_vid_.size() || vid == 0 || input_vid_[index] == vid) {
+        return;
     }
+    join_sink_vlan(vid, now);  // the new VID held before the old one is left
+    leave_sink_vlan(std::exchange(input_vid_[index], vid), now);
 }
 
 void AvbEntityKit::join_settled_input_vlans(nanoavb::StreamId const& stream_id, TimePoint const now)
