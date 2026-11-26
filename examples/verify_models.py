@@ -35,6 +35,11 @@ from aemxml.blob_writer import write_blob  # noqa: E402
 from aemxml.flatten import flatten  # noqa: E402
 from aemxml.json_reader import read_json  # noqa: E402
 from aemxml.model import INTERFACE_FLAGS_NAMES  # noqa: E402
+from aemxml.stream_formats import (  # noqa: E402
+    AAF_FORMAT_INT_32,
+    decode_aaf_stream_format,
+    stream_format_covers,
+)
 
 # Milan v1.3 5.3.3.4: a STREAM_INPUT's buffer_length is at least 2.126 ms.
 MILAN_MIN_BUFFER_LENGTH_NS = 2126000
@@ -42,6 +47,67 @@ MILAN_MIN_BUFFER_LENGTH_NS = 2126000
 MILAN_INTERFACE_FLAGS = (
     INTERFACE_FLAGS_NAMES["GPTP_SUPPORTED"] | INTERFACE_FLAGS_NAMES["SRP_SUPPORTED"]
 )
+# Milan v1.3 Table 6.1: the channel counts of the Base format, and its samples
+# per AVTPDU at each sampling rate.
+MILAN_BASE_CHANNELS = frozenset({1, 2, 4, 6, 8})
+MILAN_BASE_SAMPLES = {
+    44100: 6,
+    48000: 6,
+    88200: 12,
+    96000: 12,
+    176400: 24,
+    192000: 24,
+}
+
+
+def _base_formats_described(fmt: int) -> tuple[int, set[int]] | None:
+    """The rate and the channel counts of the Base formats a formats-list
+    entry describes; None for an entry that is no Base format."""
+    aaf = decode_aaf_stream_format(fmt)
+    if (
+        aaf is None
+        or aaf["format"] != AAF_FORMAT_INT_32
+        or aaf["depth"] != 32
+        or MILAN_BASE_SAMPLES.get(aaf["rate"]) != aaf["samples_per_frame"]
+    ):
+        return None
+    top = aaf["channels"]
+    up_to = aaf.get("up_to", False)
+    counts = {n for n in MILAN_BASE_CHANNELS if (n <= top if up_to else n == top)}
+    return (aaf["rate"], counts) if counts else None
+
+
+def _input_format_faults(config) -> list[str]:
+    """6.5: a Stream Input that lists a Base format at a rate lists them all,
+    1, 2, 4, 6 and 8 channels."""
+    faults = []
+    for stream in config.streams_input:
+        by_rate: dict[int, set[int]] = {}
+        for described in map(_base_formats_described, stream.formats):
+            if described is not None:
+                by_rate.setdefault(described[0], set()).update(described[1])
+        faults += [
+            f"STREAM_INPUT '{stream.object_name}' lists the Base format at {rate} Hz "
+            f"for {sorted(counts)} channels and not for {sorted(MILAN_BASE_CHANNELS - counts)}"
+            for rate, counts in by_rate.items()
+            if counts != MILAN_BASE_CHANNELS
+        ]
+    return faults
+
+
+def _current_format_faults(config) -> list[str]:
+    """5.3.3.4: current_format is one of the formats the formats list describes."""
+    return [
+        f"{kind} '{stream.object_name}' has a current_format its formats do not describe"
+        for kind, streams in (
+            ("STREAM_INPUT", config.streams_input),
+            ("STREAM_OUTPUT", config.streams_output),
+        )
+        for stream in streams
+        if not any(
+            stream_format_covers(f, stream.current_format) for f in stream.formats
+        )
+    ]
 
 
 def _output_mapping_faults(config) -> list[str]:
@@ -75,13 +141,14 @@ def milan_model_faults(entity) -> list[str]:
     """What in @p entity breaks a Milan v1.3 5.3.3 rule a model decides.
 
     Not held here: what the entity adds when it runs as a Milan one (the
-    ENTITY capabilities of 5.3.3.1, the 2021 descriptor lengths) and what its
-    data plane has to back (the formats of section 6).
+    ENTITY capabilities of 5.3.3.1, the 2021 descriptor lengths).
     """
     faults = []
     for config in entity.configurations:
         faults += _cluster_faults(config)
         faults += _output_mapping_faults(config)
+        faults += _input_format_faults(config)
+        faults += _current_format_faults(config)
         faults += [
             f"STREAM_INPUT '{s.object_name}' buffer_length {s.buffer_length} ns"
             for s in config.streams_input

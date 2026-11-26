@@ -309,6 +309,7 @@ Everything not listed here is the same under both.
 | MRP timers (MSRP and MVRP) | 802.1Q Table 10-7: JoinTime 200 ms, LeaveTime 1000 ms, LeaveAll 10 to 15 s, periodic 1 s | Milan Table 4.3: the same with LeaveTime 5000 ms (4.2.7.1.1) |
 | Connection management | IEEE 1722.1-2021 clause 8: the listener relays a controller's connect to the talker, the talker keeps a list of its listeners. `NanoAvbAcmpListener`, `NanoAvbAcmpTalker` | Milan v1.3 section 5.5, a separate implementation (`MILAN_ACMP.md`): a bind is saved and answered at once, the listener then probes its talker and follows the talker's SRP attribute by itself; the talker answers probes and keeps nothing. `NanoAvbMilanAcmpListener`, `NanoAvbMilanAcmpTalker`, chosen at start-up by `NanoAvbComponents::use_milan_acmp` |
 | A bind or connect from a controller other than the one holding the lock | accepted: ACMP does not ask | refused CONTROLLER_NOT_AUTHORIZED (5.5.2.4, 5.5.2.5) |
+| SET_STREAM_FORMAT on a stream input in use | STREAM_IS_RUNNING while the input is connected (7.4.9.2) | STREAM_IS_RUNNING while the input's sink is bound, settled or not (5.4.2.7) |
 | START_STREAMING and STOP_STREAMING on a stream input | the input takes or discards its frames (7.4.35, 7.4.36); the state is not saved | the started/stopped state of the input's sink (5.3.8.7), saved with its binding and also set by a bind's STREAMING_WAIT; no effect on an input that is not bound. A stopped input discards its frames and keeps its reservation |
 | START_STREAMING and STOP_STREAMING on a stream output | the talker's stream is stopped and started; GET_STREAM_INFO reports STREAMING_WAIT (7.4.35, 7.4.36, Table 7-145) | NOT_SUPPORTED, nothing changed: an output cannot be stopped (5.4.2.19, 5.4.2.20, 5.3.7.3) |
 | BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX, on a Milan model (`entity.milan`) | NOT_IMPLEMENTED, and MVU_BINDING clear in GET_MILAN_INFO | answered by the stream inputs' sinks (5.4.4.6 to 5.4.4.8), a bind from a controller the lock shuts out ENTITY_LOCKED; MVU_BINDING set |
@@ -320,6 +321,31 @@ Everything not listed here is the same under both.
 | Descriptor lengths when `atdecc.version` is empty (the default) | `2016`: STREAM, AVB_INTERFACE, AUDIO_CLUSTER and the other descriptors that grew are cut to their 1722.1-2013/2016 lengths, for controllers that reject the longer ones | `2021`: the full IEEE 1722.1-2021 descriptors, which are the ones Milan names (5.3.3); `2016` or `2021` given outright is used under either |
 | Stream destination addresses when `stream.address_mode` is empty (the default) | `static`: the configured `*_dest_mac` | `maap`: a block acquired and defended by MAAP (4.3.3.1), kept across restarts in `maap-range`; `static` or `maap` given outright is used under either. Where the MAAP socket cannot be opened the entity still falls back to the configured addresses, with a warning |
 | A Class A Domain registered from the wire with other parameters | ours is kept (802.1Q) | adopted: re-declared, the stream frames take its VLAN and priority, MVRP follows, GET_AVB_INFO is notified (4.2.7.2.1); a VID outside 1 to 4094 or a priority above 7 (802.1Q Table 9-2, 9-3) is left alone and the Domain in force kept |
+
+### The format of a stream input
+
+A stream input starts on the format its model authors and takes any other
+its formats list describes, set by SET_STREAM_FORMAT. An AAF entry of that
+list with the "up to" bit describes every channel count from one to its
+own (IEEE 1722-2025 I.2.4), which is how a model lists the five Base
+channel counts Milan v1.3 6.5 asks of an input. The bit is zero in a
+current format and in the command, so a command that names such an entry
+itself is refused NOT_SUPPORTED, as is a format no entry describes.
+
+| What | How it goes |
+|---|---|
+| What may change | the channel count of an AAF input. The sample rate is the media clock's, and the sample format, bit depth and samples per AVTPDU stay as the model authors them: a listed format that changes one of those is answered NOT_SUPPORTED |
+| When | while the input is not in use (the profile table above). The format in force named again is accepted at any time |
+| A stream output | keeps the one format its serializer was made for; any other is NOT_SUPPORTED |
+| An AVTPDU that is not of the input's format | discarded and counted UNSUPPORTED_FORMAT (4.4.2.2): its nsr, sample format, bit depth and channels per frame are compared, and its length when the format names the samples per AVTPDU. Under both profiles |
+| What the input feeds | keeps the width the model authors. A consumer (`set_consume`) is handed every channel a narrower stream does not carry as silence, and the raw audio sink gets frames of the authored channel count, zero in the channels the stream lacks |
+| Where it is reported | GET_STREAM_FORMAT, the STREAM_INPUT descriptor's current_format and GET_STREAM_INFO all give the format in force; the registered controllers are notified of a change (7.5.2) |
+| Across a restart | saved in `stream-formats` (below) and restored at the next start (5.3.8.1). A saved format the model no longer describes is left, with a status line, and the input keeps its authored one |
+
+The input mappings are still the model's static ones: stream channel *i*
+feeds cluster *i*. Milan's check of a new format against the mappings
+(5.4.2.7, BAD_ARGUMENTS) comes with the dynamic mappings of 5.3.10.1, and
+until then a format with fewer channels leaves the higher clusters silent.
 
 ### Saved state
 
@@ -333,12 +359,14 @@ different programs on one machine never share a file
 ```
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/listener-bindings
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/maap-range
+/var/lib/statusbar-avb/2ccf67fffe0a0b0c/stream-formats
 ```
 
 | File | Written | By default |
 |---|---|---|
 | `listener-bindings` | the stream inputs' bindings (Milan v1.3 5.3.8.3) | under the Milan profile. The IEEE 1722.1 listener's fast-connect memory changes what a restart does, so it is saved only where `listener.bindings` names a file |
 | `maap-range` | the MAAP block the entity defended, probed first at the next start | wherever the addresses come from MAAP: `stream.address_mode = "maap"` under either profile, and the Milan profile when the key is left empty |
+| `stream-formats` | the current format of each stream input (Milan v1.3 5.3.8.1), one line per input | under either profile, from the first time a controller changes a format; an entity nobody has set a format on has no such file |
 
 A key that names a file (`listener.bindings`, `stream.maap_range_file`)
 is used as given and the state directory is left alone for that kind. A

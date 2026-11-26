@@ -43,6 +43,8 @@ talker_on_listener = true
 #   maap-range          the MAAP block it defended, where its stream
 #                       addresses come from MAAP: stream.address_mode =
 #                       "maap", or the Milan profile with that key unset
+#   stream-formats      its stream inputs' formats, once a controller has
+#                       set one
 # The package creates the default directory. dir = "" saves nothing there;
 # listener.bindings and stream.maap_range_file name a file of your own.
 # [state]

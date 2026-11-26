@@ -31,6 +31,7 @@
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
@@ -341,6 +342,40 @@ class AvbEntityKit
     void set_input_stopped(uint16_t index, bool stopped);
     /// Every stream input given the stopped state input_stopped() says.
     void apply_input_stopped_states();
+    /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
+    /// describes: the status of the command. A stream input takes another
+    /// channel count (change_input_format); a stream output keeps the one
+    /// format its serializer was made for, and any other is NOT_SUPPORTED.
+    [[nodiscard]] auto on_stream_format_changed(uint16_t type, uint16_t index, uint64_t format) -> uint8_t;
+    /// STREAM_INPUT @p index to @p format: STREAM_IS_RUNNING while the input
+    /// is in use, NOT_SUPPORTED for a format the listener cannot be brought
+    /// to; else the listener takes it and the inputs' formats are saved.
+    [[nodiscard]] auto change_input_format(uint16_t index, uint64_t format) -> uint8_t;
+    /// Whether STREAM_INPUT @p index may not change format now: its Milan
+    /// sink is bound (Milan v1.3 5.4.2.7), or under IEEE 1722.1 it is
+    /// connected (7.4.9.2).
+    [[nodiscard]] auto input_in_use(uint16_t index) const noexcept -> bool;
+    /// The GET_STREAM_INFO answer for a stream: the talker's or the
+    /// listener's picture of it, with the format now in force. False for a
+    /// stream the entity does not have.
+    [[nodiscard]] auto stream_info(uint16_t type, uint16_t index, atdecc::aem::AemStreamInfoPayload& out) -> bool;
+    /// The current format of a stream as its descriptor has it; 0 for a stream the model does not have.
+    [[nodiscard]] auto current_stream_format(uint16_t type, uint16_t index) -> uint64_t;
+    /// The file the streams' current formats are saved in (Milan v1.3
+    /// 5.3.7.1, 5.3.8.1), empty when the machine has no state directory.
+    /// To save, @p make the entity's own directory when it is not there;
+    /// to load, only name the file.
+    [[nodiscard]] auto stream_formats_file(bool make) -> std::string;
+    /// Save every stream input's current format, STREAM_INPUT @p index
+    /// having @p format: its descriptor takes that once the command's hook
+    /// has returned.
+    void save_input_formats(uint16_t index, uint64_t format);
+    /// The formats saved before the last stop, back to the stream inputs.
+    void restore_input_formats();
+    /// One saved format to its input, when the model still describes it
+    /// and the listener takes it; else the input stays as authored, and a
+    /// status line says so.
+    void restore_input_format(SavedStreamFormat const& saved);
 
     // start()'s steps, in order.
     [[nodiscard]] auto bring_up_control_plane(net::MessageReactor& reactor, TimePoint now) -> Status;

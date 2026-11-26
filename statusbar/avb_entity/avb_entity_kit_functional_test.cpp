@@ -16,7 +16,9 @@
 #include "statusbar/avb_entity/avb_entity_listener_bindings.hpp"
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_entity.hpp"
@@ -31,6 +33,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -1549,6 +1552,264 @@ TEST(avb_entity_kit_state, a_milan_kit_given_no_address_mode_asks_maap_and_so_ha
     EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
     EXPECT_TRUE(std::filesystem::is_directory(dir.entity));
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+//
+// The format of a stream input - Milan v1.3 5.3.8.1, 5.4.2.7 and 6.5
+//
+
+namespace {
+
+// examples/dual.json: STREAM_INPUT 1 and STREAM_OUTPUT 1 are the AAF pair,
+// 96 kHz, 32 bit, eight channels of twelve samples. The input lists that
+// format "up to" eight channels.
+constexpr uint16_t AAF_STREAM = 1;
+constexpr uint64_t AAF_96K_8CH = 0x020702200200C000ULL;
+
+constexpr auto aaf_96k_of(uint64_t const channels) noexcept -> uint64_t
+{
+    return (AAF_96K_8CH & ~avtp::AAF_STREAM_FORMAT_CHANNELS_MASK) | (channels << 22);
+}
+
+/// SET_STREAM_FORMAT of @p stream to @p format, from CONTROLLER_ID: the status.
+auto set_stream_format(StreamOf const stream, uint64_t const format) -> uint8_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, atdecc::aem::AemStreamFormatPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    std::array<uint8_t, atdecc::aem::AemStreamFormatPayload::LENGTH> body{};
+    span_store(
+        std::span<uint8_t>{body},
+        atdecc::aem::AemStreamFormatPayload{.descriptor_type = stream.type, .descriptor_index = stream.index});
+    span_store(
+        std::span<uint8_t>{body}.subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format)), ieee::octlet_t{format});
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return stream.kit->host().components().aem_handler.handle_command(header, body, out).status;
+}
+
+/// The format GET_STREAM_FORMAT reports for @p stream.
+auto reported_stream_format(StreamOf const stream) -> uint64_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_FORMAT, atdecc::aem::AemGetStreamFormatCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetStreamFormatCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    ieee::octlet_t format{0};
+    span_load(format, std::span<uint8_t const>{out}.subspan(offsetof(atdecc::aem::AemStreamFormatPayload, stream_format), 8));
+    return format.get();
+}
+
+/// The format GET_STREAM_INFO reports for @p stream, which it marks valid.
+auto stream_info_format(StreamOf const stream) -> uint64_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetStreamInfoCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemStreamInfoPayload info{};
+    span_load(info, std::span<uint8_t const>{out}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
+    EXPECT_TRUE((info.flags.get() & atdecc::aem::stream_info_flags::STREAM_FORMAT_VALID) != 0);
+    ieee::octlet_t format{0};
+    span_load(format, make_const_span(info.stream_format));
+    return format.get();
+}
+
+/// The AAF input of the listener kit of a pair, with the pair's bind aimed at the AAF output.
+auto aaf_input_of(KitPair& pair) -> StreamOf
+{
+    pair.sink = AAF_STREAM;
+    pair.source = AAF_STREAM;
+    return StreamOf{.kit = pair.listener, .index = AAF_STREAM};
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_format, a_stream_input_takes_each_base_channel_count_and_its_listener_follows)
+{
+    // Milan v1.3 6.5: an input that lists one Base format at a rate takes all
+    // of them. The model says so with one "up to" entry (6.6).
+    for (std::string_view const profile : {std::string_view{"milan13"}, std::string_view{"classic"}}) {
+        KitPair pair{profile};
+        auto const input = aaf_input_of(pair);
+        EXPECT_EQ(reported_stream_format(input), AAF_96K_8CH);
+        for (uint64_t const channels : {1U, 2U, 4U, 6U, 8U}) {
+            EXPECT_EQ(set_stream_format(input, aaf_96k_of(channels)), atdecc::AEM_STATUS_SUCCESS);
+            EXPECT_EQ(reported_stream_format(input), aaf_96k_of(channels));
+            EXPECT_EQ(stream_info_format(input), aaf_96k_of(channels));  // GET_STREAM_INFO says the same
+            EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), aaf_96k_of(channels));
+        }
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+}
+
+TEST(avb_entity_kit_format, a_format_the_input_does_not_list_is_refused_and_nothing_changes)
+{
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+    uint64_t const at_48k = (aaf_96k_of(2) & ~0x000F000000000000ULL) | 0x0005000000000000ULL;
+    for (uint64_t const refused : {aaf_96k_of(9), at_48k, aaf_96k_of(8) | avtp::AAF_STREAM_FORMAT_UT_BIT}) {
+        EXPECT_EQ(set_stream_format(input, refused), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    }
+    EXPECT_EQ(reported_stream_format(input), AAF_96K_8CH);
+    EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), AAF_96K_8CH);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, a_bound_milan_input_answers_stream_is_running)
+{
+    // Milan v1.3 5.4.2.7: "The PAAD-AE shall not accept a SET_STREAM_FORMAT
+    // command on a Stream Input if the Stream Input is bound ... In these
+    // cases, the STREAM_IS_RUNNING error code shall be returned."
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+    pair.bind();
+    EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->sink(AAF_STREAM)->is_bound());
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(reported_stream_format(input), AAF_96K_8CH);
+    EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), AAF_96K_8CH);
+
+    // Unbound, it takes the format.
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_FALSE(pair.listener->host().components().milan_acmp_listener->sink(AAF_STREAM)->is_bound());
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(reported_stream_format(input), aaf_96k_of(2));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, a_connected_ieee_1722_1_input_answers_stream_is_running)
+{
+    // IEEE 1722.1-2021 7.4.9.2: "If the stream is currently streaming then
+    // the ATDECC Entity responds with a STREAM_IS_RUNNING status."
+    KitPair pair{"classic"};
+    auto const input = aaf_input_of(pair);
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_TRUE(pair.listener->host().components().acmp_listener.is_connected(AAF_STREAM));
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_EQ(reported_stream_format(input), AAF_96K_8CH);
+
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    pair.run(ROUNDS_PER_SECOND);
+    EXPECT_FALSE(pair.listener->host().components().acmp_listener.is_connected(AAF_STREAM));
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, the_format_in_force_named_again_is_accepted_whatever_the_stream_is_doing)
+{
+    // Under IEEE 1722.1 the command reaches the kit; a stream output has the
+    // one format, and naming it is no change.
+    KitPair pair{"classic"};
+    auto const input = aaf_input_of(pair);
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(set_stream_format(input, AAF_96K_8CH), atdecc::AEM_STATUS_SUCCESS);
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    EXPECT_EQ(set_stream_format(output, AAF_96K_8CH), atdecc::AEM_STATUS_SUCCESS);
+    // The output lists no other format: its mappings hold in that one (5.3.3.4).
+    EXPECT_EQ(set_stream_format(output, aaf_96k_of(2)), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(reported_stream_format(output), AAF_96K_8CH);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, the_format_of_an_input_is_saved_and_restored_at_the_next_start)
+{
+    // Milan v1.3 5.3.8.1: "The current format shall be saved in a
+    // non-volatile memory and restored after a power cycle."
+    StateDir const dir{"statusbar_state_dir_format_functional_test"};
+    auto const file = (dir.entity / entity_state_file::STREAM_FORMATS).string();
+    {
+        KitPair pair{"milan13", dir.listener_config("milan13")};
+        auto const input = aaf_input_of(pair);
+        EXPECT_FALSE(std::filesystem::exists(file));  // nothing set, nothing saved
+        EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
+        auto const saved = load_stream_formats(file);
+        EXPECT_TRUE(saved.has_value());
+        EXPECT_EQ(saved->size(), pair.listener->listener_specs().size());  // one line per input
+        EXPECT_TRUE(
+            saved->at(AAF_STREAM) ==
+            (SavedStreamFormat{
+                .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT, .descriptor_index = AAF_STREAM, .format = aaf_96k_of(2)}));
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+    // Another process, the same entity: its input is on two channels from the start.
+    KitPair again{"milan13", dir.listener_config("milan13")};
+    auto const input = aaf_input_of(again);
+    EXPECT_EQ(reported_stream_format(input), aaf_96k_of(2));
+    EXPECT_EQ(stream_info_format(input), aaf_96k_of(2));
+    EXPECT_EQ(again.listener->listener()->stream_format(AAF_STREAM), aaf_96k_of(2));
+    EXPECT_TRUE(again.listener.stop(again.now));
+    EXPECT_TRUE(again.talker.stop(again.now));
+}
+
+TEST(avb_entity_kit_format, a_saved_format_the_model_does_not_describe_is_left_and_the_input_keeps_its_own)
+{
+    // The model changed since the format was saved: 48 kHz is not this input's.
+    StateDir const dir{"statusbar_state_dir_stale_format_functional_test"};
+    std::filesystem::create_directories(dir.entity);
+    auto const file = (dir.entity / entity_state_file::STREAM_FORMATS).string();
+    uint64_t const at_48k = (aaf_96k_of(2) & ~0x000F000000000000ULL) | 0x0005000000000000ULL;
+    std::array const stale{
+        SavedStreamFormat{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_INPUT, .descriptor_index = AAF_STREAM, .format = at_48k},
+        SavedStreamFormat{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = AAF_STREAM, .format = aaf_96k_of(2)}};
+    EXPECT_TRUE(save_stream_formats(file, stale).has_value());
+
+    KitPair pair{"milan13", dir.listener_config("milan13")};
+    auto const input = aaf_input_of(pair);
+    EXPECT_EQ(reported_stream_format(input), AAF_96K_8CH);
+    EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), AAF_96K_8CH);
+    StreamOf const output{.kit = pair.listener, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    EXPECT_EQ(reported_stream_format(output), AAF_96K_8CH);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, an_ieee_1722_1_kit_makes_its_state_directory_when_a_format_is_first_set)
+{
+    // Static addresses and no bindings file: a classic kit has nothing to
+    // save until a controller sets a format.
+    StateDir const dir{"statusbar_state_dir_classic_format_functional_test"};
+    KitPair pair{"classic", dir.listener_config("classic")};
+    auto const input = aaf_input_of(pair);
+    EXPECT_FALSE(std::filesystem::exists(dir.entity));
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(4)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(std::filesystem::exists(dir.entity / entity_state_file::STREAM_FORMATS));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_format, with_no_state_directory_the_format_is_set_and_nothing_is_saved)
+{
+    StateDir const dir{"statusbar_state_dir_absent_format_functional_test"};
+    std::filesystem::remove_all(dir.state);
+    KitPair pair{"classic", dir.listener_config("classic")};
+    auto const input = aaf_input_of(pair);
+    EXPECT_EQ(set_stream_format(input, aaf_96k_of(4)), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(reported_stream_format(input), aaf_96k_of(4));
+    EXPECT_FALSE(std::filesystem::exists(dir.state));
+    // A stop and a start of the same kit keep it: the descriptor and the listener hold it.
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    bring_up(pair.listener);
+    EXPECT_EQ(reported_stream_format(input), aaf_96k_of(4));
+    EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), aaf_96k_of(4));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

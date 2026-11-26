@@ -13,6 +13,7 @@
 ///
 ///     <state.dir>/<entity ID>/listener-bindings
 ///     <state.dir>/<entity ID>/maap-range
+///     <state.dir>/<entity ID>/stream-formats
 ///
 /// One file per kind of saved state; a new kind is a new file name here.
 
@@ -36,12 +37,21 @@ namespace entity_state_file {
 inline constexpr std::string_view LISTENER_BINDINGS{"listener-bindings"};
 /// The MAAP block last defended, probed first at the next start.
 inline constexpr std::string_view MAAP_RANGE{"maap-range"};
+/// The streams' current formats (Milan v1.3 5.3.7.1, 5.3.8.1), in the form avb_entity_stream_formats_file.hpp reads.
+inline constexpr std::string_view STREAM_FORMATS{"stream-formats"};
 }  // namespace entity_state_file
 
 /// The name of an entity's own directory: its entity ID as sixteen lowercase hex digits.
 [[nodiscard]] inline auto entity_state_dir_name(ieee::Eui64 const& entity_id) -> std::string
 {
     return std::format("{:016x}", entity_id.to_uint64());
+}
+
+/// @p entity_id's directory inside @p state_dir, named and not made: where
+/// the entity's state is when it has saved any.
+[[nodiscard]] inline auto entity_state_dir_path(std::string const& state_dir, ieee::Eui64 const& entity_id) -> std::string
+{
+    return (std::filesystem::path{state_dir} / entity_state_dir_name(entity_id)).string();
 }
 
 /// @p entity_id's directory inside @p state_dir, made when it is not there yet.

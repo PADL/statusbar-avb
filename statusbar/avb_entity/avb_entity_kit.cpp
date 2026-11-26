@@ -186,6 +186,9 @@ void AvbEntityKit::install_storage_hooks()
     });
     storage_handler_.set_on_streaming_changed(
         [this](uint16_t type, uint16_t index, bool streaming) -> uint8_t { return on_streaming_changed(type, index, streaming); });
+    storage_handler_.set_on_stream_format_changed([this](uint16_t type, uint16_t index, uint64_t format) -> uint8_t {
+        return on_stream_format_changed(type, index, format);
+    });
     // Under Milan the started/stopped state of an input is its sink's
     // (a bind's STREAMING_WAIT, START_STREAMING, STOP_STREAMING): each input
     // takes or discards its frames as its sink's binding says.
@@ -264,6 +267,119 @@ void AvbEntityKit::set_input_stopped(uint16_t const index, bool const stopped)
         stopped ? logging::lit("STOPPED: its frames are discarded") : logging::lit("no longer STOPPED"));
     // Table 5.20: the started/stopped state of a stream input is told.
     (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+}
+
+auto AvbEntityKit::on_stream_format_changed(uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t
+{
+    // The format in force named again changes nothing and is refused by nothing.
+    if (current_stream_format(type, index) == format) {
+        return atdecc::AEM_STATUS_SUCCESS;
+    }
+    // A stream output's serializer is made once, for the format its model
+    // authors. Milan v1.3 5.3.3.4 has an output with static mappings list
+    // only the formats those mappings hold in, which is that one.
+    return type == DESCRIPTOR_STREAM_INPUT ? change_input_format(index, format) : atdecc::AEM_STATUS_NOT_SUPPORTED;
+}
+
+auto AvbEntityKit::change_input_format(uint16_t const index, uint64_t const format) -> uint8_t
+{
+    // Milan v1.3 5.4.2.7: "The PAAD-AE shall not accept a SET_STREAM_FORMAT
+    // command on a Stream Input if the Stream Input is bound ... In these
+    // cases, the STREAM_IS_RUNNING error code shall be returned." IEEE
+    // 1722.1-2021 7.4.9.2 says it of a stream that is streaming.
+    if (input_in_use(index)) {
+        return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    }
+    if (listener_ == nullptr || !listener_->set_stream_format(index, format)) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    host_.ctl_log().status(
+        "aem: stream input {} now receives {} channels (format {:016x})", index, decode_stream_format(format).channels, format);
+    save_input_formats(index, format);
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::input_in_use(uint16_t const index) const noexcept -> bool
+{
+    auto const& components = host_.components();
+    if (components.acmp_is_milan()) {
+        auto const* const sink = components.milan_acmp_listener->sink(index);
+        return sink != nullptr && sink->is_bound();
+    }
+    return components.acmp_listener.is_connected(index);
+}
+
+auto AvbEntityKit::current_stream_format(uint16_t const type, uint16_t const index) -> uint64_t
+{
+    atdecc::aem::DescriptorRef const ref{.configuration_index = 0, .descriptor_type = type, .descriptor_index = index};
+    return storage_handler_.current_stream_format(ref).value_or(ieee::Eui64{}).to_uint64();
+}
+
+auto AvbEntityKit::stream_formats_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::STREAM_FORMATS, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::STREAM_FORMATS);
+}
+
+void AvbEntityKit::save_input_formats(uint16_t const index, uint64_t const format)
+{
+    // Milan v1.3 5.3.8.1: "The current format shall be saved in a
+    // non-volatile memory and restored after a power cycle."
+    auto const path = stream_formats_file(true);
+    if (path.empty()) {
+        return;
+    }
+    SavedStreamFormats formats{};
+    for (auto const& spec : listener_specs_) {
+        uint64_t const word = spec.index == index ? format : current_stream_format(DESCRIPTOR_STREAM_INPUT, spec.index);
+        (void)formats.try_push_back(
+            SavedStreamFormat{.descriptor_type = DESCRIPTOR_STREAM_INPUT, .descriptor_index = spec.index, .format = word});
+    }
+    if (auto const saved = save_stream_formats(path, formats); !saved) {
+        host_.ctl_log().error("state: the stream formats were not saved (error {})", saved.error().value());
+    }
+}
+
+void AvbEntityKit::restore_input_formats()
+{
+    auto const path = stream_formats_file(false);
+    if (listener_ == nullptr || path.empty()) {
+        return;
+    }
+    auto const saved = load_stream_formats(path);
+    if (!saved.has_value()) {
+        host_.ctl_log().error(
+            "state: the saved stream formats cannot be read (error {}); the inputs keep their authored formats",
+            saved.error().value());
+        return;
+    }
+    for (auto const& one : *saved) {
+        restore_input_format(one);
+    }
+}
+
+void AvbEntityKit::restore_input_format(SavedStreamFormat const& saved)
+{
+    atdecc::aem::DescriptorRef const ref{
+        .configuration_index = 0, .descriptor_type = saved.descriptor_type, .descriptor_index = saved.descriptor_index};
+    // Asked in this order, so that nothing is taken unless both take it: the
+    // listener can, the model still describes it, the listener does.
+    bool const taken = saved.descriptor_type == DESCRIPTOR_STREAM_INPUT &&
+        listener_->can_take_stream_format(saved.descriptor_index, saved.format) &&
+        storage_handler_.restore_stream_format(ref, ieee::Eui64{}.from_uint64(saved.format)) &&
+        listener_->set_stream_format(saved.descriptor_index, saved.format);
+    if (!taken) {
+        host_.ctl_log().status(
+            "state: the saved format {:016x} of stream {} is not one it has now; it keeps its authored format",
+            saved.format,
+            saved.descriptor_index);
+    }
 }
 
 void AvbEntityKit::apply_input_stopped_states()
@@ -546,19 +662,26 @@ void AvbEntityKit::wire_aem_stream_callbacks()
         });
     host_.components().aem_handler.set_get_stream_info(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
-            if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return fill_talker_stream_info(
-                    host_,
-                    descriptor_index,
-                    effective_presentation_offset_ns(config_),
-                    talker_->stream_stopped(descriptor_index),
-                    out);
-            }
-            if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return fill_listener_stream_info(host_, descriptor_index, listener_->stream_stopped(descriptor_index), out);
-            }
-            return false;
+            return stream_info(descriptor_type, descriptor_index, out);
         });
+}
+
+auto AvbEntityKit::stream_info(uint16_t const type, uint16_t const index, atdecc::aem::AemStreamInfoPayload& out) -> bool
+{
+    bool filled = false;
+    if (type == DESCRIPTOR_STREAM_OUTPUT) {
+        filled =
+            fill_talker_stream_info(host_, index, effective_presentation_offset_ns(config_), talker_->stream_stopped(index), out);
+    } else if (type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
+        filled = fill_listener_stream_info(host_, index, listener_->stream_stopped(index), out);
+    }
+    // The fillers read the format the model authors; the one in force is the
+    // descriptor's, which a SET_STREAM_FORMAT or a restored format changes.
+    auto const format = filled ? storage_handler_.current_stream_format({0, type, index}) : std::nullopt;
+    if (format.has_value()) {
+        span_copy(make_span(out.stream_format), format->span());
+    }
+    return filled;
 }
 
 auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint const now) -> Status
@@ -785,6 +908,8 @@ void AvbEntityKit::attach_listener_rx(std::span<ieee::Eui48 const> const rx_grou
         state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
     // The started/stopped state is restored with the binding (5.3.8.7).
     apply_input_stopped_states();
+    // And each input's format, saved when a controller last set it (5.3.8.1).
+    restore_input_formats();
 }
 
 void AvbEntityKit::finish_start()

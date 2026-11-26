@@ -67,6 +67,8 @@ Every model here keeps the Milan v1.3 descriptor rules that a model decides
 | A channel of a Stream Output has one static mapping at most (5.3.3.9) | each stream port's maps name its own stream: port 0 maps stream 0, port 1 stream 1 |
 | A STREAM_INPUT's buffer_length is at least 2.126 ms (5.3.3.4) | `"buffer_length": 2126000` (nanoseconds) on every entry of `streams_in`; left out, the field is 0 |
 | An AVB_INTERFACE has GPTP_SUPPORTED and SRP_SUPPORTED (5.3.3.5) | both in `avb_interfaces[].flags` |
+| A Stream Input that lists the Base format at a rate lists it for 1, 2, 4, 6 and 8 channels (6.5) | one entry of `formats` with `"up_to": true` beside the `format` the input starts on (below) |
+| A stream's `format` is one its `formats` describe (5.3.3.4) | follows from the two keys; a `formats` list that leaves the `format` out fails the model |
 
 `buffer_length` says how much audio the input can hold. The entity kit
 hands received samples on with their presentation time and holds none
@@ -88,8 +90,24 @@ sends the 2021 descriptor lengths under the Milan profile; see
 `../docs/ENTITY_CONSTRUCTION_KIT.md`. The same blobs serve a plain
 IEEE 1722.1 entity unchanged.
 
-Not yet Milan in the models: an AAF input lists one channel count where
-section 6.5 has five, and `tone-aaf.json` has no CRF stream.
+An AAF stream input says which channel counts it takes with one entry of
+its `formats` list (6.6, IEEE 1722-2025 I.2.4):
+
+```json
+"format":  { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32 },
+"formats": [ { "type": "AAF", "rate": 96000, "channels": 8, "depth": 32, "up_to": true } ]
+```
+
+`format` is the format the input uses until a controller sets another.
+The `up_to` entry describes every channel count from one to eight at that
+rate, so a SET_STREAM_FORMAT may name any of them. `up_to` belongs in
+`formats` only: a current format never has the bit. With `formats` left
+out the list is the `format` alone, which is what a stream output wants:
+its static mappings hold in that one format.
+
+Not yet Milan in the models: the stream port inputs carry static maps,
+where 5.3.3.9 has the input mappings dynamic, and `tone-aaf.json` has no
+CRF stream.
 
 The data plane takes its channel count from the first stream port: the
 channels of its clusters, summed.

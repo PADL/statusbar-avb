@@ -47,6 +47,15 @@
               "channels": 8,
               "depth": 32
             },
+            "formats": [
+              {
+                "type": "AAF",
+                "rate": 96000,
+                "channels": 8,
+                "depth": 32,
+                "up_to": true
+              }
+            ],
             "flags": [
               "CLASS_A"
             ],
