@@ -10,14 +10,18 @@
 
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 
+#include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstdint>
 #include <memory_resource>
+#include <span>
 #include <vector>
 
 using namespace statusbar;
@@ -509,6 +513,259 @@ TEST(talker_tx_counters, signal_presence_is_unreported_until_set_and_kept_to_six
     auto const past = static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS);
     EXPECT_FALSE(talker.set_signal_presence(past, 1).has_value());
     EXPECT_FALSE(talker.signal_presence(past).has_value());
+}
+
+// --- Stream frame templates: IEEE 1722-2016 Clauses 4.4.3, 7.2 and 10.4 ---
+
+namespace {
+
+/// A small deterministic generator, so a failing case can be found again.
+struct Lcg
+{
+    uint64_t state{0x2545F4914F6CDD1DULL};
+    auto next(uint32_t const bound) -> uint32_t
+    {
+        state = (state * 6364136223846793005ULL) + 1442695040888963407ULL;
+        return static_cast<uint32_t>((state >> 33U) % bound);
+    }
+};
+
+auto eui48_for(Lcg& rng) -> ieee::Eui48
+{
+    ieee::Eui48 mac{};
+    for (auto& octet : mac.value) {
+        octet = static_cast<uint8_t>(rng.next(256));
+    }
+    return mac;
+}
+
+/// Where a frame goes and how it is tagged.
+struct Addressing
+{
+    ieee::Eui48 dest{};
+    ieee::Eui48 src{};
+    uint16_t vid{2};
+    uint8_t pcp{3};
+
+    [[nodiscard]] auto header() const -> ieee::EthernetFrame { return avb_entity::stream_frame_header(dest, src, vid, pcp); }
+};
+
+auto addressing_for(Lcg& rng) -> Addressing
+{
+    return {
+        .dest = eui48_for(rng),
+        .src = eui48_for(rng),
+        .vid = static_cast<uint16_t>(1 + rng.next(4094)),
+        .pcp = static_cast<uint8_t>(rng.next(8))};
+}
+
+/// The frame headers transmit_aaf() sends: aaf_stream_serialize()'s header behind build_stream_frame().
+auto aaf_frame_headers(
+    avtp::AafStreamOutputContext ctx,
+    uint16_t const frames,
+    uint32_t const timestamp,
+    bool const mr,
+    bool const tu,
+    Addressing const& eth) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload(static_cast<size_t>(frames) * ctx.channel_count * avtp::aaf_bytes_per_sample(ctx.format));
+    avtp::AafPdu pdu{};
+    auto const silence = [](uint8_t, std::span<float> dest) { std::ranges::fill(dest, 0.0F); };
+    EXPECT_EQ(avtp::aaf_stream_serialize(ctx, pdu, payload, frames, uint64_t{timestamp}, silence), payload.size());
+    pdu.set_tu(tu);
+    pdu.set_mr(mr);
+    std::array<uint8_t, avtp::AafPdu::HEADER_LENGTH> header{};
+    span_store(std::span<uint8_t>{header}, pdu);
+    std::vector<uint8_t> frame(64);
+    auto const length = avb_entity::build_stream_frame(frame, eth.dest, eth.src, eth.vid, eth.pcp, header);
+    frame.resize(length);
+    return frame;
+}
+
+/// The frame headers transmit_crf() sends for @p ctx's next AVTPDU.
+auto crf_frame_headers(avtp::CrfStreamOutputContext const& ctx, bool const mr, bool const tu, Addressing const& eth)
+    -> std::vector<uint8_t>
+{
+    avtp::CrfPdu pdu{};
+    pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, ctx.timestamps_per_packet);
+    pdu.set_sequence_num(ctx.sequence_num);
+    pdu.set_tu(tu);
+    pdu.set_mr(mr);
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH> header{};
+    span_store(std::span<uint8_t>{header}, pdu);
+    std::vector<uint8_t> frame(64);
+    auto const length = avb_entity::build_stream_frame(frame, eth.dest, eth.src, eth.vid, eth.pcp, header);
+    frame.resize(length);
+    return frame;
+}
+
+/// @p tmpl written for one frame, as many octets as its header.
+auto written_for(
+    avb_entity::StreamFrameTemplate const& tmpl, uint8_t const sequence, uint32_t const timestamp, bool const mr, bool const tu)
+    -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> out(tmpl.length);
+    EXPECT_TRUE(tmpl.write(sequence, timestamp, mr, tu, out));
+    return out;
+}
+
+constexpr std::array<avtp::AafFormat, 4> AAF_FORMATS{
+    avtp::AafFormat::float_32bit, avtp::AafFormat::int_32bit, avtp::AafFormat::int_24bit, avtp::AafFormat::int_16bit};
+constexpr std::array<avtp::AafSampleRate, 3> AAF_RATES{
+    avtp::AafSampleRate::rate_44_1_khz, avtp::AafSampleRate::rate_48_khz, avtp::AafSampleRate::rate_96_khz};
+
+}  // namespace
+
+TEST(stream_frame_template, the_aaf_template_s_fields_sit_where_ieee_1722_puts_them)
+{
+    avtp::AafStreamOutputContext const ctx{tsn::StreamId{}, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    auto const tmpl = avb_entity::aaf_frame_template(ctx, 6, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_EQ(tmpl->length, size_t{42});
+    EXPECT_EQ(tmpl->mr_offset, size_t{19});  // octet 1 of the AVTPDU, behind 18 octets of tagged header
+    EXPECT_EQ(tmpl->sequence_offset, size_t{20});
+    EXPECT_EQ(tmpl->tu_offset, size_t{21});
+    EXPECT_EQ(tmpl->timestamp_offset, size_t{30});
+    EXPECT_EQ(tmpl->bytes[18], uint8_t{0x02});  // subtype AAF
+    EXPECT_EQ(tmpl->bytes[19], uint8_t{0x81});  // sv, tv; mr clear
+    EXPECT_EQ(tmpl->bytes[21], uint8_t{0x00});  // tu clear
+    EXPECT_EQ(tmpl->bytes[38], uint8_t{0x00});  // stream_data_length 6 x 8 x 4 = 192
+    EXPECT_EQ(tmpl->bytes[39], uint8_t{0xC0});
+}
+
+TEST(stream_frame_template, the_crf_template_s_fields_sit_where_ieee_1722_puts_them)
+{
+    avtp::CrfStreamOutputContext const ctx{
+        tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    auto const tmpl = avb_entity::crf_frame_template(ctx, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_EQ(tmpl->length, size_t{38});
+    EXPECT_EQ(tmpl->mr_offset, size_t{19});  // mr and tu share octet 1 (Clause 10.4)
+    EXPECT_EQ(tmpl->tu_offset, size_t{19});
+    EXPECT_EQ(tmpl->sequence_offset, size_t{20});
+    EXPECT_EQ(tmpl->timestamp_offset, size_t{0});  // its timestamps are its payload
+    EXPECT_EQ(tmpl->bytes[18], uint8_t{0x04});     // subtype CRF
+}
+
+TEST(stream_frame_template, written_an_aaf_template_is_the_header_the_talker_sends)
+{
+    Lcg rng{};
+    for (int i = 0; i < 2000; ++i) {
+        auto const format = AAF_FORMATS[rng.next(AAF_FORMATS.size())];
+        auto const channels = static_cast<uint16_t>(1 + rng.next(8));
+        auto const frames = static_cast<uint16_t>(1 + rng.next(12));
+        tsn::StreamId stream_id{};
+        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        avtp::AafStreamOutputContext ctx{stream_id, format, AAF_RATES[rng.next(AAF_RATES.size())], channels, 32, 0};
+        ctx.sequence_num = static_cast<uint8_t>(rng.next(256));
+        auto const eth = addressing_for(rng);
+        uint32_t const timestamp = rng.next(0xFFFF'FFFFU);
+        bool const mr = rng.next(2) != 0;
+        bool const tu = rng.next(2) != 0;
+
+        auto const tmpl = avb_entity::aaf_frame_template(ctx, frames, eth.header());
+        EXPECT_TRUE(tmpl.has_value());
+        EXPECT_TRUE(
+            written_for(*tmpl, ctx.sequence_num, timestamp, mr, tu) == aaf_frame_headers(ctx, frames, timestamp, mr, tu, eth));
+    }
+}
+
+TEST(stream_frame_template, written_a_crf_template_is_the_header_the_talker_sends)
+{
+    Lcg rng{};
+    for (int i = 0; i < 500; ++i) {
+        tsn::StreamId stream_id{};
+        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        avtp::CrfStreamOutputContext ctx{
+            stream_id,
+            avtp::CrfType::audio_sample,
+            rng.next(2) != 0 ? 48'000U : 96'000U,
+            avtp::CrfPull::multiply_1_0,
+            static_cast<uint16_t>(1 + rng.next(192)),
+            static_cast<uint16_t>(1 + rng.next(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU))};
+        ctx.sequence_num = static_cast<uint8_t>(rng.next(256));
+        auto const eth = addressing_for(rng);
+        bool const mr = rng.next(2) != 0;
+        bool const tu = rng.next(2) != 0;
+
+        auto const tmpl = avb_entity::crf_frame_template(ctx, eth.header());
+        EXPECT_TRUE(tmpl.has_value());
+        EXPECT_TRUE(written_for(*tmpl, ctx.sequence_num, 0, mr, tu) == crf_frame_headers(ctx, mr, tu, eth));
+    }
+}
+
+TEST(stream_frame_template, a_frame_the_talker_would_not_send_has_no_template)
+{
+    auto const eth = avb_entity::stream_frame_header({}, {}, 2, 3);
+    avtp::AafStreamOutputContext const aaf{tsn::StreamId{}, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    EXPECT_FALSE(avb_entity::aaf_frame_template(aaf, 0, eth).has_value());   // no frames
+    EXPECT_TRUE(avb_entity::aaf_frame_template(aaf, 46, eth).has_value());   // 24 + 1472 octets: an Ethernet payload
+    EXPECT_FALSE(avb_entity::aaf_frame_template(aaf, 47, eth).has_value());  // 24 + 1504: past one
+    avtp::AafStreamOutputContext const unlaid{
+        tsn::StreamId{}, avtp::AafFormat::user_specified, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    EXPECT_FALSE(avb_entity::aaf_frame_template(unlaid, 6, eth).has_value());  // no byte layout
+
+    auto crf_template_for = [&](uint16_t const timestamps) {
+        avtp::CrfStreamOutputContext const crf{
+            tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, timestamps};
+        return avb_entity::crf_frame_template(crf, eth).has_value();
+    };
+    EXPECT_FALSE(crf_template_for(0));
+    EXPECT_TRUE(crf_template_for(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU));
+    EXPECT_FALSE(crf_template_for(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU + 1));
+}
+
+TEST(stream_frame_template, write_leaves_a_buffer_too_short_for_the_headers_alone)
+{
+    avtp::CrfStreamOutputContext const ctx{
+        tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    auto const tmpl = avb_entity::crf_frame_template(ctx, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    std::vector<uint8_t> out(tmpl->length - 1, 0xEE);
+    EXPECT_FALSE(tmpl->write(7, 0, true, true, out));
+    EXPECT_TRUE(std::ranges::all_of(out, [](uint8_t const b) { return b == 0xEE; }));
+}
+
+TEST(stream_frame_template, a_talker_stream_s_template_follows_its_destination_and_the_vlan_in_force)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        mc,
+        gptp_now,
+        std::pmr::get_default_resource()};
+    ieee::Eui48 const dest{0x91, 0xE0, 0xF0, 0x00, 0x0E, 0x80};
+    ieee::Eui48 const src{0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    auto open = [&talker, &dest](uint16_t const index, uint64_t const word) {
+        avb_entity::StreamSpec spec{};
+        spec.index = index;
+        spec.format_word = word;
+        spec.format = avb_entity::decode_stream_format(word);
+        EXPECT_TRUE(talker.open_stream(spec, {}, dest).has_value());
+    };
+    open(0, 0x0205022002006000ULL);  // AAF 48k int32 2ch, 6 frames
+    open(1, 0x041060010000BB80ULL);  // CRF 48k
+    open(2, 0x00A0020840000800ULL);  // AM824: no template
+
+    talker.set_vlan(0x123, 5);
+    Addressing const tagged{.dest = dest, .src = src, .vid = 0x123, .pcp = 5};
+    auto const aaf = talker.frame_template(0, src);
+    EXPECT_TRUE(aaf.has_value());
+    auto const& aaf_slot = *talker.slot_for(0);
+    EXPECT_TRUE(aaf_slot.aaf.has_value());
+    EXPECT_TRUE(
+        written_for(*aaf, 0, 0, false, false) == aaf_frame_headers(*aaf_slot.aaf, aaf_slot.aaf_samples, 0, false, false, tagged));
+    EXPECT_EQ(aaf->bytes[14], uint8_t{0xA1});  // PCP 5, VID 0x123
+    EXPECT_EQ(aaf->bytes[15], uint8_t{0x23});
+
+    auto const crf = talker.frame_template(1, src);
+    EXPECT_TRUE(crf.has_value());
+    auto const& crf_ctx = talker.slot_for(1)->crf;
+    EXPECT_TRUE(crf_ctx.has_value());
+    EXPECT_TRUE(written_for(*crf, 0, 0, false, false) == crf_frame_headers(*crf_ctx, false, false, tagged));
+    EXPECT_FALSE(talker.frame_template(2, src).has_value());
+    EXPECT_FALSE(talker.frame_template(3, src).has_value());  // no stream there
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)
