@@ -19,6 +19,8 @@ using statusbar::avb_entity::interrupt_stream_input;
 using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
 using statusbar::avb_entity::StreamInputIntervals;
+using statusbar::avb_entity::StreamOutputIntervals;
+using statusbar::avb_entity::StreamOutputTotals;
 using statusbar::avb_entity::tally_discarded_stream_input_packet;
 using statusbar::avb_entity::tally_stream_input_packet;
 
@@ -544,6 +546,71 @@ TEST(stream_input_intervals, a_stream_that_resumes_after_a_silent_interval_start
     EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
     EXPECT_EQ(c.media_locked.load(), 2U);
     EXPECT_EQ(c.media_unlocked.load(), 1U);
+}
+
+// --- Milan v1.3 Table 5.4: a stream output by observation interval ----------
+
+TEST(stream_output_intervals, starts_and_stops_are_counts_and_the_others_intervals)
+{
+    using O = StreamOutputIntervals;
+    StreamOutputIntervals out;
+    StreamOutputTotals totals{};
+    EXPECT_FALSE(out.fold(totals));  // nothing sent, nothing started
+
+    // Started, and a second of AVTPDUs: one start, one interval of FRAMES_TX.
+    totals.starts = 1;
+    totals.pdus = 8000;
+    EXPECT_TRUE(out.fold(totals));
+    EXPECT_EQ(out.values[O::STREAM_START], 1U);
+    EXPECT_EQ(out.values[O::FRAMES_TX], 1U);
+    // Another second, two hundred AVTPDUs of it with tu set and one mr toggle.
+    totals.pdus += 8000;
+    totals.tu_pdus += 200;
+    totals.mr_toggles += 1;
+    EXPECT_TRUE(out.fold(totals));
+    EXPECT_EQ(out.values[O::FRAMES_TX], 2U);
+    EXPECT_EQ(out.values[O::TIMESTAMP_UNCERTAIN], 1U);
+    EXPECT_EQ(out.values[O::MEDIA_RESET], 1U);
+
+    // Stopped: a stop, and the interval counters stay; a silent second changes nothing.
+    totals.stops = 1;
+    EXPECT_TRUE(out.fold(totals));
+    EXPECT_EQ(out.values[O::STREAM_STOP], 1U);
+    EXPECT_EQ(out.values[O::FRAMES_TX], 2U);
+    EXPECT_FALSE(out.fold(totals));
+
+    // Started again: the interval counters start again from zero.
+    totals.starts = 2;
+    totals.pdus += 4000;
+    EXPECT_TRUE(out.fold(totals));
+    EXPECT_EQ(out.values[O::STREAM_START], 2U);
+    EXPECT_EQ(out.values[O::STREAM_STOP], 1U);
+    EXPECT_EQ(out.values[O::FRAMES_TX], 1U);
+    EXPECT_EQ(out.values[O::TIMESTAMP_UNCERTAIN], 0U);
+    EXPECT_EQ(out.values[O::MEDIA_RESET], 0U);
+    EXPECT_EQ(O::VALID, 0x0000'009BU);
+}
+
+TEST(stream_output_intervals, starts_and_stops_are_answered_as_they_stand)
+{
+    // Milan v1.3 Table 5.4: at any time STREAM_START = STREAM_STOP + 1 says
+    // the talker streams, and a start zeroes the interval counters.
+    using O = StreamOutputIntervals;
+    StreamOutputIntervals out;
+    StreamOutputTotals totals{.starts = 1, .stops = 0, .pdus = 8000, .tu_pdus = 0, .mr_toggles = 0};
+    auto now = out.current(totals);
+    EXPECT_EQ(now[O::STREAM_START], 1U);
+    EXPECT_EQ(now[O::FRAMES_TX], 0U);  // until the interval ends
+    EXPECT_TRUE(out.fold(totals));
+    totals.stops = 1;
+    now = out.current(totals);
+    EXPECT_EQ(now[O::STREAM_STOP], 1U);
+    EXPECT_EQ(now[O::FRAMES_TX], 1U);
+    totals.starts = 2;
+    now = out.current(totals);
+    EXPECT_EQ(now[O::STREAM_START], 2U);
+    EXPECT_EQ(now[O::FRAMES_TX], 0U);  // the start zeroes it
+    EXPECT_EQ(out.values[O::FRAMES_TX], 1U);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_counters_test)

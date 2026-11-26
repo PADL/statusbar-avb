@@ -202,6 +202,54 @@ struct StreamInputIntervals
     void reset(StreamInputCounters const& c) noexcept;
 };
 
+/// What a STREAM_OUTPUT has sent, as running counts: its starts and stops,
+/// its AVTPDUs, those with tu set, and its mr toggles (read from
+/// TalkerTxCounters at one instant).
+struct StreamOutputTotals
+{
+    uint32_t starts{0};
+    uint32_t stops{0};
+    uint32_t pdus{0};
+    uint32_t tu_pdus{0};
+    uint32_t mr_toggles{0};
+};
+
+/// Milan v1.3 Table 5.4 STREAM_OUTPUT counters, made from StreamOutputTotals
+/// by observation interval: STREAM_START and STREAM_STOP count starts and
+/// stops, answered live (current()); MEDIA_RESET, TIMESTAMP_UNCERTAIN and
+/// FRAMES_TX count the intervals with an mr toggle, a tu set or any AVTPDU,
+/// each zeroed when the talker starts streaming. Reactor thread.
+struct StreamOutputIntervals
+{
+    /// Where each value is: bit value 1 << i of counters_valid is values[i]
+    /// (Milan v1.3 Table 5.14, IEEE 1722.1-2021 Table 7-158).
+    enum Index : uint8_t
+    {
+        STREAM_START = 0,
+        STREAM_STOP = 1,
+        MEDIA_RESET = 3,
+        TIMESTAMP_UNCERTAIN = 4,
+        FRAMES_TX = 7,
+    };
+    /// The counters_valid bits of Milan v1.3 Table 5.14's mandatory counters.
+    static constexpr uint32_t VALID = 0x0000'009BU;
+    static constexpr size_t COUNT = 8;
+
+    /// The values as of the last fold.
+    std::array<uint32_t, COUNT> values{};
+    /// The totals at the last fold.
+    StreamOutputTotals last{};
+
+    /// The values GET_COUNTERS answers at @p totals, read now: STREAM_START and
+    /// STREAM_STOP as they stand (Table 5.4 counts them each time), the interval
+    /// counters as of the last fold, or zero once the talker has started since.
+    [[nodiscard]] auto current(StreamOutputTotals const& totals) const noexcept -> std::array<uint32_t, COUNT>;
+    /// End one observation interval at @p totals: STREAM_START and STREAM_STOP
+    /// as counted, the interval counters zeroed when the talker started in it,
+    /// then each counts one when its total moved. True when a value changed.
+    [[nodiscard]] auto fold(StreamOutputTotals const& totals) noexcept -> bool;
+};
+
 /// Append the presentation-margin report for one STREAM_INPUT to @p out:
 /// late/early counts, margin and lateness statistics, and the margin histogram
 /// as an ASCII bar chart. Nothing is appended when no frame carried a usable
