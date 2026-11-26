@@ -35,6 +35,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iterator>
+#include <optional>
 #include <print>
 #include <string>
 
@@ -173,31 +174,21 @@ void print_entity_config(Config const& config, Entity const& entity)
     std::print("Media clock rate: r=1.0 PINNED to gPTP\n");
 }
 
-}  // namespace
-
-auto main(int argc, char** argv) -> int
+/// A configuration with the tool's default entity model, when the build names one.
+auto default_config() -> Config
 {
-    using namespace statusbar;
-
     Config config;
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
     config.tool.descriptor_storage_path = STATUSBAR_AVB_DEFAULT_TONE_BLOB;
 #endif
-    auto specs = build_arg_specs(config);
+    return config;
+}
 
-    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avb-tone-generator");
-    if (!cli_result) {
-        return config::handled_builtin_command(cli_result) ? 0 : 1;
-    }
-
-    if (config.entity.interface_name.empty()) {
-        std::print(stderr, "Error: --interface=<iface> is required\n");
-        print_usage(argv[0], specs);
-        return EXIT_FAILURE;
-    }
-    // --streams only picks the matching default blob (unless the user gave an
-    // explicit --descriptor-storage path); the entity's stream topology is
-    // derived FROM the blob (kit phase 1), not from a C++ stream-set enum.
+/// --streams only picks the matching default blob (unless the user gave an
+/// explicit --descriptor-storage path); the entity's stream topology is
+/// derived FROM the blob (kit phase 1), not from a C++ stream-set enum.
+void pick_default_blob([[maybe_unused]] Config& config)
+{
 #ifdef STATUSBAR_AVB_DEFAULT_TONE_BLOB
     if (config.tool.descriptor_storage_path == STATUSBAR_AVB_DEFAULT_TONE_BLOB) {
 #    ifdef STATUSBAR_AVB_DEFAULT_TONE_AAF_BLOB
@@ -212,77 +203,165 @@ auto main(int argc, char** argv) -> int
 #    endif
     }
 #endif
-    if (config.tool.descriptor_storage_path.empty()) {
-        std::print(stderr, "Error: --descriptor-storage=<path> is required\n");
-        print_usage(argv[0], specs);
-        return EXIT_FAILURE;
-    }
+}
 
+/// The first required argument the command line did not give, nullptr when none is missing.
+auto missing_argument(Config const& config) -> char const*
+{
+    if (config.entity.interface_name.empty()) {
+        return "--interface=<iface>";
+    }
+    if (config.tool.descriptor_storage_path.empty()) {
+        return "--descriptor-storage=<path>";
+    }
+    return nullptr;
+}
+
+/// Say that required argument @p missing was not given, with the usage: the exit code.
+auto report_missing_argument(char const* const missing, char const* const program, args::ArgumentSpecs const& specs) -> int
+{
+    std::print(stderr, "Error: {} is required\n", missing);
+    print_usage(program, specs);
+    return EXIT_FAILURE;
+}
+
+/// The command line read into @p config: nullopt to go on, or the exit code when the run ends
+/// here (a built-in command such as --help, a bad argument, a required one missing).
+auto read_command_line(int const argc, char** const argv, Config& config) -> std::optional<int>
+{
+    auto specs = build_arg_specs(config);
+    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avb-tone-generator");
+    if (!cli_result) {
+        return config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+    char const* const missing = missing_argument(config);
+    if (missing == nullptr) {
+        return std::nullopt;
+    }
+    return report_missing_argument(missing, argv[0], specs);
+}
+
+/// The default model --streams asks for, the node's identity defaults and the entity model into
+/// @p config: false, with the error printed, when the model's file does not load.
+auto prepare_entity_config(Config& config) -> bool
+{
+    pick_default_blob(config);
     avb_entity::apply_node_identity_defaults(
         config.entity.interface_name,
         config.entity.entity_id,
         config.entity.entity_name,
         ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x03},
         "Statusbar Tone Generator");
-
     auto blob = avb_entity::load_blob_file(config.tool.descriptor_storage_path);
     if (blob.empty()) {
         std::print(stderr, "Error: Failed to load descriptor storage file: {}\n", config.tool.descriptor_storage_path);
-        return EXIT_FAILURE;
+        return false;
     }
     config.entity.descriptor_storage_blob = std::move(blob);
+    return true;
+}
 
+/// The entity's configuration and PTP's, as the tool starts.
+void print_configuration(Config const& config, Entity const& entity)
+{
+    print_entity_config(config, entity);
+    std::string ptp_summary;
+    ptpclient::format_ptp_config_to(std::back_inserter(ptp_summary), config.ptp_app, "\nPTP Configuration");
+    std::print("{}\n", ptp_summary);
+}
+
+/// One wake per Class A packet interval (125 us), scaled by packets_per_wake;
+/// the rate is blob-derived so the period comes from the entity.
+auto packet_period_ns(Entity const& entity) -> int64_t
+{
+    return (1'000'000'000LL / Entity::CLASS_A_PACKETS_PER_SEC) * static_cast<int64_t>(entity.config().packets_per_wake);
+}
+
+/// Start @p entity on @p reactor, which its handlers join: false, with the error printed, when
+/// it does not start.
+auto start_entity(Entity& entity, net::MessageReactor& reactor) -> bool
+{
+    auto start_result = entity.start(reactor);
+    if (!start_result) {
+        std::print(stderr, "Error: Failed to start entity: {}\n", start_result.error().message());
+        return false;
+    }
+    std::print("\nEntity started. Network handlers registered.\n");
+    return true;
+}
+
+/// PTP was not set up (@p error), or a shutdown was asked for meanwhile: @p entity stopped, and
+/// the exit code.
+auto ptp_setup_failed(Entity& entity, std::error_code const& error) -> int
+{
+    (void)entity.stop();
+    if (realtime::is_shutdown_requested()) {
+        std::print("Shutdown requested during setup\n");
+        return EXIT_SUCCESS;
+    }
+    std::print(stderr, "Error: Failed to setup PTP: {}\n", error.message());
+    return EXIT_FAILURE;
+}
+
+/// Tell @p entity its link is going down, stop it, and say so.
+void stop_entity(Entity& entity)
+{
+    entity.on_link_down(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    (void)entity.stop();
+    std::print("Entity stopped.\n");
+}
+
+/// The main loop until shutdown, then @p entity stopped and its final status printed: the exit code.
+auto loop_then_stop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, Entity& entity, Config const& config) -> int
+{
+    std::print("\nStarting main loop (Ctrl-C to stop)...\n\n");
+    auto loop_result = avb_entity::run_entity_main_loop(reactor, ctx, entity, config.tool, packet_period_ns(entity));
+    std::print("\n\nShutting down...\n");
+    stop_entity(entity);
+    avb_entity::print_final_status(entity, loop_result, config.tool.dump_stats_on_exit);
+    return loop_result.exit_code;
+}
+
+/// @p entity on a reactor of its own: started, given PTP, run until shutdown and stopped. The
+/// exit code.
+auto run_entity(Entity& entity, Config& config) -> int
+{
+    itc::StopToken shutdown_flag{};
+    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
+    if (!start_entity(entity, reactor)) {
+        return EXIT_FAILURE;
+    }
+    auto ctx_result = avb_entity::setup_entity_ptp(config.ptp_app, config.tool.require_ptp);
+    if (!ctx_result) {
+        return ptp_setup_failed(entity, ctx_result.error());
+    }
+    return loop_then_stop(reactor, *ctx_result, entity, config);
+}
+
+/// The entity made from @p config, its configuration printed, and run: the exit code.
+auto make_and_run_entity(Config& config) -> int
+{
     realtime::setup_shutdown_signal_handlers();
-
-    auto const base_midi_note = config.base_midi_note;
-    auto entity_result = avb_entity::AvbEntityToneGenerator::create(std::move(config.entity), base_midi_note);
+    auto entity_result = Entity::create(std::move(config.entity), config.base_midi_note);
     if (!entity_result) {
         std::print(stderr, "Error: Failed to create entity: {}\n", entity_result.error().message());
         return EXIT_FAILURE;
     }
     auto& entity = **entity_result;
+    print_configuration(config, entity);
+    return run_entity(entity, config);
+}
 
-    print_entity_config(config, entity);
+}  // namespace
 
-    std::string ptp_summary;
-    ptpclient::format_ptp_config_to(std::back_inserter(ptp_summary), config.ptp_app, "\nPTP Configuration");
-    std::print("{}\n", ptp_summary);
-
-    itc::StopToken shutdown_flag{};
-    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
-
-    auto start_result = entity.start(reactor);
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start entity: {}\n", start_result.error().message());
+auto main(int argc, char** argv) -> int
+{
+    Config config = default_config();
+    if (auto const done = read_command_line(argc, argv, config)) {
+        return *done;
+    }
+    if (!prepare_entity_config(config)) {
         return EXIT_FAILURE;
     }
-    std::print("\nEntity started. Network handlers registered.\n");
-
-    auto ctx_result = avb_entity::setup_entity_ptp(config.ptp_app, config.tool.require_ptp);
-    if (!ctx_result) {
-        (void)entity.stop();
-        if (realtime::is_shutdown_requested()) {
-            std::print("Shutdown requested during setup\n");
-            return EXIT_SUCCESS;
-        }
-        std::print(stderr, "Error: Failed to setup PTP: {}\n", ctx_result.error().message());
-        return EXIT_FAILURE;
-    }
-    auto& ctx = *ctx_result;
-    std::print("\nStarting main loop (Ctrl-C to stop)...\n\n");
-
-    // One wake per Class A packet interval (125 us), scaled by packets_per_wake;
-    // the rate is blob-derived so the period comes from the entity.
-    int64_t const packet_period_ns =
-        (1'000'000'000LL / Entity::CLASS_A_PACKETS_PER_SEC) * static_cast<int64_t>(entity.config().packets_per_wake);
-    auto loop_result = avb_entity::run_entity_main_loop(reactor, ctx, entity, config.tool, packet_period_ns);
-
-    std::print("\n\nShutting down...\n");
-    auto stop_time = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.on_link_down(stop_time);
-    (void)entity.stop();
-    std::print("Entity stopped.\n");
-
-    avb_entity::print_final_status(entity, loop_result, config.tool.dump_stats_on_exit);
-    return loop_result.exit_code;
+    return make_and_run_entity(config);
 }

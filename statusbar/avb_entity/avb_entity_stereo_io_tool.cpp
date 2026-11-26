@@ -45,6 +45,7 @@
 #include <functional>
 #include <iterator>
 #include <memory>
+#include <optional>
 #include <print>
 #include <span>
 #include <string>
@@ -480,6 +481,124 @@ void print_final_status(avb_entity::AvbEntityStereoIO const& entity, MainLoopRes
     }
 }
 
+/// The first required argument the command line did not give, nullptr when none is missing.
+auto missing_argument(Config const& config) -> char const*
+{
+    return config.entity.interface_name.empty() ? "--interface=<iface>" : nullptr;
+}
+
+/// Say that required argument @p missing was not given, with the usage: the exit code.
+auto report_missing_argument(char const* const missing, char const* const program, args::ArgumentSpecs const& specs) -> int
+{
+    std::print(stderr, "Error: {} is required\n", missing);
+    print_usage(program, specs);
+    return EXIT_FAILURE;
+}
+
+/// The command line read into @p config: nullopt to go on, or the exit code when the run ends
+/// here (a built-in command such as --help, a bad argument, a required one missing).
+auto read_command_line(int const argc, char** const argv, Config& config) -> std::optional<int>
+{
+    auto specs = build_arg_specs(config);
+    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avb-stereo-io");
+    if (!cli_result) {
+        return config::handled_builtin_command(cli_result) ? 0 : 1;
+    }
+    char const* const missing = missing_argument(config);
+    if (missing == nullptr) {
+        return std::nullopt;
+    }
+    return report_missing_argument(missing, argv[0], specs);
+}
+
+/// The entity's configuration and PTP's, as the tool starts.
+void print_configuration(Config const& config)
+{
+    print_entity_config(config);
+    std::string ptp_summary;
+    ptpclient::format_ptp_config_to(std::back_inserter(ptp_summary), config.ptp_app, "\nPTP Configuration");
+    std::print("{}\n", ptp_summary);
+}
+
+/// PTP for the media timer, with the fallback to the system clock.
+auto setup_ptp(Config& config)
+{
+    auto is_shutdown = [] { return realtime::is_shutdown_requested(); };
+    return ptpclient::setup_ptp_app_with_fallback(config.ptp_app, is_shutdown);
+}
+
+/// Start @p entity on @p reactor, which its handlers join: false, with the error printed, when
+/// it does not start.
+auto start_entity(avb_entity::AvbEntityStereoIO& entity, net::MessageReactor& reactor) -> bool
+{
+    auto start_result = entity.start(reactor);
+    if (!start_result) {
+        std::print(stderr, "Error: Failed to start entity: {}\n", start_result.error().message());
+        return false;
+    }
+    std::print("\nEntity started. Network handlers registered.\n");
+    return true;
+}
+
+/// PTP was not set up (@p error), or a shutdown was asked for meanwhile: @p entity stopped, and
+/// the exit code.
+auto ptp_setup_failed(avb_entity::AvbEntityStereoIO& entity, std::error_code const& error) -> int
+{
+    if (realtime::is_shutdown_requested()) {
+        std::print("Shutdown requested during setup\n");
+        (void)entity.stop();
+        return EXIT_SUCCESS;
+    }
+    std::print(stderr, "Error: Failed to setup PTP: {}\n", error.message());
+    (void)entity.stop();
+    return EXIT_FAILURE;
+}
+
+/// Tell @p entity its link is going down, stop it, and say so.
+void stop_entity(avb_entity::AvbEntityStereoIO& entity)
+{
+    entity.on_link_down(TimePoint{std::chrono::steady_clock::now().time_since_epoch()});
+    (void)entity.stop();
+    std::print("Entity stopped.\n");
+}
+
+/// The main loop until shutdown, then @p entity stopped and its final status printed: the exit code.
+auto loop_then_stop(
+    net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx, avb_entity::AvbEntityStereoIO& entity, Config const& config) -> int
+{
+    std::print("\nStarting main loop (Ctrl-C to stop)...\n\n");
+    auto loop_result = run_main_loop(reactor, ctx, entity, config);
+    std::print("\n\nShutting down...\n");
+    stop_entity(entity);
+    print_final_status(entity, loop_result, config.dump_stats_on_exit);
+    return loop_result.exit_code;
+}
+
+/// @p entity on a reactor of its own: started, given PTP, run until shutdown and stopped. The
+/// exit code.
+auto run_entity(avb_entity::AvbEntityStereoIO& entity, Config& config) -> int
+{
+    itc::StopToken shutdown_flag{};
+    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
+    if (!start_entity(entity, reactor)) {
+        return EXIT_FAILURE;
+    }
+    auto ctx_result = setup_ptp(config);
+    if (!ctx_result) {
+        return ptp_setup_failed(entity, ctx_result.error());
+    }
+    return loop_then_stop(reactor, *ctx_result, entity, config);
+}
+
+/// The entity made from @p config, its configuration printed first, and run: the exit code.
+auto make_and_run_entity(Config& config) -> int
+{
+    realtime::setup_shutdown_signal_handlers();
+    print_configuration(config);
+    avb_entity::AvbEntityStereoIO entity{config.entity};
+    return run_entity(entity, config);
+}
+
 }  // namespace
 
 //
@@ -488,25 +607,11 @@ void print_final_status(avb_entity::AvbEntityStereoIO const& entity, MainLoopRes
 
 auto main(int argc, char** argv) -> int
 {
-    using namespace statusbar;
-
-    // Build config and specs with bindings
     Config config;
-    auto specs = build_arg_specs(config);
-
-    // Parse CLI arguments
-    auto cli_result = config::parse_cli_args(argc, argv, specs, print_usage, "statusbar-avb-stereo-io");
-    if (!cli_result) {
-        return config::handled_builtin_command(cli_result) ? 0 : 1;
+    if (auto const done = read_command_line(argc, argv, config)) {
+        return *done;
     }
-
-    if (config.entity.interface_name.empty()) {
-        std::print(stderr, "Error: --interface=<iface> is required\n");
-        print_usage(argv[0], specs);
-        return EXIT_FAILURE;
-    }
-
-    // Per-node-unique entity_id (NIC MAC → modified EUI-64) + hostname name,
+    // Per-node-unique entity_id (NIC MAC -> modified EUI-64) + hostname name,
     // unless overridden by --entity.id / --entity.name.
     avb_entity::apply_node_identity_defaults(
         config.entity.interface_name,
@@ -514,69 +619,5 @@ auto main(int argc, char** argv) -> int
         config.entity.entity_name,
         ieee::Eui64{0x70, 0xB3, 0xD5, 0xED, 0xCF, 0x00, 0x00, 0x01},
         "AVB Stereo IO Tool");
-
-    // Set up signal handlers for clean shutdown
-    realtime::setup_shutdown_signal_handlers();
-
-    // Print configuration
-    print_entity_config(config);
-
-    // Print PTP configuration
-    std::string ptp_summary;
-    ptpclient::format_ptp_config_to(std::back_inserter(ptp_summary), config.ptp_app, "\nPTP Configuration");
-    std::print("{}\n", ptp_summary);
-
-    // Create the AVB entity
-    avb_entity::AvbEntityStereoIO entity{config.entity};
-
-    // Create message reactor with shutdown flag and monotonic clock
-    itc::StopToken shutdown_flag{};
-    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
-
-    // Start the entity (adds handlers to reactor)
-    auto start_result = entity.start(reactor);
-    if (!start_result) {
-        std::print(stderr, "Error: Failed to start entity: {}\n", start_result.error().message());
-        return EXIT_FAILURE;
-    }
-
-    std::print("\nEntity started. Network handlers registered.\n");
-
-    // Setup PTP application with automatic fallback to system clock
-    auto is_shutdown = [] { return realtime::is_shutdown_requested(); };
-    auto ctx_result = ptpclient::setup_ptp_app_with_fallback(config.ptp_app, is_shutdown);
-
-    if (!ctx_result) {
-        if (realtime::is_shutdown_requested()) {
-            std::print("Shutdown requested during setup\n");
-            (void)entity.stop();
-            return EXIT_SUCCESS;
-        }
-        std::print(stderr, "Error: Failed to setup PTP: {}\n", ctx_result.error().message());
-        (void)entity.stop();
-        return EXIT_FAILURE;
-    }
-
-    auto& ctx = *ctx_result;
-
-    std::print("\nStarting main loop (Ctrl-C to stop)...\n\n");
-
-    // Run main loop with PTP timer
-    auto loop_result = run_main_loop(reactor, ctx, entity, config);
-
-    // Clean shutdown
-    std::print("\n\nShutting down...\n");
-
-    // Notify entity of shutdown
-    auto stop_time = TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    entity.on_link_down(stop_time);
-
-    // Stop entity
-    (void)entity.stop();
-    std::print("Entity stopped.\n");
-
-    // Print final status
-    print_final_status(entity, loop_result, config.dump_stats_on_exit);
-
-    return loop_result.exit_code;
+    return make_and_run_entity(config);
 }
