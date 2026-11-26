@@ -7,9 +7,8 @@
 
 An MVU command is an AECP VENDOR_UNIQUE command or response (IEEE 1722.1-2021
 Clause 9.2.1.5) whose protocol_id is Avnu's MVU protocol, 00-1B-C5-0A-C1-00.
-`statusbar/atdecc/atdecc_aecp_mvu.hpp` holds the PDU layouts and
-`statusbar/nanoavb/nanoavb_mvu_handler.hpp` answers them for a nanoavb entity,
-beside the AEM handler.
+`statusbar/atdecc/atdecc_aecp_mvu.hpp` holds the PDU layouts and the AEM
+handler (`nanoavb::AemCommandHandler`) answers them for a nanoavb entity.
 
 A Milan entity implements Milan v1.3, and GET_MILAN_INFO says so
 (specification_version 1.3.0.0). Milan v1.3 Section 5.4.4.1 forbids changing
@@ -55,66 +54,33 @@ GET_STREAM_INFO extension; the talker fields are zero for an unbound input.
 
 ## The handler
 
-`MvuCommandHandler` does no packet I/O: the caller hands it frames and a
-`send_response` callback. `dispatch_aecp` routes one AECPDU addressed to the
-entity: an MVU command to the MVU handler, anything else to the AEM handler
-(which answers AEM commands, and NOT_IMPLEMENTED for the other AECP command
-types and vendor unique protocols). Replies are synchronous, well inside the
-240 ms of Section 5.4.3.4. It is single-threaded, driven by the reactor
-thread that drives the AEM handler. `NanoAvbComponents` wires it to the AEM
-handler, whose lock and acquisition gate the SETs and bindings, whose
-unsolicited-notification registrations receive its notifications; and to the
-ACMP listener's Milan sinks (`atdecc::MilanListener`), which BIND_STREAM and
-UNBIND_STREAM drive at the time the caller gives `dispatch_aecp` (the
-command's, as ACMP's `receive` is told its time).
+`AemCommandHandler` answers MVU beside AEM, on the reactor thread, its lock and
+acquisition gating the SETs, its unsolicited-notification registrations receiving
+the notifications. Replies are synchronous, well inside the 240 ms of Section
+5.4.3.4. BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX go to the Milan
+ACMP listener's sinks: see [`MILAN_ACMP.md`](MILAN_ACMP.md) ("Binding over AECP MVU").
 
 Implemented (Milan profile only):
 
-- GET_MILAN_INFO (Section 5.4.4.1): protocol_version 1, certification_version
-  0 (not certified),
-  specification_version 1.3.0.0 and features_flags: MVU_BINDING when there
-  are sinks to bind, plus what `set_extra_features` adds (the kit adds
-  TALKER_SIGNAL_PRESENCE when the application reports signal presence). No
-  REDUNDANCY, no TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING. A command without its
-  reserved field is answered too (the receiver ignores it).
-- SET/GET_SYSTEM_UNIQUE_ID (Sections 5.4.4.2-3), as above.
-- SET/GET_MEDIA_CLOCK_REFERENCE_INFO (Sections 5.4.4.4-5, 7.6) per
-  CLOCK_DOMAIN: default_mcr_prio, user_mcr_prio and media_clock_domain_name
-  ("DEFAULT"). The default priority is MVU_MCR_PRIO_NETWORK_INTERFACE (192,
-  Milan v1.3 Table 7.3), set for every domain or for one with
-  `set_default_mcr_priority`; a user priority still at the old default follows
-  it (Section 7.6.1.2). A SET changes only the fields its flags mark, and the
-  response carries every supported flag. Milan v1.3 Section 5.4.4.4 makes the
-  default part of the entity model: an entity whose default changes reports a
-  different entity_model_id.
-- BIND_STREAM and UNBIND_STREAM (Sections 5.4.4.6-7): the sink's
-  RCV_BIND_RX_CMD and RCV_UNBIND_RX_CMD (Section 5.5.3.2), answered in MVU
-  form before the sink probes (Section 5.5.3.6.3 steps 3 and 5): a locked
-  entity ENTITY_LOCKED, an unknown STREAM_INPUT NO_SUCH_DESCRIPTOR, another
-  descriptor type BAD_ARGUMENTS. The binding is saved as an ACMP one is.
-- GET_STREAM_INPUT_INFO_EX (Section 5.4.4.8): the input's talker, pbsta
-  and acmpsta.
+- GET_MILAN_INFO (Section 5.4.4.1): specification_version 1.3.0.0 and the
+  features_flags the entity gives (`set_milan_info`; the kit sets MVU_BINDING under
+  the Milan profile and TALKER_SIGNAL_PRESENCE when the application reports it).
+- SET/GET_SYSTEM_UNIQUE_ID (Sections 5.4.4.2-3), as above; a SET is refused
+  ENTITY_LOCKED while another controller holds the lock, BAD_ARGUMENTS for a name
+  that is not UTF-8.
+- SET/GET_MEDIA_CLOCK_REFERENCE_INFO (Sections 5.4.4.4-5, 7.6) per CLOCK_DOMAIN.
+  The default priority is MVU_MCR_PRIO_DEFAULT (128, Milan v1.3 Table 7.3) until the
+  entity sets its own (`set_default_mcr_priority`; the kit's `mcr.default_priority`).
+  Milan v1.3 Section 5.4.4.4 makes the default part of the entity model: an entity
+  whose default changes reports a different entity_model_id.
+- BIND_STREAM, UNBIND_STREAM and GET_STREAM_INPUT_INFO_EX (Sections 5.4.4.6-8).
 
-SETs and bindings are refused ENTITY_LOCKED while another controller holds the
-AEM lock or acquisition (Section 5.4.4.4). A SET or binding that changes
-something is sent, u bit set, to the other controllers registered for
-unsolicited notifications (Section 5.4.5.3), each with the registration's own
-MVU sequence id (Section 5.4.5.2); a SET is also reported to
-`set_on_settings_changed` (the values are non-volatile). Every change
-of what GET_STREAM_INPUT_INFO_EX reports, or of the talker's registration, is
-sent to every registered controller (Table 5.21; the listener's
-`set_on_info_ex_changed`). An MVU command restarts the controller's monitor
-timer (Section 5.4.5.4).
+A SET that changes something is sent, u bit set, to the other registered controllers
+(Section 5.4.5.3) and reported to `set_on_mvu_settings_changed` (the values are
+non-volatile: the kit saves them in its persistent state).
 
-Answered NOT_IMPLEMENTED: every MVU command in the classic profile, and
-command types Milan v1.3 Table 5.15 does not define.
-
-Not answered:
-
-- GET_MILAN_INFO in the classic profile: an entity whose active
-  configuration is not Milan compliant should not reply (Section 5.4.4.1
-  NOTE; a requirement in a later revision), so it never claims Milan;
-- a frame shorter than its control_data_length declares (malformed).
+Answered NOT_IMPLEMENTED: every MVU command in the classic profile, and command
+types Milan v1.3 Table 5.15 does not define.
 
 ## Notes
 
@@ -124,6 +90,6 @@ Not answered:
 
 ## See also
 
-- [`MILAN_LISTENER.md`](MILAN_LISTENER.md) - the sinks MVU binding drives
-- [`NANOAVB_ARCHITECTURE.md`](NANOAVB_ARCHITECTURE.md) - the AEM handler beside the MVU handler
+- [`MILAN_ACMP.md`](MILAN_ACMP.md) - the sinks MVU binding drives
+- [`NANOAVB_ARCHITECTURE.md`](NANOAVB_ARCHITECTURE.md) - the AEM handler
 - [`AEM_ENTITY_MODEL.md`](AEM_ENTITY_MODEL.md) - the entity model

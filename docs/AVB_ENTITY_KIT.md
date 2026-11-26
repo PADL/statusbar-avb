@@ -273,6 +273,26 @@ talker counts, admitted or not: an output's format changes only while it does
 not stream, so the check is the last chance to keep them all admissible.
 Milan v1.2 Section 5.4.2.7 names no status for this. Listeners do not count.
 
+### Whose data plane: `kit_data_plane`
+
+`AvbEntityAudioIOConfig::kit_data_plane` says whether the kit's own engines (its
+talker and listener streams) are the entity's data plane. Off, the default, the
+entity moves its own: SET_SAMPLING_RATE asks the unit-rate hook and moves the
+descriptors alone (the kit's specs, engines, `sample_rate()` and TSpecs keep their
+rate); a stream input's SET_STREAM_FORMAT goes to the listener and is saved in the
+state directory's `stream-formats` file; a stream output's is NOT_SUPPORTED; a
+dynamic STREAM_PORT starts unmapped and every held mapping refuses a rate it would
+break (Milan v1.3 Section 5.4.2.13); a presentation offset is the entity's hook's
+alone. On, the rest of this section applies: the kit re-shapes its engines for a
+SET_STREAM_FORMAT (an input's only when the entity installed a format hook; without
+one it follows the listener alone, as with the switch off), refuses a streaming
+output's presentation offset STREAM_IS_RUNNING, keeps stream formats in its persistent state, starts
+each dynamic port at the identity mapping its engines route, and an output port's
+identity is the kit's own to drop or keep at another rate
+(`AemCommandHandler::set_output_mappings_follow_streams`). Either way the AEM
+handler's refusals come first: a held mapping (BAD_ARGUMENTS or NOT_SUPPORTED) and
+a bound or connected input (STREAM_IS_RUNNING).
+
 SET_SAMPLING_RATE (IEEE 1722.1-2021 Clause 7.4.21; Milan v1.3 Section 5.4.2.13)
 to the unit's current rate is a no-op SUCCESS; a rate the AUDIO_UNIT does not
 list is NOT_SUPPORTED (the storage handler). Another listed rate of AUDIO_UNIT 0
@@ -299,7 +319,7 @@ refreshed once. A stream the format hook refuses puts back those re-timed and
 the data plane (the unit-rate hook asked for the old rate) and answers its
 status. CRF streams and streams at another rate keep their formats. The
 re-timed streams are notified after the response, as unsolicited
-SET_STREAM_FORMATs to every registered controller (Milan v1.2 Section 5.4.5.2).
+SET_STREAM_FORMATs to every other registered controller (Milan v1.3 Section 5.4.5.2).
 Another unit's rate is NOT_SUPPORTED: the kit's rate is AUDIO_UNIT 0's, and
 another unit's streams keep the mapping rules at the rate the kit was built
 with. An entity whose talkers send through `TalkerStreams` at the unit's rate
@@ -350,24 +370,29 @@ installed falls back to the default.
 hook call; a change is notified as the REMOVE and ADD it amounts to and saved.
 
 Milan v1.3 Section 5.3.4.1 has a locked entity refuse changes by other than
-ATDECC. That is opt-in: after `set_lock_refuses_local_changes(true)` the local
-setters (`request_entity_name`, `request_audio_mappings`, and a host's own
-SET_STREAM_FORMAT through `local_change_refusal()`) answer ENTITY_ACQUIRED or
-ENTITY_LOCKED while a controller holds the acquisition or the lock, as its
-commands would be. By default they go through.
+ATDECC. Under `atdecc.profile = "milan13"` every local path of the AEM handler
+(`apply_local_name`, `apply_local_audio_mappings`,
+`apply_local_descriptor_value`, and `set_local_identify`, Milan v1.3 Section
+5.4.2.17) answers ENTITY_LOCKED while a controller holds the lock, and so do
+the kit's local setters (`request_entity_name`, `request_audio_mappings`) and
+a host's own SET_STREAM_FORMAT through `local_change_refusal()`. Under
+classic they go through.
 `request_clock_source` follows a source the host has already applied, so it
 is never refused.
 
 ## Persistence
 
-With `persistent_state_path` set, `start()` loads the file before the control
+With `state_dir` set, `start()` loads the entity's `entity-state` file
+(`<state_dir>/<entity ID>/entity-state`, `avb_entity_state_dir.hpp`) before the control
 plane advertises and applies what it holds through the same validation a
 controller's command gets (a saved value the model no longer accepts is dropped
 with a warning). From then on the kit rewrites it after every change: a
 successful SET_NAME, SET_STREAM_FORMAT, SET_CLOCK_SOURCE or
 presentation offset command, a listener binding made or removed, a
 SET_SYSTEM_UNIQUE_ID or SET_MEDIA_CLOCK_REFERENCE_INFO. Nothing is written when
-the file already says it. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
+the file already says it, and an entity that changed nothing from the model's
+defaults makes no directory. A Milan listener's bindings are the host's
+`listener-bindings` file in the same directory (MILAN_ACMP.md), not this one. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
 
 ## Media clock reference priority
 
@@ -375,7 +400,7 @@ the file already says it. See [PERSISTENT_STATE.md](PERSISTENT_STATE.md).
 Priority by index (Milan v1.3 Section 7.6.1.1, Table 7.3); the last entry also
 serves the domains after it, so one entry sets the whole entity. `start()`
 applies it before the saved state, so a user priority still at the old default
-follows it and a saved one stays (Section 7.6.1.2). Empty keeps 192. The
+follows it and a saved one stays (Section 7.6.1.2). Empty keeps MVU_MCR_PRIO_DEFAULT (128). The
 default is part of the entity model (Section 5.4.4.4): an entity that changes
 it must change its entity_model_id too. The tools accept
 `--mcr.default_priority=224[,192...]`.
@@ -401,7 +426,8 @@ SAVED_STATE, STREAMING_WAIT and BOUND 0; pbsta and acmpsta 0. The entity never
 declares Talker Failed, so MSRP_FAILURE_VALID stays 0. Classic: CONNECTED from
 the ACMP connection count; STREAMING_WAIT after STOP_STREAMING until
 START_STREAMING (IEEE 1722.1-2021 Table 7-145), each command pushed to the
-registered controllers as an unsolicited GET_STREAM_INFO. A Milan listener
+registered controllers as an unsolicited GET_STREAM_INFO. (Milan refuses
+STOP_STREAMING on an output, Milan v1.2 Section 5.4.2.20.) A Milan listener
 queries this to verify the stream before sustaining a connection.
 
 The response form is the AEM handler's `stream_info_layout()`: the profile's
@@ -544,13 +570,14 @@ entity over an AF_UNIX datagram socket, without raw-socket privileges
   PROBE_TX answer TALKER_DEST_MAC_FAIL, GET_TX_STATE and GET_STREAM_INFO show
   zero), or the listener would join a group the talker never streams to. A
   stream also waits for its MAAP address before declaring, since a pre-MAAP
-  destination would not match the address ACMP hands the listener.
+  destination would not match the address ACMP hands the listener. (An IEEE
+  1722.1 talker answers such a CONNECT_TX as its state machine does.)
 
 ## See also
 
 - [`ENTITY_CONSTRUCTION_KIT.md`](ENTITY_CONSTRUCTION_KIT.md) - the kit's design and build order
 - [`PERSISTENT_STATE.md`](PERSISTENT_STATE.md) - the state file
-- [`MILAN_TALKER.md`](MILAN_TALKER.md), [`MILAN_LISTENER.md`](MILAN_LISTENER.md) - the Milan stream paths
+- [`MILAN_TALKER.md`](MILAN_TALKER.md), [`MILAN_ACMP.md`](MILAN_ACMP.md) - the Milan stream paths
 - [`SHAPER.md`](SHAPER.md) - talker traffic shaping and the listener VLAN
 - [`STREAM_PORTS.md`](STREAM_PORTS.md) - the frame transport
 - [`NANOAVB_ARCHITECTURE.md`](NANOAVB_ARCHITECTURE.md) - the entity stack underneath

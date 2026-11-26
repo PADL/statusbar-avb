@@ -3,17 +3,22 @@
 # AVB entity persistent state
 
 `avb_entity_persistent_state.hpp` keeps what controllers set on an AVB entity
-across a restart, in one TOML file the kit owns. Milan v1.2 requires these
+across a restart, in one TOML file the kit owns: `entity-state` in the entity's
+directory of the state directory (`<state_dir>/<entity ID>/entity-state`,
+`avb_entity_state_dir.hpp`), made by the first save. Milan v1.3 requires these
 settings to be saved in non-volatile memory.
 
 ## What is kept
 
 - user names (SET_NAME)
-- stream formats, the AUDIO_UNIT's sampling rate and clock sources
+- the AUDIO_UNIT's sampling rate and clock sources; the stream formats when the
+  kit's engines are the data plane (`kit_data_plane`; otherwise the inputs' formats
+  are the state directory's `stream-formats` file)
 - the talkers' presentation time offsets
 - the stream ports' dynamic audio mappings that differ from the entity's default
-- the listener's bindings: classic fast-connect goals and Milan bound state
-  (the file absorbs the older `avb_entity_listener_bindings.hpp` file)
+- a classic listener's fast-connect goals (the file absorbs the older
+  `avb_entity_listener_bindings.hpp` file); a Milan listener's bindings are the
+  host's `listener-bindings` file in the same directory (Milan v1.3 Section 5.3.8.3)
 - the system unique id and the Media Clock Reference user settings
 
 Not kept (Milan v1.2 Section 5.3.4): the lock and the registered controllers.
@@ -23,9 +28,7 @@ unit is off its authored rate, every stream of it is saved at its format.
 
 A listener binding records the talker a stream input connects to and the
 input's stream format when it was saved (0: unknown, e.g. imported); a binding
-is not restored onto an input whose format differs. A Milan input also keeps
-its binding parameters (Milan v1.2 Section 5.3.8.3): the controller that bound
-it and whether it is started (Section 5.3.8.7).
+is not restored onto an input whose format differs.
 
 ## Format (version 1)
 
@@ -106,4 +109,4 @@ synced), from the reactor thread only, never the media thread.
 ## See also
 
 - [`AVB_ENTITY_KIT.md`](AVB_ENTITY_KIT.md) - what the kit restores at start
-- [`MILAN_LISTENER.md`](MILAN_LISTENER.md) - the saved listener bindings
+- [`MILAN_ACMP.md`](MILAN_ACMP.md) - a Milan listener's saved bindings

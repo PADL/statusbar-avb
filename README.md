@@ -216,7 +216,6 @@ Topic documents live in [`docs/`](docs/):
 | [`GPTP_STATE_MACHINES.md`](docs/GPTP_STATE_MACHINES.md) | The IEEE 802.1AS slave-role follower |
 | [`IEEE17221_GAP_ANALYSIS.md`](docs/IEEE17221_GAP_ANALYSIS.md) | IEEE 1722.1 implementation gap analysis |
 | [`LINUXPTP.md`](docs/LINUXPTP.md) | linuxptp configuration and the `ptpclient` bridge |
-| [`MILAN_LISTENER.md`](docs/MILAN_LISTENER.md) | The Milan listener: binding, probing and receive |
 | [`MILAN_TALKER.md`](docs/MILAN_TALKER.md) | The Milan talker: ACMP, declarations and the transmit gate |
 | [`MRP_STATE_MACHINES.md`](docs/MRP_STATE_MACHINES.md) | MRP, MSRP and MVRP |
 | [`MVU.md`](docs/MVU.md) | Milan Vendor Unique commands |
