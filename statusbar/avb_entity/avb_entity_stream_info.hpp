@@ -154,29 +154,6 @@ template <typename ListenerSink>
     return true;
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index (IEEE 1722.1-2021
-/// Clause 7.4.42, Table 7-158) from what the talker sent (TalkerTxCounters):
-/// STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX,
-/// as running counts. False for a stream the talker has no slot for.
-[[nodiscard]] inline auto fill_talker_stream_counters(
-    TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
-{  // NOLINT(statusbar-block-statements) one line per STREAM_OUTPUT counter, read top to bottom
-    auto const* const c = talker.tx_counters(descriptor_index);
-    if (talker.slot_for(descriptor_index) == nullptr || c == nullptr) {
-        return false;
-    }
-    auto const relaxed = std::memory_order_relaxed;
-    uint32_t const changes = c->streaming_changes.load(relaxed);
-    valid |= (1U << stream_output_stream_start_bit) | (1U << stream_output_stream_stop_bit) |
-        (1U << stream_output_media_reset_bit) | (1U << stream_output_timestamp_uncertain_bit) | (1U << stream_output_frames_tx_bit);
-    out[stream_output_stream_start_bit] = stream_starts(changes);
-    out[stream_output_stream_stop_bit] = stream_stops(changes);
-    out[stream_output_media_reset_bit] = c->mr_toggles.load(relaxed);
-    out[stream_output_timestamp_uncertain_bit] = c->tu_pdus.load(relaxed);
-    out[stream_output_frames_tx_bit] = c->pdus.load(relaxed);
-    return true;
-}
-
 /// What STREAM_OUTPUT @p descriptor_index has sent (TalkerTxCounters) as
 /// StreamOutputTotals, its starts and stops of one instant; zeros for an
 /// index past MAX_ENTITY_STREAMS. Reactor thread.
@@ -194,6 +171,36 @@ template <typename ListenerSink>
         .pdus = c->pdus.load(relaxed),
         .tu_pdus = c->tu_pdus.load(relaxed),
         .mr_toggles = c->mr_toggles.load(relaxed)};
+}
+
+/// The counters_valid bits of the STREAM_OUTPUT counters a talker counts.
+inline constexpr uint32_t stream_output_counters_valid = (1U << stream_output_stream_start_bit) |
+    (1U << stream_output_stream_stop_bit) | (1U << stream_output_media_reset_bit) | (1U << stream_output_timestamp_uncertain_bit) |
+    (1U << stream_output_frames_tx_bit);
+
+/// @p totals as running counts into the GET_COUNTERS array @p out, each at its bit.
+inline void store_stream_output_totals(StreamOutputTotals const& totals, std::array<uint32_t, 32>& out) noexcept
+{
+    out[stream_output_stream_start_bit] = totals.starts;
+    out[stream_output_stream_stop_bit] = totals.stops;
+    out[stream_output_media_reset_bit] = totals.mr_toggles;
+    out[stream_output_timestamp_uncertain_bit] = totals.tu_pdus;
+    out[stream_output_frames_tx_bit] = totals.pdus;
+}
+
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index (IEEE 1722.1-2021
+/// Clause 7.4.42, Table 7-158) from what the talker sent (TalkerTxCounters):
+/// STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX,
+/// as running counts. False for a stream the talker has no slot for.
+[[nodiscard]] inline auto fill_talker_stream_counters(
+    TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
+{
+    if (talker.slot_for(descriptor_index) == nullptr || talker.tx_counters(descriptor_index) == nullptr) {
+        return false;
+    }
+    valid |= stream_output_counters_valid;
+    store_stream_output_totals(talker_stream_totals(talker, descriptor_index), out);
+    return true;
 }
 
 /// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index as Milan v1.3 Table

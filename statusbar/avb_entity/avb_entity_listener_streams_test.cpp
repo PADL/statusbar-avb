@@ -1134,4 +1134,39 @@ TEST(listener_counters, get_counters_reports_an_interrupted_stream)
     EXPECT_EQ(out[11], 39U);
 }
 
+TEST(listener_counters, get_counters_reports_each_running_counter_at_its_own_bit)
+{
+    // IEEE 1722.1-2021 Clause 7.4.42: twelve STREAM_INPUT counters, bits 0 to 11 of counters_valid.
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto& c = ls.slot_for(0)->counters;
+    uint32_t value = 100;
+    for (auto* counter :
+         {&c.media_locked,
+          &c.media_unlocked,
+          &c.stream_interrupted,
+          &c.seq_num_mismatch,
+          &c.media_reset,
+          &c.timestamp_uncertain,
+          &c.timestamp_valid,
+          &c.timestamp_not_valid,
+          &c.unsupported_format,
+          &c.late_timestamp,
+          &c.early_timestamp,
+          &c.frames_rx}) {
+        counter->store(value++);
+    }
+
+    uint32_t valid = 0;
+    std::array<uint32_t, 32> out{};
+    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
+    EXPECT_EQ(valid, 0x0000'0FFFU);
+    for (uint32_t bit = 0; bit < 12; ++bit) {
+        EXPECT_EQ(out[bit], 100U + bit);
+    }
+    EXPECT_EQ(out[12], 0U);
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

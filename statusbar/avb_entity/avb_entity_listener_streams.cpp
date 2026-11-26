@@ -17,6 +17,8 @@
 #include "statusbar/tsn/tsn.hpp"
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstdint>
 #include <filesystem>
 #include <format>
@@ -24,6 +26,7 @@
 #include <span>
 #include <string>
 #include <system_error>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -758,33 +761,38 @@ void ListenerStreams::update_stream_input_counters(
     }
 }
 
+namespace {
+
+/// The running counter behind each STREAM_INPUT counter of IEEE 1722.1-2021
+/// Clause 7.4.42, by its bit in counters_valid: counters[bit] holds the value.
+constexpr std::array<std::pair<uint8_t, std::atomic<uint32_t> StreamInputCounters::*>, 12> STREAM_INPUT_COUNTERS{{
+    {0, &StreamInputCounters::media_locked},
+    {1, &StreamInputCounters::media_unlocked},
+    {2, &StreamInputCounters::stream_interrupted},
+    {3, &StreamInputCounters::seq_num_mismatch},
+    {4, &StreamInputCounters::media_reset},
+    {5, &StreamInputCounters::timestamp_uncertain},
+    {6, &StreamInputCounters::timestamp_valid},
+    {7, &StreamInputCounters::timestamp_not_valid},
+    {8, &StreamInputCounters::unsupported_format},
+    {9, &StreamInputCounters::late_timestamp},
+    {10, &StreamInputCounters::early_timestamp},
+    {11, &StreamInputCounters::frames_rx},
+}};
+
+}  // namespace
+
 auto ListenerStreams::fill_stream_input_counters(
     uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
-{  // NOLINT(statusbar-block-statements) one line per STREAM_INPUT counter, read top to bottom
+{
     auto const* slot = slot_for(descriptor_index);
     if (slot == nullptr) {
         return false;
     }
-    auto const& c = slot->counters;
-    auto const relaxed = std::memory_order_relaxed;
-    // IEEE 1722.1 STREAM_INPUT counter bit positions (Clause 7.4.42). counters[bit]
-    // holds the value for the bit set in `valid`.
-    auto set = [&](size_t bit, uint32_t v) {
+    for (auto const& [bit, counter] : STREAM_INPUT_COUNTERS) {
         valid |= (1U << bit);
-        out[bit] = v;
-    };
-    set(0, c.media_locked.load(relaxed));
-    set(1, c.media_unlocked.load(relaxed));
-    set(2, c.stream_interrupted.load(relaxed));
-    set(3, c.seq_num_mismatch.load(relaxed));
-    set(4, c.media_reset.load(relaxed));
-    set(5, c.timestamp_uncertain.load(relaxed));
-    set(6, c.timestamp_valid.load(relaxed));
-    set(7, c.timestamp_not_valid.load(relaxed));
-    set(8, c.unsupported_format.load(relaxed));
-    set(9, c.late_timestamp.load(relaxed));
-    set(10, c.early_timestamp.load(relaxed));
-    set(11, c.frames_rx.load(relaxed));
+        out[bit] = (slot->counters.*counter).load(std::memory_order_relaxed);
+    }
     return true;
 }
 
