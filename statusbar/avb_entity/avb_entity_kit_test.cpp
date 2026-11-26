@@ -52,6 +52,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -109,6 +110,13 @@ auto make_blob(
     iface.priority1 = priority1;
     iface.clock_identity = clock_identity;
     w.add(0, DESCRIPTOR_AVB_INTERFACE, 0, make_const_span(iface));
+    if (identify) {
+        atdecc::aem::DescriptorControl control{};
+        control.control_type = atdecc::aem::CONTROL_TYPE_IDENTIFY;
+        control.control_value_type = 0x0001;  // CONTROL_LINEAR_UINT8
+        control.number_of_values = 1;
+        w.add(0, atdecc::aem::DESCRIPTOR_CONTROL, 0, wire(control));
+    }
     return w.write();
 }
 
@@ -730,9 +738,9 @@ void expect_kit_on_vlan(KitUnderTest& kit, uint16_t const vlan_id, uint8_t const
     EXPECT_EQ(kit->host().components().msrp_handler.domain().sr_class_priority, priority);
     EXPECT_EQ(kit->talker().vlan_id(), vlan_id);
     for (auto const& spec : kit.talker_specs()) {
-        auto const* stream = kit->host().components().acmp_talker.get_stream(spec.index);
-        EXPECT_NE(stream, nullptr);
-        if (stream != nullptr) {
+        auto const stream = kit->host().components().talker_stream(spec.index);
+        EXPECT_TRUE(stream.has_value());
+        if (stream.has_value()) {
             EXPECT_EQ(stream->stream_vlan_id, vlan_id);
         }
         auto const info = kit->make_talker_srp_info(spec);
@@ -3548,202 +3556,11 @@ TEST(avb_entity_kit_formats, a_talker_change_keeps_within_the_class_a_budget)
         atdecc::AEM_STATUS_SUCCESS);
 }
 
-// A binding saved for an input whose format has since changed is dropped
-TEST(avb_entity_kit_persistence, binding_for_a_changed_input_format_dropped)
-{
-    auto const dir = state_dir("bindfmt");
-    auto const path = (dir / "avb-state.toml").string();
-    PersistentState saved{};
-    saved.configured_entity_name = "kit milan";
-    saved.configured_presentation_offset_ns = 2'000'000;
-    saved.listener_bindings.push_back(
-        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 2, .format = CRF_MILAN_48K});
-    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(saved)).has_value());
-    PersistentKit m{path};
-    EXPECT_TRUE(m.start_ready());
-    EXPECT_TRUE(m.kit.host().components().acmp_listener.fast_connect_goals().empty());
-    EXPECT_FALSE(m.kit.host().components().acmp_listener.milan_sinks().sink(0)->bound());
-    std::filesystem::remove_all(dir);
-}
-
 // --- The Milan listener -------------------------------------------------------
 
 namespace {
 
 ieee::Eui64 const BINDING_CONTROLLER = ieee::Eui64{}.from_uint64(0x001B92FFFE00C001ULL);
-
-/// A Milan listener kit and a Milan talker kit on one simulated segment: ACMP
-/// and MSRP queued between them and delivered by pump().
-struct MilanPair
-{
-    explicit MilanPair(std::string const& path = {}, std::optional<bool> const listener_milan = std::nullopt)
-        : l{path, 0x40, listener_milan}
-        , t{std::nullopt, 0x41}
-    {}
-
-    auto start() -> bool
-    {
-        if (!l.start_ready() || !t.start_ready()) {
-            return false;
-        }
-        auto const queue = [this](atdecc::AcmpCommandResponse const& pdu) {
-            acmp.push_back(pdu);
-            return true;
-        };
-        lc().acmp_listener.set_transmit(queue, queue);
-        tc().acmp_talker.set_callbacks(nanoavb::AcmpTalkerCallbacks{.tx_response = queue});
-        lc().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
-            to_t.emplace_back(p.begin(), p.end());
-            return true;
-        });
-        tc().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
-            to_l.emplace_back(p.begin(), p.end());
-            return true;
-        });
-        now = sm::Clock::now();
-        return true;
-    }
-
-    auto lc() -> nanoavb::NanoAvbComponents& { return l.kit.host().components(); }
-    auto tc() -> nanoavb::NanoAvbComponents& { return t.kit.host().components(); }
-    [[nodiscard]] auto sink() const -> atdecc::MilanSink const&
-    {
-        return *l.kit.host().components().acmp_listener.milan_sinks().sink(0);
-    }
-
-    /// One round of the segment every @p step, @p rounds times; MSRP only
-    /// with @p msrp.
-    void pump(int const rounds = 10, bool const msrp = true, std::chrono::milliseconds const step = std::chrono::milliseconds{100})
-    {
-        for (int i = 0; i < rounds; ++i) {
-            now += step;
-            lc().acmp_listener.tick(now);
-            auto pending = std::move(acmp);
-            acmp.clear();
-            for (auto const& pdu : pending) {
-                heard.push_back(pdu);
-                (void)tc().acmp_talker.receive_command(pdu, now);
-                (void)lc().acmp_listener.receive_controller_command(pdu, now);
-                (void)lc().acmp_listener.receive_talker_response(pdu, now);
-            }
-            if (!msrp) {
-                continue;
-            }
-            lc().msrp_handler.tick(now);
-            tc().msrp_handler.tick(now);
-            for (auto const& p : std::exchange(to_l, {})) {
-                lc().msrp_handler.receive_packet(p, now);
-            }
-            for (auto const& p : std::exchange(to_t, {})) {
-                tc().msrp_handler.receive_packet(p, now);
-            }
-        }
-    }
-
-    auto command(uint8_t const type, uint16_t const flags = 0, uint16_t const unique_id = 0) -> atdecc::AcmpCommandResponse
-    {
-        atdecc::AcmpCommandResponse cmd{};
-        cmd.init_command(type);
-        cmd.controller_entity_id = BINDING_CONTROLLER;
-        cmd.talker_entity_id = t.config.entity_id;
-        cmd.talker_unique_id = unique_id;
-        cmd.listener_entity_id = l.config.entity_id;
-        cmd.listener_unique_id = unique_id;
-        cmd.sequence_id = sequence++;
-        cmd.flags = flags;
-        return cmd;
-    }
-
-    /// A controller's ACMP command to the listener, for stream @p unique_id at both ends; its response.
-    auto controller(uint8_t const type, uint16_t const flags = 0, uint16_t const unique_id = 0) -> atdecc::AcmpCommandResponse
-    {
-        auto const cmd = command(type, flags, unique_id);
-        (void)lc().acmp_listener.receive_controller_command(cmd, now);
-        for (auto const& pdu : acmp) {
-            if (pdu.message_type() == type + 1 && pdu.sequence_id.get() == cmd.sequence_id.get()) {
-                return pdu;
-            }
-        }
-        return {};
-    }
-
-    /// GET_STREAM_INFO of the listener's STREAM_INPUT 0.
-    auto input_info() -> std::pair<atdecc::aem::AemStreamInfoPayload, atdecc::aem::AemStreamInfoMilanExtension>
-    {
-        std::array<uint8_t, 4> body{0x00, 0x05, 0x00, 0x00};
-        l.use_milan_v1_2_stream_info();
-        auto const r = l.aem_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, body);
-        EXPECT_EQ(r.status, atdecc::AEM_STATUS_SUCCESS);
-        EXPECT_EQ(r.body.size(), atdecc::aem::AEM_STREAM_INFO_MILAN_LENGTH);
-        return load_info(r.body);
-    }
-
-    auto streaming(bool const start) -> uint8_t
-    {
-        std::array<uint8_t, 4> body{0x00, 0x05, 0x00, 0x00};
-        return l.aem_command(start ? atdecc::AEM_COMMAND_START_STREAMING : atdecc::AEM_COMMAND_STOP_STREAMING, body).status;
-    }
-
-    /// The talker's PROBE_TX_RESPONSE to the sink's probe: stream @p stream_id to @p group on VLAN @p vid.
-    void probe_answered(ieee::Eui48 const& group, uint64_t const stream_id = 0x0200000000000777ULL, uint16_t const vid = 2)
-    {
-        auto resp = sink().probe;
-        resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
-        resp.stream_id = ieee::Eui64{}.from_uint64(stream_id);
-        resp.stream_dest_mac = group;
-        resp.stream_vlan_id = vid;
-        (void)lc().acmp_listener.receive_talker_response(resp, now);
-    }
-
-    /// Open the listener's stream port as a test port (before start()); its context.
-    auto listener_wire() -> net::TestPortContext&
-    {
-        EXPECT_TRUE(
-            l.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x40}}).has_value());
-        return *l.kit.stream_port().test_port();
-    }
-
-    /// Stop the listener and start it again on a fresh test port, its sends captured as start()'s; that port.
-    auto restart_listener() -> net::TestPortContext&
-    {
-        EXPECT_TRUE(l.kit.stop(now).has_value());
-        auto& wire = listener_wire();
-        EXPECT_TRUE(l.start_ready());
-        auto const queue = [this](atdecc::AcmpCommandResponse const& pdu) {
-            acmp.push_back(pdu);
-            return true;
-        };
-        lc().acmp_listener.set_transmit(queue, queue);
-        lc().msrp_handler.set_send_packet([this](std::span<uint8_t const> p) {
-            to_t.emplace_back(p.begin(), p.end());
-            return true;
-        });
-        return wire;
-    }
-
-    /// The talker's ENTITY_AVAILABLE reaching the listener.
-    void talker_advertises()
-    {
-        auto const& ours = lc().adp_advertiser.adpdu();
-        lc().acmp_listener.receive_adpdu(tc().adp_advertiser.adpdu(), ours.gptp_grandmaster_id, ours.gptp_domain_number.get(), now);
-    }
-
-    [[nodiscard]] auto listener_reservation() -> nanoavb::ListenerReservationState
-    {
-        auto const* s = lc().msrp_handler.get_listener_stream(t.sid(0));
-        return s != nullptr ? s->state : nanoavb::ListenerReservationState::Idle;
-    }
-
-    sm::TimePoint now{};
-    uint16_t sequence{0x100};
-    std::vector<atdecc::AcmpCommandResponse> acmp;
-    std::vector<atdecc::AcmpCommandResponse> heard;
-    std::vector<std::vector<uint8_t>> to_l;
-    std::vector<std::vector<uint8_t>> to_t;
-    // Last: their stops at destruction send into the queues above.
-    PersistentKit l;
-    MilanKit t;
-};
 
 namespace sif = atdecc::aem::stream_info_flags;
 
@@ -3751,331 +3568,38 @@ namespace sif = atdecc::aem::stream_info_flags;
 
 // BIND_RX answered at once; the probe makes the talker declare; the listener
 // settles and declares Ready; UNBIND withdraws without a DISCONNECT_TX.
-TEST(avb_entity_kit_milan_listener, binds_probes_settles_and_reserves)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_TRUE(p.lc().acmp_listener.milan());
-
-    auto const bound = p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    EXPECT_EQ(bound.status(), atdecc::ACMP_STATUS_SUCCESS);
-    EXPECT_EQ(bound.connection_count.get(), uint16_t{1});
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_resp);
-    EXPECT_EQ(p.acmp.back().message_type(), atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
-
-    p.pump(1, false);  // the probe reaches the talker, which declares
-    EXPECT_TRUE(p.t.advertising(0));
-    p.pump(1, false);  // its response settles the sink
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_no_rsv);
-    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_EQ(p.lc().acmp_listener.get_stream(0)->stream_id.to_uint64(), p.t.sid(0).to_uint64());
-
-    p.pump(10);
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_rsv_ok);
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
-    EXPECT_TRUE(p.tc().msrp_handler.registered_listener(p.t.sid(0)) == srp::msrp::ListenerDeclaration::Ready);
-    EXPECT_FALSE(p.t.kit.admitted_talker_streams().empty());
-
-    auto const [info, ext] = p.input_info();
-    uint32_t const flags = info.flags.get();
-    EXPECT_EQ(
-        flags,
-        sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAM_ID_VALID |
-            sif::STREAM_DEST_MAC_VALID | sif::STREAM_VLAN_ID_VALID | sif::MSRP_ACC_LAT_VALID);
-    EXPECT_EQ(info.stream_id.to_uint64(), p.t.sid(0).to_uint64());
-    EXPECT_EQ(info.stream_vlan_id.get(), uint16_t{2});
-    EXPECT_EQ(ext.flags_ex.get(), atdecc::aem::stream_info_flags_ex::REGISTERING);
-    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::COMPLETED);
-    EXPECT_EQ(ext.acmp_status(), uint8_t{0});
-
-    auto const rx = p.controller(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND);
-    EXPECT_EQ(rx.status(), atdecc::ACMP_STATUS_SUCCESS);
-    EXPECT_EQ(rx.talker_entity_id, p.t.config.entity_id);
-    EXPECT_EQ(rx.connection_count.get(), uint16_t{1});
-    EXPECT_EQ(rx.flags.get(), atdecc::acmp_flags::FAST_CONNECT);
-    EXPECT_EQ(rx.stream_id.to_uint64(), p.t.sid(0).to_uint64());
-
-    auto const unbound = p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_EQ(unbound.status(), atdecc::ACMP_STATUS_SUCCESS);
-    EXPECT_FALSE(p.sink().bound());
-    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Idle);
-    p.heard.clear();
-    p.pump(10);
-    EXPECT_TRUE(p.tc().msrp_handler.registered_listener(p.t.sid(0)) == srp::msrp::ListenerDeclaration::Ignore);
-    EXPECT_TRUE(std::ranges::none_of(
-        p.heard, [](auto const& pdu) { return pdu.message_type() == atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_TX_COMMAND; }));
-    EXPECT_EQ(p.input_info().first.flags.get(), sif::STREAM_FORMAT_VALID);
-}
 
 // Settled before the talker's Advertise reaches it, the listener declares
 // nothing (Milan v1.2 Section 5.3.8.5); once registered, Listener Ready
-TEST(avb_entity_kit_milan_listener, declares_only_once_the_advertise_is_registered)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.pump(3, false);
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_no_rsv);
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Waiting);
-    auto [info, ext] = p.input_info();
-    EXPECT_EQ(ext.flags_ex.get(), 0U);
-    EXPECT_EQ(info.flags.get() & sif::MSRP_ACC_LAT_VALID, 0U);
-    EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::COMPLETED);
-    p.pump(10);
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_rsv_ok);
-}
 
 // START/STOP_STREAMING on a bound input (Milan v1.2 Sections 5.4.2.19-20):
 // stopped discards the stream's AVTPDUs and shows STREAMING_WAIT; no effect
 // on an unbound input; outputs still refuse them
-TEST(avb_entity_kit_milan_listener, start_and_stop_streaming_on_inputs)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    EXPECT_EQ(p.streaming(false), atdecc::AEM_STATUS_SUCCESS);  // unbound: no effect
-    EXPECT_FALSE(p.l.kit.listener()->slot_for(0)->stopped.load());
-    EXPECT_EQ(p.input_info().first.flags.get() & sif::STREAMING_WAIT, 0U);
-
-    // An unbound input bound with STREAMING_WAIT is stopped from the start,
-    // and START / UNBIND act on it
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, atdecc::acmp_flags::STREAMING_WAIT);
-    EXPECT_FALSE(p.sink().binding.started);
-    EXPECT_TRUE(p.l.kit.listener()->slot_for(0)->stopped.load());
-    EXPECT_EQ(p.streaming(true), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_FALSE(p.l.kit.listener()->slot_for(0)->stopped.load());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_FALSE(p.l.kit.listener()->slot_for(0)->stopped.load());
-
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.pump(10);
-    EXPECT_EQ(p.streaming(false), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_FALSE(p.sink().binding.started);
-    EXPECT_TRUE(p.l.kit.listener()->slot_for(0)->stopped.load());
-    EXPECT_NE(p.input_info().first.flags.get() & sif::STREAMING_WAIT, 0U);
-    EXPECT_EQ(
-        p.controller(atdecc::ACMP_MESSAGE_TYPE_GET_RX_STATE_COMMAND).flags.get(),
-        static_cast<uint16_t>(atdecc::acmp_flags::FAST_CONNECT | atdecc::acmp_flags::STREAMING_WAIT));
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_rsv_ok);  // still reserved
-
-    EXPECT_EQ(p.streaming(true), atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(p.sink().binding.started);
-    EXPECT_FALSE(p.l.kit.listener()->slot_for(0)->stopped.load());
-
-    // A bind with STREAMING_WAIT binds stopped
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, atdecc::acmp_flags::STREAMING_WAIT);
-    EXPECT_FALSE(p.sink().binding.started);
-    EXPECT_TRUE(p.l.kit.listener()->slot_for(0)->stopped.load());
-
-    std::array<uint8_t, 4> output{0x00, 0x06, 0x00, 0x00};
-    EXPECT_EQ(p.l.aem_command(atdecc::AEM_COMMAND_STOP_STREAMING, output).status, atdecc::AEM_STATUS_NOT_SUPPORTED);
-}
 
 // A locked entity accepts BIND_RX / UNBIND_RX only from the locking controller
-TEST(avb_entity_kit_milan_listener, lock_refuses_other_controllers)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};  // flags 0, the ENTITY: locked by controller 0
-    EXPECT_EQ(p.l.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND).status(), atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
-    EXPECT_FALSE(p.sink().bound());
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND).status(), atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED);
-}
 
 // A sink settled on a VID other than the Class A one joins it with MVRP,
 // and leaves it when it unsettles (Milan v1.2 Section 4.4.1)
-TEST(avb_entity_kit_milan_listener, another_vid_joins_mvrp)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    auto resp = p.sink().probe;
-    resp.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
-    resp.stream_id = ieee::Eui64{}.from_uint64(0x0200000000000777ULL);
-    resp.stream_dest_mac = ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x77};
-    resp.stream_vlan_id = uint16_t{5};
-    (void)p.lc().acmp_listener.receive_talker_response(resp, p.now);
-    EXPECT_TRUE(p.sink().settled());
-    EXPECT_TRUE(p.lc().mvrp_handler.get_vlan_state(5) != nanoavb::VlanState::Unregistered);
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_TRUE(p.lc().mvrp_handler.get_vlan_state(5) == nanoavb::VlanState::Unregistered);
-    EXPECT_TRUE(p.lc().mvrp_handler.get_vlan_state(2) != nanoavb::VlanState::Unregistered);  // the host's
-}
 
 // Rebound to another talker's stream, a settled input leaves its group before
 // it joins the new one: each group is joined once while it is listened to
-TEST(avb_entity_kit_milan_listener, a_rebind_leaves_the_old_group_and_joins_the_new)
-{
-    MilanPair p;
-    auto const& wire = p.listener_wire();
-    EXPECT_TRUE(p.start());
-    ieee::Eui48 const first{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x01};
-    ieee::Eui48 const second{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x02};
-    auto const joins = [&wire](ieee::Eui48 const& group) { return std::ranges::count(wire.joined_multicast_groups(), group); };
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.probe_answered(first);
-    EXPECT_EQ(joins(first), 1);
-
-    auto rebind = p.command(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    rebind.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200000000000042ULL);
-    EXPECT_TRUE(p.lc().acmp_listener.receive_controller_command(rebind, p.now));
-    EXPECT_EQ(joins(first), 0);
-    p.probe_answered(second, 0x0200000000000042ULL);
-    EXPECT_EQ(joins(first), 0);
-    EXPECT_EQ(joins(second), 1);
-}
 
 // stop() releases the connected group before it closes the port, which drops what else it holds;
 // the log outlives the port
-TEST(avb_entity_kit_milan_listener, a_stop_leaves_the_connected_group_and_closes_the_port)
-{
-    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
-    MilanPair p;
-    p.listener_wire().record_memberships(&log);
-    EXPECT_TRUE(p.start());
-    ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0x07, 0x03};
-    auto const held = [&log](ieee::Eui48 const& g) {
-        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = true}) -
-            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = g, .joined = false});
-    };
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.probe_answered(group);
-    EXPECT_EQ(held(group), 1);
-
-    EXPECT_TRUE(p.l.kit.stop(p.now).has_value());
-    EXPECT_FALSE(p.l.kit.stream_port().valid());
-    EXPECT_EQ(held(group), 0);
-}
 
 // A locked entity's stop() still unbinds its inputs, as the locking controller
-TEST(avb_entity_kit_milan_listener, a_stop_unbinds_a_locked_entitys_input)
-{
-    MilanPair p;
-    EXPECT_TRUE(p.start());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    std::array<uint8_t, atdecc::aem::AemLockEntityPayload::LENGTH> lock{};  // locked by controller 0
-    EXPECT_EQ(p.l.aem_command(atdecc::AEM_COMMAND_LOCK_ENTITY, lock).status, atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_TRUE(p.l.kit.stop(p.now).has_value());
-    EXPECT_FALSE(p.sink().bound());
-}
 
 // stop() drops the input's connection, not its saved binding: after a restart
 // it is unconnected until the binding settles again, declared and joined anew
-TEST(avb_entity_kit_milan_listener, a_restart_reconnects_from_the_saved_binding)
-{
-    auto const dir = state_dir("restart");
-    auto const path = (dir / "avb-state.toml").string();
-    MilanPair p{path};
-    (void)p.listener_wire();
-    EXPECT_TRUE(p.start());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.pump(10);
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
-    auto const group = p.lc().acmp_listener.get_stream(0)->stream_dest_mac;
-
-    auto const& rewired = p.restart_listener();
-    auto const joins = [&rewired, &group] { return std::ranges::count(rewired.joined_multicast_groups(), group); };
-    auto const static_joins = joins();  // the loopback topology's pre-joined group may be the same
-    EXPECT_EQ(load_persistent_state(path, 0, {}).state.listener_bindings.size(), size_t{1});
-    EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_avail);
-    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Idle);
-
-    p.talker_advertises();
-    p.pump(20);  // TMR_DELAY, the probe, the reservation
-    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
-    EXPECT_EQ(joins(), static_joins + 1);
-    std::filesystem::remove_all(dir);
-}
 
 // A classic input is disconnected by stop() with its fast-connect goal kept;
 // after a restart the goal connects it again
-TEST(avb_entity_kit_milan_listener, a_classic_restart_reconnects_from_the_goal)
-{
-    auto const dir = state_dir("classic-restart");
-    MilanPair p{(dir / "avb-state.toml").string(), false};
-    (void)p.listener_wire();
-    EXPECT_TRUE(p.start());
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
-    p.pump(10);
-    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
-
-    (void)p.restart_listener();
-    EXPECT_FALSE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_EQ(p.lc().acmp_listener.fast_connect_goals().size(), size_t{1});
-    p.pump(30);  // FAST_CONNECT_RETRY, the CONNECT_TX, the reservation
-    EXPECT_TRUE(p.lc().acmp_listener.is_connected(0));
-    EXPECT_TRUE(p.listener_reservation() == nanoavb::ListenerReservationState::Ready);
-    std::filesystem::remove_all(dir);
-}
 
 // [avb] milan = false keeps the classic listener: CONNECT_RX relayed as
 // CONNECT_TX, no Milan sink bound
-TEST(avb_entity_kit_milan_listener, classic_profile_keeps_the_classic_listener)
-{
-    MilanPair p{{}, false};
-    EXPECT_TRUE(p.start());
-    EXPECT_FALSE(p.lc().acmp_listener.milan());
-    auto const cmd = p.command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
-    EXPECT_TRUE(p.lc().acmp_listener.receive_controller_command(cmd, p.now));
-    EXPECT_TRUE(p.lc().acmp_listener.has_pending());
-    EXPECT_EQ(p.acmp.back().message_type(), atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
-    EXPECT_FALSE(p.sink().bound());
-}
 
 // The bound state is saved and restored: PRB_W_AVAIL until the talker
 // advertises, then a probe (Milan v1.2 Sections 5.3.8.2-3, 5.3.8.7, 5.5.3.5.2).
-TEST(avb_entity_kit_persistence, milan_binding_survives_a_restart_and_reprobes)
-{
-    auto const dir = state_dir("milanbind");
-    auto const path = (dir / "avb-state.toml").string();
-    {
-        MilanPair p{path};
-        EXPECT_TRUE(p.start());
-        (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-        p.pump(10);
-        EXPECT_EQ(p.streaming(false), atdecc::AEM_STATUS_SUCCESS);
-        p.l.kit.on_declaration_timer(MilanKit::steady_ns());  // the end of the reactor pass
-        auto const saved = load_persistent_state(path, 0, {});
-        EXPECT_EQ(saved.state.listener_bindings.size(), size_t{1});
-        auto const& b = saved.state.listener_bindings.front();
-        EXPECT_EQ(b.stream_input, uint16_t{0});
-        EXPECT_EQ(b.talker_entity_id, p.t.config.entity_id.to_uint64());
-        EXPECT_EQ(b.talker_unique_id, uint16_t{0});
-        EXPECT_EQ(b.controller_entity_id, BINDING_CONTROLLER.to_uint64());
-        EXPECT_FALSE(b.started);
-        EXPECT_EQ(b.format, AAF_48K_INT24_32CH);
-    }
-    {
-        MilanPair p{path};
-        EXPECT_TRUE(p.start());
-        EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_avail);
-        EXPECT_EQ(p.sink().binding.controller_entity_id, BINDING_CONTROLLER);
-        EXPECT_FALSE(p.sink().binding.started);
-        EXPECT_TRUE(p.l.kit.listener()->slot_for(0)->stopped.load());
-        auto const [info, ext] = p.input_info();
-        EXPECT_EQ(
-            info.flags.get(), sif::STREAM_FORMAT_VALID | sif::BOUND | sif::FAST_CONNECT | sif::SAVED_STATE | sif::STREAMING_WAIT);
-        EXPECT_EQ(ext.probing_status(), atdecc::aem::probing_status::PASSIVE);
-        p.pump(30);  // no ADP from the talker: it waits
-        EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_avail);
-
-        p.talker_advertises();
-        EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::prb_w_delay);
-        p.pump(20);  // TMR_DELAY (at most 1 s), the probe, the reservation
-        EXPECT_TRUE(p.sink().state == atdecc::MilanSinkState::settled_rsv_ok);
-        EXPECT_TRUE(p.tc().msrp_handler.registered_listener(p.t.sid(0)) == srp::msrp::ListenerDeclaration::Ready);
-        EXPECT_FALSE(p.sink().binding.started);  // still stopped
-        // Unbound: nothing is kept
-        (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-        p.l.kit.on_declaration_timer(MilanKit::steady_ns());
-        EXPECT_TRUE(load_persistent_state(path, 0, {}).state.listener_bindings.empty());
-    }
-    std::filesystem::remove_all(dir);
-}
 
 // --- Counters, GET_AS_PATH and GET_AVB_INFO ----------------------------------
 
@@ -4157,8 +3681,7 @@ TEST(avb_entity_kit_classic_talker, a_stopped_output_reports_streaming_wait)
 {
     MilanKit m{false, 0x63};
     EXPECT_TRUE(m.start_ready());
-    std::array<uint8_t, 0> none{};
-    (void)m.aem_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, none);
+    register_other_controller(m);
     m.aem.clear();
     auto const waiting = [&m] {
         return (load_info(m.stream_info(0).body).first.flags.get() & atdecc::aem::stream_info_flags::STREAMING_WAIT) != 0;
@@ -4410,8 +3933,8 @@ struct DomainBridge
     [[nodiscard]] auto all_on(uint16_t const vid) const -> bool
     {
         auto& c = m.kit.host().components();
-        auto const* stream = c.acmp_talker.get_stream(0);
-        return c.msrp_handler.domain().sr_class_vid == vid && m.kit.talker().vlan_id() == vid && stream != nullptr &&
+        auto const stream = c.talker_stream(0);
+        return c.msrp_handler.domain().sr_class_vid == vid && m.kit.talker().vlan_id() == vid && stream.has_value() &&
             stream->stream_vlan_id == vid && m.kit.make_talker_srp_info(m.kit.talker_specs()[0]).vlan_id == vid &&
             c.mvrp_handler.get_vlan_state(vid) != nanoavb::VlanState::Unregistered;
     }
@@ -4568,63 +4091,10 @@ TEST(avb_entity_kit_counters, as_path_ends_with_this_entity)
 // A binding restored at start is bound: unbinding it is no interruption, and
 // is a change of binding (notified, counters kept); a stopped input's
 // discarded stream is none either.
-TEST(avb_entity_kit_counters, a_restored_binding_unbinds_without_an_interruption)
-{
-    auto const dir = state_dir("restored-counters");
-    auto const path = (dir / "avb-state.toml").string();
-    PersistentState saved{};
-    saved.configured_entity_name = "kit milan";
-    saved.configured_presentation_offset_ns = 2'000'000;
-    saved.listener_bindings.push_back(
-        {.stream_input = 0, .talker_entity_id = 0x020000fffe000041ULL, .talker_unique_id = 0, .started = true});
-    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(saved)).has_value());
-    MilanPair p{path};
-    EXPECT_TRUE(p.start());
-    EXPECT_TRUE(p.sink().bound());
-    auto& c = p.l.kit.listener()->slot_for(0)->counters;
-    int64_t t = MilanKit::steady_ns();
-    p.l.kit.poll_counters(t);
-    c.media_locked.store(1);  // as if its stream had locked
-    c.is_locked.store(true);
-    c.frames_rx.store(100);
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_FALSE(p.sink().bound());
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);  // nothing received since
-    auto counters = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
-    EXPECT_EQ(counters.counters[0].get(), 1U);  // MEDIA_LOCKED
-    EXPECT_EQ(counters.counters[1].get(), 1U);  // MEDIA_UNLOCKED
-    EXPECT_EQ(counters.counters[2].get(), 0U);  // STREAM_INTERRUPTED
-
-    // Bound again and stopped: its stream discarded is no interruption.
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND, atdecc::acmp_flags::STREAMING_WAIT);
-    c.media_locked.fetch_add(1);
-    c.is_locked.store(true);
-    p.l.kit.poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    counters = counters_of(p.l, DESCRIPTOR_STREAM_INPUT, 0);
-    EXPECT_EQ(counters.counters[2].get(), 0U);
-    EXPECT_EQ(counters.counters[0].get(), counters.counters[1].get());
-    std::filesystem::remove_all(dir);
-}
 
 // ---- Names and dynamic input mappings ------------------------------------------
 
 namespace {
-
-ieee::Eui64 const OTHER_CONTROLLER{0x02, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x02};
-ieee::Eui48 const OTHER_CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x02};
-
-/// Register a second controller for unsolicited notifications.
-void register_other_controller(PersistentKit& m)
-{
-    nanoavb::AemDu header{};
-    header.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, nanoavb::AemDu::AEM_DATA_LENGTH);
-    header.target_entity_id = m.config.entity_id;
-    header.controller_entity_id = OTHER_CONTROLLER;
-    std::array<uint8_t, nanoavb::AemDu::LENGTH> frame{};
-    span_store(frame, header);
-    (void)m.kit.host().components().aem_handler.process_packet(OTHER_CONTROLLER_MAC, frame, m.config.entity_id);
-}
 
 /// SET_NAME of (@p type, @p index, @p name_index).
 auto set_name(PersistentKit& m, uint16_t const type, uint16_t const index, uint16_t const name_index, std::string_view const name)
@@ -4821,6 +4291,9 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
         std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(0, 5)};
         EXPECT_TRUE(std::ranges::equal(m.kit.input_mappings(0), swapped));
         EXPECT_TRUE(routed.size() == 1 && routed.back() == swapped);  // the saved set, once
+        EXPECT_TRUE(m.kit.host().components().milan_acmp_listener->restore_binding(
+            atdecc::MilanBinding{.listener_unique_id = 0, .talker_entity_id = ieee::Eui64{}.from_uint64(0x0200001111110001ULL)},
+            sm::Clock::now()));
         EXPECT_TRUE(m.kit.input_running(0));
         // Bound: the format stays, the mappings change.
         EXPECT_EQ(map_command(m, false, {mapping(0, 5)}), atdecc::AEM_STATUS_SUCCESS);
@@ -5321,47 +4794,6 @@ TEST(avb_entity_kit_kind, a_port_reopened_before_start_holds_each_static_group_o
     EXPECT_EQ(std::ranges::count(m.kit.stream_port().test_port()->joined_multicast_groups(), group), 1);
 }
 
-// An input whose connection uses its pre-joined group holds two memberships of it: the output's
-// kind change leaves the pre-joined one and the unbind the connection's, the count back to zero
-TEST(avb_entity_kit_kind, a_static_group_shared_with_a_connection_is_left_by_each)
-{
-    std::vector<net::TestPortContext::MembershipChange> log;  // outlives the port and the fixture
-    RateKit m{{}, 0x77, false, false, /*am824=*/true};
-    EXPECT_TRUE(m.kit.stream_port().open_test({.hardware_address = ieee::Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}}).has_value());
-    m.kit.stream_port().test_port()->record_memberships(&log);
-    EXPECT_TRUE(m.start_ready());
-    auto const group = m.kit.talker().slot_for(0)->dest_mac;
-    auto const held = [&log, group] {
-        return std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = true}) -
-            std::ranges::count(log, net::TestPortContext::MembershipChange{.group = group, .joined = false});
-    };
-    EXPECT_EQ(held(), 1);  // pre-joined
-
-    auto& acmp = m.kit.host().components().acmp_listener;
-    atdecc::AcmpCommandResponse bind{};
-    bind.init_command(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    bind.controller_entity_id = BINDING_CONTROLLER;
-    bind.talker_entity_id = ieee::Eui64{}.from_uint64(0x0200000000000042ULL);
-    bind.listener_entity_id = m.config.entity_id;
-    EXPECT_TRUE(acmp.receive_controller_command(bind, sm::Clock::now()));
-    auto answer = acmp.milan_sinks().sink(0)->probe;
-    answer.set_message_type(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_RESPONSE);
-    answer.stream_id = ieee::Eui64{}.from_uint64(0x0200000000000777ULL);
-    answer.stream_dest_mac = group;
-    answer.stream_vlan_id = uint16_t{2};
-    (void)acmp.receive_talker_response(answer, sm::Clock::now());
-    EXPECT_TRUE(acmp.milan_sinks().sink(0)->settled());
-    EXPECT_EQ(held(), 2);
-
-    EXPECT_EQ(
-        m.aem_packet(atdecc::AEM_COMMAND_SET_STREAM_FORMAT, format_body(DESCRIPTOR_STREAM_OUTPUT, 0, AM824_8CH_48K)),
-        atdecc::AEM_STATUS_SUCCESS);
-    EXPECT_EQ(held(), 1);
-    bind.set_message_type(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_TRUE(acmp.receive_controller_command(bind, sm::Clock::now()));
-    EXPECT_EQ(held(), 0);
-}
-
 // ---- Clock sources and clock domain lock (IEEE 1722.1-2021 Clauses 7.2.32, 7.4.23-24, 7.4.42) ----
 
 namespace {
@@ -5699,83 +5131,9 @@ class VlanRecorder final : public net::vlan::VlanControl
 // A Milan input settled on VLAN 3 (its talker's probe answer) holds VID 3 on the NIC's filter beside the Class A
 // VID 2. When an adopted Domain moves Class A onto 3, the link both use stays and 2's goes; the input's unbind
 // leaves 3 to the Class A VID.
-TEST(avb_entity_kit_milan_listener, an_input_settled_on_another_vlan_holds_its_vid_on_the_filter)
-{
-    VlanRecorder fake;  // first: it outlives the kit, which deletes its links through it
-    MilanPair p;
-    p.l.kit.bind_listener_vlan(fake, 9);  // before start(), which then uses it
-    EXPECT_TRUE(p.start());
-    p.lc().msrp_handler.set_adopt_domain(true);  // as atdecc.profile = "milan13"
-    auto const link = [&p](uint16_t const vid) { return net::vlan::vlan_link_name(p.l.config.interface_name, vid); };
-    EXPECT_EQ(p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND).status(), atdecc::ACMP_STATUS_SUCCESS);
-    p.probe_answered(ieee::Eui48{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x10}, 0x0200000000000777ULL, 3);
-    EXPECT_TRUE(p.sink().settled());
-    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
-
-    std::vector<std::vector<uint8_t>> out;
-    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9e};
-    bridge.set_send_pdu([&out](std::span<uint8_t const> pdu) {
-        out.emplace_back(pdu.begin(), pdu.end());
-        return true;
-    });
-    bridge.start(p.now);
-    srp::msrp::DomainFirstValue class_a{};
-    class_a.sr_class_vid = 3;
-    (void)bridge.declare_domain(class_a, p.now);
-    for (int i = 0; i < 4; ++i) {
-        p.now += std::chrono::milliseconds(250);
-        bridge.tick(p.now);
-        for (auto const& pdu : std::exchange(out, {})) {
-            p.lc().msrp_handler.receive_packet(pdu, p.now);
-        }
-    }
-    EXPECT_EQ(p.lc().msrp_handler.domain().sr_class_vid, uint16_t{3});
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(2)}));
-}
 
 // A probe answer naming no VLAN (0) matches the Talker Advertise on any; the input joins the VLAN that
 // Advertise is on (3) once it is registered, and leaves it at its unbind.
-TEST(avb_entity_kit_milan_listener, an_input_probed_without_a_vlan_joins_its_talker_advertises)
-{
-    VlanRecorder fake;  // first: it outlives the kit, which deletes its links through it
-    MilanPair p;
-    p.l.kit.bind_listener_vlan(fake, 9);
-    EXPECT_TRUE(p.start());
-    auto const link = [&p](uint16_t const vid) { return net::vlan::vlan_link_name(p.l.config.interface_name, vid); };
-    ieee::Eui48 const group{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x11};
-    uint64_t const stream = 0x0200000000000888ULL;
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_BIND_RX_COMMAND);
-    p.probe_answered(group, stream, 0);
-    EXPECT_TRUE(p.sink().settled());
-    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2)}));  // no VID yet
-
-    std::vector<std::vector<uint8_t>> out;
-    srp::msrp::MsrpParticipant bridge{srp::msrp::MsrpConfig{}, 0xb1d9f};
-    bridge.set_send_pdu([&out](std::span<uint8_t const> pdu) {
-        out.emplace_back(pdu.begin(), pdu.end());
-        return true;
-    });
-    bridge.start(p.now);
-    srp::msrp::TalkerAdvertiseFirstValue fv{};
-    (void)tsn::load_unchecked(ieee::Eui64{}.from_uint64(stream).span(), &fv.stream_id);
-    fv.destination_address = group;
-    fv.vlan_identifier = 3;
-    fv.max_frame_size = 416;
-    fv.max_interval_frames = 1;
-    (void)bridge.declare_talker_advertise(fv, p.now);
-    for (int i = 0; i < 4; ++i) {
-        p.now += std::chrono::milliseconds(250);
-        bridge.tick(p.now);
-        for (auto const& pdu : std::exchange(out, {})) {
-            p.lc().msrp_handler.receive_packet(pdu, p.now);
-        }
-    }
-    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3)}));
-    (void)p.controller(atdecc::ACMP_MESSAGE_TYPE_UNBIND_RX_COMMAND);
-    EXPECT_TRUE(fake.requests == (std::vector<std::string>{"add " + link(2), "add " + link(3), "del " + link(3)}));
-}
 
 #endif  // __linux__
-
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

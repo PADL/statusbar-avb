@@ -48,6 +48,7 @@ using namespace statusbar::avb_entity;
 namespace {
 
 constexpr uint64_t AAF_96K_INT32_8CH = 0x020702200200C000ULL;
+constexpr uint64_t AM824_48K_8CH = 0x00A0020840000800ULL;
 constexpr uint64_t CRF_MILAN_48K = 0x041060010000BB80ULL;
 
 auto load_file(std::filesystem::path const& path) -> std::vector<uint8_t>
@@ -124,7 +125,7 @@ TEST(listener_connection, a_settled_sink_hands_what_it_probed_to_msrp_and_a_conn
 {
     auto donor = make_donor();
     std::atomic<int64_t> gptp{0};
-    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
     EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
     auto const followed = [&donor](ieee::Eui64 const& stream) {
         nanoavb::StreamId sid{};
@@ -954,6 +955,96 @@ auto l2_frame(std::span<uint8_t const> const avtpdu, bool const tagged, uint16_t
 
 }  // namespace
 
+namespace {
+
+using AafFrame = std::array<uint8_t, avtp::AafPdu::HEADER_LENGTH + (12 * 8 * 4)>;
+
+/// One AAF packet of @p format for STREAM_1, twelve samples presented at @p presentation.
+auto aaf_frame_of(StreamFormatFields const& format, avtp::Nanoseconds const presentation) -> AafFrame
+{
+    avtp::AafStreamOutputContext talker{
+        tsn::StreamId{},
+        format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(format.sample_rate_hz),
+        format.channels,
+        format.bit_depth,
+        0};
+    avtp::AafPdu pdu{};
+    AafFrame frame{};
+    auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    EXPECT_EQ(avtp::aaf_stream_serialize(talker, pdu, payload, 12, presentation, [](uint8_t, std::span<float>) {}), payload.size());
+    span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+    return frame;
+}
+
+}  // namespace
+
+TEST(listener_stopped, a_stopped_input_discards_its_frames_and_a_started_one_takes_them_again)
+{
+    // Milan v1.3 5.3.8.7: "A PAAD-AE having a stopped Stream Input shall
+    // discard the Stream AVTPDUs it receives."
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    constexpr avtp::Nanoseconds NOW{1'795'000'000'000'000'000};
+    auto const frame = aaf_frame_of(ls.slot_for(0)->spec.format, NOW + avtp::Nanoseconds{2'000'000});
+    int calls = 0;
+    ls.set_consume(0, [&](uint8_t, std::span<float const>, uint64_t, uint64_t) { ++calls; });
+    auto const& slot = *ls.slot_for(0);
+
+    EXPECT_FALSE(ls.stream_stopped(0));
+    ls.on_stream_rx_frame(frame, NOW.count());
+    EXPECT_EQ(calls, 8);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 1U);
+    EXPECT_EQ(slot.counters.timestamp_valid.load(), 1U);
+
+    // Stopped: nothing is decoded and no consumer is called. The frame is
+    // counted as received and as nothing else.
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(ls.stream_stopped(0));
+    for (int i = 0; i < 3; ++i) {
+        ls.on_stream_rx_frame(frame, NOW.count());
+    }
+    EXPECT_EQ(calls, 8);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(slot.rx_samples.load(), uint64_t{12});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 4U);
+    EXPECT_EQ(slot.counters.timestamp_valid.load(), 1U);
+    // It is still connected: stopping is not unbinding.
+    EXPECT_TRUE(ls.frame_is_for_listener(0, frame));
+
+    ls.set_stream_stopped(0, false);
+    ls.on_stream_rx_frame(frame, NOW.count());
+    EXPECT_EQ(calls, 16);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{2});
+    EXPECT_EQ(slot.counters.frames_rx.load(), 5U);
+    EXPECT_EQ(slot.counters.seq_num_mismatch.load(), 0U);  // the same frame again, and no error: the run began afresh
+}
+
+TEST(listener_stopped, the_stopped_state_is_kept_by_stream_index_and_outlives_the_slots)
+{
+    // The entity's stop and start close and open the slots; an input that
+    // was stopped is stopped still. One input's state is not another's.
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.set_stream_stopped(0, true);
+    EXPECT_TRUE(ls.stream_stopped(0));
+    EXPECT_FALSE(ls.stream_stopped(1));
+    ls.close_rx();
+    EXPECT_TRUE(ls.stream_stopped(0));
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(ls.stream_stopped(0));
+    // An index past the entity's streams is never stopped, and setting it does nothing.
+    ls.set_stream_stopped(60000, true);
+    EXPECT_FALSE(ls.stream_stopped(60000));
+}
+
 // drain_rx reads frames from the port: an untagged and a tagged AAF frame both
 // reach the connected slot with the AVTPDU at its offset (14, 18), and a
 // frame of another ethertype between them reaches nothing and stops nothing.
@@ -1355,6 +1446,237 @@ TEST(listener_kind, crf_kind_changes_are_refused)
     StreamSpec to_aaf = make_aaf_spec(1);
     EXPECT_FALSE(ls.reformat_stream(to_aaf).has_value());
     EXPECT_TRUE(ls.slot_for(1)->kind.load() == StreamKind::crf && ls.slot_for(1)->crf.has_value());
+}
+
+namespace {
+
+/// The Milan Base format at 96 kHz (AAF, 32 bit integer, 12 samples per
+/// AVTPDU) with @p channels channels: AAF_96K_INT32_8CH with another count.
+constexpr auto aaf_96k_of(uint64_t const channels) noexcept -> uint64_t
+{
+    return (AAF_96K_INT32_8CH & ~avtp::AAF_STREAM_FORMAT_CHANNELS_MASK) | (channels << 22);
+}
+
+constexpr avtp::Nanoseconds FORMAT_NOW{1'795'000'000'000'000'000};
+
+/// One AAF AVTPDU of the format @p word for STREAM_1 with @p samples samples
+/// of each channel, channel ch holding (ch + 1) / 16 throughout.
+auto aaf_frame_of_word(uint64_t const word, uint16_t const samples = 12) -> std::vector<uint8_t>
+{
+    auto const format = decode_stream_format(word);
+    avtp::AafStreamOutputContext talker{
+        tsn::StreamId{},
+        format.aaf_format,
+        *avtp::aaf_sample_rate_from_hz(format.sample_rate_hz),
+        format.channels,
+        format.bit_depth,
+        0};
+    avtp::AafPdu pdu{};
+    std::vector<uint8_t> frame(avtp::AafPdu::HEADER_LENGTH + (size_t{samples} * format.channels * 4), 0);
+    auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    auto const fill = [](uint8_t ch, std::span<float> lane) { std::ranges::fill(lane, static_cast<float>(ch + 1) / 16.0F); };
+    EXPECT_EQ(
+        avtp::aaf_stream_serialize(talker, pdu, payload, samples, FORMAT_NOW + avtp::Nanoseconds{2'000'000}, fill), payload.size());
+    span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+    span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_1));
+    return frame;
+}
+
+/// What the consumers of one input were handed: per channel, the calls and the last lane.
+struct HeardChannels
+{
+    std::array<int, 8> calls{};
+    std::array<std::vector<float>, 8> lanes{};
+
+    auto consumer()
+    {
+        return [this](uint8_t ch, std::span<float const> samples, uint64_t, uint64_t) {
+            ++calls.at(ch);
+            lanes.at(ch).assign(samples.begin(), samples.end());
+        };
+    }
+    [[nodiscard]] auto total() const -> int { return std::accumulate(calls.begin(), calls.end(), 0); }
+};
+
+/// A raw audio sink that keeps the last payload it was handed.
+struct KeepingSink : StreamRxAudioSink
+{
+    int calls{0};
+    std::vector<uint8_t> last{};
+    void on_listener_audio(uint16_t, StreamAudioFormat, std::span<uint8_t const> payload) override
+    {
+        ++calls;
+        last.assign(payload.begin(), payload.end());
+    }
+};
+
+}  // namespace
+
+TEST(listener_format, an_input_reports_the_format_it_was_opened_with_until_another_is_set)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_EQ(ls.stream_format(0), uint64_t{0});  // not open
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_EQ(ls.stream_format(0), AAF_96K_INT32_8CH);
+
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    EXPECT_EQ(ls.stream_format(0), aaf_96k_of(2));
+    EXPECT_TRUE(ls.set_stream_format(0, AAF_96K_INT32_8CH));
+    EXPECT_EQ(ls.stream_format(0), AAF_96K_INT32_8CH);
+}
+
+TEST(listener_format, an_input_takes_every_base_channel_count_at_its_rate)
+{
+    // Milan v1.3 6.5: a Stream Input that supports one Base format at a rate
+    // supports all of them, 1, 2, 4, 6 and 8 channels.
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    HeardChannels heard{};
+    ls.set_consume(0, heard.consumer());
+
+    int frames = 0;
+    for (uint64_t const channels : {1U, 2U, 4U, 6U, 8U}) {
+        EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(channels)));
+        ls.on_stream_rx_frame(aaf_frame_of_word(aaf_96k_of(channels)), FORMAT_NOW.count());
+        ++frames;
+        // Every channel of the opened input is handed on once per AVTPDU:
+        // what the stream carries decoded, the rest silent.
+        EXPECT_EQ(heard.total(), frames * 8);
+        for (size_t ch = 0; ch < 8; ++ch) {
+            float const expected = ch < channels ? static_cast<float>(ch + 1) / 16.0F : 0.0F;
+            EXPECT_EQ(heard.lanes.at(ch).size(), size_t{12});
+            EXPECT_EQ(heard.lanes.at(ch).front(), expected);
+            EXPECT_EQ(heard.lanes.at(ch).back(), expected);
+        }
+    }
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{5});
+    EXPECT_EQ(ls.slot_for(0)->counters.unsupported_format.load(), 0U);
+}
+
+TEST(listener_format, an_avtpdu_that_is_not_of_the_inputs_format_is_discarded)
+{
+    // Milan v1.3 4.4.2.2: "A Listener PAAD shall discard the incoming AVTPDUs
+    // that don't respect the format which is configured in the associated
+    // STREAM_INPUT descriptor."
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    HeardChannels heard{};
+    ls.set_consume(0, heard.consumer());
+    auto const& slot = *ls.slot_for(0);
+
+    // Opened for eight channels: two channels, and six samples, are refused.
+    ls.on_stream_rx_frame(aaf_frame_of_word(aaf_96k_of(2)), FORMAT_NOW.count());
+    ls.on_stream_rx_frame(aaf_frame_of_word(AAF_96K_INT32_8CH, 6), FORMAT_NOW.count());
+    EXPECT_EQ(heard.total(), 0);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{0});
+    EXPECT_EQ(slot.rx_bad.load(), uint64_t{0});  // read, so not bad: discarded as UNSUPPORTED_FORMAT
+    EXPECT_EQ(slot.counters.frames_rx.load(), 2U);
+    EXPECT_EQ(slot.counters.unsupported_format.load(), 2U);
+
+    // Set to two channels: now the eight channel AVTPDU is the one refused.
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    ls.on_stream_rx_frame(aaf_frame_of_word(AAF_96K_INT32_8CH), FORMAT_NOW.count());
+    EXPECT_EQ(heard.total(), 0);
+    EXPECT_EQ(slot.counters.unsupported_format.load(), 3U);
+    ls.on_stream_rx_frame(aaf_frame_of_word(aaf_96k_of(2)), FORMAT_NOW.count());
+    EXPECT_EQ(heard.total(), 8);
+    EXPECT_EQ(slot.rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(slot.counters.unsupported_format.load(), 3U);
+}
+
+TEST(listener_format, an_input_refuses_a_format_it_cannot_be_brought_to)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    StreamSpec crf{};
+    crf.index = 1;
+    crf.format_word = CRF_MILAN_48K;
+    crf.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(ls.open_stream(crf).has_value());
+
+    uint64_t const at_48k = (aaf_96k_of(2) & ~0x000F000000000000ULL) | 0x0005000000000000ULL;
+    uint64_t const of_24_bits = (aaf_96k_of(2) & ~0x000000FF00000000ULL) | 0x0000001800000000ULL;
+    uint64_t const of_6_samples = (aaf_96k_of(2) & ~(0x3FFULL << 12)) | (6ULL << 12);
+    for (uint64_t const refused :
+         {at_48k,
+          of_24_bits,
+          of_6_samples,
+          aaf_96k_of(0),
+          aaf_96k_of(MAX_AAF_INPUT_CHANNELS + 1U),
+          aaf_96k_of(2) | avtp::AAF_STREAM_FORMAT_UT_BIT,
+          CRF_MILAN_48K,
+          AM824_48K_8CH}) {
+        EXPECT_FALSE(ls.can_take_stream_format(0, refused));
+        EXPECT_FALSE(ls.set_stream_format(0, refused));
+    }
+    EXPECT_EQ(ls.stream_format(0), AAF_96K_INT32_8CH);
+    EXPECT_TRUE(ls.can_take_stream_format(0, aaf_96k_of(MAX_AAF_INPUT_CHANNELS)));
+
+    // An input of another kind takes the word it was opened with and no other.
+    EXPECT_TRUE(ls.set_stream_format(1, CRF_MILAN_48K));
+    EXPECT_FALSE(ls.set_stream_format(1, aaf_96k_of(2)));
+    EXPECT_EQ(ls.stream_format(1), CRF_MILAN_48K);
+    // An input that is not open takes nothing.
+    EXPECT_FALSE(ls.set_stream_format(5, AAF_96K_INT32_8CH));
+    EXPECT_FALSE(ls.set_stream_format(60000, AAF_96K_INT32_8CH));
+}
+
+TEST(listener_format, the_format_is_kept_by_stream_index_and_outlives_the_slots)
+{
+    // The entity's stop and start close and open the slots; an input set to
+    // two channels receives two channels still.
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    ls.close_rx();
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_EQ(ls.stream_format(0), aaf_96k_of(2));
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    ls.on_stream_rx_frame(aaf_frame_of_word(aaf_96k_of(2)), FORMAT_NOW.count());
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{1});
+    EXPECT_EQ(ls.slot_for(0)->counters.unsupported_format.load(), 0U);
+}
+
+TEST(listener_format, the_raw_sink_is_handed_frames_of_the_opened_channel_count)
+{
+    // A sink reads the payload by the width the input was opened with. A
+    // narrower stream reaches it widened, its missing channels zero.
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    KeepingSink sink{};
+    ListenerStreams ls{1'000'000, donor->components(), gptp, &sink};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+
+    auto const wide = aaf_frame_of_word(AAF_96K_INT32_8CH);
+    ls.on_stream_rx_frame(wide, FORMAT_NOW.count());
+    EXPECT_EQ(sink.calls, 1);
+    EXPECT_TRUE(std::ranges::equal(sink.last, std::span{wide}.subspan(avtp::AafPdu::HEADER_LENGTH)));
+
+    EXPECT_TRUE(ls.set_stream_format(0, aaf_96k_of(2)));
+    auto const narrow = aaf_frame_of_word(aaf_96k_of(2));
+    ls.on_stream_rx_frame(narrow, FORMAT_NOW.count());
+    EXPECT_EQ(sink.calls, 2);
+    EXPECT_EQ(sink.last.size(), size_t{12} * 8 * 4);
+    auto const audio = std::span{narrow}.subspan(avtp::AafPdu::HEADER_LENGTH);
+    for (size_t frame = 0; frame < 12; ++frame) {
+        auto const handed = std::span{sink.last}.subspan(frame * 8 * 4, size_t{8} * 4);
+        EXPECT_TRUE(std::ranges::equal(handed.first(8), audio.subspan(frame * 2 * 4, 8)));
+        EXPECT_TRUE(std::ranges::all_of(handed.subspan(8), [](uint8_t octet) { return octet == 0; }));
+    }
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)

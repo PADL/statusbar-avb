@@ -20,9 +20,6 @@ using statusbar::avb_entity::interrupt_stream_input;
 using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
 using statusbar::avb_entity::StreamInputCounts;
-using statusbar::avb_entity::StreamInputIntervals;
-using statusbar::avb_entity::StreamOutputIntervals;
-using statusbar::avb_entity::StreamOutputTotals;
 using statusbar::avb_entity::tally_discarded_stream_input_packet;
 using statusbar::avb_entity::tally_stream_input_packet;
 

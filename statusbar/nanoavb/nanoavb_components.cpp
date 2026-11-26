@@ -30,6 +30,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace statusbar::nanoavb {
 
@@ -282,7 +283,7 @@ auto NanoAvbComponents::listener_sink(uint16_t const stream_index) const noexcep
 }
 
 void NanoAvbComponents::print_info() const
-{  // NOLINT(statusbar-block-statements) the info print; pre-dates the gate
+{
     std::print("Components initialized:\n");
     std::print("  - EntityModel with {} configuration(s)\n", entity_model.configuration_count());
     std::print("  - AemCommandHandler\n");
@@ -470,14 +471,6 @@ void AtdeccNetHandler::log_status()
         talker_connections += acmp_talker_.connection_count(i);
     }
 
-    // Count listener connections (streams whose ACMP CONNECT_RX completed)
-    size_t listener_connections = 0;
-    for (size_t i = 0; i < acmp_listener_.max_streams(); ++i) {
-        if (acmp_listener_.is_connected(static_cast<uint16_t>(i))) {
-            ++listener_connections;
-        }
-    }
-
     // NOLINTNEXTLINE(bugprone-unchecked-optional-access) - tick() calls this only with a logger set
     logger_->debug(
         "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
@@ -498,38 +491,6 @@ auto AtdeccNetHandler::listener_connections() const -> size_t
         count += (acmp_listener_.is_connected(index) || milan_settled) ? 1U : 0U;
     }
     return count;
-}
-
-void AtdeccNetHandler::advertiser_receive(
-    atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
-{
-    // The local socket is not an AVB interface (Milan v1.2 Section 5.6.3): a local discover
-    // is answered at once, to that controller alone, outside the advertise state machine.
-    if (!local) {
-        adp_advertiser_.receive_adpdu(adp, now);
-    } else if (local_port_ != nullptr && adp_advertiser_.is_discover_for_us(adp)) {
-        (void)adp_advertiser_.reply_available([&](AdpDu const& du) { return local_port_->send(src_mac, as_bytes(du)); });
-    }
-}
-
-void AtdeccNetHandler::dispatch_adp(atdecc::AdpDu const& adp, ieee::Eui48 const& src_mac, sm::TimePoint const now, bool const local)
-{
-    advertiser_receive(adp, src_mac, now, local);
-    if (adp_discovery_ != nullptr) {
-        adp_discovery_->receive_adpdu(adp, src_mac, now);
-    }
-    // The Milan listener's per-sink talker discovery (Section 5.6.4)
-    // compares the talker's gPTP grandmaster and domain with ours.
-    acmp_listener_.receive_adpdu(
-        adp, adp_advertiser_.adpdu().gptp_grandmaster_id, adp_advertiser_.adpdu().gptp_domain_number.get(), now);
-    // A departing talker tears down the sinks still connected to it: ACMP clears a sink only
-    // on a controller's DISCONNECT_RX, so it would otherwise stay connected (and hold its SRP
-    // reservation) forever.
-    if (adp.is_entity_departing()) {
-        (void)acmp_listener_.on_talker_departed(adp.entity_id, now);
-        // A departing controller's unsolicited registration is now stale.
-        (void)aem_handler_.remove_unsolicited_registrations_for(adp.entity_id);
-    }
 }
 
 void AtdeccNetHandler::dispatch_frame(
@@ -684,54 +645,6 @@ void AtdeccNetHandler::dispatch_aecp(ieee::Eui48 const& src_mac, std::span<uint8
 //
 // NanoAvbComponents constructor
 //
-
-namespace {
-
-/// The STREAM_INPUT descriptors in configuration 0 of @p storage, at most the Milan listener's sinks;
-/// nullopt without a blob (the sinks are the inputs).
-auto stream_input_count(atdecc::aem::DescriptorStorage const* const storage) noexcept -> std::optional<size_t>
-{
-    if (storage == nullptr) {
-        return std::nullopt;
-    }
-    size_t count = 0;
-    while (count < atdecc::MilanListener::MAX_SINKS &&
-           storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, static_cast<uint16_t>(count)).has_value()) {
-        ++count;
-    }
-    return count;
-}
-
-/// The CLOCK_DOMAIN descriptors in configuration 0 of @p storage (one, the
-/// MVU handler's default, without a blob).
-auto clock_domain_count(atdecc::aem::DescriptorStorage const* const storage) noexcept -> size_t
-{
-    if (storage == nullptr) {
-        return 1;
-    }
-    size_t count = 0;
-    while (count < MvuCommandHandler::MAX_CLOCK_DOMAINS &&
-           storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, static_cast<uint16_t>(count)).has_value()) {
-        ++count;
-    }
-    return count;
-}
-
-/// The entity's MSRP configuration: Milan's timers for a Milan entity (the immediate leave is set_instant_leave),
-/// IEEE 802.1Q's for a classic one.
-[[nodiscard]] auto profile_msrp_config(EntityProfile const profile, statusbar::srp::msrp::MsrpConfig const& config) noexcept
-    -> statusbar::srp::msrp::MsrpConfig
-{
-    return profile.milan ? milan_msrp_config(config) : config;
-}
-
-/// The entity's MVRP configuration: Milan's timers for a Milan entity, IEEE 802.1Q's otherwise.
-[[nodiscard]] auto profile_mvrp_config(EntityProfile const profile) noexcept -> statusbar::srp::mvrp::MvrpConfig
-{
-    return profile.milan ? milan_mvrp_config({}) : statusbar::srp::mvrp::MvrpConfig{};
-}
-
-}  // namespace
 
 // Wire each handler against the *member* `entity_model`. Member init runs in
 // declaration order (entity_model first), so the references the handlers take
