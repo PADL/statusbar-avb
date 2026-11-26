@@ -1826,13 +1826,19 @@ void AvbEntityKit::wire_milan_listener_callbacks()
 
 void AvbEntityKit::follow_milan_bindings()
 {
+    // The bound and stopped states, then the kit's own save.
+    follow_inputs_bound();
+    apply_input_stopped_states();
+    persist_pending_ = true;
+}
+
+void AvbEntityKit::follow_inputs_bound()
+{
     // Milan v1.3 Section 5.3.8.10: bound from unbound zeroes the input's counters; an unbind is
-    // no interruption. Then the stopped states (5.3.8.7), and the kit's own save.
+    // no interruption.
     for (auto const& spec : listener_ != nullptr ? std::span{listener_specs_} : std::span<StreamSpec const>{}) {
         follow_input_bound(spec.index);
     }
-    apply_input_stopped_states();
-    persist_pending_ = true;
 }
 
 void AvbEntityKit::follow_input_bound(uint16_t const index)
@@ -2373,7 +2379,9 @@ void AvbEntityKit::restore_listener_bindings()
     }
     host_.enable_listener_binding_persistence(
         state_file(config_.listener_bindings_path, entity_state_file::LISTENER_BINDINGS, milan));
-    // The started/stopped state is restored with the binding (Milan v1.3 Section 5.3.8.7).
+    // A restored binding is bound, and its started/stopped state restored with it (Milan v1.3
+    // Sections 5.3.8.10, 5.3.8.7): its unbind is then no interruption.
+    follow_inputs_bound();
     apply_input_stopped_states();
     if (!config_.kit_data_plane) {
         restore_input_formats();  // each input's format, saved when a controller last set it (Section 5.3.8.1)

@@ -735,6 +735,8 @@ class AvbEntityKit
     /// A Milan sink's binding changed: the counters of an input bound or unbound, the stopped
     /// states (Milan v1.3 Sections 5.3.8.7, 5.3.8.10), and a save.
     void follow_milan_bindings();
+    /// follow_input_bound() for every stream input.
+    void follow_inputs_bound();
     /// Milan input @p index bound or unbound since last seen: its counters zeroed, or its lock let go.
     void follow_input_bound(uint16_t index);
     /// START_STREAMING or STOP_STREAMING was accepted for a stream.
