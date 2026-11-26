@@ -387,6 +387,46 @@ struct TalkerStreams
     /// a change counts a start or a stop. The sender's thread.
     void follow_streaming(uint16_t stream_index, bool on) noexcept;
 
+    //
+    // A talker stream sent beside the stream port (docs/ENTITY_CONSTRUCTION_KIT.md)
+    //
+
+    /// The varying header fields a data plane beside the port gives the AVTPDUs it sends of a stream from now on.
+    struct OffloadHeader
+    {
+        uint8_t sequence_num{0};  ///< the next AVTPDU's
+        bool mr{false};
+        bool tu{false};
+    };
+    /// What such a data plane sent of a stream since it last said.
+    struct OffloadSent
+    {
+        uint32_t pdus{0};          ///< AVTPDUs sent
+        uint32_t tu_pdus{0};       ///< of them, those with tu set; counted at most pdus
+        uint8_t next_sequence{0};  ///< the sequence_num of the next it sends; read when pdus is not 0
+        /// The mr of the last AVTPDU it sent, when it knows it: a toggle is then counted, and its hold run down, only
+        /// once the wire carries it. Without it every AVTPDU reported counts with the mr last answered.
+        std::optional<bool> last_mr{};
+    };
+    /// The header @p slot's next AVTPDU carries as it starts sending: its sequence, a pending restart applied as for
+    /// an AVTPDU the kit sends (next_mr()), tu at the media wake last told (wake_timestamp_uncertain()). The data plane
+    /// is told the wake as the port's sender is: through AvbEntityKit::talker_should_transmit(), or tell_wake_time()
+    /// if it does not ask the gate. Media thread, in transmit_if_due()'s place for a stream a data plane beside the
+    /// port sends, so the slot's mr, hold and counters keep their one writer.
+    [[nodiscard]] auto offload_header(TalkerStreamSlot& slot) noexcept -> OffloadHeader;
+    /// transmit_if_due() for a stream a data plane beside the port sends: @p sent counted as the kit's own AVTPDUs,
+    /// a start or a stop as @p gate_open and STOP_STREAMING have it; then offload_header() while the stream streams,
+    /// else the header with mr as it stands, as no AVTPDU goes. Media thread, in transmit_if_due()'s place, the wake
+    /// told first as for offload_header().
+    [[nodiscard]] auto notify_offload_sent(TalkerStreamSlot& slot, bool gate_open, OffloadSent const& sent) noexcept
+        -> OffloadHeader;
+    /// @p sent counted on @p slot and its stream's TalkerTxCounters, its mr hold run down, its sequence moved on.
+    void count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept;
+    /// @p slot's header with mr @p mr: its next sequence_num, tu at the wake last told.
+    [[nodiscard]] auto offload_header_for(TalkerStreamSlot const& slot, bool mr) const noexcept -> OffloadHeader;
+    /// @p slot's AAF reframer and CRF schedule emptied, as after a closed gate. Media thread.
+    static void empty_own_schedule(TalkerStreamSlot& slot) noexcept;
+
     /// The AAF and CRF halves of transmit_if_due.
     void serve_aaf(
         TalkerStreamSlot& slot,

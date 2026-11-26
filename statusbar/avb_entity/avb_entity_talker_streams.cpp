@@ -11,6 +11,7 @@
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -41,6 +42,61 @@ void count_pdu(TalkerTxCounters& c, bool const tu, bool const mr) noexcept
     }
     c.last_mr = mr;
     c.have_mr = true;
+}
+
+/// @p k more in a counter that one thread writes.
+void add(std::atomic<uint32_t>& counter, uint32_t const k) noexcept
+{
+    counter.store(counter.load(std::memory_order_relaxed) + k, std::memory_order_relaxed);
+}
+
+/// @p pdus AVTPDUs sent, @p tu_pdus of them with tu, every one with @p mr: an mr unlike the last AVTPDU's is a toggle.
+void count_pdus(TalkerTxCounters& c, uint32_t const pdus, uint32_t const tu_pdus, bool const mr) noexcept
+{
+    add(c.pdus, pdus);
+    add(c.tu_pdus, tu_pdus);
+    if (c.have_mr && mr != c.last_mr) {
+        bump(c.mr_toggles);
+    }
+    c.last_mr = mr;
+    c.have_mr = true;
+}
+
+/// How many of @p sent's AVTPDUs are known to carry @p mr, the mr a toggle's hold is of: all of them without
+/// last_mr; with it all when the wire carried @p mr before (@p c), the last one when it does from this report, else none.
+auto pdus_carrying(TalkerTxCounters const& c, bool const mr, TalkerStreams::OffloadSent const& sent) noexcept -> uint32_t
+{
+    if (!sent.last_mr) {
+        return sent.pdus;
+    }
+    if (*sent.last_mr != mr) {
+        return 0;
+    }
+    return c.have_mr && c.last_mr == mr ? sent.pdus : 1U;
+}
+
+/// @p slot's serializer's next sequence_num.
+auto next_sequence_for(TalkerStreamSlot const& slot) noexcept -> uint8_t
+{
+    if (slot.aaf) {
+        return slot.aaf->sequence_num;
+    }
+    if (slot.am824) {
+        return slot.am824->sequence_num;
+    }
+    return slot.crf ? slot.crf->sequence_num : uint8_t{0};
+}
+
+/// @p slot's serializer to give its next AVTPDU sequence_num @p sequence.
+void set_sequence(TalkerStreamSlot& slot, uint8_t const sequence) noexcept
+{
+    if (slot.aaf) {
+        slot.aaf->sequence_num = sequence;
+    } else if (slot.am824) {
+        slot.am824->sequence_num = sequence;
+    } else if (slot.crf) {
+        slot.crf->sequence_num = sequence;
+    }
 }
 
 /// One slot's serializer for an AM824 spec.
@@ -663,6 +719,54 @@ auto TalkerStreams::frame_template(uint16_t const stream_index, ieee::Eui48 cons
         return aaf_frame_template(*slot->aaf, slot->aaf_samples, header);
     }
     return slot->crf ? crf_frame_template(*slot->crf, header) : std::nullopt;
+}
+
+//
+// A talker stream sent beside the stream port
+//
+
+auto TalkerStreams::offload_header(TalkerStreamSlot& slot) noexcept -> OffloadHeader
+{
+    return offload_header_for(slot, next_mr(slot));
+}
+
+auto TalkerStreams::offload_header_for(TalkerStreamSlot const& slot, bool const mr) const noexcept -> OffloadHeader
+{
+    return {.sequence_num = next_sequence_for(slot), .mr = mr, .tu = wake_timestamp_uncertain()};
+}
+
+auto TalkerStreams::notify_offload_sent(TalkerStreamSlot& slot, bool const gate_open, OffloadSent const& sent) noexcept
+    -> OffloadHeader
+{
+    bool const streams = gate_open && !stream_stopped(slot.spec.index);
+    follow_streaming(slot.spec.index, streams);
+    empty_own_schedule(slot);
+    count_offload_sent(slot, sent);
+    // As the kit's own path, which asks next_mr() only for an AVTPDU it sends.
+    return streams ? offload_header(slot) : offload_header_for(slot, slot.mr);
+}
+
+void TalkerStreams::empty_own_schedule(TalkerStreamSlot& slot) noexcept
+{
+    // The kit's own path starts clean if the stream comes back to it, as after a closed gate.
+    if (slot.reframer) {
+        slot.reframer->clear();
+    }
+    slot.crf_due.reset();
+}
+
+void TalkerStreams::count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept
+{
+    if (sent.pdus == 0) {
+        return;
+    }
+    slot.tx_packets += sent.pdus;
+    set_sequence(slot, sent.next_sequence);
+    if (slot.spec.index < tx_counters_.size()) {
+        auto& c = tx_counters_[slot.spec.index];
+        slot.mr_hold -= static_cast<uint8_t>(std::min<uint32_t>(slot.mr_hold, pdus_carrying(c, slot.mr, sent)));
+        count_pdus(c, sent.pdus, std::min(sent.tu_pdus, sent.pdus), sent.last_mr.value_or(slot.mr));
+    }
 }
 
 }  // namespace statusbar::avb_entity
