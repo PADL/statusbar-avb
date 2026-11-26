@@ -170,6 +170,26 @@ auto NanoAvbAcmpListener::receive_controller_command(AcmpCommandResponse const& 
     return true;
 }
 
+namespace {
+
+/// The CONNECT_RX_COMMAND a listener gives itself for a fast connect, the
+/// talker and the sink still to name: entity @p my_id is its controller and
+/// its listener. Made as a controller makes one (init_command), since the
+/// machine copies it into the CONNECT_TX_COMMAND it sends: the subtype and
+/// the control_data_length of that ACMPDU are this command's (IEEE
+/// 1722.1-2021 Clauses 8.2.1.1 and 8.2.1.6).
+[[nodiscard]] auto fast_connect_command(Eui64 const& my_id, uint16_t const sequence_id) -> AcmpCommandResponse
+{
+    AcmpCommandResponse cmd{};
+    cmd.init_command(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
+    cmd.controller_entity_id = cmd.listener_entity_id = my_id;
+    cmd.sequence_id = sequence_id;
+    cmd.flags = acmp_flags::FAST_CONNECT;
+    return cmd;
+}
+
+}  // namespace
+
 auto NanoAvbAcmpListener::fast_connect(
     uint16_t const listener_unique_id, Eui64 const& talker_id, uint16_t const talker_unique_id, TimePoint const now) -> bool
 {
@@ -182,15 +202,10 @@ auto NanoAvbAcmpListener::fast_connect(
     // on_connect callback all run exactly as for a controller connect;
     // the CONNECT_RX_RESPONSE the machine emits is addressed to ourselves
     // on the ACMP multicast and ignored like any other foreign response.
-    AcmpCommandResponse cmd{};
-    cmd.set_message_type(ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND);
-    cmd.controller_entity_id = ctx_.my_id;
+    auto cmd = fast_connect_command(ctx_.my_id, fast_connect_sequence_++);
     cmd.talker_entity_id = talker_id;
     cmd.talker_unique_id = talker_unique_id;
-    cmd.listener_entity_id = ctx_.my_id;
     cmd.listener_unique_id = listener_unique_id;
-    cmd.sequence_id = fast_connect_sequence_++;
-    cmd.flags = acmp_flags::FAST_CONNECT;
     return receive_controller_command(cmd, now);
 }
 

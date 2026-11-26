@@ -1189,6 +1189,41 @@ TEST(avb_entity_kit_acmp, a_milan_binding_is_in_the_file_before_the_answer_and_s
     (void)std::filesystem::remove(path);
 }
 
+TEST(avb_entity_kit_acmp, an_ieee_1722_1_listener_started_with_a_saved_connection_connects_to_its_talker_again)
+{
+    // IEEE 1722.1-2021 8.2.2.1.1: a listener restoring a saved connection is its
+    // own controller. Its CONNECT_TX_COMMAND crosses the wire as octets here, so
+    // the talker answers only a well-formed ACMPDU.
+    auto const path = (std::filesystem::temp_directory_path() / "statusbar_ieee_bindings_functional_test.txt").string();
+    (void)std::filesystem::remove(path);
+    {
+        KitPair pair{"classic", path};
+        pair.bind();
+        pair.run(2 * ROUNDS_PER_SECOND);
+        EXPECT_TRUE(pair.listener->host().components().acmp_listener.is_connected(pair.sink));
+        EXPECT_EQ(load_saved_listener_bindings(path)->size(), 1U);
+        EXPECT_TRUE(pair.listener.stop(pair.now));
+        EXPECT_TRUE(pair.talker.stop(pair.now));
+    }
+
+    // Both entities started again, as after a power cycle, and no controller anywhere.
+    KitPair again{"classic", path};
+    EXPECT_FALSE(again.listener->host().components().acmp_listener.is_connected(again.sink));
+    again.run(4 * ROUNDS_PER_SECOND);
+    auto const asked = again.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    auto const answer = again.last(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    EXPECT_TRUE(asked.has_value() && answer.has_value());
+    EXPECT_EQ(asked.value_or(atdecc::AcmpCommandResponse{}).controller_entity_id, LISTENER_ID);
+    EXPECT_EQ(answer.value_or(atdecc::AcmpCommandResponse{}).connection_count.get(), 1);
+    EXPECT_TRUE(again.listener->host().components().acmp_listener.is_connected(again.sink));
+    EXPECT_EQ(again.listener_srp_state(), nanoavb::ListenerReservationState::Ready);
+    EXPECT_TRUE(again.talker_transmits());
+
+    EXPECT_TRUE(again.listener.stop(again.now));
+    EXPECT_TRUE(again.talker.stop(again.now));
+    (void)std::filesystem::remove(path);
+}
+
 TEST(avb_entity_kit_acmp, without_a_bindings_file_a_milan_binding_lasts_a_stop_and_start_of_the_kit)
 {
     using atdecc::MilanSinkState;

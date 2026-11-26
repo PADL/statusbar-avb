@@ -532,8 +532,13 @@ TEST(nanoavb_acmp_listener, fast_connect_connects_without_controller)
     EXPECT_TRUE(listener.fast_connect(0, talker_id, 0, now));
     EXPECT_TRUE(command_sent);
     EXPECT_EQ(captured_command.message_type(), ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+    // An ACMPDU, of the length of one: what a talker looks at before anything else (8.2.1.1, 8.2.1.6).
+    EXPECT_EQ(captured_command.subtype.get(), uint8_t{statusbar::avtp::AvtpSubtype::acmp});
+    EXPECT_EQ(captured_command.control_data_length(), AcmpCommandResponse::DATA_LENGTH);
+    EXPECT_EQ(captured_command.status(), ACMP_STATUS_SUCCESS);
     EXPECT_EQ(captured_command.talker_entity_id, talker_id);
     EXPECT_EQ(captured_command.controller_entity_id, listener_id);
+    EXPECT_EQ(captured_command.listener_entity_id, listener_id);
     EXPECT_TRUE(captured_command.is_fast_connect());
     EXPECT_TRUE(listener.has_pending());
 
