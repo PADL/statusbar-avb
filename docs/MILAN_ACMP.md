@@ -341,6 +341,10 @@ which is what the grace was for.
   thread, so with no frame arriving it is counted when one does. After a
   start the stream is taken as a new one: no SEQ_NUM_MISMATCH or
   MEDIA_RESET for what went by unread.
+- An input that loses its stream (an unbind, or a sink that leaves its
+  settled state) counts MEDIA_UNLOCKED at once if it was locked: with no
+  stream it is not synchronized, and MEDIA_LOCKED equals MEDIA_UNLOCKED
+  again (5.3.8.10). The same holds for an IEEE 1722.1 disconnect.
 
 ## Not done
 

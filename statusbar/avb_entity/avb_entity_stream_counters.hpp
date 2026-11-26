@@ -22,7 +22,9 @@ namespace statusbar::avb_entity {
 /// IEEE 1722.1 STREAM_INPUT counters (Clause 7.4.42) for incoming-stream
 /// health, queryable via AECP GET_COUNTERS. Published values are atomic
 /// (written on the RX thread, read by the AECP handler); the lock/sequence
-/// detector state below is touched only on the RX thread.
+/// detector state below is touched only on the RX thread, but for is_locked,
+/// which the reactor thread clears when the input loses its stream
+/// (unlock_stream_input).
 struct StreamInputCounters
 {
     std::atomic<uint32_t> media_locked{0};
@@ -75,7 +77,12 @@ struct StreamInputCounters
     uint32_t prev_delta{0};
     bool have_prev_delta{false};
     int locked_run{0};
-    bool is_locked{false};
+    /// Whether the input is synchronized on the media clock: MEDIA_LOCKED is
+    /// then one more than MEDIA_UNLOCKED, and otherwise equal to it (Milan
+    /// v1.3 5.3.8.10). Set on the RX thread alone, after it has counted
+    /// MEDIA_LOCKED; cleared by an exchange on either thread, whose winner
+    /// counts MEDIA_UNLOCKED. So MEDIA_UNLOCKED never runs ahead.
+    std::atomic<bool> is_locked{false};
 };
 
 /// Update one StreamInputCounters from a received stream packet.
@@ -114,6 +121,16 @@ void tally_stream_input_packet(
 /// stream as it is, with no SEQ_NUM_MISMATCH or MEDIA_RESET for the packets
 /// nobody looked at. RX thread.
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept;
+
+/// The input is no longer synchronized on the media clock: when it was
+/// locked, MEDIA_UNLOCKED is counted, once, and it is not locked. Nothing
+/// otherwise. Called when the input loses its stream (an unbind, a
+/// disconnect, a Milan sink that leaves its settled state): with no stream
+/// there is nothing to be synchronized on, and no AVTPDU will come to show
+/// it. Milan v1.3 5.3.8.10: "either MEDIA_LOCKED=MEDIA_UNLOCKED (in this
+/// case, the input stream is not synchronized on the media clock), or
+/// MEDIA_LOCKED=MEDIA_UNLOCKED+1". Either thread.
+void unlock_stream_input(StreamInputCounters& c) noexcept;
 
 /// Append the presentation-margin report for one STREAM_INPUT to @p out:
 /// late/early counts, margin and lateness statistics, and the margin histogram

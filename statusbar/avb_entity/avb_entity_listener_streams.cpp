@@ -748,6 +748,13 @@ void ListenerStreams::update_stream_input_counters(
         now.count(),
         lock_tolerance_ns_,
         sample_rate_);
+    // An AVTPDU taken up just before the input lost its stream may lock it
+    // after the reactor thread has dropped the lock (on_listener_disconnected).
+    // The reactor clears the stream id first and the lock after, so a lock
+    // set after that sees the id gone here, and is dropped.
+    if (slot.rx_stream_id.load() == 0) {
+        unlock_stream_input(slot.counters);
+    }
 }
 
 auto ListenerStreams::fill_stream_input_counters(
@@ -956,6 +963,10 @@ void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
         settled = slot->connection.settled;
         slot->rx_stream_id.publish(0);  // no frame is this input's any more
+        // And with no stream it is not synchronized on the media clock: a
+        // held lock is dropped here, since no AVTPDU will come to show it
+        // (Milan v1.3 5.3.8.10). After the id, see update_stream_input_counters.
+        unlock_stream_input(slot->counters);
         release_connection(slot->connection, now);
     }
     if (logger_) {

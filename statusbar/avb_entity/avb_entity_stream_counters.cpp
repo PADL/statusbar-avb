@@ -5,7 +5,6 @@
 
 #include <format>
 #include <iterator>
-#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -91,16 +90,15 @@ void tally_media_lock(
         if (c.locked_run < LOCK_RUN_THRESHOLD) {
             ++c.locked_run;
         }
-        if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.is_locked) {
-            c.is_locked = true;
+        if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.is_locked.load()) {
+            // Counted before it is shown as locked, so that the thread that
+            // clears it never counts MEDIA_UNLOCKED ahead of MEDIA_LOCKED.
             c.media_locked.fetch_add(1, relaxed);
+            (void)c.is_locked.exchange(true);
         }
     } else {
         c.locked_run = 0;
-        if (c.is_locked) {
-            c.is_locked = false;
-            c.media_unlocked.fetch_add(1, relaxed);
-        }
+        unlock_stream_input(c);
     }
     c.prev_delta = actual;
     c.have_prev_delta = true;
@@ -178,12 +176,17 @@ void format_stream_input_timing_to(std::string& out, uint16_t const stream_index
     format_histogram_to(out, c);
 }
 
+void unlock_stream_input(StreamInputCounters& c) noexcept
+{
+    if (c.is_locked.exchange(false)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+    }
+}
+
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
 {
     c.frames_rx.fetch_add(1, relaxed);
-    if (std::exchange(c.is_locked, false)) {
-        c.media_unlocked.fetch_add(1, relaxed);
-    }
+    unlock_stream_input(c);
     forget_run(c);
 }
 

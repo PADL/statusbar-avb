@@ -155,6 +155,45 @@ TEST(stream_counters, stopping_a_locked_input_unlocks_it_once)
     EXPECT_EQ(c.frames_rx.load(), 114U);
 }
 
+// --- An input that loses its stream: Milan v1.3 5.3.8.10 ----------------------
+
+TEST(stream_counters, unlocking_a_locked_input_counts_media_unlocked_once)
+{
+    StreamInputCounters c;
+    for (uint8_t i = 0; i < 14; ++i) {
+        feed(c, i, static_cast<uint32_t>(i) * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    EXPECT_EQ(c.media_locked.load(), 1U);
+    EXPECT_TRUE(c.is_locked.load());
+
+    unlock_stream_input(c);
+    EXPECT_FALSE(c.is_locked.load());
+    EXPECT_EQ(c.media_locked.load(), 1U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    // Asked again, and of an input that never locked: nothing more.
+    unlock_stream_input(c);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    StreamInputCounters never{};
+    unlock_stream_input(never);
+    EXPECT_EQ(never.media_unlocked.load(), 0U);
+}
+
+TEST(stream_counters, an_unlocked_input_locks_again_on_a_steady_stream)
+{
+    // The stream goes on (or another comes): the detector's run is still
+    // good, so the next steady step locks it again, and the two counters
+    // stay one apart.
+    StreamInputCounters c;
+    for (uint8_t i = 0; i < 14; ++i) {
+        feed(c, i, static_cast<uint32_t>(i) * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    }
+    unlock_stream_input(c);
+    feed(c, 14, 14U * 125'000U, /*tv=*/true, /*ts_sparse=*/false);
+    EXPECT_TRUE(c.is_locked.load());
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+}
+
 TEST(stream_counters, a_started_input_begins_from_the_stream_as_it_is)
 {
     // A hundred packets went by unread while the input was stopped: the
