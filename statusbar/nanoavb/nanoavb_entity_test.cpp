@@ -5969,10 +5969,13 @@ TEST(nanoavb_entity_presentation_offset, set_stream_info_refusals)
     EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, MSRP_ACC_LAT_VALID, 1)), int{AEM_STATUS_STREAM_IS_RUNNING});
     EXPECT_EQ(store.sets, 0);
     EXPECT_EQ(store.offsets[0], 2'000'000U);
-    // No sub-command at all: nothing to do.
+    // No sub-command at all: nothing to do, and nothing to save.
     store.set_status = AEM_STATUS_SUCCESS;
+    int saves = 0;
+    handler.set_on_settings_changed([&saves](uint16_t) { ++saves; });
     EXPECT_EQ(run(set_stream_info_body(DESCRIPTOR_STREAM_OUTPUT, 0, CLASS_B, 1)), int{AEM_STATUS_SUCCESS});
     EXPECT_EQ(store.sets, 0);
+    EXPECT_EQ(saves, 0);
 }
 
 TEST(nanoavb_entity_presentation_offset, set_stream_info_sets_it_and_notifies_a_change)

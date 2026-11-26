@@ -1432,6 +1432,11 @@ TEST(entity_name, a_set_to_the_value_in_force_is_not_saved)
     EXPECT_EQ(saves, 1);
     set_name("LiveName");
     EXPECT_EQ(saves, 1);
+    // The same through a local rename (apply_local_name).
+    EXPECT_EQ(cmd_handler.apply_local_name(make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "LiveName")), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(saves, 1);
+    EXPECT_EQ(cmd_handler.apply_local_name(make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "LocalName")), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(saves, 2);
 }
 
 TEST(entity_name, get_set_round_trip_and_callback_and_read_descriptor)
