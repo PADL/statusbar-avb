@@ -2475,41 +2475,28 @@ TEST(stream_lifecycle, set_stream_format_refuses_what_an_up_to_entry_does_not_de
     EXPECT_EQ(response_stream_format(get.bytes), STREAM_FMT_A);
 }
 
-TEST(stream_lifecycle, a_restored_stream_format_is_served_and_no_callback_runs)
+TEST(stream_lifecycle, a_format_an_up_to_entry_describes_is_put_in_force_without_the_hook)
 {
     auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
     auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
     EXPECT_TRUE(storage_result.has_value());
     DescriptorStorageHandler handler{*storage_result};
     AemCommandHandler cmd_handler{handler};
-    static int called = 0;
-    called = 0;
-    handler.set_on_stream_format_changed([](uint16_t, uint16_t, uint64_t) -> uint8_t {
-        ++called;
-        return AEM_STATUS_SUCCESS;
-    });
     DescriptorRef const output{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0};
 
-    EXPECT_TRUE(handler.restore_stream_format(output, ieee::Eui64{}.from_uint64(stream_fmt_a_of(2))));
+    // A saved format is restored this way: two channels of the eight the entry goes up to.
+    EXPECT_TRUE(handler.stream_format_listed(output, ieee::Eui64{}.from_uint64(stream_fmt_a_of(2))));
+    EXPECT_TRUE(handler.set_runtime_stream_format(output, ieee::Eui64{}.from_uint64(stream_fmt_a_of(2))));
     auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
     EXPECT_EQ(response_stream_format(get.bytes), stream_fmt_a_of(2));
-    EXPECT_EQ(called, 0);
-}
 
-TEST(stream_lifecycle, a_format_the_model_no_longer_describes_is_not_restored)
-{
-    auto blob = make_blob_with_stream_output(STREAM_FMT_A_UP_TO_8);
-    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
-    EXPECT_TRUE(storage_result.has_value());
-    DescriptorStorageHandler handler{*storage_result};
-    AemCommandHandler cmd_handler{handler};
-    DescriptorRef const output{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 0};
-    DescriptorRef const absent{.configuration_index = 0, .descriptor_type = DESCRIPTOR_STREAM_OUTPUT, .descriptor_index = 7};
-
-    EXPECT_FALSE(handler.restore_stream_format(output, ieee::Eui64{}.from_uint64(STREAM_FMT_B)));
-    EXPECT_FALSE(handler.restore_stream_format(absent, ieee::Eui64{}.from_uint64(STREAM_FMT_A)));
-    auto const get = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
-    EXPECT_EQ(response_stream_format(get.bytes), STREAM_FMT_A);
+    // What the entry does not describe is not listed, the entry itself included.
+    for (uint64_t const refused : {stream_fmt_a_of(9), STREAM_FMT_B, STREAM_FMT_A_UP_TO_8}) {
+        EXPECT_FALSE(handler.stream_format_listed(output, ieee::Eui64{}.from_uint64(refused)));
+        EXPECT_FALSE(handler.set_runtime_stream_format(output, ieee::Eui64{}.from_uint64(refused)));
+    }
+    auto const still = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_STREAM_FORMAT, make_stream_format_body(0));
+    EXPECT_EQ(response_stream_format(still.bytes), stream_fmt_a_of(2));
 }
 
 TEST(stream_lifecycle, a_listed_format_is_put_in_force_without_the_hook)

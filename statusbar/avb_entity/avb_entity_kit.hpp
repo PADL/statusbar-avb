@@ -341,7 +341,8 @@ class AvbEntityKit
     /// does not list it, or STREAM_IS_RUNNING for a running input (Milan v1.3 Section 5.4.2.7).
     [[nodiscard]] auto retimed_to(bool output, uint16_t index, uint64_t word, uint32_t rate) const
         -> std::expected<uint64_t, uint8_t>;
-    /// Whether STREAM_INPUT @p index runs: its Milan sink bound, or connected under IEEE 1722.1.
+    /// Whether STREAM_INPUT @p index runs: its Milan sink bound (Milan v1.3 Section 5.4.2.7), or
+    /// connected under IEEE 1722.1 (Clause 7.4.9.2). Its format does not change while it does.
     [[nodiscard]] auto input_running(uint16_t index) const noexcept -> bool;
     /// @p retimed put in force at @p rate by the entity's data plane, then in the descriptors,
     /// its notifications left for after the response; the data plane's status.
@@ -415,13 +416,10 @@ class AvbEntityKit
     /// format its serializer was made for, and any other is NOT_SUPPORTED.
     [[nodiscard]] auto on_stream_format_changed(uint16_t type, uint16_t index, uint64_t format) -> uint8_t;
     /// STREAM_INPUT @p index to @p format: STREAM_IS_RUNNING while the input
-    /// is in use, NOT_SUPPORTED for a format the listener cannot be brought
-    /// to; else the listener takes it and the inputs' formats are saved.
+    /// runs (input_running), NOT_SUPPORTED for a format the listener cannot
+    /// be brought to; else the listener takes it and the inputs' formats
+    /// are saved.
     [[nodiscard]] auto change_input_format(uint16_t index, uint64_t format) -> uint8_t;
-    /// Whether STREAM_INPUT @p index may not change format now: its Milan
-    /// sink is bound (Milan v1.3 5.4.2.7), or under IEEE 1722.1 it is
-    /// connected (7.4.9.2).
-    [[nodiscard]] auto input_in_use(uint16_t index) const noexcept -> bool;
     /// The GET_STREAM_INFO answer for a stream: the talker's or the
     /// listener's picture of it, with the format now in force. False for a
     /// stream the entity does not have.

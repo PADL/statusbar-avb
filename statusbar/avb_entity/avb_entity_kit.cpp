@@ -322,7 +322,7 @@ auto AvbEntityKit::change_input_format(uint16_t const index, uint64_t const form
     // command on a Stream Input if the Stream Input is bound ... In these
     // cases, the STREAM_IS_RUNNING error code shall be returned." IEEE
     // 1722.1-2021 7.4.9.2 says it of a stream that is streaming.
-    if (input_in_use(index)) {
+    if (input_running(index)) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     if (listener_ == nullptr || !listener_->set_stream_format(index, format)) {
@@ -334,20 +334,9 @@ auto AvbEntityKit::change_input_format(uint16_t const index, uint64_t const form
     return atdecc::AEM_STATUS_SUCCESS;
 }
 
-auto AvbEntityKit::input_in_use(uint16_t const index) const noexcept -> bool
-{
-    auto const& components = host_.components();
-    if (components.acmp_is_milan()) {
-        auto const* const sink = components.milan_acmp_listener->sink(index);
-        return sink != nullptr && sink->is_bound();
-    }
-    return components.acmp_listener.is_connected(index);
-}
-
 auto AvbEntityKit::current_stream_format(uint16_t const type, uint16_t const index) -> uint64_t
 {
-    atdecc::aem::DescriptorRef const ref{.configuration_index = 0, .descriptor_type = type, .descriptor_index = index};
-    return storage_handler_.current_stream_format(ref).value_or(ieee::Eui64{}).to_uint64();
+    return storage_handler_.current_stream_format(stream_ref(type, index)).value_or(ieee::Eui64{}).to_uint64();
 }
 
 auto AvbEntityKit::stream_formats_file(bool const make) -> std::string
@@ -401,13 +390,12 @@ void AvbEntityKit::restore_input_formats()
 
 void AvbEntityKit::restore_input_format(SavedStreamFormat const& saved)
 {
-    atdecc::aem::DescriptorRef const ref{
-        .configuration_index = 0, .descriptor_type = saved.descriptor_type, .descriptor_index = saved.descriptor_index};
+    auto const ref = stream_ref(saved.descriptor_type, saved.descriptor_index);
     // Asked in this order, so that nothing is taken unless both take it: the
     // listener can, the model still describes it, the listener does.
     bool const taken = saved.descriptor_type == DESCRIPTOR_STREAM_INPUT &&
         listener_->can_take_stream_format(saved.descriptor_index, saved.format) &&
-        storage_handler_.restore_stream_format(ref, ieee::Eui64{}.from_uint64(saved.format)) &&
+        storage_handler_.set_runtime_stream_format(ref, ieee::Eui64{}.from_uint64(saved.format)) &&
         listener_->set_stream_format(saved.descriptor_index, saved.format);
     if (!taken) {
         host_.ctl_log().status(
@@ -744,7 +732,7 @@ auto AvbEntityKit::stream_info(uint16_t const type, uint16_t const index, atdecc
     }
     // The fillers read the format the model authors; the one in force is the
     // descriptor's, which a SET_STREAM_FORMAT or a restored format changes.
-    auto const format = filled ? storage_handler_.current_stream_format({0, type, index}) : std::nullopt;
+    auto const format = filled ? storage_handler_.current_stream_format(stream_ref(type, index)) : std::nullopt;
     if (format.has_value()) {
         span_copy(make_span(out.stream_format), format->span());
     }

@@ -731,26 +731,6 @@ class DescriptorStorageHandler : public AemEntityHandler
         on_stream_format_changed_ = std::move(fn);
     }
 
-    /// Take @p format as the stream's current format with no command behind
-    /// it: the one saved before a restart (Milan v1.3 5.3.7.1 and 5.3.8.1:
-    /// "The current format shall be saved in a non-volatile memory and
-    /// restored after a power cycle"). It has to be a format the descriptor's
-    /// formats describe, as for SET_STREAM_FORMAT. The change callback is not
-    /// called and no controller is told. False, with nothing changed, when
-    /// it is not such a format or the blob has no such stream.
-    [[nodiscard]] auto restore_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
-    {
-        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
-        bool const described = blob.has_value() && blob->size() >= atdecc::aem::DescriptorStream::MINIMUM_LENGTH &&
-            stream_format_supported(*blob, format);
-        auto* const state = described ? find_or_init_stream_state(ref) : nullptr;
-        if (state != nullptr) {
-            state->format = format;
-            state->has_format = true;
-        }
-        return state != nullptr;
-    }
-
     /// The stream's runtime current_format (falls back to the blob's
     /// authored current_format; nullopt if the blob has no such stream).
     [[nodiscard]] auto current_stream_format(DescriptorRef ref) noexcept -> std::optional<ieee::Eui64>
@@ -779,8 +759,11 @@ class DescriptorStorageHandler : public AemEntityHandler
     }
 
     /// Make listed @p format the stream's runtime current_format without the stream-format
-    /// callback, for a change the entity's data plane has already made. False, with nothing
-    /// changed, when the descriptor does not list it or the blob has no such stream.
+    /// callback, for a change the entity's data plane has already made, or for the format saved
+    /// before a restart (Milan v1.3 Sections 5.3.7.1 and 5.3.8.1: "The current format shall be
+    /// saved in a non-volatile memory and restored after a power cycle"). No controller is told.
+    /// False, with nothing changed, when the descriptor does not list it or the blob has no
+    /// such stream.
     [[nodiscard]] auto set_runtime_stream_format(DescriptorRef ref, ieee::Eui64 const& format) noexcept -> bool
     {
         if (!stream_format_listed(ref, format)) {

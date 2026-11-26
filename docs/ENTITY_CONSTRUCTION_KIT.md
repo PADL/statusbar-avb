@@ -344,10 +344,12 @@ itself is refused NOT_SUPPORTED, as is a format no entry describes.
 | Where it is reported | GET_STREAM_FORMAT, the STREAM_INPUT descriptor's current_format and GET_STREAM_INFO all give the format in force; the registered controllers are notified of a change (7.5.2) |
 | Across a restart | saved in `stream-formats` (below) and restored at the next start (5.3.8.1). A saved format the model no longer describes is left, with a status line, and the input keeps its authored one |
 
-The input mappings are still the model's static ones: stream channel *i*
-feeds cluster *i*. Milan's check of a new format against the mappings
-(5.4.2.7, BAD_ARGUMENTS) comes with the dynamic mappings of 5.3.10.1, and
-until then a format with fewer channels leaves the higher clusters silent.
+The kit's own input mappings are still the model's static ones: stream
+channel *i* feeds cluster *i*, and a format with fewer channels leaves the
+higher clusters silent. An entity that hands the handler a store of
+dynamic mappings (5.3.10.1, below) gets Milan's check with it: a new
+format that would leave a channel a held mapping names is answered
+BAD_ARGUMENTS (5.4.2.7).
 
 ### Saved state
 
