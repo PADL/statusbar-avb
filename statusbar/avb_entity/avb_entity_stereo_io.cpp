@@ -354,7 +354,9 @@ auto AvbEntityStereoIO::start(net::MessageReactor& reactor, TimePoint const now)
         [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
             listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
         },
-        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
+        [this](uint16_t stream_index, TimePoint now) {
+            listener_->on_listener_disconnected(stream_index, now, StreamInputLoss::released);
+        });
 
     // AECP GET_COUNTERS: expose the IEEE 1722.1 STREAM_INPUT health counters
     // (Clause 7.4.42) for our single AM824 listener stream (index 0).

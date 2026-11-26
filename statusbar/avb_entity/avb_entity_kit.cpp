@@ -604,7 +604,17 @@ void AvbEntityKit::wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpList
             auto const only = sink != nullptr ? std::optional{probed_talker(sink->context().srp)} : std::nullopt;
             listener_->on_listener_connected(stream_index, stream_id, dest_mac, now, only);
         },
-        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
+        [this](uint16_t stream_index, TimePoint now) {
+            listener_->on_listener_disconnected(stream_index, now, milan_input_loss(stream_index));
+        });
+}
+
+auto AvbEntityKit::milan_input_loss(uint16_t const stream_index) const -> StreamInputLoss
+{
+    // Read as the sink stops SRP: why it does (Milan v1.3 Table 5.6 exempts only a controller's unbind).
+    auto const* const sink = host_.components().milan_acmp_listener->sink(stream_index);
+    bool const lost = sink != nullptr && sink->context().srp_stop == atdecc::MilanSrpStop::TalkerLost;
+    return lost ? StreamInputLoss::talker_lost : StreamInputLoss::released;
 }
 
 void AvbEntityKit::wire_milan_listener_callbacks()
@@ -634,7 +644,9 @@ void AvbEntityKit::wire_listener_connections(Listener& listener)
         [this](uint16_t stream_index, ieee::Eui64 const& stream_id, ieee::Eui48 dest_mac, TimePoint now) {
             listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
         },
-        [this](uint16_t stream_index, TimePoint now) { listener_->on_listener_disconnected(stream_index, now); });
+        [this](uint16_t stream_index, TimePoint now) {
+            listener_->on_listener_disconnected(stream_index, now, StreamInputLoss::released);
+        });
 }
 
 void AvbEntityKit::wire_ieee_acmp_callbacks()

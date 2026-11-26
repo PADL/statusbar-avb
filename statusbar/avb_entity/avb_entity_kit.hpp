@@ -303,6 +303,8 @@ class AvbEntityKit
     /// The Milan listener's settle and its giving up of the SRP parameters,
     /// onto the stream inputs, with the Talker attribute each sink probed.
     void wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener);
+    /// Why Milan sink @p stream_index is stopping SRP, as its input's loss. Within stop_srp only.
+    [[nodiscard]] auto milan_input_loss(uint16_t stream_index) const -> StreamInputLoss;
     /// What a sink with the SRP parameters @p srp follows in SRP.
     [[nodiscard]] static auto probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch;
     /// The stream outputs have destination addresses that are theirs to use

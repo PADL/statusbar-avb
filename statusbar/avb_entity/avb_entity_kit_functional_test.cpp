@@ -18,6 +18,7 @@
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -2016,6 +2017,92 @@ TEST(avb_entity_kit_format, with_no_state_directory_the_format_is_set_and_nothin
     bring_up(pair.listener);
     EXPECT_EQ(reported_stream_format(input), aaf_96k_of(4));
     EXPECT_EQ(pair.listener->listener()->stream_format(AAF_STREAM), aaf_96k_of(4));
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+//
+// Stream counters - Milan v1.3 Sections 5.3.8.10, 5.4.2.25; IEEE 1722.1-2021 Clause 7.4.42
+//
+
+namespace {
+
+/// The pair's AAF stream as its talker numbers and stamps it, handed to the
+/// listener kit's input as received a millisecond before presentation.
+struct AafSender
+{
+    KitPair& pair;
+    avtp::AafStreamOutputContext context;
+    int64_t next_ns{1'000'000'000};
+
+    explicit AafSender(KitPair& sending)
+        : pair{sending}
+        , context{context_for(sending)}
+    {}
+
+    /// The talker kit's AAF stream, eight channels at 96 kHz.
+    static auto context_for(KitPair& pair) -> avtp::AafStreamOutputContext
+    {
+        tsn::StreamId sid{};
+        for (auto const& spec : pair.talker.talker_specs()) {
+            sid = spec.index == AAF_STREAM ? pair.talker->make_talker_srp_info(spec).stream_id : sid;
+        }
+        auto const format = decode_stream_format(AAF_96K_8CH);
+        return avtp::AafStreamOutputContext{
+            sid,
+            format.aaf_format,
+            avtp::aaf_sample_rate_from_hz(format.sample_rate_hz).value_or(avtp::AafSampleRate::rate_96_khz),
+            format.channels,
+            format.bit_depth,
+            0};
+    }
+
+    /// @p count AVTPDUs, 125 us apart, after @p skip more the talker sent and the network lost.
+    void send(int const count, int const skip = 0)
+    {
+        for (int i = 0; i < count + skip; ++i, next_ns += 125'000) {
+            std::vector<uint8_t> frame(avtp::AafPdu::HEADER_LENGTH + (size_t{12} * 8 * 4), 0);
+            avtp::AafPdu pdu{};
+            auto const payload = std::span<uint8_t>{frame}.subspan(avtp::AafPdu::HEADER_LENGTH);
+            (void)avtp::aaf_stream_serialize(
+                context, pdu, payload, 12, avtp::Nanoseconds{next_ns}, [](uint8_t, std::span<float>) {});
+            span_store(std::span<uint8_t>{frame}.first(avtp::AafPdu::HEADER_LENGTH), pdu);
+            if (i >= skip) {
+                pair.listener->listener()->on_stream_rx_frame(frame, next_ns - 1'000'000);
+            }
+        }
+    }
+};
+
+}  // namespace
+
+TEST(avb_entity_kit_input_counters, a_milan_input_whose_talker_withdraws_is_interrupted_and_an_unbound_one_is_not)
+{
+    // Milan v1.3 Table 5.6: STREAM_INTERRUPTED "for any reason other than a
+    // Controller Unbind operation", the Talker attribute withdrawn among them.
+    KitPair pair{"milan13"};
+    pair.no_leave_alls();  // the withdrawal below is timed
+    (void)aaf_input_of(pair);
+    auto const& counters = pair.listener->listener()->slot_for(AAF_STREAM)->counters;
+    AafSender talker{pair};
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    talker.send(20);
+    EXPECT_TRUE(counters.is_locked.load());
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    EXPECT_EQ(counters.media_unlocked.load(), 1U);
+    EXPECT_EQ(counters.stream_interrupted.load(), 0U);
+
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    talker.send(20);
+    EXPECT_TRUE(counters.is_locked.load());
+    EXPECT_TRUE(pair.talker->host().components().msrp_handler.talker_withdraw(talker.context.stream_id, pair.now).has_value());
+    pair.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(counters.media_locked.load(), 2U);
+    EXPECT_EQ(counters.media_unlocked.load(), 2U);
+    EXPECT_EQ(counters.stream_interrupted.load(), 1U);
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }

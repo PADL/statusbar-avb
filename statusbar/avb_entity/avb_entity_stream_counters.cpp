@@ -98,7 +98,7 @@ void tally_media_lock(
         }
     } else {
         c.locked_run = 0;
-        unlock_stream_input(c);
+        interrupt_stream_input(c);
     }
     c.prev_delta = actual;
     c.have_prev_delta = true;
@@ -180,6 +180,14 @@ void unlock_stream_input(StreamInputCounters& c) noexcept
 {
     if (c.is_locked.exchange(false)) {
         c.media_unlocked.fetch_add(1, relaxed);
+    }
+}
+
+void interrupt_stream_input(StreamInputCounters& c) noexcept
+{
+    if (c.is_locked.exchange(false)) {
+        c.media_unlocked.fetch_add(1, relaxed);
+        c.stream_interrupted.fetch_add(1, relaxed);
     }
 }
 

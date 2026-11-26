@@ -348,6 +348,14 @@ which is what the grace was for.
   next stream's first AVTPDU is then compared with nothing before it: no
   SEQ_NUM_MISMATCH or MEDIA_RESET against the stream that went, and the
   input locks on a run of the new stream's packets.
+- STREAM_INTERRUPTED (Table 5.6) counts a media lock lost for any reason
+  other than a controller's unbind: a timestamp step out of the lock
+  tolerance, which lost AVTPDUs or wrong timestamps make, and a sink that
+  leaves its settled state because its Talker attribute went or never
+  came (5.5.3.6.36, .48; `MilanSinkContext::srp_stop`). A lock the
+  entity gives up is not counted: a controller's unbind or bind to
+  another source, STOP_STREAMING and an IEEE 1722.1 disconnect, a
+  departed talker's among them, count MEDIA_UNLOCKED alone.
 
 ## Not done
 
