@@ -212,6 +212,25 @@ struct Op
 /// reading the entity's name.
 constexpr int64_t NAMED_ENTITY_WAIT_MS = 13'000;
 
+/// The discovery window of a command that names its entities, or that was
+/// given none of its own: what is seen in it is enough to go on, since a named
+/// entity that is missing is waited for beyond it.
+constexpr int64_t DISCOVERY_WINDOW_MS = 1'500;
+
+/// How long a command collects ENTITY_AVAILABLE messages before it goes on.
+/// @param asked_ms --discover-ms; 0 (its default) or less leaves the choice here.
+/// @param lists_every_entity The command is a list of whatever is on the
+///        network. It names nothing that could be waited for, so by default
+///        it listens until no entity can still be on its way
+///        (NAMED_ENTITY_WAIT_MS). Any other command takes DISCOVERY_WINDOW_MS.
+[[nodiscard]] constexpr auto discovery_window_ms(int64_t const asked_ms, bool const lists_every_entity) noexcept -> int64_t
+{
+    if (asked_ms > 0) {
+        return asked_ms;
+    }
+    return lists_every_entity ? NAMED_ENTITY_WAIT_MS : DISCOVERY_WINDOW_MS;
+}
+
 /// Whether @p name is an entity of @p entities, by resolve_entity()'s
 /// matching: an EUI-64 literal is itself, any other name is a
 /// case-insensitive part of a discovered entity's name. An entity is in the

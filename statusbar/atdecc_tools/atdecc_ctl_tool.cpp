@@ -87,7 +87,7 @@ struct Config
     std::string state{"on"};  // identify: desired state (on|off)
     std::string signal_type;  // set-signal-selector: source descriptor type (name or integer)
     std::string backend{atdecc_tools::default_controller_backend()};  // raw (own SMs) or avb (macOS AVB framework)
-    int64_t discover_ms{1500};
+    int64_t discover_ms{0};  // 0: atdecc_tools::discovery_window_ms() picks it (run_controller)
     int64_t clock_domain{0};
     int64_t clock_source{0};
     int64_t descriptor{0};     // signal-selector ops: SIGNAL_SELECTOR descriptor index
@@ -147,8 +147,9 @@ void add_op_specs(args::ArgumentSpecs& specs, Config& config)
         "file", "Batch/supervise TOML file (command=batch|supervise)", "", [&](auto v) { config.file = std::string{v}; });
     specs.add<int64_t>(
         "discover-ms",
-        "Discovery window in ms. An entity the command names is waited for beyond it, up to 13 s after the start",
-        1500,
+        "Discovery window in ms; 0 picks it: 1500, or 13000 for a list without --entity. An entity the command names is "
+        "waited for beyond it, up to 13 s after the start",
+        0,
         [&](auto v) { config.discover_ms = v; });
     specs.add<int64_t>("clock-domain", "CLOCK_DOMAIN index (clock-source ops)", 0, [&](auto v) { config.clock_domain = v; });
     specs.add<int64_t>("clock-source", "CLOCK_SOURCE index (set-clock-source)", 0, [&](auto v) { config.clock_source = v; });
@@ -719,12 +720,22 @@ auto named_entities(Config const& config) -> std::vector<std::string>
     return names;
 }
 
+/// Whether the command is a list of whatever is on the network: it names no
+/// entity that discovery could wait for.
+auto lists_every_entity(Config const& config) -> bool
+{
+    return config.command == "list" && config.entity.empty();
+}
+
 /// DISCOVER phase: announce + read every entity's ENTITY descriptor (the
 /// controller auto-enqueues that on ENTITY_AVAILABLE, populating names). The
 /// discovery window is always spent; an entity the command line names is
 /// waited for beyond it (snapshot_with()).
 auto discover_entities(MessageReactor& reactor, ControllerSimple& ctrl, Config const& config) -> std::vector<EntityDisplayInfo>
 {
+    if (lists_every_entity(config)) {
+        std::println(stderr, "discovery: listening {} ms for every entity to answer (--discover-ms sets it)", config.discover_ms);
+    }
     ctrl.dispatch(discover_action(), elapsed_ns());
     (void)pump(reactor, ctrl, config.discover_ms, [] { return false; }, [](auto const&) {});
     return snapshot_with(reactor, ctrl, named_entities(config));
@@ -1209,9 +1220,12 @@ auto run_with_controller(Config const& config, std::unique_ptr<ControllerSimple>
     return run_command(config, reactor, ctrl, stop);
 }
 
-/// Open the controller @p config asks for and run its command.
-auto run_controller(Config const& config) -> int
+/// Open the controller @p config asks for and run its command. A discovery
+/// window left to us (--discover-ms 0) is settled here, once, for everything
+/// that reads it.
+auto run_controller(Config config) -> int
 {
+    config.discover_ms = atdecc_tools::discovery_window_ms(config.discover_ms, lists_every_entity(config));
     auto pollable = make_controller(config);
     return pollable ? run_with_controller(config, std::move(pollable)) : 1;
 }

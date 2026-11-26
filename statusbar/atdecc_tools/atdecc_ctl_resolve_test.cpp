@@ -194,6 +194,21 @@ TEST(atdecc_ctl_discovery, the_wait_runs_from_the_discover_and_ends)
     EXPECT_EQ(named_entity_wait_left_ms(-5), NAMED_ENTITY_WAIT_MS);
 }
 
+TEST(atdecc_ctl_discovery, the_window_is_what_was_asked_for_or_fits_the_command)
+{
+    // Asked for: that, whatever the command.
+    EXPECT_EQ(discovery_window_ms(400, /*lists_every_entity=*/false), int64_t{400});
+    EXPECT_EQ(discovery_window_ms(400, /*lists_every_entity=*/true), int64_t{400});
+    EXPECT_EQ(discovery_window_ms(60'000, /*lists_every_entity=*/true), int64_t{60'000});
+    // Left to us: a command that names its entities waits for those it misses,
+    // so a short window does; a list of everything can only listen.
+    EXPECT_EQ(discovery_window_ms(0, /*lists_every_entity=*/false), DISCOVERY_WINDOW_MS);
+    EXPECT_EQ(discovery_window_ms(0, /*lists_every_entity=*/true), NAMED_ENTITY_WAIT_MS);
+    EXPECT_EQ(discovery_window_ms(-1, /*lists_every_entity=*/true), NAMED_ENTITY_WAIT_MS);
+    EXPECT_EQ(DISCOVERY_WINDOW_MS, int64_t{1'500});
+    EXPECT_TRUE(NAMED_ENTITY_WAIT_MS > DISCOVERY_WINDOW_MS);
+}
+
 TEST(atdecc_ctl_discovery, an_op_names_its_endpoints_or_its_entity)
 {
     Op connect{};
