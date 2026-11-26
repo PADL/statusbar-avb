@@ -1142,11 +1142,11 @@ void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const
     bool const changed = slot.rx_stream_id.load() != stream_id;
     slot.rx_stream_id.publish(stream_id);
     if (changed) {
-        tell_input_changed(slot);
+        notify_input_changed(slot);
     }
 }
 
-void ListenerStreams::tell_input_changed(ListenerStreamSlot const& slot) const noexcept
+void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
 {
     if (on_input_changed_) {
         on_input_changed_(slot.spec.index, slot.rx_stream_id.load(), slot.stopped.load(std::memory_order_relaxed));
@@ -1157,7 +1157,7 @@ void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const
 {
     auto* const slot = slot_for(stream_index);
     if (slot != nullptr && slot->stopped.exchange(stopped, std::memory_order_relaxed) != stopped) {
-        tell_input_changed(*slot);
+        notify_input_changed(*slot);
     }
 }
 

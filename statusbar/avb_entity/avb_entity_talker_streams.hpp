@@ -345,7 +345,7 @@ struct TalkerStreams
         -> std::optional<StreamFrameTemplate>;
 
     /// Told on the control thread that made it of each change of an open stream's frame_template(): VID or PCP
-    /// (set_vlan()), destination (set_destination()) or an accepted format (tell_frames_changed()); not open_stream().
+    /// (set_vlan()), destination (set_destination()) or an accepted format (notify_frames_changed()); not open_stream().
     /// Set before streams flow; it must not throw, and what it captures must outlive this TalkerStreams.
     using FramesChangedFn = sg14::inplace_function<void(uint16_t stream_index), 32>;
     void set_on_frames_changed(FramesChangedFn fn) noexcept { on_frames_changed_ = std::move(fn); }
@@ -353,7 +353,7 @@ struct TalkerStreams
     /// frames when it moves. Control thread; the media thread reads it as it always has.
     void set_destination(uint16_t stream_index, ieee::Eui48 const& dest_mac) noexcept;
     /// on_frames_changed_ told of STREAM_OUTPUT @p stream_index, if set.
-    void tell_frames_changed(uint16_t stream_index) const noexcept;
+    void notify_frames_changed(uint16_t stream_index) const noexcept;
 
     /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
     /// MAX_ENTITY_STREAMS). Any thread.

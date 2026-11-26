@@ -767,7 +767,7 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
             refresh_output_mappings();  // a re-time refreshes them once, at its end
         }
         if (talker_->slot_for(updated.index) != nullptr) {
-            talker_->tell_frames_changed(updated.index);  // the entity's hook accepted it: the frames are the new format's
+            talker_->notify_frames_changed(updated.index);  // the entity's hook accepted it: the frames are the new format's
         }
     }
     host_.ctl_log().status(

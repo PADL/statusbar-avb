@@ -481,7 +481,7 @@ struct ListenerStreams
     /// @p slot matches frames of @p stream_id (0: none) from now on, told to on_input_changed_.
     void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
     /// on_input_changed_ told of @p slot as it stands, if set.
-    void tell_input_changed(ListenerStreamSlot const& slot) const noexcept;
+    void notify_input_changed(ListenerStreamSlot const& slot) const noexcept;
     /// @p counts added to @p slot's counters; a lost lock as unlock_stream_input() while it is stopped or unbound.
     static void count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
     /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.

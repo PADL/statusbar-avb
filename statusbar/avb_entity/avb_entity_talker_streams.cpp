@@ -249,7 +249,7 @@ void TalkerStreams::set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
         return;
     }
     for (auto const& slot : slots_) {
-        tell_frames_changed(slot.spec.index);
+        notify_frames_changed(slot.spec.index);
     }
 }
 
@@ -260,10 +260,10 @@ void TalkerStreams::set_destination(uint16_t const stream_index, ieee::Eui48 con
         return;
     }
     slot->dest_mac = dest_mac;
-    tell_frames_changed(stream_index);
+    notify_frames_changed(stream_index);
 }
 
-void TalkerStreams::tell_frames_changed(uint16_t const stream_index) const noexcept
+void TalkerStreams::notify_frames_changed(uint16_t const stream_index) const noexcept
 {
     if (on_frames_changed_) {
         on_frames_changed_(stream_index);
