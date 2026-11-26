@@ -2836,6 +2836,35 @@ TEST(nanoavb_entity_in_progress, octets_past_control_data_length_are_ignored)
     EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), kSetControl5));
 }
 
+// IEEE 1722.1-2021 Table 7-141: a deferred SET with a body over 64 octets is held, completed and answered.
+TEST(nanoavb_entity_in_progress, a_deferred_set_with_a_long_body_is_completed_and_answered)
+{
+    DeferringControlHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    std::array<uint8_t, 100> body{0x00, static_cast<uint8_t>(DESCRIPTOR_CONTROL), 0x00, 0x00};
+    std::ranges::fill(std::span{body}.subspan(4), uint8_t{0x5A});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, body);
+    EXPECT_EQ(header_of(sends[0]).status(), AEM_STATUS_IN_PROGRESS);
+    EXPECT_TRUE(std::ranges::equal(body_of(sends[0]), body));
+    EXPECT_EQ(handler.pending_command_count(), size_t{1});
+
+    sends.clear();
+    EXPECT_TRUE(handler.complete_pending_command(AEM_COMMAND_SET_CONTROL, DESCRIPTOR_CONTROL, 0, AEM_STATUS_SUCCESS));
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    if (reply != nullptr) {
+        EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_SUCCESS);
+        EXPECT_TRUE(std::ranges::equal(body_of(*reply), body));
+    }
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
 //
 // Profiles: 7.5.2 as written notifies every SET answered SUCCESS; Milan v1.3
 // 5.4.5.3 notifies only a SET that modifies the entity, so under milan13 a SET

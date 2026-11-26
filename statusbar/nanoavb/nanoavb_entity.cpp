@@ -642,8 +642,8 @@ auto AemCommandHandler::defer_command(uint16_t const command_type, std::span<uin
 {
     (void)command_type;
     // handle_set_descriptor_value() saw a free slot before the hook ran, so the
-    // add below cannot fail for want of one; a body too long to keep is the one
-    // refusal left here, and it is a property of the command, known to its sender.
+    // add below cannot fail for want of one; a body longer than an AECPDU carries,
+    // which no command read off the wire has, is the one refusal left here.
     if (echoed_body.size() > MAX_PENDING_BODY) {
         return {.status = AEM_STATUS_NO_RESOURCES, .size = echoed_body.size()};
     }
@@ -966,9 +966,6 @@ constexpr std::array<uint16_t, 24> DYNAMIC_INFO_COMMANDS{
     AEM_COMMAND_GET_PTP_PORT_OVERRIDES,
     AEM_COMMAND_GET_PATH_LATENCY,
 };
-
-/// The most AEM command-specific data one AECPDU can carry.
-constexpr size_t MAX_AEM_BODY = AECP_MAX_CONTROL_DATA_LENGTH - AemDu::AEM_DATA_LENGTH;
 
 auto read_u16(std::span<uint8_t const> bytes, size_t const at) -> uint16_t
 {
