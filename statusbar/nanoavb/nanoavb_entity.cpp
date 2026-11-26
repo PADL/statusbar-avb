@@ -1659,8 +1659,8 @@ auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_
 auto AemCommandHandler::stream_info_set_answer(
     AemCommandResponse const r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
-    if (r.status == AEM_STATUS_SUCCESS) {
-        return r;
+    if (r.status == AEM_STATUS_SUCCESS || r.status == AEM_STATUS_IN_PROGRESS) {
+        return r;  // a deferred SET is answered from its slot when it completes
     }
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> in_force{};
     if (value_in_force(AEM_COMMAND_SET_STREAM_INFO, command_data, in_force) == 0) {
@@ -1687,12 +1687,40 @@ auto AemCommandHandler::set_stream_info(
         return {.status = *refused, .size = response.size()};
     }
     uint32_t const offset = cmd.msrp_accumulated_latency.get();
-    auto const status = offset > MILAN_PRESENTATION_OFFSET_MAX_NS
-        ? AEM_STATUS_BAD_ARGUMENTS
-        : callbacks_.set_presentation_offset(cmd.descriptor_index.get(), offset);
+    if (auto const early = stream_info_offset_answered_before_hook(offset, response.size())) {
+        return *early;
+    }
+    return apply_stream_info_offset(cmd.descriptor_index.get(), offset, current, response);
+}
+
+auto AemCommandHandler::stream_info_offset_answered_before_hook(uint32_t const offset, size_t const size) const
+    -> std::optional<AemCommandResponse>
+{
+    if (offset > MILAN_PRESENTATION_OFFSET_MAX_NS) {
+        return AemCommandResponse{.status = AEM_STATUS_BAD_ARGUMENTS, .size = size};
+    }
+    // As SET_MAX_TRANSIT_TIME's (answered_before_hook): a repeat of one deferred is IN_PROGRESS again,
+    // its hook not run twice (the echo is the slot's); with no slot to defer to, NO_RESOURCES.
+    if (repeated_pending(AEM_COMMAND_SET_STREAM_INFO) != nullptr) {
+        return AemCommandResponse{.status = AEM_STATUS_IN_PROGRESS, .size = size};
+    }
+    if (pending_commands_.size() >= pending_commands_.capacity()) {
+        return AemCommandResponse{.status = AEM_STATUS_NO_RESOURCES, .size = size};
+    }
+    return std::nullopt;
+}
+
+auto AemCommandHandler::apply_stream_info_offset(
+    uint16_t const index, uint32_t const offset, uint32_t const current, std::span<uint8_t const> const response)
+    -> AemCommandResponse
+{
+    auto const status = callbacks_.set_presentation_offset(index, offset);
+    setting_unchanged_ = offset == current;
+    if (status == AEM_STATUS_IN_PROGRESS) {
+        return defer_command(AEM_COMMAND_SET_STREAM_INFO, response);  // finished by complete_pending_command()
+    }
     // The response echoes the command (MSRP_ACC_LAT_VALID and the offset); a change goes to the
     // other registered controllers as that response (Milan v1.2 Section 5.4.5.2).
-    setting_unchanged_ = offset == current;
     if (status == AEM_STATUS_SUCCESS && offset != current) {
         emit_unsolicited(AEM_COMMAND_SET_STREAM_INFO, response);
     }
