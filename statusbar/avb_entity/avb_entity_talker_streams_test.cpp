@@ -366,6 +366,27 @@ TEST(talker_mr, a_stream_not_open_refuses_a_restart_and_a_reopened_one_starts_cl
     EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 0U);
 }
 
+TEST(talker_mr, a_media_clock_re_anchored_on_a_stepped_gptp_timeline_toggles_mr)
+{
+    // The timestamps jump with the gPTP time the media clock re-anchors on: a restart of it.
+    ptpclient::MediaClockGenerator mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    (void)mc.advance(1'000'000'000, 1.0, 6);
+    auto& slot = open_aaf_output(talker, 2);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+    (void)mc.advance(1'000'125'000, 1.0, 6);  // on time: no step
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+
+    (void)mc.advance(9'000'000'000, 1.0, 6);  // gPTP stepped seconds ahead
+    EXPECT_EQ(mc.step_count(), 1U);
+    EXPECT_TRUE(send_mr(talker, slot, 8) == std::vector<bool>(8, true));
+    (void)mc.advance(1'000'000'000, 1.0, 6);  // and back, the hold over: the next AVTPDU
+    EXPECT_TRUE(send_mr(talker, slot, 1) == std::vector<bool>{false});
+    EXPECT_EQ(talker.tx_counters(2)->mr_toggles.load(), 2U);
+}
+
 // --- AVTP tu: IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1 ---
 
 TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_none_is_in_force)

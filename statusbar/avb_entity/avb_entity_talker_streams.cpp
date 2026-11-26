@@ -333,13 +333,20 @@ auto TalkerStreams::mr_requests(uint16_t const stream_index) const noexcept -> u
     return stream_index < mr_requests_.size() ? mr_requests_[stream_index].load(std::memory_order_relaxed) : 0U;
 }
 
+auto TalkerStreams::restart_owed(TalkerStreamSlot const& slot) const noexcept -> bool
+{
+    uint64_t const steps = media_clock_.step_count();
+    return mr_requests(slot.spec.index) != slot.mr_requests_seen || steps != slot.media_clock_steps.value_or(steps);
+}
+
 auto TalkerStreams::next_mr(TalkerStreamSlot& slot) noexcept -> bool
 {
-    uint32_t const requests = mr_requests(slot.spec.index);
-    if (slot.mr_hold == 0 && requests != slot.mr_requests_seen) {
+    slot.media_clock_steps = slot.media_clock_steps.value_or(media_clock_.step_count());  // the first AVTPDU's
+    if (slot.mr_hold == 0 && restart_owed(slot)) {
         slot.mr = !slot.mr;
         slot.mr_hold = MR_HOLD_PDUS;
-        slot.mr_requests_seen = requests;  // every request so far: one toggle
+        slot.mr_requests_seen = mr_requests(slot.spec.index);  // every restart so far: one toggle
+        slot.media_clock_steps = media_clock_.step_count();
     }
     return slot.mr;
 }

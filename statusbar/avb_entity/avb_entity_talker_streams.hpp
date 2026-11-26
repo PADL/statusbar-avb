@@ -81,6 +81,9 @@ struct TalkerStreamSlot
     uint8_t mr_hold{0};
     /// The media clock restart requests mr has followed (toggle_media_clock_restart). Media thread.
     uint32_t mr_requests_seen{0};
+    /// The media clock's re-anchors mr has followed (MediaClockGenerator::step_count), from the
+    /// first AVTPDU on. Media thread.
+    std::optional<uint64_t> media_clock_steps{};
 };
 
 /// What one STREAM_OUTPUT has sent, for GET_COUNTERS: its AVTPDUs, those with
@@ -144,8 +147,9 @@ struct TalkerStreams
     /// or the first after MR_HOLD_PDUS since the last toggle, and keeps its new state; requests
     /// before then toggle it once. invalid_argument for a stream not open. Reactor thread, the one writer.
     [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
-    /// The mr bit @p slot's next AVTPDU carries, toggled when a restart is owed and the hold is over.
-    /// Media thread; call once per AVTPDU sent (count_sent runs the hold down).
+    /// The mr bit @p slot's next AVTPDU carries, toggled when a restart is owed (a request, or the
+    /// media clock re-anchored on a stepped gPTP timeline) and the hold is over. Media thread; call
+    /// once per AVTPDU sent (count_sent runs the hold down).
     [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
 
     //
@@ -338,6 +342,8 @@ struct TalkerStreams
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_requests_{};
     /// The requests counted for STREAM_OUTPUT @p stream_index, 0 past MAX_ENTITY_STREAMS.
     [[nodiscard]] auto mr_requests(uint16_t stream_index) const noexcept -> uint32_t;
+    /// Whether @p slot owes a toggle of mr: a request or a re-anchor it has not followed. Media thread.
+    [[nodiscard]] auto restart_owed(TalkerStreamSlot const& slot) const noexcept -> bool;
     /// One AVTP stream frame to @p dest_mac: VLAN tag from config_, source
     /// the port's address, recorded to the pcap tap when that is armed.
     void send_stream_frame(ieee::Eui48 const& dest_mac, std::span<uint8_t const> payload);
