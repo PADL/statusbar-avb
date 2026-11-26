@@ -2440,4 +2440,42 @@ TEST(avb_entity_kit_tu, the_talker_follows_the_announced_grandmaster_whatever_th
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+//
+// AVTP mr - IEEE 1722-2016 Clause 4.4.4.3
+//
+
+TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_the_domains_outputs_as_media_reset)
+{
+    KitPair pair{"classic"};
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    auto& talker = pair.talker->talker();
+    auto* const slot = talker.slot_for(AAF_STREAM);
+    EXPECT_TRUE(slot != nullptr);
+    auto send = [&](int const count) {  // what transmit_* stores and counts
+        for (int i = 0; i < count; ++i) {
+            talker.count_sent(*slot, false, talker.next_mr(*slot));
+        }
+    };
+    auto set_clock_source = [&](uint16_t const source) {
+        atdecc::AemDu header{};
+        header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
+        header.controller_entity_id = CONTROLLER_ID;
+        atdecc::aem::AemClockSourcePayload const asked{
+            .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
+        std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+        return pair.talker->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
+    };
+    send(2);
+    EXPECT_EQ(set_clock_source(1), atdecc::AEM_STATUS_SUCCESS);
+    send(TalkerStreams::MR_HOLD_PDUS);
+    EXPECT_EQ(set_clock_source(1), atdecc::AEM_STATUS_SUCCESS);  // the source in force: no restart
+    send(TalkerStreams::MR_HOLD_PDUS);
+    auto const counters = counters_of(output);
+    EXPECT_EQ(counters.counters[3].get(), 1U);                                       // MEDIA_RESET
+    EXPECT_EQ(counters.counters[7].get(), 2U + (2U * TalkerStreams::MR_HOLD_PDUS));  // FRAMES_TX
+    EXPECT_TRUE(slot->mr);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

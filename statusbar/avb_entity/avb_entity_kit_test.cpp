@@ -805,4 +805,26 @@ TEST(avb_entity_kit_rate, a_held_mapping_refuses_a_retime)
     aem.set_dynamic_audio_maps(nullptr);
 }
 
+// IEEE 1722-2016 Clause 4.4.4.3: a re-timed stream output's media clock restarts, so its mr
+// toggles; a refused rate restarts nothing.
+TEST(avb_entity_kit_rate, a_retimed_stream_output_toggles_mr)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    RateControllers controllers{kit};
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    auto& talker = kit->talker();
+    auto const& aaf = kit->talker_specs().front();
+    EXPECT_TRUE(talker.open_stream(aaf, {}, {}).has_value());  // as start() opens it
+    auto* const slot = talker.slot_for(aaf.index);
+    EXPECT_TRUE(slot != nullptr);
+
+    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_FALSE(talker.next_mr(*slot));
+    data_plane.answer = atdecc::AEM_STATUS_SUCCESS;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(talker.next_mr(*slot));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

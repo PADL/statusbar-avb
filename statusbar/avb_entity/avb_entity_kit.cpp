@@ -227,15 +227,29 @@ void AvbEntityKit::install_storage_hooks()
     host_.set_on_milan_bindings_changed([this]() { follow_milan_bindings(); });
     // Kit phase 3c: a controller's SET_CLOCK_SOURCE switches the active
     // source; the media thread reads it per tick (media_rate()).
-    storage_handler_.set_on_clock_source_changed([this](uint16_t domain, uint16_t source) -> uint8_t {
-        if (domain == 0) {
-            active_clock_source_.store(source, std::memory_order_release);
-        }
-        return atdecc::AEM_STATUS_SUCCESS;
-    });
+    storage_handler_.set_on_clock_source_changed(
+        [this](uint16_t const domain, uint16_t const source) -> uint8_t { return change_clock_source(domain, source); });
     // SET_SAMPLING_RATE: the rate in force, or a re-time the entity's data plane makes.
     storage_handler_.set_on_sampling_rate_changed(
         [this](uint16_t const audio_unit, uint32_t const rate) -> uint8_t { return change_sampling_rate(audio_unit, rate); });
+}
+
+auto AvbEntityKit::change_clock_source(uint16_t const domain, uint16_t const source) -> uint8_t
+{
+    if (domain == 0 && active_clock_source_.exchange(source, std::memory_order_acq_rel) != source) {
+        restart_media_clock(domain);
+    }
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+void AvbEntityKit::restart_media_clock(uint16_t const domain)
+{
+    // IEEE 1722-2016 Clause 4.4.4.3: each stream the domain's media clock times toggles mr.
+    for (auto const& spec : talker_specs_) {
+        if (spec.clock_domain_index == domain) {
+            (void)talker_->toggle_media_clock_restart(spec.index);  // a stream not open has no AVTPDU to tell
+        }
+    }
 }
 
 auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
@@ -875,6 +889,9 @@ auto AvbEntityKit::retime_streams(uint32_t const rate, RetimedFormats const& ret
     }
     for (auto const& r : retimed) {
         (void)storage_handler_.set_runtime_stream_format(stream_ref(r.type, r.index), ieee::Eui64{}.from_uint64(r.to));
+        if (r.type == DESCRIPTOR_STREAM_OUTPUT) {
+            (void)talker_->toggle_media_clock_restart(r.index);  // its media clock restarts (IEEE 1722-2016 Clause 4.4.4.3)
+        }
     }
     notify_after_response(retimed);
     host_.ctl_log().status("aem: AUDIO_UNIT 0 at {} Hz, {} streams re-timed", rate, retimed.size());
