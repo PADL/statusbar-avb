@@ -442,6 +442,30 @@ without the hook the offset is fixed and the SET answers NOT_SUPPORTED.
 Either way an offset past 0x7FFFFFFF ns is BAD_ARGUMENTS (Milan v1.3
 5.4.2.30), a refusal carries the time in force, and a change is notified.
 
+SET_SAMPLING_RATE (IEEE 1722.1-2021 7.4.21) to the rate in force answers
+SUCCESS. Another rate the AUDIO_UNIT lists answers NOT_SUPPORTED unless
+the entity gives the kit `AvbEntityKit::set_on_unit_rate_changed`, so no
+unit reports a rate its data plane does not run. With the hook, a change
+of AUDIO_UNIT 0 re-times its streams, the audio streams at its rate in
+its clock domain (7.2.3): each AAF stream to its format at the new rate,
+channels kept (`aaf_format_at_rate()`), when its descriptor lists that
+format; an AM824 stream, or one that lists none, makes it NOT_SUPPORTED,
+and a bound Milan input or a connected IEEE 1722.1 input
+STREAM_IS_RUNNING (Milan v1.3 5.4.2.7), as does a dynamic audio mapping
+held on a stream at the old rate (5.4.2.13). The hook moves the data
+plane, all or none, and answers for a talker that cannot change while it
+streams. On SUCCESS GET_STREAM_FORMAT and READ_DESCRIPTOR follow, and
+each re-timed stream is notified as a SET_STREAM_FORMAT after the
+response (`AemCommandHandler::call_after_response()`). The kit's own
+`TalkerStreams` and `ListenerStreams`, its stream specs, `sample_rate()`
+and the TSpecs it declares keep the rate they were built with: the media
+thread reads them, and they have no way to change rate. An entity whose
+streams run on them answers the hook NOT_SUPPORTED; the hook is for one
+that runs its streams itself. Another unit, or a unit 0 whose clock
+domain another unit shares, keeps its rate. The kit installs its hook on
+the storage handler when it is built: one the entity installed before is
+replaced, one installed after replaces the kit's.
+
 A STREAM_PORT without AUDIO_MAP descriptors has dynamic audio mappings
 (IEEE 1722.1-2021 7.4.44 to 7.4.46, Milan v1.3 5.4.2.26 to 5.4.2.28),
 kept in a `DynamicAudioMaps` store (`nanoavb_dynamic_audio_maps.hpp`, up to

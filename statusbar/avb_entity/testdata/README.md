@@ -39,3 +39,19 @@ for pair in dual:entity_audio tone:entity_tone tone-aaf:entity_tone_aaf tone-aaf
         "statusbar/avb_entity/testdata/${pair##*:}.bin" --set version=0.0.0-test
 done
 ```
+
+## `entity_rates.bin`
+
+The rate model `entity_rates.json` beside it, compiled the same way: an
+AUDIO_UNIT listing 48, 96 and 192 kHz, an AAF stream input and output
+listing their 8-channel format at 48 and 96 kHz, a CRF stream output,
+and stream ports of eight one-channel clusters without AUDIO_MAP
+descriptors. It keeps the Milan v1.3 5.3.3 model rules
+(`examples/verify_models.py`'s `milan_model_faults`). Loaded by
+`avb_entity_kit_test.cpp` for SET_SAMPLING_RATE. Write it again from the
+top of the repository:
+
+```
+python3 python/aemxml/aemxml_tool.py json2bin statusbar/avb_entity/testdata/entity_rates.json \
+    statusbar/avb_entity/testdata/entity_rates.bin --set version=0.0.0-test
+```
