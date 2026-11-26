@@ -159,15 +159,16 @@ TEST(listener_bindings, a_line_must_be_of_its_files_version)
     EXPECT_TRUE(parse_saved_listener_bindings(v2 + "\n")->empty());
 }
 
-TEST(listener_bindings, more_bindings_than_the_ieee_listener_has_goals_is_refused_for_it_only)
+// The IEEE listener keeps a fast-connect goal for each of its 32 streams, as many as Milan sinks.
+TEST(listener_bindings, a_binding_for_every_stream_is_read_for_both_listeners)
 {
     SavedListenerBindings bindings{};
-    for (uint16_t sink = 0; sink < 20; ++sink) {
+    for (uint16_t sink = 0; sink < nanoavb::NanoAvbMilanAcmpListener::MAX_STREAMS; ++sink) {
         bindings.push_back(milan_binding(sink, 0xAB, 0, 0xCD, false));
     }
     auto const text = serialize_milan_listener_bindings({bindings.data(), bindings.size()});
-    EXPECT_EQ(parse_saved_listener_bindings(text)->size(), size_t{20});
-    EXPECT_TRUE(!parse_listener_bindings(text).has_value());
+    EXPECT_EQ(parse_saved_listener_bindings(text)->size(), size_t{32});
+    EXPECT_EQ(parse_listener_bindings(text)->size(), size_t{32});
 }
 
 TEST(listener_bindings, a_milan_file_round_trips_and_a_missing_one_is_empty)

@@ -2213,6 +2213,14 @@ auto state_dir(std::string const& name) -> std::filesystem::path
 
 ieee::Eui48 const CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x01};
 
+/// The persistent state file of the MilanKit with @p entity_low in state directory @p dir, its directory made.
+auto kit_state_path(std::filesystem::path const& dir, uint64_t const entity_low = 0x30) -> std::string
+{
+    auto const entity_dir = entity_state_dir_path(dir.string(), ieee::Eui64{}.from_uint64(0x020000fffe000000ULL | entity_low));
+    std::filesystem::create_directories(entity_dir);
+    return entity_state_file_path(entity_dir, entity_state_file::ENTITY_STATE);
+}
+
 /// A kit keeping its persistent state at @p path, with a capture of what its
 /// MVU handler sends
 struct PersistentKit : MilanKit
@@ -2225,8 +2233,10 @@ struct PersistentKit : MilanKit
         bool const gate = true)
         : MilanKit{milan, entity_low, gate, std::move(model)}
     {
-        config.persistent_state_path = path;
-        kit.host().components().mvu_handler.set_clock_domain_count(1);  // the test model has none
+        if (!path.empty()) {
+            // The state directory the file is in: <state_dir>/<entity ID>/entity-state.
+            config.state_dir = std::filesystem::path{path}.parent_path().parent_path().string();
+        }
     }
 
     /// An AEM command through process_packet (as from the network: the
@@ -2323,7 +2333,7 @@ struct PersistentKit : MilanKit
 TEST(avb_entity_kit_persistence, set_name_survives_a_rebuild)
 {
     auto const dir = state_dir("name");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     {
         PersistentKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -2351,7 +2361,7 @@ TEST(avb_entity_kit_persistence, set_name_survives_a_rebuild)
 TEST(avb_entity_kit_persistence, stream_names_are_renameable_saved_and_told)
 {
     auto const dir = state_dir("stream-name");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     std::vector<std::tuple<uint16_t, uint16_t, std::string>> told;
     auto const hook = [&told](uint16_t const type, uint16_t const index, atdecc::aem::AtdeccString const& name) {
         told.emplace_back(type, index, std::string{name.as_string_view()});
@@ -2513,7 +2523,7 @@ TEST(avb_entity_kit_persistence, request_entity_name_is_a_local_set_name)
 TEST(avb_entity_kit_persistence, presentation_offset_survives_a_rebuild)
 {
     auto const dir = state_dir("offset");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     std::vector<std::pair<uint16_t, uint32_t>> applied;
     auto const hook = [&applied](uint16_t const idx, uint32_t const ns) -> uint8_t {
         applied.emplace_back(idx, ns);
@@ -2592,19 +2602,19 @@ TEST(avb_entity_kit, default_mcr_priorities_parse)
 }
 
 // No state file yet: the listener bindings file's bindings are imported and
-// armed as fast-connect goals, and the state file is written with them; the
-// old file is no longer written
+// armed as fast-connect goals (the classic listener), and the state file is
+// written with them; the old file is no longer written
 TEST(avb_entity_kit_persistence, listener_bindings_imported)
 {
     auto const dir = state_dir("bindings");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     auto const legacy = (dir / "avb-bindings").string();
     std::string const legacy_text = std::string{LISTENER_BINDINGS_MAGIC} + "\n0 0200001111110001 2\n";
     {
         std::ofstream out{legacy};
         out << legacy_text;
     }
-    PersistentKit m{path};
+    PersistentKit m{path, 0x30, false};
     m.config.listener_bindings_path = legacy;
     EXPECT_TRUE(m.start_ready());
     auto const goals = m.kit.host().components().acmp_listener.fast_connect_goals();
@@ -2640,7 +2650,7 @@ TEST(avb_entity_kit_persistence, listener_bindings_imported)
 TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
 {
     auto const dir = state_dir("model");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     PersistentState other{};
     other.entity_model_id = 0x99;
     other.configured_entity_name = "kit milan";
@@ -2693,7 +2703,7 @@ TEST(avb_entity_kit_persistence, other_model_and_corrupt_files)
 TEST(avb_entity_kit_persistence, formats_and_rates_follow_the_data_plane)
 {
     auto const dir = state_dir("formats");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x30);
     PersistentKit m{path};
     EXPECT_TRUE(m.start_ready());
     std::array<uint8_t, 12> body{0x00, 0x05, 0x00, 0x00};  // STREAM_INPUT 0
@@ -2799,6 +2809,21 @@ struct RateKit : PersistentKit
 };
 
 /// The unsolicited AEM responses in @p frames with command @p command.
+ieee::Eui64 const OTHER_CONTROLLER{0x02, 0x00, 0x00, 0xC0, 0x00, 0x00, 0x00, 0x02};
+ieee::Eui48 const OTHER_CONTROLLER_MAC{0x02, 0x00, 0x00, 0xC0, 0x00, 0x02};
+
+/// Register a second controller for unsolicited notifications.
+void register_other_controller(MilanKit& m)
+{
+    nanoavb::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, nanoavb::AemDu::AEM_DATA_LENGTH);
+    header.target_entity_id = m.config.entity_id;
+    header.controller_entity_id = OTHER_CONTROLLER;
+    std::array<uint8_t, nanoavb::AemDu::LENGTH> frame{};
+    span_store(frame, header);
+    (void)m.kit.host().components().aem_handler.process_packet(OTHER_CONTROLLER_MAC, frame, m.config.entity_id);
+}
+
 auto unsolicited(std::vector<std::vector<uint8_t>> const& frames, uint16_t const command) -> std::vector<std::vector<uint8_t>>
 {
     std::vector<std::vector<uint8_t>> out;
@@ -3023,7 +3048,7 @@ TEST(avb_entity_kit_formats, a_refused_rate_change_is_undone)
 TEST(avb_entity_kit_formats, a_saved_sampling_rate_is_restored_at_start)
 {
     auto const dir = state_dir("multi-rate");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x70);
     {
         RateKit m{path};
         EXPECT_TRUE(m.start_ready());
@@ -3205,11 +3230,11 @@ TEST(avb_entity_kit_formats, a_stream_kept_at_its_rate_stays_there_across_a_rest
 {
     constexpr uint16_t SYNC_SAMPLE_RATE_CONV = 0x0004;
     auto const dir = state_dir("kept-rate");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x77);
     {
         RateKit m{path, 0x77, true, false, false, true, SYNC_SAMPLE_RATE_CONV};
         EXPECT_TRUE(m.start_ready());
-        (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND, 0);
+        (void)m.acmp_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 0);
         m.bridge_listener(0, srp::msrp::ListenerDeclaration::Ready);
         EXPECT_EQ(m.aem_packet(atdecc::AEM_COMMAND_SET_SAMPLING_RATE, rate_body(96000)), atdecc::AEM_STATUS_SUCCESS);
         EXPECT_EQ(m.current_format(DESCRIPTOR_STREAM_OUTPUT, 0), INT24_8CH_48K);
@@ -3968,7 +3993,7 @@ auto mapping(uint16_t const stream_ch, uint16_t const cluster) -> nanoavb::Dynam
 TEST(avb_entity_kit_names, every_milan_name_is_settable_saved_and_notified)
 {
     auto const dir = state_dir("stage7-names");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x71);
     using namespace atdecc::aem;
     std::vector<std::pair<uint16_t, uint16_t>> const named{
         {DESCRIPTOR_CONFIGURATION, 0},
@@ -4038,7 +4063,7 @@ TEST(avb_entity_kit_names, every_milan_name_is_settable_saved_and_notified)
 TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
 {
     auto const dir = state_dir("stage7-maps");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x72);
     std::vector<nanoavb::DynamicAudioMapping> identity;
     for (uint16_t ch = 0; ch < 8; ++ch) {
         identity.push_back(mapping(ch, ch));
@@ -4083,11 +4108,7 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
         EXPECT_EQ(saved.audio_maps.size(), size_t{1});
         EXPECT_TRUE(saved.audio_maps.size() == 1 && saved.audio_maps[0].mappings.size() == 3);
     }
-    // Restart, bound: the saved format, then the saved mappings, through the hooks.
-    PersistentState state = load_persistent_state(path, 0, {}).state;
-    state.listener_bindings.push_back(
-        {.stream_input = 0, .talker_entity_id = 0x0200001111110001ULL, .talker_unique_id = 0, .format = base_format(48000, 2)});
-    EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
+    // Restart, then bound: the saved format, then the saved mappings, through the hooks.
     {
         RateKit m{path, 0x72, true};
         std::vector<std::vector<nanoavb::DynamicAudioMapping>> routed;
@@ -4116,7 +4137,7 @@ TEST(avb_entity_kit_mappings, default_change_persist_restore_and_formats)
         EXPECT_EQ(load_persistent_state(path, 0, {}).state.audio_maps[0].mappings.size(), size_t{3});
     }
     // A saved set the model no longer accepts falls back to the default.
-    state = load_persistent_state(path, 0, {}).state;
+    PersistentState state = load_persistent_state(path, 0, {}).state;
     state.audio_maps[0].mappings.push_back({.stream_index = 0, .stream_channel = 9, .cluster_offset = 6, .cluster_channel = 0});
     state.listener_bindings.clear();
     EXPECT_TRUE(save_persistent_state(path, serialize_persistent_state(state)).has_value());
@@ -4243,7 +4264,7 @@ TEST(avb_entity_kit_mappings, an_output_keeps_the_channels_its_static_map_names)
 TEST(avb_entity_kit_mappings, saved_mappings_survive_a_start_before_the_hook)
 {
     auto const dir = state_dir("stage7-maps-nohook");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x74);
     std::vector<nanoavb::DynamicAudioMapping> const swapped{mapping(1, 0), mapping(0, 1), mapping(2, 2)};
     {
         RateKit m{path, 0x74, true};
@@ -4295,7 +4316,7 @@ auto output_map(PersistentKit& m) -> std::pair<uint8_t, uint16_t>
 TEST(avb_entity_kit_mixed_rates, an_unmapped_input_accepts_another_rate)
 {
     auto const dir = state_dir("mixed-input");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x76);
     std::vector<nanoavb::DynamicAudioMapping> identity;
     for (uint16_t ch = 0; ch < 8; ++ch) {
         identity.push_back(mapping(ch, ch));
@@ -4459,7 +4480,7 @@ TEST(avb_entity_kit_mixed_rates, a_static_output_map_holds_across_rates_when_opt
 TEST(avb_entity_kit_mixed_rates, a_saved_off_rate_output_format_is_restored_when_opted_in)
 {
     auto const dir = state_dir("mixed-output-restore");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x7D);
     {
         RateKit m{path, 0x7D, true};
         m.kit.set_output_mappings_across_rates(true);
@@ -4824,7 +4845,7 @@ TEST(avb_entity_kit_clock_source, set_clock_source_on_domain_one_reaches_the_hos
 TEST(avb_entity_kit_clock_source, a_vetoed_clock_source_leaves_the_domain_unchanged)
 {
     auto const dir = state_dir("clock-source-veto");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x81);
     PersistentKit m{path, 0x81, std::nullopt, make_clock_domains_blob()};
     m.kit.set_on_clock_source_changed([](uint16_t const domain, uint16_t) -> uint8_t {
         return domain == 1 ? atdecc::AEM_STATUS_NOT_SUPPORTED : atdecc::AEM_STATUS_SUCCESS;
@@ -4847,7 +4868,7 @@ TEST(avb_entity_kit_clock_source, a_vetoed_clock_source_leaves_the_domain_unchan
 TEST(avb_entity_kit_clock_source, a_host_clock_source_is_notified_without_the_hook)
 {
     auto const dir = state_dir("clock-source-host");
-    auto const path = (dir / "avb-state.toml").string();
+    auto const path = kit_state_path(dir, 0x83);
     PersistentKit m{path, 0x83, std::nullopt, make_clock_domains_blob()};
     int calls = 0;
     m.kit.set_on_clock_source_changed([&calls](uint16_t, uint16_t) -> uint8_t {

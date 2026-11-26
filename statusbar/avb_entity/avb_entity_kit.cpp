@@ -23,13 +23,19 @@
 
 namespace statusbar::avb_entity {
 
-using statusbar::atdecc::aem::DESCRIPTOR_AUDIO_UNIT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_INPUT;
 using statusbar::atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
-using statusbar::atdecc::aem::DescriptorRef;
 using statusbar::nanoavb::DomainInfo;
 
 namespace {
+
+/// An ACMP stream_id as the StreamID SRP knows the stream by.
+[[nodiscard]] auto srp_stream_id(ieee::Eui64 const& acmp_stream_id) noexcept -> nanoavb::StreamId
+{
+    nanoavb::StreamId stream_id{};
+    (void)statusbar::tsn::load_unchecked(acmp_stream_id.span(), &stream_id);
+    return stream_id;
+}
 
 /// The static destination MAC @p config gives a talker stream of @p kind (none for "other").
 auto talker_dest_mac(AvbEntityAudioIOConfig const& config, StreamKind const kind) noexcept -> ieee::Eui48
@@ -2727,17 +2733,18 @@ void AvbEntityKit::load_persistent_state()
     persistence_blocked_ = false;
     persist_pending_ = false;
     saved_bindings_.clear();
-    if (!config_.persistent_state_path.empty()) {
+    persistent_state_path_ = persistent_state_file(false);  // the directory is made by the first save
+    if (!persistent_state_path_.empty()) {
         restore_persistent_state();
     }
 }
 
 void AvbEntityKit::restore_persistent_state()
 {
+    // A classic listener's bindings file is imported once; a Milan one's is the host's own.
+    bool const import_bindings = listener_ != nullptr && !host_.components().acmp_is_milan();
     auto loaded = avb_entity::load_persistent_state(
-        config_.persistent_state_path,
-        served_entity_model_id(),
-        listener_ != nullptr ? config_.listener_bindings_path : std::string{});
+        persistent_state_path_, served_entity_model_id(), import_bindings ? config_.listener_bindings_path : std::string{});
     save_settings_changes();
     if (!notify_persistent_state_outcome(loaded)) {
         return;
@@ -2752,7 +2759,7 @@ void AvbEntityKit::save_settings_changes()
     // Every later change is saved: AEM settings, the MVU values (the
     // listener bindings once the listener is up).
     host_.components().aem_handler.set_on_settings_changed([this](uint16_t) { persist(); });
-    host_.components().mvu_handler.set_on_settings_changed([this] { persist(); });
+    host_.components().aem_handler.set_on_mvu_settings_changed([this](uint16_t) { persist(); });
 }
 
 auto AvbEntityKit::notify_persistent_state_outcome(LoadedPersistentState const& loaded) -> bool
@@ -2761,6 +2768,7 @@ auto AvbEntityKit::notify_persistent_state_outcome(LoadedPersistentState const& 
     switch (loaded.outcome) {
         case PersistentStateOutcome::fresh:
             log.status("kit: no persistent state yet; starting from the model's defaults");
+            persisted_text_ = serialize_persistent_state(collect_persistent_state());  // the defaults need no file
             if (loaded.error) {
                 log.warning("kit: the listener bindings file was not imported: {}", logging::embed<40>(loaded.error.message()));
             }
@@ -2819,7 +2827,7 @@ void AvbEntityKit::apply_saved_settings(PersistentState const& saved)
 void AvbEntityKit::apply_saved_descriptor_values(PersistentState const& saved)
 {
     for (auto const port : dynamic_input_ports_) {
-        (void)host_.components().aem_handler.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
+        (void)put_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
     }
     apply_saved_sampling_rates(saved);
     for (auto const& format : saved.stream_formats) {
@@ -3039,6 +3047,20 @@ void AvbEntityKit::collect_stream_settings(PersistentState& state) const
     }
 }
 
+void AvbEntityKit::collect_stream_formats(PersistentState& state) const
+{
+    storage_handler_.for_each_runtime_stream_format([this,
+                                                     &state](uint16_t const type, uint16_t const index, ieee::Eui64 const& format) {
+        // A stream's own format is the model's: nothing to keep.
+        auto const authored =
+            storage_handler_.authored_stream_format({.configuration_index = 0, .descriptor_type = type, .descriptor_index = index});
+        if (!authored || *authored != format) {
+            state.stream_formats.push_back({.descriptor_type = type, .descriptor_index = index, .format = format.to_uint64()});
+        }
+    });
+    collect_unit_formats(state);
+}
+
 void AvbEntityKit::collect_unit_formats(PersistentState& state) const
 {
     // The rate is restored first and its streams follow it: while it is not the authored one, every stream of
@@ -3087,19 +3109,17 @@ void AvbEntityKit::collect_listener_bindings(PersistentState& state) const
 
 void AvbEntityKit::collect_mvu_settings(PersistentState& state) const
 {
-    auto const& mvu = host_.components().mvu_handler;
-    state.system_unique_id = mvu.system_unique_id();
-    auto const& name = mvu.system_unique_name();
-    state.system_unique_name.assign(name.data(), static_cast<size_t>(std::ranges::find(name, '\0') - name.begin()));
-    for (size_t index = 0; index < mvu.clock_domain_count(); ++index) {
-        nanoavb::MvuCommandHandler::McrInfo const defaults{.user_mcr_prio = mvu.default_mcr_priority(index)};
-        if (auto const* info = mvu.mcr_info(index); info != nullptr && !(*info == defaults)) {
-            auto const& field = info->domain_name;
-            auto const length = static_cast<size_t>(std::ranges::find(field, '\0') - field.begin());
+    auto const& aem = host_.components().aem_handler;
+    state.system_unique_id = aem.system_unique_id();
+    state.system_unique_name = std::string{aem.system_unique_name().as_string_view()};
+    for (size_t index = 0; index < clock_domain_count(); ++index) {
+        auto const info = aem.media_clock_reference_info(static_cast<uint16_t>(index));
+        auto const name = info.media_clock_domain_name.as_string_view();
+        if (info.user_mcr_prio.get() != info.default_mcr_prio.get() || name != atdecc::MVU_DEFAULT_MEDIA_CLOCK_DOMAIN_NAME) {
             state.media_clock_references.push_back(
                 {.clock_domain = static_cast<uint16_t>(index),
-                 .user_priority = info->user_mcr_prio,
-                 .domain_name = std::string{field.data(), length}});
+                 .user_priority = info.user_mcr_prio.get(),
+                 .domain_name = std::string{name}});
         }
     }
 }
@@ -3116,9 +3136,24 @@ void AvbEntityKit::persist()
     }
 }
 
+auto AvbEntityKit::persistent_state_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::ENTITY_STATE, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::ENTITY_STATE);
+}
+
 void AvbEntityKit::save_persisted(std::string text)
 {
-    if (auto const saved = save_persistent_state(config_.persistent_state_path, text); !saved) {
+    if (persistent_state_file(true).empty()) {
+        return;  // no directory for this entity: nothing is saved
+    }
+    if (auto const saved = save_persistent_state(persistent_state_path_, text); !saved) {
         host_.ctl_log().warning("kit: could not save the persistent state: error {}", saved.error().value());
         return;
     }
