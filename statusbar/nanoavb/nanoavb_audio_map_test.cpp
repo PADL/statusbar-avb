@@ -688,4 +688,22 @@ TEST(nanoavb_audio_map, a_local_change_from_a_hook_keeps_the_commands_requester)
     EXPECT_EQ(b.notified(AEM_COMMAND_SET_CONTROL, MAC_B), 1);
 }
 
+// The mappings belong to the configuration's ports: a switch forgets them, a refused one does not.
+TEST(nanoavb_audio_map, a_configuration_switch_forgets_the_mappings)
+{
+    Bench b;
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 0, 0)}), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(b.mappings(true, 0, {m(0, 0, 0)}, CONTROLLER_A, DESCRIPTOR_STREAM_PORT_OUTPUT), AEM_STATUS_SUCCESS);
+    std::array<uint8_t, AemSetConfigurationPayload::LENGTH> to_1{};
+    span_store(to_1, AemSetConfigurationPayload{.reserved = uint16_t{0}, .configuration_index = uint16_t{1}});
+    // No hook: the switch is refused and the mappings stay.
+    EXPECT_EQ(b.command(CONTROLLER_A, MAC_A, AEM_COMMAND_SET_CONFIGURATION, to_1).header.status(), AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(b.maps->size(), size_t{2});
+    b.aem.set_on_configuration_changed([](uint16_t) { return AEM_STATUS_SUCCESS; });
+    EXPECT_EQ(b.command(CONTROLLER_A, MAC_A, AEM_COMMAND_SET_CONFIGURATION, to_1).header.status(), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0).mappings.empty());
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings.empty());
+    EXPECT_EQ(b.maps->size(), size_t{0});
+}
+
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)

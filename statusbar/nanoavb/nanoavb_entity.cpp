@@ -2311,6 +2311,9 @@ auto AemCommandHandler::answer_set_configuration(std::span<uint8_t const> comman
 void AemCommandHandler::forget_configuration_state()
 {
     mcr_info_ = {};  // the new configuration's CLOCK_DOMAINs start from their defaults
+    if (audio_maps_ != nullptr) {
+        audio_maps_->clear();  // they named the old configuration's ports
+    }
 }
 
 auto AemCommandHandler::send_response(

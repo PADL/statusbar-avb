@@ -472,7 +472,8 @@ or nothing, through the same hook, refused while `local_change_refusal()`
 refuses), which notifies every registered controller of what changed as
 REMOVE then ADD in AECPDUs of at most 63 mappings, and seeds a port's
 defaults, or mappings it restores, with `seed_audio_mappings`, which
-notifies nobody. The kit hands the handler no store: an entity that
+notifies nobody. A configuration switch forgets every port's mappings.
+The kit hands the handler no store: an entity that
 routes channels gives `components().aem_handler` its store and hook.
 
 Profile-independent, because both documents agree: only the ENTITY
