@@ -391,12 +391,17 @@ class AvbEntityKit
         uint64_t to{0};
     };
     using RetimedFormats = sg14::inplace_vector<RetimedFormat, 2 * MAX_ENTITY_STREAMS>;
-    /// The entity's data plane moves AUDIO_UNIT 0 to @p rate and @p streams with it, all or none, before each
-    /// stream's format hook (reactor thread); answers an AEM status. Without it the unit keeps its rate.
+    /// The entity's data plane moves AUDIO_UNIT 0 to @p rate and @p streams with it, all or none
+    /// (reactor thread), answering an AEM status (STREAM_IS_RUNNING when a talker cannot change while it
+    /// streams). Without it a rate but the one in force is NOT_SUPPORTED. The kit's own engines follow only
+    /// with kit_data_plane, each stream through its format hook; else an entity on them answers NOT_SUPPORTED.
     using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
     void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
     /// Whether a SET_SAMPLING_RATE is moving its streams through the format hook now (not while undoing).
     [[nodiscard]] auto retiming() const noexcept -> bool { return retiming_; }
+    /// Whether the kit's own engines are the entity's data plane (AvbEntityAudioIOConfig::kit_data_plane):
+    /// a SET_SAMPLING_RATE moves them, and dynamic ports start at their identity mappings.
+    [[nodiscard]] auto kit_data_plane() const noexcept -> bool { return config_.kit_data_plane; }
     /// The link speed (Mbit/s, reactor thread; the interface's from start() and each link up, 1000 unknown; the
     /// shaper keeps it current) whose SR_BANDWIDTH_PERCENT is the talkers' class A budget: a format change that
     /// pushes every talker's TSpec bandwidth together past it, and raises it, is refused NO_RESOURCES.
@@ -588,8 +593,6 @@ class AvbEntityKit
     /// model's (a Milan model does, any other does not).
     [[nodiscard]] auto milan_profile() const noexcept -> bool;
     [[nodiscard]] auto listener_specs() const noexcept -> StreamSpecs const& { return listener_specs_; }
-    /// The rate the kit's engines were built with; a SET_SAMPLING_RATE does not change it
-    /// (set_on_unit_rate_changed()), so any thread may read it.
     [[nodiscard]] auto sample_rate() const noexcept -> uint32_t { return sample_rate_; }
     /// The entity configuration the kit was built with (VLAN, stream PCP, ...).
     [[nodiscard]] auto config() const noexcept -> AvbEntityAudioIOConfig const& { return config_; }
@@ -638,108 +641,6 @@ class AvbEntityKit
     /// the ACMP talker log and listener connect/disconnect, the AEM GET_COUNTERS and GET_STREAM_INFO
     /// fills.
     void wire_stream_callbacks();
-    /// The MSRP third of wire_stream_callbacks(): advertise, withdraw, and the transmit gate's Listener Ready.
-    void wire_srp_callbacks();
-    /// The ACMP third, for whichever ACMP the components run.
-    void wire_acmp_callbacks();
-    /// Talker stream @p idx's IEEE 1722.1 ACMP connection count to the gate, then admission re-evaluated.
-    void publish_talker_connections(uint16_t idx);
-    /// Recompute the admitted set at @p now after a gate input changed, or at the admission
-    /// deadline; tell on_admission_changed_ when it differs from the one last told.
-    void notify_admission(RawTimePoint now);
-    /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
-    void arm_admission_deadline(RawTimePoint now) noexcept;
-    /// At or past the admission deadline (@p now on the gate's clock), re-evaluate admission, so a
-    /// grace that runs out with no MSRP or ACMP event still leaves the set and is told to the hook.
-    /// Before it, nothing. end_cycle() calls it.
-    void on_admission_timer(RawTimePoint now);
-    /// Evaluate each talker stream's gate (evaluate_talker_gate()); tell on_talker_gate_changed_ each that moved.
-    void notify_talker_gates() noexcept;
-    /// Whether talker stream @p idx streams by the reactor's state: slot open, MAAP ready, admitted, not stopped.
-    [[nodiscard]] auto evaluate_talker_gate(uint16_t idx) const noexcept -> bool;
-    /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
-    void wire_ieee_acmp_callbacks();
-    /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
-    void wire_milan_talker_callbacks();
-    void wire_milan_listener_callbacks();
-    /// The IEEE 1722.1 listener's connect and disconnect, onto the stream inputs.
-    template <typename Listener>
-    void wire_listener_connections(Listener& listener);
-    /// The Milan listener's settle and its giving up of the SRP parameters,
-    /// onto the stream inputs, with the Talker attribute each sink probed.
-    void wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpListener& listener);
-    /// Why Milan sink @p stream_index is stopping SRP, as its input's loss. Within stop_srp only.
-    [[nodiscard]] auto milan_input_loss(uint16_t stream_index) const -> StreamInputLoss;
-    /// What a sink with the SRP parameters @p srp follows in SRP.
-    [[nodiscard]] static auto probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch;
-    /// The stream outputs have destination addresses that are theirs to use
-    /// (Milan v1.3 4.3.3.1, 5.5.4.1 step 3).
-    [[nodiscard]] auto talker_addresses_valid() const noexcept -> bool;
-    /// REGISTERING_FAILED for stream output @p stream_index (Milan v1.3 Table 5.23).
-    [[nodiscard]] auto talker_registering_failed(uint16_t stream_index) const -> bool;
-    /// The entity is locked by a controller other than @p controller.
-    [[nodiscard]] auto locked_out(ieee::Eui64 const& controller) const noexcept -> bool;
-    /// This entity's gPTP grandmaster and domain, as its own ADP reports them.
-    [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
-    /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
-    [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
-    /// Stream input @p index as Milan v1.3 Table 5.8 reads it: its sink's binding and SRP
-    /// parameters and the matching Talker attribute the port registers. nullopt for an entity
-    /// whose connection management is not Milan's, and for an input it has no sink for.
-    [[nodiscard]] auto milan_sink_stream_info(uint16_t index) const -> std::optional<MilanSinkStreamInfo>;
-    /// Milan v1.3 Table 5.20: a GET_STREAM_INFO notification for each stream input whose stream
-    /// ID, destination address, VLAN, accumulated latency, Talker attribute registration, failure
-    /// code or bridge, connected state or started/stopped state is not what it was at the last
-    /// call. The first call only looks. end_cycle() calls it; nothing is done for an entity whose
-    /// connection management is not Milan's.
-    void tell_changed_input_info();
-    /// tell_changed_input_info() for stream input @p index.
-    void tell_input_info_if_changed(uint16_t index);
-    /// What tell_changed_input_info() compares for stream input @p index: its GET_STREAM_INFO
-    /// answer without the format, which SET_STREAM_FORMAT notifies for itself.
-    [[nodiscard]] auto told_input_info(uint16_t index) -> std::optional<atdecc::aem::AemStreamInfoPayload>;
-    /// A GET_STREAM_INFO notification for stream input @p index now, noted so that
-    /// tell_changed_input_info() does not send what it says a second time.
-    void notify_input_info(uint16_t index);
-    /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills, and the
-    /// presentation offsets of SET and GET_MAX_TRANSIT_TIME.
-    void wire_aem_stream_callbacks();
-    /// SET_MAX_TRANSIT_TIME's @p offset_ns for talker stream @p idx, through
-    /// on_presentation_offset_changed_ (NOT_SUPPORTED without it): its AEM status.
-    [[nodiscard]] auto change_presentation_offset(uint16_t idx, uint32_t offset_ns) -> uint8_t;
-    /// Whether @p idx is one of the kit's talker streams.
-    [[nodiscard]] auto is_talker_index(uint16_t idx) const noexcept -> bool;
-    /// The storage handler's SET_SAMPLING_RATE hook: SUCCESS for the rate in force; another
-    /// rate re-times AUDIO_UNIT 0's streams through on_unit_rate_changed_, NOT_SUPPORTED without it.
-    [[nodiscard]] auto change_sampling_rate(uint16_t audio_unit, uint32_t rate) -> uint8_t;
-    /// AUDIO_UNIT 0's streams at @p from, each at @p rate; else NOT_SUPPORTED (an audio stream that
-    /// lists no such format) or STREAM_IS_RUNNING (an input runs, Milan v1.3 Section 5.4.2.7).
-    [[nodiscard]] auto retimed_formats(uint32_t from, uint32_t rate) -> std::expected<RetimedFormats, uint8_t>;
-    /// Stream @p spec (an output when @p output) added to @p out when a re-time from @p from to
-    /// @p rate moves it; else the status retimed_formats() refuses with, or SUCCESS.
-    [[nodiscard]] auto add_retimed(bool output, StreamSpec const& spec, uint32_t from, uint32_t rate, RetimedFormats& out)
-        -> uint8_t;
-    /// That stream's format in force when a re-time from @p from moves it: an audio stream at
-    /// that rate in AUDIO_UNIT 0's clock domain (IEEE 1722.1-2021 Clauses 7.2.3, 7.2.6); else nullopt.
-    [[nodiscard]] auto retimed_from(bool output, StreamSpec const& spec, uint32_t from) -> std::optional<uint64_t>;
-    /// Format @p word of stream @p index at @p rate; else NOT_SUPPORTED when the stream's descriptor
-    /// does not list it, or STREAM_IS_RUNNING for a running input (Milan v1.3 Section 5.4.2.7).
-    [[nodiscard]] auto retimed_to(bool output, uint16_t index, uint64_t word, uint32_t rate) const
-        -> std::expected<uint64_t, uint8_t>;
-    /// Whether STREAM_INPUT @p index runs: its Milan sink bound (Milan v1.3 Section 5.4.2.7), or
-    /// connected under IEEE 1722.1 (Clause 7.4.9.2). Its format does not change while it does.
-    [[nodiscard]] auto input_running(uint16_t index) const noexcept -> bool;
-    /// @p retimed put in force at @p rate by the entity's data plane, then in the descriptors,
-    /// its notifications left for after the response; the data plane's status.
-    [[nodiscard]] auto retime_streams(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
-    /// Notify @p retimed as SET_STREAM_FORMATs once the SET_SAMPLING_RATE is answered.
-    void notify_after_response(RetimedFormats const& retimed);
-    /// The SET_STREAM_FORMAT notification of each stream notify_after_response() was given.
-    void notify_retimed();
-    /// A PROBE_TX_COMMAND arrived for stream output @p stream_index: tell the
-    /// SRP handler, which under the Milan profile declares the stream's
-    /// Talker attribute on it (Milan v1.3 4.3.3.1).
-    void note_talker_probe(uint16_t stream_index, TimePoint now);
 
     /// The SRP handler's Class A Domain in force changed: adopted from the
     /// wire, or back to the configured one after a startup or Link Up (Milan
@@ -822,6 +723,24 @@ class AvbEntityKit
     [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
     /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
     [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
+    /// Stream input @p index as Milan v1.3 Table 5.8 reads it: its sink's binding and SRP
+    /// parameters and the matching Talker attribute the port registers. nullopt for an entity
+    /// whose connection management is not Milan's, and for an input it has no sink for.
+    [[nodiscard]] auto milan_sink_stream_info(uint16_t index) const -> std::optional<MilanSinkStreamInfo>;
+    /// Milan v1.3 Table 5.20: a GET_STREAM_INFO notification for each stream input whose stream
+    /// ID, destination address, VLAN, accumulated latency, Talker attribute registration, failure
+    /// code or bridge, connected state or started/stopped state is not what it was at the last
+    /// call. The first call only looks. end_cycle() calls it; nothing is done for an entity whose
+    /// connection management is not Milan's.
+    void tell_changed_input_info();
+    /// tell_changed_input_info() for stream input @p index.
+    void tell_input_info_if_changed(uint16_t index);
+    /// What tell_changed_input_info() compares for stream input @p index: its GET_STREAM_INFO
+    /// answer without the format, which SET_STREAM_FORMAT notifies for itself.
+    [[nodiscard]] auto told_input_info(uint16_t index) -> std::optional<atdecc::aem::AemStreamInfoPayload>;
+    /// A GET_STREAM_INFO notification for stream input @p index now, noted so that
+    /// tell_changed_input_info() does not send what it says a second time.
+    void notify_input_info(uint16_t index);
     /// A Milan sink's binding changed: the counters of an input bound or unbound, the stopped
     /// states (Milan v1.3 Sections 5.3.8.7, 5.3.8.10), and a save.
     void follow_milan_bindings();
@@ -952,12 +871,39 @@ class AvbEntityKit
     /// The storage handler's SET_STREAM_FORMAT and SET_SAMPLING_RATE hooks (the latter re-times AUDIO_UNIT 0's
     /// streams at its rate through the former, all or none: docs/AVB_ENTITY_KIT.md).
     [[nodiscard]] auto change_stream_format(uint16_t descriptor_type, uint16_t descriptor_index, uint64_t format) -> uint8_t;
+    /// Whether a SET_STREAM_FORMAT of @p type re-shapes the kit's engines (kit_data_plane, and for an
+    /// input the entity's format hook); else on_stream_format_changed() applies.
+    [[nodiscard]] auto engines_follow_format(uint16_t type) const noexcept -> bool;
     [[nodiscard]] auto change_sampling_rate(uint16_t audio_unit, uint32_t rate) -> uint8_t;
+    /// Without kit_data_plane: a stream input's format through the listener alone, saved in the
+    /// stream-formats file; a stream output's is NOT_SUPPORTED (its serializer is made once).
+    [[nodiscard]] auto on_stream_format_changed(uint16_t type, uint16_t index, uint64_t format) -> uint8_t;
+    [[nodiscard]] auto change_input_format(uint16_t index, uint64_t format) -> uint8_t;
+    /// The format in force of stream (@p type, @p index), 0 without one.
+    [[nodiscard]] auto current_stream_format(uint16_t type, uint16_t index) const -> uint64_t;
+    /// The stream-formats file of the entity's state directory, the directory made with @p make; empty without one.
+    [[nodiscard]] auto stream_formats_file(bool make) -> std::string;
+    /// Every input's format, @p index's at @p format, saved (Milan v1.3 Section 5.3.8.1).
+    void save_input_formats(uint16_t index, uint64_t format);
+    /// The saved input formats, each kept only when the listener and the model still accept it.
+    void restore_input_formats();
+    void restore_input_format(SavedStreamFormat const& saved);
+    /// The persistent state file of the entity's state directory, the directory made with @p make.
+    [[nodiscard]] auto persistent_state_file(bool make) -> std::string;
     /// AUDIO_UNIT 0's idle audio streams at @p from, each at @p rate; else NOT_SUPPORTED (one on a port that
     /// converts no rates cannot follow, Milan v1.3 Section 5.4.2.13) or NO_RESOURCES (the class A budget).
     [[nodiscard]] auto retimed_formats(uint32_t from, uint32_t rate) const -> std::expected<RetimedFormats, uint8_t>;
-    /// Stream @p spec of the direction (@p output) added to @p out when retimed_formats() re-times it; else as there.
-    [[nodiscard]] auto add_retimed(bool output, StreamSpec const& spec, uint32_t from, uint32_t rate, RetimedFormats& out) const
+    /// Stream @p index of the direction (@p output) added to @p out at @p rate when its format in force is
+    /// at @p from in AUDIO_UNIT 0's domain; NOT_SUPPORTED when it lists no such format, STREAM_IS_RUNNING
+    /// for a running input. The UnitRateFn decides for an output.
+    [[nodiscard]] auto add_retimed(bool output, uint16_t index, uint32_t from, uint32_t rate, RetimedFormats& out) const -> uint8_t;
+    /// The format in force of that stream when SET_SAMPLING_RATE from @p from moves it; else nullopt.
+    [[nodiscard]] auto retimed_from(bool output, uint16_t index, uint32_t from) const -> std::optional<uint64_t>;
+    /// @p word at @p rate when the stream lists it and may change; else the refusal's status.
+    [[nodiscard]] auto retimed_to(bool output, uint16_t index, uint64_t word, uint32_t rate) const
+        -> std::expected<uint64_t, uint8_t>;
+    /// With kit_data_plane: stream @p spec added to @p out when the kit's engines follow; else as there.
+    [[nodiscard]] auto add_own_retimed(bool output, StreamSpec const& spec, uint32_t from, uint32_t rate, RetimedFormats& out) const
         -> uint8_t;
     /// Stream @p spec's format at @p rate when it is idle and its descriptor lists it; else nullopt.
     [[nodiscard]] auto following_format(bool output, StreamSpec const& spec, uint32_t rate) const -> std::optional<uint64_t>;
@@ -968,6 +914,14 @@ class AvbEntityKit
     /// The data plane (on_unit_rate_changed_), then @p retimed in force with the unit at @p rate, the output
     /// mappings refreshed once; a refusal leaves both as they were.
     [[nodiscard]] auto retime_streams(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
+    /// Without kit_data_plane: @p retimed in force in the descriptors alone, notified after the response.
+    [[nodiscard]] auto retime_descriptors(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
+    /// With kit_data_plane: the unit at @p rate, @p retimed through the kit's engines (retime_all), the output
+    /// mappings refreshed, notified after the response.
+    [[nodiscard]] auto retime_engines(uint32_t rate, RetimedFormats const& retimed) -> uint8_t;
+    /// The queued format notifications sent once the command is answered, its controller left out
+    /// (at once outside a command).
+    void notify_after_response();
     /// Each of @p retimed at its new format, their notifications queued; a refusal puts the unit back at
     /// @p before and those changed back at their formats, and answers its status.
     [[nodiscard]] auto retime_all(uint32_t before, RetimedFormats const& retimed) -> uint8_t;
@@ -1211,9 +1165,6 @@ class AvbEntityKit
     /// The owning entity's blob-backed descriptor handler; carries the
     /// built-ins the kit's lifecycle/CONTROL hooks dispatch from.
     nanoavb::DescriptorStorageHandler& storage_handler_;
-    /// AUDIO_UNIT 0's CLOCK_DOMAIN, whose streams a SET_SAMPLING_RATE re-times; nullopt without
-    /// the unit, or when another unit shares the domain (its rate would change with it).
-    std::optional<uint16_t> retimed_clock_domain_;
 
     /// Reusable AVB control plane: talker/listener stream counts from the
     /// blob, 4 max listeners per talker stream.
