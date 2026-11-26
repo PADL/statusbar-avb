@@ -839,7 +839,8 @@ class AemCommandHandler
         -> AemCommandResponse;
 
     /// Forget what controllers set on the old configuration's descriptors: the media clock
-    /// reference settings of its CLOCK_DOMAINs (Milan v1.3 Section 7.6).
+    /// reference settings of its CLOCK_DOMAINs (Milan v1.3 Section 7.6), the dynamic audio mappings
+    /// of its stream ports.
     void forget_configuration_state();
 
     /// Handle CONTROLLER_AVAILABLE command (always SUCCESS, no body).
