@@ -155,7 +155,9 @@ using SetPresentationOffsetFn = statusbar::sg14::inplace_function<uint8_t(uint16
 
 /// Put stream port (@p port_type, @p port_index)'s new dynamic mappings (all of them, in cluster
 /// order) in force in the data plane: SUCCESS once in force, any other AEM status refuses and leaves
-/// the port as it was. Called on the reactor thread before the response; it must not change mappings itself.
+/// the port as it was. Called on the reactor thread before the response; it must not change mappings
+/// itself. An entity that does not change a streaming STREAM_OUTPUT's mappings refuses BAD_ARGUMENTS
+/// (Milan v1.3 Section 5.4.2.27, without TALKER_DYNAMIC_MAPPINGS_WHILE_RUNNING).
 using AudioMappingsChangedFn = statusbar::sg14::
     inplace_function<uint8_t(uint16_t port_type, uint16_t port_index, std::span<DynamicAudioMapping const> mappings), 64>;
 
@@ -996,8 +998,8 @@ class AemCommandHandler
     /// with @p check_channel, a channel of its current format at the unit's rate; else BAD_ARGUMENTS.
     [[nodiscard]] auto check_mapping(
         uint16_t port_index, PortModel const& port, DynamicAudioMapping const& mapping, bool check_channel) const -> uint8_t;
-    /// SUCCESS when @p stream_channel is a channel of @p stream_format and, on an input port that does
-    /// not convert rates, the format is at its audio unit's rate; else BAD_ARGUMENTS.
+    /// SUCCESS when @p stream_channel is a channel of @p stream_format and, on a port that does not
+    /// convert rates, the format is at its audio unit's rate; else BAD_ARGUMENTS.
     [[nodiscard]] auto check_stream_channel(
         uint16_t port_index, PortModel const& port, uint64_t stream_format, uint16_t stream_channel) const -> uint8_t;
     /// Whether the audio unit holding stream port (@p port_type, @p port_index) runs at base rate
@@ -1006,8 +1008,8 @@ class AemCommandHandler
     /// dynamic_port() for a port a controller's ADD or REMOVE may change (with the store and the
     /// data plane's hook); else the status they refuse with.
     [[nodiscard]] auto mappable_port(uint16_t port_type, uint16_t port_index, PortModel& port) const -> uint8_t;
-    /// Append @p mappings, checked as an ADD's, to the set in the store's next(): BAD_ARGUMENTS for
-    /// a cluster channel mapped from two stream channels, NO_RESOURCES past the store's capacity.
+    /// Append @p mappings, checked as an ADD's, to the set in the store's next(): BAD_ARGUMENTS for an
+    /// input's cluster channel, or an output's stream channel, mapped twice; NO_RESOURCES past capacity.
     [[nodiscard]] auto add_mappings(uint16_t port_index, PortModel const& port, std::span<DynamicAudioMapping const> mappings)
         -> uint8_t;
     /// add_mappings() for one mapping.

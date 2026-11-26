@@ -535,4 +535,43 @@ TEST(nanoavb_audio_map, a_full_add_is_answered_before_it_is_notified)
     EXPECT_TRUE(b.sent[1].body == b.sent[0].body);
 }
 
+// Milan v1.3 Sections 5.4.2.27 and 5.4.2.28: a controller changes a dynamic STREAM_PORT_OUTPUT's
+// mappings too. The rule runs the other way from an input's: a stream channel is fed from one
+// cluster channel, and a cluster channel may feed several stream channels.
+TEST(nanoavb_audio_map, a_controller_maps_an_output_port_by_the_output_rule)
+{
+    Bench b;
+    auto const add_out = [&b](std::vector<DynamicAudioMapping> const& list) {
+        return b.mappings(true, 0, list, CONTROLLER_A, DESCRIPTOR_STREAM_PORT_OUTPUT);
+    };
+    EXPECT_EQ(add_out({m(0, 0, 0)}), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((b.applied_to.back() == std::pair<uint16_t, uint16_t>{DESCRIPTOR_STREAM_PORT_OUTPUT, 0}));
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_B), 1);
+    EXPECT_EQ(b.notified(AEM_COMMAND_ADD_AUDIO_MAPPINGS, MAC_A), 0);
+    // One cluster channel fanned out to a second stream channel.
+    EXPECT_EQ(add_out({m(0, 1, 0)}), AEM_STATUS_SUCCESS);
+    std::vector<DynamicAudioMapping> const fanned{m(0, 0, 0), m(0, 1, 0)};
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == fanned);
+
+    // Two cluster channels into one stream channel, in one command or beside one held.
+    EXPECT_EQ(add_out({m(0, 2, 0), m(0, 2, 1)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(add_out({m(0, 0, 1)}), AEM_STATUS_BAD_ARGUMENTS);
+    // A channel past the current format (the listed 8-channel one is not in force), a stream at
+    // 96 kHz under a 48 kHz unit, a cluster the port lacks.
+    EXPECT_EQ(add_out({m(0, 4, 1)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(add_out({m(2, 0, 1)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(add_out({m(0, 2, 2)}), AEM_STATUS_BAD_ARGUMENTS);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == fanned);
+    EXPECT_EQ(b.applied.size(), size_t{2});
+    // A port that converts rates accepts the 96 kHz stream.
+    b.model.output_flags = PORT_FLAG_SYNC_SAMPLE_RATE_CONV;
+    EXPECT_EQ(add_out({m(2, 0, 1)}), AEM_STATUS_SUCCESS);
+
+    EXPECT_EQ(b.mappings(false, 0, {m(0, 1, 0)}, CONTROLLER_A, DESCRIPTOR_STREAM_PORT_OUTPUT), AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(b.get_map(0, 0, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == (std::vector<DynamicAudioMapping>{m(0, 0, 0)}));
+    EXPECT_TRUE(b.get_map(0, 1, DESCRIPTOR_STREAM_PORT_OUTPUT).mappings == (std::vector<DynamicAudioMapping>{m(2, 0, 1)}));
+    EXPECT_EQ(b.notified(AEM_COMMAND_REMOVE_AUDIO_MAPPINGS, MAC_B), 1);
+    EXPECT_TRUE(b.get_map(0, 0).mappings.empty());  // the input ports' are apart
+}
+
 TEST_MAIN(statusbar_nanoavb, nanoavb_audio_map_test)

@@ -1505,10 +1505,15 @@ using CommandMappings = sg14::inplace_vector<DynamicAudioMapping, MAX_COMMAND_MA
         .cluster_channel = wire.cluster_channel.get()};
 }
 
-/// Whether @p a and @p b name the same cluster channel.
-[[nodiscard]] auto same_cluster_channel(DynamicAudioMapping const& a, DynamicAudioMapping const& b) noexcept -> bool
+/// Whether @p a and @p b map the same channel of a port of @p port_type: on an input, the cluster
+/// channel they feed; on an output, the stream channel (Milan v1.3 Section 5.4.2.27).
+[[nodiscard]] auto same_mapped_channel(
+    uint16_t const port_type, DynamicAudioMapping const& a, DynamicAudioMapping const& b) noexcept -> bool
 {
-    return a.cluster_offset == b.cluster_offset && a.cluster_channel == b.cluster_channel;
+    if (port_type == DESCRIPTOR_STREAM_PORT_INPUT) {
+        return a.cluster_offset == b.cluster_offset && a.cluster_channel == b.cluster_channel;
+    }
+    return a.stream_index == b.stream_index && a.stream_channel == b.stream_channel;
 }
 
 /// Whether AUDIO_UNIT @p unit holds stream port (@p port_type, @p port_index).
@@ -1748,9 +1753,7 @@ auto AemCommandHandler::check_stream_channel(
         return AEM_STATUS_BAD_ARGUMENTS;
     }
     bool const converts = (port.port_flags & (PORT_FLAG_ASYNC_SAMPLE_RATE_CONV | PORT_FLAG_SYNC_SAMPLE_RATE_CONV)) != 0;
-    bool const at_rate =
-        port.port_type != DESCRIPTOR_STREAM_PORT_INPUT || converts || unit_rate_is(port.port_type, port_index, format.rate);
-    return at_rate ? AEM_STATUS_SUCCESS : AEM_STATUS_BAD_ARGUMENTS;
+    return converts || unit_rate_is(port.port_type, port_index, format.rate) ? AEM_STATUS_SUCCESS : AEM_STATUS_BAD_ARGUMENTS;
 }
 
 auto AemCommandHandler::unit_rate_is(uint16_t const port_type, uint16_t const port_index, uint32_t const rate) const -> bool
@@ -1772,10 +1775,7 @@ auto AemCommandHandler::mappable_port(uint16_t const port_type, uint16_t const p
     if (audio_maps_ == nullptr || !callbacks_.on_audio_mappings_changed) {
         return AEM_STATUS_NOT_IMPLEMENTED;
     }
-    if (auto const status = dynamic_port(port_type, port_index, port); status != AEM_STATUS_SUCCESS) {
-        return status;
-    }
-    return port_type == DESCRIPTOR_STREAM_PORT_INPUT ? AEM_STATUS_SUCCESS : AEM_STATUS_NOT_IMPLEMENTED;
+    return dynamic_port(port_type, port_index, port);
 }
 
 auto AemCommandHandler::handle_audio_mappings(bool const add, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -1859,11 +1859,11 @@ auto AemCommandHandler::add_mapping(uint16_t const port_index, PortModel const& 
     if (auto const status = check_mapping(port_index, port, mapping, true); status != AEM_STATUS_SUCCESS) {
         return status;
     }
-    // Milan v1.3 Section 5.4.2.27: a cluster channel maps from at most one stream channel; one
-    // mapped already, or listed twice, from another is BAD_ARGUMENTS, from the same nothing new.
+    // Milan v1.3 Section 5.4.2.27: an input's cluster channel is fed from one stream channel, an
+    // output's stream channel from one cluster channel; another, held or listed, is BAD_ARGUMENTS.
     auto& next = audio_maps_->next();
     auto const* const existing =
-        std::ranges::find_if(next, [&mapping](DynamicAudioMapping const& m) { return same_cluster_channel(m, mapping); });
+        std::ranges::find_if(next, [&](DynamicAudioMapping const& m) { return same_mapped_channel(port.port_type, m, mapping); });
     if (existing != next.end()) {
         return *existing == mapping ? AEM_STATUS_SUCCESS : AEM_STATUS_BAD_ARGUMENTS;
     }
