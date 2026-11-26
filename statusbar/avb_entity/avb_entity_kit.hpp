@@ -1017,8 +1017,10 @@ class AvbEntityKit
 #endif
     /// Join settled Milan input @p index's VID once: the probe answer's, or with none (0) the matched
     /// Talker attribute's once it is registered (matched_talker_vid).
-    /// Settled Milan input @p index's VID (its probed one, else its registered Talker's) joined once at @p now.
     void join_input_vlan(uint16_t index, atdecc::MilanSrpParameters const& srp, TimePoint now);
+    /// After a change of @p stream_id's Talker registration at @p now: join_input_vlan() for each
+    /// settled Milan input on that StreamID.
+    void join_settled_input_vlans(nanoavb::StreamId const& stream_id, TimePoint now);
     /// The VLAN of the registered Talker Advertise or Failed on @p srp's StreamID and destination; 0: none.
     [[nodiscard]] auto matched_talker_vid(atdecc::MilanSrpParameters const& srp) const -> uint16_t;
     /// stop(): the data plane down and a pending save written.

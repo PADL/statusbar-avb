@@ -1817,8 +1817,9 @@ void AvbEntityKit::wire_milan_listener_callbacks()
     listener.set_locked_out([this](ieee::Eui64 const& controller) { return locked_out(controller); });
     listener.set_gptp_state([this]() { return own_gptp_state(); });
     listener.set_talker_registration([this](atdecc::MilanSrpParameters const& srp) { return talker_registration_for(srp); });
-    host_.components().msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& /*stream_id*/, TimePoint const now) {
+    host_.components().msrp_handler.set_on_remote_talker([this](nanoavb::StreamId const& stream_id, TimePoint const now) {
         host_.components().milan_acmp_listener->on_srp_changed(now);
+        join_settled_input_vlans(stream_id, now);
     });
     wire_milan_listener_connections(listener);
 }
@@ -1961,6 +1962,19 @@ void AvbEntityKit::join_input_vlan(uint16_t const index, atdecc::MilanSrpParamet
     if (index < input_vid_.size() && input_vid_[index] == 0 && vid != 0) {
         input_vid_[index] = vid;
         join_sink_vlan(vid, now);
+    }
+}
+
+void AvbEntityKit::join_settled_input_vlans(nanoavb::StreamId const& stream_id, TimePoint const now)
+{
+    // A sink settled on a probe answer naming no VID joins its Talker attribute's VID once that
+    // registers, as one naming it does at its settle (Milan v1.2 Section 4.4.1).
+    auto const& listener = *host_.components().milan_acmp_listener;
+    for (auto const& spec : listener_specs_) {
+        auto const* sink = listener.sink(spec.index);
+        if (sink != nullptr && sink->is_settled() && srp_stream_id(sink->context().srp.stream_id) == stream_id) {
+            join_input_vlan(spec.index, sink->context().srp, now);
+        }
     }
 }
 
