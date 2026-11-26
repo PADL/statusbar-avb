@@ -788,6 +788,23 @@ auto ListenerStreams::fill_stream_input_counters(
     return true;
 }
 
+auto ListenerStreams::fill_interval_stream_input_counters(
+    uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool
+{
+    auto const* slot = slot_for(descriptor_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    valid |= StreamInputIntervals::VALID;
+    auto const values = slot->intervals.current(slot->counters);
+    for (size_t i = 0; i < values.size(); ++i) {
+        if ((StreamInputIntervals::VALID & (1U << i)) != 0) {
+            out[i] = values[i];
+        }
+    }
+    return true;
+}
+
 auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bool
 {
     auto* const slot = slot_for(descriptor_index);

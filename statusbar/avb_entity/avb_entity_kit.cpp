@@ -691,7 +691,9 @@ void AvbEntityKit::wire_aem_stream_callbacks()
                 return fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                return listener_->fill_stream_input_counters(descriptor_index, valid, counters);
+                // Milan v1.3 Table 5.13 by observation interval; IEEE 1722.1's running counts otherwise.
+                return milan_profile() ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
+                                       : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             return false;
         });
