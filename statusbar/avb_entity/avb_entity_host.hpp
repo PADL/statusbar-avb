@@ -80,9 +80,9 @@ using statusbar::Status;
     return cfg;
 }
 
-/// An AS path from an Announce's path trace (802.1AS-2020 10.3.9.23): the
-/// trace, then @p own_clock_identity unless it ends the trace already (this
-/// system is the grandmaster) or is unknown; empty when the trace is.
+/// An AS path from an Announce's @p path_trace (IEEE 802.1AS-2020 Clause 10.3.9.23): the trace,
+/// then @p own_clock_identity unless it is unknown, the trace is empty (no grandmaster), the
+/// trace ends with it already (this system is the grandmaster) or the path is full.
 [[nodiscard]] auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity)
     -> nanoavb::AsPath;
 
@@ -232,11 +232,6 @@ class AvbEntityHost
     /// counts as a transition); another counts UNLOCKED if locked, then reports no counters until
     /// noted again. False as notify_clock_domain_locked. Reactor thread.
     [[nodiscard]] auto release_clock_domain_lock(uint16_t index) -> bool;
-
-    /// The gPTP path for AVB_INTERFACE @p index (IEEE 1722.1-2021 Clause 7.4.41): the
-    /// last Announce's path trace, then this entity's clock identity unless already
-    /// last; empty with no grandmaster. False for an unknown interface. Reactor thread.
-    [[nodiscard]] auto as_path(uint16_t index, nanoavb::AsPath& path) const -> bool;
 
     /// The clock identity AVB_INTERFACE 0 reports, once known.
     [[nodiscard]] auto own_clock_identity() const noexcept -> std::optional<ieee::Eui64> const& { return own_clock_identity_; }

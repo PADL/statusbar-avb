@@ -204,15 +204,25 @@ void AvbEntityHost::wire_avb_info()
 
 auto AvbEntityHost::as_path(uint16_t const index, nanoavb::AsPath& path) const -> bool
 {
-    if (index != 0) {
-        auto const* storage = descriptor_storage();
-        if (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index)) {
-            return false;
-        }
+    // Every AVB_INTERFACE is this host's one NIC, as for GET_AVB_INFO.
+    auto const* storage = descriptor_storage();
+    if (index != 0 && (storage == nullptr || !storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_AVB_INTERFACE, index))) {
+        return false;
     }
-    path = net_handlers_ != nullptr ? compose_as_path(net_handlers_->gptp_handler().path_trace(), own_clock_identity_)
+    path = net_handlers_ != nullptr ? compose_as_path(net_handlers_->gptp_handler().path_trace(), interface_clock_identity(index))
                                     : nanoavb::AsPath{};
     return true;
+}
+
+auto AvbEntityHost::interface_clock_identity(uint16_t const index) const -> std::optional<ieee::Eui64>
+{
+    nanoavb::DescriptorId const id{
+        .ref = {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_AVB_INTERFACE, .descriptor_index = index}};
+    atdecc::aem::DescriptorAvbInterface desc{};
+    if (handler_ == nullptr || !handler_->on_get_avb_interface(id, desc) || desc.clock_identity == ieee::Eui64{}) {
+        return std::nullopt;
+    }
+    return desc.clock_identity;
 }
 
 auto compose_as_path(nanoavb::AsPath const& path_trace, std::optional<ieee::Eui64> const& own_clock_identity) -> nanoavb::AsPath

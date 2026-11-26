@@ -4171,9 +4171,10 @@ TEST(avb_entity_kit_counters, as_path_and_avb_info_follow_gptp)
     trace.push_back(ieee::Eui64{}.from_uint64(0x0011'22FF'FE33'4455ULL));
     trace.push_back(ieee::Eui64{}.from_uint64(0x001B'21FF'FE00'0002ULL));
     handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
-        .grandmaster_id_changed =
-            [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) { m.kit.notify_grandmaster_changed(gm); },
-        .path_trace_changed = [&m](int64_t) { m.kit.notify_as_path_changed(); }});
+        .grandmaster_id_changed = [&m](int64_t, gptp::ClockIdentity const& gm, gptp::AnnounceMessage const&) {
+            m.kit.notify_grandmaster_changed(gm);
+        }});
+    handlers->gptp_handler().set_on_path_trace_changed([&m](int64_t) { m.kit.notify_as_path_changed(); });
     handlers->gptp_handler().observe_announce(MilanKit::steady_ns(), announce, trace);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AS_PATH), 1);
     EXPECT_EQ(unsolicited_count(m.aem, atdecc::AEM_COMMAND_GET_AVB_INFO), 1);

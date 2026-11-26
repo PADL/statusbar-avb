@@ -62,8 +62,7 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
                 [kit = &kit](int64_t /*now_ns*/) {
                     kit->host().ctl_log().warning("gPTP: no Announce within the receipt timeout: grandmaster lost");
                     kit->notify_grandmaster_lost();  // AVTP tu until a grandmaster returns
-                },
-            .path_trace_changed = [kit = &kit](int64_t /*now_ns*/) { kit->notify_as_path_changed(); }});
+                }});
     }
 }
 
