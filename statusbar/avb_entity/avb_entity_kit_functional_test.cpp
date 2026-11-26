@@ -2546,6 +2546,47 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_an_inputs_counters_and_an_unbi
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+TEST(avb_entity_kit_input_counters, an_unbind_of_a_restored_binding_is_no_interruption)
+{
+    // A binding restored at start is bound: its unbind counts MEDIA_UNLOCKED, not
+    // STREAM_INTERRUPTED (Milan v1.2 Table 5.6), and a stopped input's discarded stream neither.
+    StateDir const dir{"statusbar_state_dir_restored_counters_functional_test"};
+    {
+        KitPair first{"milan13", dir.listener_config("milan13")};
+        first.bind();
+        EXPECT_TRUE(first.listener.stop(first.now));
+        EXPECT_TRUE(first.talker.stop(first.now));
+    }
+    KitPair pair{"milan13", dir.listener_config("milan13")};
+    EXPECT_TRUE(pair.listener->host().components().milan_acmp_listener->sink(pair.sink)->is_bound());
+    auto& c = pair.listener->listener()->slot_for(pair.sink)->counters;
+    int64_t t = 1'000'000'000;
+    pair.listener->poll_counters(t);
+    c.media_locked.store(1);  // as if its stream had locked
+    c.is_locked.store(true);
+    c.frames_rx.store(100);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    auto counters = input_counters(pair.listener, pair.sink);
+    EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[MEDIA_UNLOCKED].get(), 1U);
+    EXPECT_EQ(counters.counters[STREAM_INTERRUPTED].get(), 0U);
+
+    auto bind = controller_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink);
+    bind.flags = atdecc::acmp_flags::STREAMING_WAIT;
+    pair.controller_sends(bind);
+    c.media_locked.fetch_add(1);
+    c.is_locked.store(true);
+    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    counters = input_counters(pair.listener, pair.sink);
+    EXPECT_EQ(counters.counters[STREAM_INTERRUPTED].get(), 0U);
+    EXPECT_EQ(counters.counters[MEDIA_LOCKED].get(), counters.counters[MEDIA_UNLOCKED].get());
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST(avb_entity_kit_input_counters, what_an_offload_received_reaches_get_counters)
 {
     // An offload data plane's reception of an input counts as the kit's own: Table 5.16's
