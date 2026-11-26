@@ -294,7 +294,7 @@ attribute for the next 15 seconds (4.3.3.1). The transmit gate under Milan
 is the stream started and MSRP Listener Ready registered: there is no ACMP
 connection to wait for (`TalkerGate::set_needs_acmp_connection`). It has
 no grace either (`TalkerGate::set_listener_grace`). The IEEE 1722.1 gate
-holds a stream five seconds past the last Listener Ready it saw, and a
+holds a stream five seconds past the withdrawal of its Listener Ready, and a
 disconnect closes it at once; a Milan talker hears of no disconnect, so
 the same grace would keep frames going out for five seconds after the
 last listener left and the Talker attribute was withdrawn. The MSRP

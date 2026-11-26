@@ -40,7 +40,7 @@ using namespace statusbar::ieee;
 
 namespace {
 
-/// The media wake the gate is told in these tests: any instant, the grace
+/// The RAW instant the gate is told in these tests: any instant, the grace
 /// window is measured from it.
 constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 
@@ -305,24 +305,24 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     EXPECT_FALSE(gate.should_transmit(k_aaf, RAW_NOW));
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
 
-    // The grace window runs from the wake the gate last SAW Listener Ready at,
-    // on the clock it is told (no thread reads one): CRF was seen ready at
-    // RAW_NOW, so a LeaveAll blip keeps it up for GRACE past that and no longer.
-    gate.note_listener_ready(crf_sid, false);
+    // The grace window runs from the instant the reactor stamped CRF's Listener
+    // Ready withdrawn, on the clock the media wake is told: a LeaveAll blip keeps
+    // it up for GRACE past that and no longer.
+    gate.note_listener_ready(crf_sid, false, RAW_NOW);
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{4}));
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + TalkerGate::GRACE));
-    // Re-declared: seen again at a later wake, and the window restarts there.
-    gate.note_listener_ready(crf_sid, true);
+    // Re-declared and withdrawn again: the window restarts at the new withdrawal.
+    gate.note_listener_ready(crf_sid, true, RAW_NOW + std::chrono::seconds{10});
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{10}));
-    gate.note_listener_ready(crf_sid, false);
+    gate.note_listener_ready(crf_sid, false, RAW_NOW + std::chrono::seconds{10});
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{14}));
 
     // A gate given no grace closes at the first wake that finds Listener Ready gone.
     gate.set_listener_grace(std::chrono::seconds{0});
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{14}));
-    gate.note_listener_ready(crf_sid, true);
+    gate.note_listener_ready(crf_sid, true, RAW_NOW + std::chrono::seconds{15});
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
-    gate.note_listener_ready(crf_sid, false);
+    gate.note_listener_ready(crf_sid, false, RAW_NOW + std::chrono::seconds{15});
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
     EXPECT_FALSE(gate.should_transmit(k_crf, RAW_NOW + std::chrono::seconds{15}));
 }

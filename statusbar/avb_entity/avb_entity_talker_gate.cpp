@@ -7,21 +7,25 @@
 
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
+#include "statusbar/net/net_ethernet_port.hpp"
+
+#include <chrono>
 #include <cstdint>
+#include <optional>
 
 namespace statusbar::avb_entity {
 
-void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready)
+void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, RawTimePoint const now)
 {
     // Per-stream transmit gate: record whether this talker stream now has a
-    // listener that permits transmit (MSRP Listener Ready). Matched to the stream
-    // index by the ACMP stream_id (same value MSRP advertises). The grace window
-    // is the media thread's: should_transmit records when it last saw the flag.
+    // listener that permits transmit (MSRP Listener Ready), and when that was
+    // last known. Matched to the stream index by the ACMP stream_id (same
+    // value MSRP advertises).
     uint64_t const sid_u64 = stream_id.to_uint64();
     for (uint16_t idx = 0; idx < static_cast<uint16_t>(listener_ready_.size()); ++idx) {
         auto const s = components_.talker_stream(idx);
         if (s.has_value() && s->stream_id.to_uint64() == sid_u64) {
-            bool const was = listener_ready_[idx].exchange(ready, std::memory_order_relaxed);
+            bool const was = stamp(idx, ready, now);
             if (was != ready && logger_) {
                 logger_->status(
                     "srp: talker stream {} MSRP listener-ready -> {} ({} gate)",
@@ -33,7 +37,25 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
     }
 }
 
-auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready)
+{
+    note_listener_ready(stream_id, ready, net::rx_clock_now());
+}
+
+auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const now) noexcept -> bool
+{
+    // The reactor is the one writer. The grace runs from the last instant the
+    // declaration was known registered, so a withdrawal seen while already
+    // withdrawn does not extend it. The stamp goes before the flag (release).
+    bool const was = listener_ready_[idx].load(std::memory_order_relaxed);
+    if (ready || was) {
+        ready_raw_ns_[idx].store(RawTimePoint::clock::to_ns(now), std::memory_order_relaxed);
+    }
+    listener_ready_[idx].store(ready, std::memory_order_release);
+    return was;
+}
+
+auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
     if (!gate_enabled_) {
         // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
@@ -53,6 +75,14 @@ auto TalkerGate::should_transmit(uint16_t const idx, RawTimePoint const now) noe
     return listener_ready_within_grace(idx, now);
 }
 
+auto TalkerGate::grace_ends(uint16_t const idx) const noexcept -> std::optional<RawTimePoint>
+{
+    if (idx >= listener_ready_.size() || listener_ready_[idx].load(std::memory_order_acquire)) {
+        return std::nullopt;
+    }
+    return stamp_plus_grace(idx);
+}
+
 auto TalkerGate::connected_and_started(uint16_t const idx) const noexcept -> bool
 {
     // ACMP connection count is published by the reactor thread (note_acmp_connections)
@@ -62,20 +92,28 @@ auto TalkerGate::connected_and_started(uint16_t const idx) const noexcept -> boo
     return connected && stream_started_[idx].load(std::memory_order_relaxed);
 }
 
-auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) noexcept -> bool
+auto TalkerGate::listener_ready_within_grace(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
-    // MSRP Listener Ready, held across the MRP LeaveAll re-registration blip by a
-    // grace window: the peer's Listener declaration ages out and re-declares on a
-    // ~10s leave-all cycle (Ready momentarily withdrawn for ~1-3s), which must NOT
-    // chop the stream. Stay up while Ready is currently set OR was seen set within
-    // GRACE of this wake. A genuine listener departure (no re-declare for GRACE)
-    // closes the gate. The wake we are told is the clock: nothing here reads one.
-    if (listener_ready_[idx].load(std::memory_order_relaxed)) {
-        last_seen_ready_[idx] = now;
+    // MSRP Listener Ready, held across the MRP LeaveAll re-registration blip by the
+    // grace: the flag first (acquire), then the stamp it was published after. With
+    // no grace the registration alone admits, whatever instant the caller was told.
+    if (listener_ready_[idx].load(std::memory_order_acquire)) {
         return true;
     }
-    auto const last_seen = last_seen_ready_[idx];
-    return last_seen != NEVER && (now - last_seen) < grace_;
+    if (grace_ <= std::chrono::nanoseconds{0}) {
+        return false;
+    }
+    auto const ends = stamp_plus_grace(idx);
+    return ends.has_value() && now < *ends;
+}
+
+auto TalkerGate::stamp_plus_grace(uint16_t const idx) const noexcept -> std::optional<RawTimePoint>
+{
+    int64_t const last_ready = ready_raw_ns_[idx].load(std::memory_order_relaxed);
+    if (last_ready == 0) {
+        return std::nullopt;
+    }
+    return RawTimePoint::clock::from_ns(last_ready) + grace_;
 }
 
 }  // namespace statusbar::avb_entity
