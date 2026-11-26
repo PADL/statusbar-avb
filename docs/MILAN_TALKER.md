@@ -3,83 +3,48 @@
 # Milan talker: connection management, declarations and the transmit gate
 
 A Milan talker answers ACMP without connection state
-(`statusbar/atdecc/atdecc_acmp_milan_talker.hpp`), declares a stream's MSRP
-Talker Advertise only while someone wants it (`avb_entity::TalkerDeclarations`)
-and transmits only while a Listener attribute admits it
-(`avb_entity::TalkerGate`). Milan v1.2 Sections 4.3.3.1, 5.3.7 and 5.5.4.
+(`nanoavb::NanoAvbMilanAcmpTalker`, [`MILAN_ACMP.md`](MILAN_ACMP.md)), declares a
+stream's MSRP Talker Advertise only while someone wants it
+(`nanoavb::MsrpHandler::set_talker_waits_for_listener`) and transmits only while a
+Listener attribute admits it (`avb_entity::TalkerGate`). Milan v1.3 Sections 4.3.3.1,
+5.3.7 and 5.5.4.
 
 ## Connection management
 
-A Milan talker keeps no ACMP connection state (Milan v1.2 Section 5.5.2.7): it
-learns whether anyone wants a stream from MSRP alone (Listener Ready / Ready
-Failed registrations), and PROBE_TX_COMMAND only queries a stream's parameters.
-`atdecc_acmp_milan_talker.hpp` is therefore a stateless responder: each command
-is answered from what the stream output is now (its stream identity, and
-whether MAAP has given it a destination address). Nothing it receives changes
-the talker, except that a probe opens the 15 s window in which the talker
-declares its Talker Advertise (Section 4.3.3.1). That window belongs to the
-caller; `milan_talker_respond` reports whether a probe counts.
-
-PROBE_TX_COMMAND is CONNECT_TX_COMMAND renamed (Section 5.5.2.2), so a classic
-listener's CONNECT_TX gets a PROBE_TX_RESPONSE with connection_count 0 and goes
-on to declare its Listener Ready, which is all a Milan talker needs from it.
-
-Without a MAAP address (Section 4.3.3.1 condition 1) a probe is answered
-TALKER_DEST_MAC_FAIL rather than ignored: a silent talker leaves the listener
-probing. A probe counts for the declaration window when it is a
-PROBE_TX_COMMAND for a valid stream output on its own AVB interface, answered
-SUCCESS or TALKER_DEST_MAC_FAIL.
-
-| Command           | Responses                                                         |
-|-------------------|-------------------------------------------------------------------|
-| PROBE_TX          | TALKER_UNKNOWN_ID (Table 5.40), INCOMPATIBLE_REQUEST (5.41), TALKER_DEST_MAC_FAIL (5.42), SUCCESS (5.43) |
-| DISCONNECT_TX     | TALKER_UNKNOWN_ID (5.44) or SUCCESS, changing nothing (5.45)      |
-| GET_TX_STATE      | TALKER_UNKNOWN_ID (5.46) or SUCCESS (5.47)                         |
-| GET_TX_CONNECTION | NOT_SUPPORTED (5.48), whatever the unique id                       |
-
-Fields the tables call undefined are left as the command had them; the fields
-of Table 5.25 (CLASS_B, SAVED_STATE, the encryption flags) are cleared in every
-successful response.
+A Milan talker keeps no ACMP connection state (Milan v1.3 Section 5.5.2.7): it
+learns whether anyone wants a stream from MSRP alone, and PROBE_TX_COMMAND
+(CONNECT_TX_COMMAND renamed, Section 5.5.2.2) only queries a stream's parameters.
+The responder and its tables are in [`MILAN_ACMP.md`](MILAN_ACMP.md). The kit wires
+three things into it (`AvbEntityKit::wire_milan_talker_callbacks`): a probe goes to
+the MSRP handler (`note_talker_probe`), the destination address is valid while MAAP
+says so (else TALKER_DEST_MAC_FAIL), and REGISTERING_FAILED is the MSRP handler's.
 
 ## When a stream declares its Talker Advertise
 
-`TalkerDeclarations` decides when each stream output declares its MSRP Talker
-Advertise. A Milan talker declares only while the stream's SRP parameters are
-valid (Section 4.3.3.1):
+The kit hands each stream's parameters to the MSRP handler (`talker_advertise`) when
+the control plane comes up and again when they change. Under the Milan profile the
+handler declares only while the stream's SRP parameters are valid (Section 4.3.3.1):
 
-1. MAAP has allocated the destination address and reports no conflict, and
+1. MAAP has allocated the destination address and reports no conflict
+   (`set_talker_addresses_valid`), and
 2. a PROBE_TX_COMMAND for the stream arrived in the last 15 s, or a Listener
    attribute for its stream ID is registered,
 
-so a stream nobody asked for costs the network nothing. While declaring, a MAAP
-conflict withdraws the attribute; the stream "waits for 2 LeaveAll periods and
-allocates a new Destination MAC Address, then declares a new Talker attribute"
-(Table 5.3). The hold follows every withdrawal but binds only a re-declaration
-with different parameters: the same stream ID, address and VID come back at
-once (a probe after the 15 s window ran out re-declares without waiting). A parameter change the control plane chose (the
-adopted Class A VID or priority) is held as well, by the MSRP participant: the
-old Talker Advertise leaves at once and the new one is declared two LeaveAll
-periods later (IEEE 802.1Q-2022 Clause 35.2.2.8).
+and leaves the stream `TalkerReservationState::Waiting` otherwise, so a stream nobody
+asked for costs the network nothing. A probe re-hands a waiting stream's parameters
+first, so the AccumulatedLatency it declares is the port's as it is then (IEEE
+802.1Q-2022 Clause 35.2.2.8.6). A changed Talker Advertise of a declared stream ID
+(a new MAAP address, the adopted Class A Domain's VID or priority) is held two
+LeaveAll periods by the participant (IEEE 802.1Q-2022 Clause 35.2.2.8).
 
-Condition 2's Listener arm is the MSRP registrar's: In, or Lv after a LeaveAll
-until LeaveTime (5 s, Milan v1.3 Table 4.3) runs out, which is what rides out a
-Listener's re-declaration. A Listener's Lv moves the registrar to MT at once
-(Section 4.2.7.2.2), so the last Listener's Lv withdraws a stream whose probe
-window is over at once, and a Listener lost without one is withdrawn LeaveTime
-after the next LeaveAll received. The entity's own LeaveAll does not age its
-MSRP registrars, so only a peer's LeaveAll starts that LeaveTime.
+Condition 2's Listener arm is the MSRP registrar's: In, or Lv after a LeaveAll until
+LeaveTime (5 s, Milan v1.3 Table 4.3) runs out. A Listener's Lv moves the registrar
+to MT at once (Section 4.2.7.2.2), so the last Listener's Lv withdraws a stream whose
+probe window is over at once, and a Listener lost without one is withdrawn LeaveTime
+after the next LeaveAll received.
 
-A classic (non-Milan) entity skips condition 2 (`interest_required` false):
-every stream declares as soon as its address is valid, and `TalkerDeclarations`
-holds nothing. In either profile the MSRP participant holds any changed Talker
-Advertise of a declared stream ID (a new MAAP address, or the adopted Class A
-Domain's VID or priority) two LeaveAll periods (IEEE 802.1Q-2022 Clause
-35.2.2.8).
-
-The control plane must also be up (`set_active`): the host's MSRP talker is
-advertising (Ready), not withdrawn (Degraded / Down). The class is pure state
-and time; the kit applies what `evaluate()` decides to MSRP and runs a timer to
-`next_deadline()`.
+A classic (non-Milan) entity does not wait: every stream handed to the handler is
+declared at once.
 
 ## The transmit gate
 
@@ -93,17 +58,19 @@ transmitting the stream". A talker puts stream `idx` on the wire only when:
 
 1. an MSRP Listener declaration that permits transmission (Ready or Ready
    Failed, not Asking Failed) is registered for the stream's stream_id, or was
-   within the gate's grace (`GRACE` for a classic entity, `MILAN_GRACE`, none,
-   for a Milan one);
+   within the gate's grace (`GRACE` for a classic entity; the kit sets none,
+   `set_listener_grace(0)`, for a Milan one);
 2. our Talker Advertise is declared. This is implied by (1): a listener
    declaration for our stream only arises against our Talker Advertise, and the
    gate closes at once when we withdraw it (`notify_talker_withdrawn`);
 3. the stream is Started (default true; stops a stream without tearing down its
    reservation).
 
-ACMP connections play no part: a Milan listener binds with PROBE_TX_COMMAND and
-a Milan talker tracks no connections, while a classic IEEE 1722.1 listener
-declares Listener Ready after CONNECT_RX all the same. Streams are matched by
+4. an IEEE 1722.1 stream has an ACMP connection (`note_acmp_connections`). A Milan
+   talker tracks no connections, so the kit turns this off under the Milan profile
+   (`set_needs_acmp_connection(false)`), as does a talker without an ATDECC entity.
+
+Streams are matched by
 the ACMP stream_id, the same value MSRP advertises. The match is a StreamID to
 stream index lookup given to the gate (`TalkerGate::StreamIndexFn`); the kit's
 is its ACMP talker table, and a talker without an ATDECC entity (one driving an
@@ -127,8 +94,9 @@ then the `listener_ready_` flag with release; `notify_talker_withdrawn` zeroes t
 stamp (no grace) before clearing the flag. A reader loads the flag with acquire
 and then the stamp, so a withdrawal never pairs an old stamp with a cleared flag.
 
-`admitted(idx, now)` is the whole predicate: gating off, or Started and
-(`listener_ready_` or `now < stamp + grace`). `should_transmit(idx, now)` is
+`admitted(idx, now)` is the whole predicate: gating off, or Started, connected
+(when connections count) and (`listener_ready_` or `now < stamp + grace`; with no
+grace the flag alone). `should_transmit(idx, now)` is
 `admitted()` by another name for the media wake, so a Ready set and cleared
 between two media wakes, a STOP through a LeaveAll blip and a START within the
 grace, a Talker withdrawal followed by a Ready, all read the same from the
@@ -161,17 +129,9 @@ earliest grace end (`AvbEntityKit::admission_deadline()`) and re-evaluates it
 then (`on_admission_timer`), noticing a grace expiry without an MSRP event. `listener_admitted()` reports the listener half alone (whatever
 `gate_enabled_` says, Started/Stopped playing no part).
 
-The declarations' deadlines (`TalkerDeclarations`, the probe window and the
-re-declare hold) are a different matter: they run on the reactor's clock, built
-from the time each hook is told, and the kit's `DeclarationTimer` compares them
-with the time the reactor tells its tick, so a reactor on any `ClockFn` closes
-a window on time. An AEM hook told no time (SET_STREAM_FORMAT, whose TSpec
-re-declares the stream) asks for the re-declaration (`RefreshSet`) and the next
-reactor pass runs it, told its time; a refresh is per stream, never the table.
-
 ## See also
 
 - [`ACMP_STATE_MACHINES.md`](ACMP_STATE_MACHINES.md) - the IEEE 1722.1 ACMP state machines
-- [`MILAN_LISTENER.md`](MILAN_LISTENER.md) - the listener side
+- [`MILAN_ACMP.md`](MILAN_ACMP.md) - the Milan ACMP talker and listener
 - [`MRP_STATE_MACHINES.md`](MRP_STATE_MACHINES.md) - MSRP declarations
 - [`SHAPER.md`](SHAPER.md) - the credit-based shaper behind the gate

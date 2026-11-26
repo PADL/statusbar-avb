@@ -305,64 +305,31 @@ end, shaped like `RawnetContext`.
 
 ## Entity profile: Milan or classic
 
-`EntityProfile` (`nanoavb_entity_profile.hpp`) is one value every module
-reads, so Milan-only behaviour that a classic IEEE 1722.1 controller could
-trip over is switched in one place. Interoperable Milan behaviour (MRP
-timers, TSpec, the AVTP `tu` bit, the MSRP Domain, ADP valid_time) is
-unconditional and does not consult it.
+The AEM handler's profile (`AemCommandHandler::Profile`, `classic` or `milan13`,
+`set_profile`) is the one answer: the AEM and MVU commands answered, the GET_STREAM_INFO
+layout, and with it which ACMP runs (`NanoAvbComponents::use_milan_acmp`). An entity built
+with the kit is Milan when its configuration says so (`atdecc.profile`, else `entity.milan`,
+`AvbEntityAudioIOConfig::milan`; ENTITY_CONSTRUCTION_KIT.md, "Profiles"); the kit then also
+sets the MRP timers, the adopted Class A Domain, the instant leave and the talker that waits
+for a listener (MILAN_TALKER.md). Interoperable Milan behaviour (TSpec, the AVTP `tu` bit,
+ADP valid_time) is unconditional.
 
-Being Milan is a property of the device model, so the default comes from the
-model: the blob's symbol table may carry one of two well-known symbols on the
-ENTITY descriptor (aemxml's entity `milan` attribute,
-`ENTITY_PROFILE_*_SYMBOL` in `python/aemxml/flatten.py`). The symbol table is
-blob metadata the kit reads internally and is never served to a controller
-(READ_DESCRIPTOR serves the TOC's descriptor bytes only), so the AVDECC
-information model is unchanged. A model that says nothing is Milan; the kit
-config's `milan` setting overrides the model.
+Under the Milan profile:
 
-Keyed off `EntityProfile::milan`:
-
-- ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.2 Section 5.4.2.1; Milan
-  controllers use LOCK_ENTITY). Nothing is acquired, so the controller is not
-  implicitly registered for notifications either.
-- MVU commands are answered only when Milan (see `docs/MVU.md`).
-- ACMP: the talker and listener handlers switch between the classic and the
-  Milan state machines (below).
-- Unsolicited notifications: Milan v1.2 Section 5.4.5.1 notifies every
-  registered controller but the requester; classic (IEEE 1722.1-2021 Cor 1)
-  notifies the requester too.
+- ACQUIRE_ENTITY answers NOT_SUPPORTED (Milan v1.3 Section 5.4.2.1; Milan
+  controllers use LOCK_ENTITY).
+- MVU commands are answered (see `docs/MVU.md`).
+- ACMP is Milan's: `NanoAvbMilanAcmpTalker` and `NanoAvbMilanAcmpListener`
+  (see `docs/MILAN_ACMP.md`); the components' `talker_stream()` and `listener_sink()`
+  read the one that runs.
 
 ## ACMP: classic and Milan
 
-`NanoAvbAcmpTalker` and `NanoAvbAcmpListener` have two behaviours each,
-chosen by `set_milan()` (`NanoAvbComponents` follows the entity profile).
-
-- **Talker, classic** (the default): the IEEE 1722.1-2021 Clause 8.2.4 talker
-  state machine, which counts the listeners connected with CONNECT_TX.
-- **Talker, Milan** (Milan v1.2 Section 5.5.4): a stateless responder
-  (`atdecc::milan_talker_respond`). PROBE_TX (the same message type as
-  CONNECT_TX) only queries the stream; nothing is counted,
-  `connection_count` is always 0 and `on_connect` / `on_disconnect` never
-  fire. A probe that counts for the Talker Advertise window (Section 4.3.3.1)
-  is reported through `on_probe`. Unset, the stream-state hook reports the
-  destination address valid when not zero, interface 0, no Asking Failed.
-- **Listener, classic** (the default): the Clause 8.2.4 listener state
-  machine, with fast-connect goals.
-- **Listener, Milan** (Milan v1.2 Section 5.5.3): one `atdecc::MilanListener`
-  sink per stream (`milan_sinks()`). CONNECT_RX / DISCONNECT_RX are BIND_RX /
-  UNBIND_RX (the same message types). A settled sink is mirrored into the
-  stream table (`get_stream()`, `is_connected()`) and reported through
-  `on_connect`, leaving the settled states through `on_disconnect`, so the
-  data plane follows a Milan sink exactly as a classic connection.
-  Fast-connect goals and `on_talker_departed` are unused: the sinks discover
-  their talkers themselves (`receive_adpdu`).
-
-In both profiles a talker without a destination address yet (MAAP still
-acquiring) refuses CONNECT_TX with TALKER_DEST_MAC_FAIL (IEEE 1722.1-2021
-Table 8-3) rather than hand the listener an address it will not stream to.
-Nothing is connected and the listener's controller retries; the next connect
-or probe after MAAP gets the MAAP address. After a restart a CONNECT_TX can
-arrive before MAAP has defended its block.
+`NanoAvbAcmpTalker` and `NanoAvbAcmpListener` are the IEEE 1722.1-2021 Clause 8.2.4
+state machines; `use_milan_acmp()` puts Milan v1.3 Section 5.5's talker and listener
+beside them for the life of the entity, and the ATDECC handler hands ACMP to those
+(`docs/MILAN_ACMP.md`). The classic talker counts the listeners connected with
+CONNECT_TX; the classic listener keeps fast-connect goals.
 
 ## AEM command handling
 
@@ -448,14 +415,18 @@ STREAM_INPUT; a stream channel may feed several.
   an already mapped cluster channel from another stream channel (Milan allows
   refusing it: the controller removes the old one first). Anything else is
   BAD_ARGUMENTS with nothing added.
-- REMOVE_AUDIO_MAPPINGS removes what it lists; a mapping not there, or listed
-  twice, is ignored, and one naming no cluster channel or stream of the model
-  is BAD_ARGUMENTS.
+- REMOVE_AUDIO_MAPPINGS removes what it lists; a mapping listed twice is
+  ignored, and one the port does not hold, or naming no cluster channel or
+  stream of the model, is BAD_ARGUMENTS with nothing removed (IEEE
+  1722.1-2021 Clause 7.4.46.1). The entity's own changes
+  (`apply_local_audio_mappings()`) ignore a mapping not held.
 - Each change goes through `on_audio_mappings_changed` before it is kept (all
   or nothing; the data plane may refuse with BAD_ARGUMENTS), is answered with
   the command echoed, notified to the other registered controllers, and
   reported to `on_settings_changed`. `set_audio_mappings` seeds default or
-  saved mappings without notification or settings report.
+  saved mappings without notification or settings report;
+  `apply_local_audio_mappings` is the entity's own REMOVE-then-ADD (the lock is
+  its caller's to honour), notified in AECPDUs of at most 63 mappings.
 - GET_AUDIO_MAP partitions the port's cluster channels, in cluster order,
   into maps of `MAX_AUDIO_MAP_MAPPINGS` (fixed for the model) and answers
   map_index P with the mappings of partition P. A port with static maps

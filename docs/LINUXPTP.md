@@ -95,7 +95,6 @@ Note: at Site A the GPS grandmaster has a 3D GPS lock but is **not** the active 
 (the AVB switch free-runs as GM); fix is on the GPS grandmaster's PTP Config page
 (`Packet Output = 802.1AS`).
 
-
 ## ptpclient: grandmaster status from ptp4l
 
 `ptpclient::PtpManagementClient` asks ptp4l which grandmaster the local clock
@@ -105,21 +104,36 @@ own domain: a message whose domainNumber differs is ignored, so
 `PtpManagementConfig::domain` must be ptp4l's (pmc `-d` semantics), else the
 client sees no answer and reports unreachable.
 
-The client is a `net::Pollable` for the reactor thread. On its first tick, and
-every `period_ns` after, it sends GET PARENT_DATA_SET, GET CURRENT_DATA_SET and
-GET TIME_PROPERTIES_DATA_SET, parses the responses as they arrive, and calls
-its listener when the status or grandmaster changes. With `port_interface` set
-it also sends linuxptp's GET PORT_PROPERTIES_NP (each port's interface name, so
-the port identity is learnt, not configured) and GET PORT_DATA_SET (15.5.3.6.1),
-and reports that port's `peerMeanPathDelay` in ns: on a gPTP port it is
-802.1AS-2020's neighborPropDelay, measured whatever the port's role (11.2.2), the
-`propagation_delay` of IEEE 1722.1-2021 Clause 7.4.40. Its own socket is a path
-beside ptp4l's, as pmc's is (`dirname(uds_address)/statusbar-ptpmgmt.<pid>`),
-removed on destruction.
+The client is a `net::Pollable` for the reactor thread, event-driven: one fetch
+of the data sets it follows, then ptp4l's notifications. While ptp4l is
+unreachable it sends GET PARENT_DATA_SET every `retry_period_ns`, once with
+transportSpecific 0 and once with 1, since ptp4l drops a request whose
+transportSpecific is not its UDS port's (the global `transportSpecific`, 1 in a
+gPTP configuration, unless `ignore_transport_specific`). The first answer gives
+the UDS port's value, used from then on (a port's notifications carry that port's
+own, which is not used), and starts the fetch: GET PARENT_DATA_SET,
+CURRENT_DATA_SET, TIME_PROPERTIES_DATA_SET and every port's PORT_DATA_SET
+(15.5.3.6.1); with `port_interface` set also linuxptp's PORT_PROPERTIES_NP (each
+port's interface name, so the port identity is learnt, not configured), before the
+PORT_DATA_SET; the grandmaster settings,
+if any; and SET SUBSCRIBE_EVENTS_NP. The status stays unreachable until
+PARENT_DATA_SET says which grandmaster ptp4l follows. The header's
+minorVersionPTP is not checked (linuxptp sends 0x12 by default). The client
+reports that port's
+`peerMeanPathDelay` in ns: on a gPTP port it is 802.1AS-2020's neighborPropDelay,
+measured whatever the port's role (11.2.2), the `propagation_delay` of IEEE
+1722.1-2021 Clause 7.4.40. Its own socket is autobound to an abstract address
+(Linux `bind()` with only the address family), unique to each client and gone
+with the socket; ptp4l answers to the sender's address (`recvfrom`, then
+`sendto`), so nothing is created in the filesystem. Each client has its own source
+port identity (the pid and a per-client port number), which ptp4l keys a
+subscription by.
 
 The message layout is IEEE 1588-2019 Clause 15: the common header (13.3, as
 `gptp::MessageHeader`), the management header (15.4.1), the MANAGEMENT TLV
-(15.5.2) and the data sets (15.5.3). `build_management_get()` and
+(15.5.2) and the data sets (15.5.3), as packed structs
+(`ptpclient_management_format.hpp`, with linuxptp's implementation-specific data
+sets as its `tlv.h` lays them out). `build_management_message()` and
 `parse_management_message()` are pure and portable, so the wire format is unit
 tested without a ptp4l, and fuzzed.
 
@@ -135,18 +149,28 @@ just after it happens.
 
 ### Notifications, polling and grandmaster settings
 
-The client always subscribes to `port_state` and `parent_data_set`, and to the
-further events in `PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to
-the socket that last subscribed with the client's source port identity, an
-unsolicited RESPONSE carrying the whole data set an event concerns: a port's
-PORT_DATA_SET on each state change, PARENT_DATA_SET when it changes (linuxptp
-4.2) and TIME_STATUS_NP on each clock update. They are parsed as the answers to
-GETs are. A new parent also fetches CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET
-again; TIME_STATUS_NP is kept in `state().time_status` and reports nothing by
-itself. ptp4l notifies nothing for TIME_PROPERTIES_DATA_SET or for a port's
-peerMeanPathDelay, so those are polled every `poll_period_ns`, with
-PARENT_DATA_SET too while ptp4l holds no subscription (it refuses one on the
-read-only socket; that refusal is not reported in `state().refused`).
+The client always subscribes to `port_state` and `parent_data_set`, to `cmlds`
+when it follows a port (`port_interface`), and to the further events in
+`PtpManagementConfig::events` (`time_sync`). ptp4l pushes, to the socket that
+last subscribed with the client's source port identity, an unsolicited RESPONSE
+carrying the whole data set an event concerns: a port's PORT_DATA_SET on each
+state change, PARENT_DATA_SET when it changes (linuxptp 4.2), a port's
+CMLDS_INFO_NP on each asCapable change and peer delay measurement (linuxptp 4.3,
+named by the header's sourcePortIdentity) and TIME_STATUS_NP on each clock
+update. They are parsed as the answers to GETs are. A new parent also fetches
+CURRENT_DATA_SET and TIME_PROPERTIES_DATA_SET again; TIME_STATUS_NP is kept in
+`state().time_status` and reports nothing by itself. The followed port's
+CMLDS_INFO_NP gives `state().as_capable` (as linuxptp reports it: `asCapable
+true` is always_capable) and its peer delay; it is fetched once with the rest,
+again when the port's state changes, and DISABLED or FAULTY makes it
+not_capable once known, since linuxptp keeps asCapable as it was there. A ptp4l
+before 4.3 echoes the `cmlds` bit without honouring it: asCapable then stays
+unknown, and the followed port's PORT_DATA_SET is polled for its peer delay
+until a first CMLDS_INFO_NP comes. ptp4l notifies nothing for
+TIME_PROPERTIES_DATA_SET, so it is polled every `poll_period_ns`, with every
+port's PORT_DATA_SET, the followed port's CMLDS_INFO_NP and PARENT_DATA_SET too
+while ptp4l holds no subscription (it refuses one on the read-only socket; that
+refusal is not reported in `state().refused`).
 
 The subscription lasts `subscription_duration_s` (6 s by default; 65535 would
 never expire and is refused) and is renewed three times per duration, as phc2sys
@@ -158,7 +182,9 @@ fetches everything again and sends its settings, and settings other than ours ar
 sent again. It is also the keepalive: two renewals without any answer from ptp4l
 make the client unreachable, and so does a send ptp4l's socket refuses (ENOENT,
 ECONNREFUSED: it exited or is restarting); everything learnt is then forgotten and
-the probes resume. A client being destroyed unsubscribes (an empty bitmask).
+the probes resume. `state().error` then holds that error, also when an earlier
+send had left another there (EAGAIN from a send that met ptp4l's full queue). A
+client being destroyed unsubscribes (an empty bitmask).
 
 `set_grandmaster_settings()` sends SET GRANDMASTER_SETTINGS_NP: the clockQuality
 (clockClass, clockAccuracy, offsetScaledLogVariance), currentUtcOffset, the time
@@ -172,7 +198,7 @@ MANAGEMENT_ERROR_STATUS in `state().refused`; an answer with other settings than
 ours sends ours again. The settings and the subscription need ptp4l's read-write
 socket (`uds_address`, not `uds_ro_address`).
 
-## ptpclient: PHC cross-timestamps and the PHC servo
+## ptpclient: PHC cross-timestamps, the PHC servo and the follower
 
 `PhcDevice` opens a `/dev/ptpN` and reads it against CLOCK_MONOTONIC_RAW by the
 best method the device and kernel offer: `PTP_SYS_OFFSET_PRECISE` (a hardware
@@ -206,6 +232,36 @@ until `thaw()`; `reset()` starts over from the frequency in force and allows a
 step again. A known target rate goes in as `feed_forward_ppb`, so the integrator
 learns only the PHC's own oscillator error. The servo is arithmetic only;
 `apply()` sets the frequency (ADJ_FREQUENCY) and steps (ADJ_SETOFFSET).
+
+`PhcFollower` is the loop that steers one PHC to follow another, or a line over
+it, as phc2sys does between two PHCs but over a `PhcCrossTimestamp` pair. Each
+`sample(line)` reads one pair, computes the error `phc_d - line.at(phc0)`, feeds
+it to a `PhcServo` at the pair's own CLOCK_MONOTONIC_RAW instant (`raw_ns`) with
+the line's rate as its feed-forward, and applies the action: the frequency, then
+any step. A `PhcLine` is a target time at a PHC0 anchor and a rate offset in
+ppb (finite, else the sample is refused); `PhcLine::offset_from_phc0(offset_ns)`
+follows PHC0 itself with a constant calibration. A caller whose line is not
+running passes its rate as 0, or freezes the follower. The servo starts from the
+followed PHC's frequency and is clamped to the smaller of its parameters' range
+and the device's. `freeze()` steers nothing (the pair is still measured) until
+`thaw()`, for a line that stopped running; after `thaw()` the servo estimates
+its rate again. An optional restep rule starts the servo over, so it may step
+again, after `restep_count` samples past `restep_threshold_ns` once the servo's
+rate estimate is done (`PhcServo::estimated()`): a timescale change of PHC0,
+before or after a lock, or a line that resumed elsewhere after a freeze. The
+samples it counts are held, not fed to the servo, so a glitch does not wind it
+up, and the follower reports itself unlocked meanwhile. A sample reports what
+failed (`PhcFollowerStage`) and its error, and carries the pair it measured: a
+failed measure or a refused frequency leaves the follower as it was, so a step
+it wanted is still owed; a refused step after the frequency went through starts
+the servo over from that frequency, so device and servo agree and the step is
+owed again; refused twice running (a device without ADJ_SETOFFSET), it slews
+from then on, and the restep rule stays off until the caller's `reset()`. A
+line's rate at or past the servo's clamp (the smaller of its parameters' and the
+device's range) is refused: the servo would have no headroom to follow it. The pair is a `PhcFollowerPort` (measure, frequency, step,
+range): `open_phc_follower_port(phc0, followed)` is the device pair, one
+`PhcCrossTimestamp` opened with PHC_d writable (`PhcCrossAccess::phcd_writable`)
+and adjusted through it; a test gives the loop a fake.
 
 The tests that touch real clocks skip unless the devices open. On a box with
 PHCs, as root:
