@@ -9,16 +9,17 @@
 
 #include "wireshark_golden_atdecc.hpp"
 
-#include "statusbar/atdecc/atdecc_acmp_milan_talker.hpp"
 #include "statusbar/atdecc/atdecc_acmp_pdu.hpp"
 #include "statusbar/atdecc/atdecc_acmp_types.hpp"
 #include "statusbar/atdecc/atdecc_adp.hpp"
 #include "statusbar/atdecc/atdecc_aecp.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aa.hpp"
 #include "statusbar/atdecc/atdecc_aecp_aem.hpp"
+#include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
 #include "statusbar/atdecc/atdecc_aem_command.hpp"
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/atdecc/atdecc_jdks.hpp"
+#include "statusbar/atdecc/atdecc_milan_acmp_talker.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/ieee/ieee_ethernet.hpp"
 
@@ -129,9 +130,23 @@ auto read_descriptor_response(std::vector<uint8_t> const& descriptor, uint16_t c
 
 using Frames = std::vector<AtdeccGoldenFrame>;
 
-auto atdecc_golden_frames() -> std::vector<AtdeccGoldenFrame>
-{  // NOLINT(statusbar-block-statements): the golden frame table, one scope per command
-    std::vector<AtdeccGoldenFrame> frames;
+/// The shortest AVTPDU in a frame: a 64-octet Ethernet frame (FCS included) less the 14-octet
+/// header and the 4-octet FCS. Shorter MVU PDUs are padded to this.
+constexpr size_t MIN_AVTPDU_LENGTH = 64 - 14 - 4;
+
+/// The AECP common header of a Milan vendor-unique command or response with
+/// @p payload_size octets from the command_type on.
+auto mvu_common(bool const response, uint16_t const sequence, size_t const payload_size) -> AecpDuCommon
+{
+    AecpDuCommon du{};
+    du.init_command(
+        response ? AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE : AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND,
+        static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + payload_size));
+    du.target_entity_id = TARGET;
+    du.controller_entity_id = CONTROLLER;
+    du.sequence_id = sequence;
+    return du;
+}
 
 /// A Milan vendor-unique AVTPDU: the common header, the MVU protocol id,
 /// then @p payload, which starts with the command_type.
@@ -245,18 +260,16 @@ void add_adp_acmp_and_acquire_frames(Frames& frames)
         frames.push_back({"acmp_get_tx_state_command", bytes_of(state)});
     }
 
-    // ---- ACMP: the Milan talker's answers (milan_talker_respond, Milan v1.2
+    // ---- ACMP: the Milan talker's answers (milan_talker_response, Milan v1.3
     // Section 5.5.4), in the 56-octet form the entity sends ----
     {  // NOLINT(statusbar-block-statements): golden frames, one per statement
-        MilanTalkerSource const source{
+        MilanTalkerStream const stream{
             .stream_id = Eui64{0x70, 0xB3, 0xD5, 0xED, 0xC8, 0xF0, 0x00, 0x00},
             .stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E},
-            .stream_vlan_id = 2,
-            .avb_interface_index = 0,
-            .dest_mac_valid = true,
-            .registering_failed = true};
+            .stream_vlan_id = 2};
+        MilanTalkerSource const source{.stream = &stream, .dest_mac_valid = true, .registering_failed = true};
         AcmpCommandResponse probe{};
-        probe.init_command(ACMP_MESSAGE_TYPE_PROBE_TX_COMMAND);
+        probe.init_command(ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
         probe.controller_entity_id = CONTROLLER;
         probe.talker_entity_id = TALKER;
         probe.listener_entity_id = TARGET;
@@ -264,14 +277,14 @@ void add_adp_acmp_and_acquire_frames(Frames& frames)
         probe.sequence_id = 0x0103;
         probe.flags = acmp_flags::FAST_CONNECT;
         std::array<uint8_t, AcmpDu2021::LENGTH> buf{};
-        if (auto const probed = milan_talker_respond(probe, &source, 0)) {
-            auto const pdu = acmp_serialize_2016(probed->response, buf);
+        if (auto const probed = milan_talker_response(probe, source)) {
+            auto const pdu = acmp_serialize_2016(*probed, buf);
             frames.push_back({"acmp_milan_probe_tx_response", {pdu.begin(), pdu.end()}});
         }
         auto unready = source;
         unready.dest_mac_valid = false;
-        if (auto const refusal = milan_talker_respond(probe, &unready, 0)) {
-            auto const refused = acmp_serialize_2016(refusal->response, buf);
+        if (auto const refusal = milan_talker_response(probe, unready)) {
+            auto const refused = acmp_serialize_2016(*refusal, buf);
             frames.push_back({"acmp_milan_probe_tx_response_dest_mac_fail", {refused.begin(), refused.end()}});
         }
         AcmpCommandResponse state{};
@@ -279,8 +292,8 @@ void add_adp_acmp_and_acquire_frames(Frames& frames)
         state.controller_entity_id = CONTROLLER;
         state.talker_entity_id = TALKER;
         state.sequence_id = 0x0104;
-        if (auto const answer = milan_talker_respond(state, &source, 0)) {
-            auto const answered = acmp_serialize_2016(answer->response, buf);
+        if (auto const answer = milan_talker_response(state, source)) {
+            auto const answered = acmp_serialize_2016(*answer, buf);
             frames.push_back({"acmp_milan_get_tx_state_response", {answered.begin(), answered.end()}});
         }
     }
@@ -1027,53 +1040,16 @@ void add_hdcp_avc_and_extended_frames(Frames& frames)
     }
 }
 
-    // ---- Milan vendor unique: GET_MILAN_INFO, SET_SYSTEM_UNIQUE_ID, MCR info, BIND_STREAM, GET_STREAM_INPUT_INFO_EX ----
-    {
-        auto const mvu = [&](bool const response, uint16_t const sequence, std::span<uint8_t const> const payload) {
-            AecpDuCommon du{};
-            du.init_command(
-                response ? AECP_MESSAGE_TYPE_VENDOR_UNIQUE_RESPONSE : AECP_MESSAGE_TYPE_VENDOR_UNIQUE_COMMAND,
-                static_cast<uint16_t>(AecpDuCommon::COMMON_DATA_LENGTH + 6 + payload.size()));
-            du.target_entity_id = TARGET;
-            du.controller_entity_id = CONTROLLER;
-            du.sequence_id = sequence;
-            std::vector<uint8_t> out;
-            append(out, du);
-            std::array<uint8_t, 6> const protocol_id{0x00, 0x1B, 0xC5, 0x0A, 0xC1, 0x00};
-            append(out, std::span<uint8_t const>(protocol_id));
-            append(out, payload);
-            return out;
-        };
-        std::array<uint8_t, 4> const get_info{0x00, 0x00, 0x00, 0x00};
-        frames.push_back({"mvu_get_milan_info_command", mvu(false, 60, std::span<uint8_t const>(get_info))});
-        std::array<uint8_t, 20> const info{0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
-                                           0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x03, 0x00};
-        frames.push_back({"mvu_get_milan_info_response", mvu(true, 60, std::span<uint8_t const>(info))});
-        std::vector<uint8_t> unique_id{0x00, 0x01, 0x00, 0x00, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x51, 0x1D};
-        std::array<uint8_t, 64> name{};
-        std::string_view const text{"FOH system"};
-        std::copy(text.begin(), text.end(), name.begin());
-        unique_id.insert(unique_id.end(), name.begin(), name.end());
-        frames.push_back({"mvu_set_system_unique_id_command", mvu(false, 61, std::span<uint8_t const>(unique_id))});
-        std::vector<uint8_t> mcr{0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00};
-        std::array<uint8_t, 64> domain{};
-        std::string_view const dtext{"Main clock"};
-        std::copy(dtext.begin(), dtext.end(), domain.begin());
-        mcr.insert(mcr.end(), domain.begin(), domain.end());
-        frames.push_back({"mvu_set_media_clock_reference_info_command", mvu(false, 62, std::span<uint8_t const>(mcr))});
-        std::array<uint8_t, 20> const bind{0x00, 0x05, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x70, 0xB3,
-                                           0xD5, 0xED, 0xC0, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x00, 0x00};
-        frames.push_back({"mvu_bind_stream_command", mvu(false, 63, std::span<uint8_t const>(bind))});
-        std::array<uint8_t, 20> const info_ex{0x00, 0x07, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x70, 0xB3,
-                                              0xD5, 0xED, 0xC0, 0x00, 0xC8, 0xF0, 0x00, 0x01, 0x02, 0x00};
-        frames.push_back({"mvu_get_stream_input_info_ex_response", mvu(true, 64, std::span<uint8_t const>(info_ex))});
-    }
+/// Milan vendor unique, Address Access, and another vendor's protocol.
+void add_vendor_unique_and_address_access_frames(Frames& frames)
+{
+    add_mvu_frames(frames);
 
     // ---- Milan 1.2 MVU built with the entity's structs (atdecc_aecp_mvu.hpp): GET_MILAN_INFO without
     // specification_version, and a NOT_IMPLEMENTED echo, both padded past control_data_length ----
     {  // NOLINT(statusbar-block-statements): golden frames, one per statement
         auto const padded = [](std::vector<uint8_t> out) {
-            out.resize(std::max(out.size(), MVU_MIN_PDU_LENGTH), 0);
+            out.resize(std::max(out.size(), MIN_AVTPDU_LENGTH), 0);
             return out;
         };
         AecpMvuDu du{};
@@ -1116,9 +1092,9 @@ void add_hdcp_avc_and_extended_frames(Frames& frames)
         du.common.sequence_id = 68;
         MvuMediaClockReferenceInfoPayload mcr_info{};
         mcr_info.flags = MVU_MCR_FLAGS_SUPPORTED;
-        mcr_info.default_mcr_prio = MVU_MCR_PRIO_NETWORK_INTERFACE;
+        mcr_info.default_mcr_prio = MVU_MCR_PRIO_AUDIO_INTERFACE;
         mcr_info.user_mcr_prio = uint8_t{200};
-        mcr_info.media_clock_domain_name[0] = 'S';
+        mcr_info.media_clock_domain_name = AtdeccString{"S"};
         std::vector<uint8_t> mout;
         append(mout, du);
         append(mout, mcr_info);

@@ -5144,13 +5144,12 @@ function M.add_mvu_mvu_reserved(tree, tvb, off)
     tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
 end
 
---- GET_MILAN_INFO response (Milan 1.3 Figure 5.6)
+--- GET_MILAN_INFO response (Milan 1.2 Figure 5.4, 1.3 Figure 5.6)
 function M.add_mvu_mvu_get_milan_info_response(tree, tvb, off)
     tree:add(M.f.atdecc_mvu_reserved, tvb(off + 30, 2))
     tree:add(M.f.atdecc_mvu_protocol_version, tvb(off + 32, 4))
     tree:add(M.f.atdecc_mvu_features_flags, tvb(off + 36, 4))
     tree:add(M.f.atdecc_mvu_certification_version, tvb(off + 40, 4))
-    tree:add(M.f.atdecc_mvu_specification_version, tvb(off + 44, 4))
 end
 
 --- SET_SYSTEM_UNIQUE_ID command/response, GET_SYSTEM_UNIQUE_ID response (Milan 1.2 Figure 5.5: one quadlet)
