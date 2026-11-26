@@ -5,6 +5,7 @@
 
 #include <format>
 #include <iterator>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -248,6 +249,71 @@ void tally_stream_input_packet(
         // on a perfectly healthy, media-locked AM824 stream and read as an error.
         c.timestamp_not_valid.fetch_add(1, relaxed);
     }
+}
+
+namespace {
+
+using RunningCounter = std::atomic<uint32_t> StreamInputCounters::*;
+using I = StreamInputIntervals;
+
+/// The running counter behind each interval counter of Milan v1.3 Table 5.6.
+constexpr std::array<std::pair<I::Index, RunningCounter>, 7> INTERVAL_COUNTERS{{
+    {I::SEQ_NUM_MISMATCH, &StreamInputCounters::seq_num_mismatch},
+    {I::MEDIA_RESET, &StreamInputCounters::media_reset},
+    {I::TIMESTAMP_UNCERTAIN, &StreamInputCounters::timestamp_uncertain},
+    {I::UNSUPPORTED_FORMAT, &StreamInputCounters::unsupported_format},
+    {I::LATE_TIMESTAMP, &StreamInputCounters::late_timestamp},
+    {I::EARLY_TIMESTAMP, &StreamInputCounters::early_timestamp},
+    {I::FRAMES_RX, &StreamInputCounters::frames_rx},
+}};
+
+/// The event counters of @p c less @p base into @p out, read at one instant:
+/// MEDIA_UNLOCKED and STREAM_INTERRUPTED between two equal reads of
+/// MEDIA_LOCKED, so neither is ahead of a lock the RX thread counted meanwhile.
+void read_events(
+    StreamInputCounters const& c, std::array<uint32_t, I::COUNT> const& base, std::array<uint32_t, I::COUNT>& out) noexcept
+{
+    for (uint32_t locked = c.media_locked.load();;) {
+        out[I::MEDIA_UNLOCKED] = c.media_unlocked.load() - base[I::MEDIA_UNLOCKED];
+        out[I::STREAM_INTERRUPTED] = c.stream_interrupted.load() - base[I::STREAM_INTERRUPTED];
+        if (std::exchange(locked, c.media_locked.load()) == locked) {
+            out[I::MEDIA_LOCKED] = locked - base[I::MEDIA_LOCKED];
+            return;
+        }
+    }
+}
+
+}  // namespace
+
+auto StreamInputIntervals::current(StreamInputCounters const& c) const noexcept -> std::array<uint32_t, COUNT>
+{
+    auto out = values;
+    read_events(c, last, out);
+    return out;
+}
+
+auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
+{
+    if (c.frames_rx.load(relaxed) == last[FRAMES_RX]) {
+        // Nothing received for a whole interval: the stream stopped, and one that resumes starts afresh.
+        c.restart_run.store(true);
+        interrupt_stream_input(c);
+    }
+    for (auto const& [index, running] : INTERVAL_COUNTERS) {
+        uint32_t const now = (c.*running).load(relaxed);
+        values[index] += now != std::exchange(last[index], now) ? 1U : 0U;
+    }
+    values = current(c);
+    return std::exchange(folded, values) != values;
+}
+
+void StreamInputIntervals::reset(StreamInputCounters const& c) noexcept
+{
+    values = {};
+    for (auto const& [index, running] : INTERVAL_COUNTERS) {
+        last[index] = (c.*running).load(relaxed);
+    }
+    read_events(c, {}, last);
 }
 
 }  // namespace statusbar::avb_entity

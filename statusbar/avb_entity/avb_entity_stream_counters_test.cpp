@@ -11,12 +11,14 @@
 
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 
 using statusbar::avb_entity::interrupt_stream_input;
 using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
+using statusbar::avb_entity::StreamInputIntervals;
 using statusbar::avb_entity::tally_discarded_stream_input_packet;
 using statusbar::avb_entity::tally_stream_input_packet;
 
@@ -409,5 +411,139 @@ TEST(stream_counters, timing_report_names_the_input_and_the_late_frames)
 }
 
 // Test runner
+
+// --- Milan v1.3 Table 5.6: by observation interval ---------------------------
+
+namespace {
+
+using I = StreamInputIntervals;
+
+/// @p count steady AAF packets from sequence_num @p seq and timestamp @p ts on, both moved on past them.
+void feed_run(StreamInputCounters& c, uint8_t& seq, uint32_t& ts, int const count)
+{
+    for (int i = 0; i < count; ++i, ++seq, ts += 125'000U) {
+        feed(c, seq, ts, /*tv=*/true, /*ts_sparse=*/false);
+    }
+}
+
+}  // namespace
+
+TEST(stream_input_intervals, an_interval_counter_counts_intervals_not_avtpdus)
+{
+    StreamInputCounters c;
+    StreamInputIntervals in;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    // Interval 1: three sequence gaps among a thousand AVTPDUs.
+    feed_run(c, seq, ts, 100);
+    for (int gap = 0; gap < 3; ++gap) {
+        ++seq;
+        feed_run(c, seq, ts, 300);
+    }
+    EXPECT_EQ(c.seq_num_mismatch.load(), 3U);
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_EQ(in.values[I::SEQ_NUM_MISMATCH], 1U);
+    EXPECT_EQ(in.values[I::FRAMES_RX], 1U);
+    EXPECT_EQ(in.values[I::MEDIA_LOCKED], 1U);
+    // Interval 2: a clean run moves FRAMES_RX alone.
+    feed_run(c, seq, ts, 300);
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_EQ(in.values[I::SEQ_NUM_MISMATCH], 1U);
+    EXPECT_EQ(in.values[I::FRAMES_RX], 2U);
+    EXPECT_EQ(in.values[I::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(in.values[I::MEDIA_UNLOCKED], 0U);
+    // The values are those of Table 5.13 alone: TIMESTAMP_VALID and _NOT_VALID are not among them.
+    EXPECT_EQ(I::VALID, 0x0000'0F3FU);
+    EXPECT_EQ(in.values[6] + in.values[7], 0U);
+}
+
+TEST(stream_input_intervals, a_locked_input_that_receives_nothing_for_an_interval_is_interrupted)
+{
+    StreamInputCounters c;
+    StreamInputIntervals in;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    EXPECT_TRUE(in.fold(c));
+    // Nothing for a whole interval: the stream stopped while the input was locked.
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_FALSE(c.is_locked.load());
+    EXPECT_EQ(in.values[I::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(in.values[I::MEDIA_UNLOCKED], 1U);
+    EXPECT_EQ(in.values[I::STREAM_INTERRUPTED], 1U);
+    EXPECT_EQ(in.values[I::FRAMES_RX], 1U);
+    // A further silent interval changes nothing, and says so.
+    EXPECT_FALSE(in.fold(c));
+    EXPECT_EQ(in.values[I::STREAM_INTERRUPTED], 1U);
+}
+
+TEST(stream_input_intervals, a_reset_zeroes_every_value_and_the_events_count_from_there)
+{
+    StreamInputCounters c;
+    StreamInputIntervals in;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    ++seq;
+    feed_run(c, seq, ts, 20);
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_TRUE(in.fold(c));  // silent: interrupted
+    EXPECT_EQ(in.values[I::STREAM_INTERRUPTED], 1U);
+
+    in.reset(c);
+    EXPECT_TRUE(std::ranges::all_of(in.values, [](uint32_t const v) { return v == 0; }));
+    // The fold after a reset reports the change, and counts from the reset.
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_TRUE(std::ranges::all_of(in.values, [](uint32_t const v) { return v == 0; }));
+    ts += 40'000'000U;
+    ++seq;
+    feed_run(c, seq, ts, 20);
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_EQ(in.values[I::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(in.values[I::MEDIA_UNLOCKED], 0U);
+    EXPECT_EQ(in.values[I::SEQ_NUM_MISMATCH], 0U);  // after a silent interval, a stream of its own
+    EXPECT_EQ(in.values[I::FRAMES_RX], 1U);
+}
+
+TEST(stream_input_intervals, the_event_counters_are_answered_as_they_stand_and_the_others_at_a_fold)
+{
+    // Milan v1.3 Table 5.6: MEDIA_LOCKED and MEDIA_UNLOCKED are incremented
+    // each time, so that at any time they say whether the input is locked.
+    StreamInputCounters c;
+    StreamInputIntervals in;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    auto now = in.current(c);
+    EXPECT_EQ(now[I::MEDIA_LOCKED], 1U);
+    EXPECT_EQ(now[I::MEDIA_UNLOCKED], 0U);
+    EXPECT_EQ(now[I::FRAMES_RX], 0U);  // until the interval ends
+    EXPECT_TRUE(in.fold(c));
+    interrupt_stream_input(c);
+    now = in.current(c);
+    EXPECT_EQ(now[I::MEDIA_UNLOCKED], 1U);
+    EXPECT_EQ(now[I::STREAM_INTERRUPTED], 1U);
+    EXPECT_EQ(now[I::FRAMES_RX], 1U);
+    EXPECT_EQ(in.values[I::MEDIA_UNLOCKED], 0U);  // values are the last fold's
+}
+
+TEST(stream_input_intervals, a_stream_that_resumes_after_a_silent_interval_starts_afresh)
+{
+    // The talker paused for more than an interval and numbers its AVTPDUs
+    // anew: no SEQ_NUM_MISMATCH or MEDIA_RESET against the AVTPDU before the pause.
+    StreamInputCounters c;
+    StreamInputIntervals in;
+    uint8_t seq = 0;
+    uint32_t ts = 0;
+    feed_run(c, seq, ts, 20);
+    EXPECT_TRUE(in.fold(c));
+    EXPECT_TRUE(in.fold(c));  // silent
+    seq = 100;
+    ts += 400'000'000U;
+    feed_run(c, seq, ts, 20);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(c.media_locked.load(), 2U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+}
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_counters_test)
