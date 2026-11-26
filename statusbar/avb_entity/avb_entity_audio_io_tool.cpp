@@ -650,7 +650,7 @@ auto main(int argc, char** argv) -> int
     std::print("{}\n", ptp_summary);
 
     itc::StopToken shutdown_flag{};
-    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
+    net::MessageReactor reactor{shutdown_flag, avb_entity::entity_reactor_clock(entity), 10};
 
     auto start_result = entity.start(reactor);
     if (!start_result) {

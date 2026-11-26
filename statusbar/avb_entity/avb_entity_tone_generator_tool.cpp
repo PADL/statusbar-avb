@@ -327,7 +327,7 @@ auto loop_then_stop(net::MessageReactor& reactor, ptpclient::PtpAppContext& ctx,
 auto run_entity(Entity& entity, Config& config) -> int
 {
     itc::StopToken shutdown_flag{};
-    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
+    net::MessageReactor reactor{shutdown_flag, avb_entity::entity_reactor_clock(entity), 10};
     if (!start_entity(entity, reactor)) {
         return EXIT_FAILURE;
     }

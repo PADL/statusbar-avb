@@ -10,7 +10,6 @@
 #include "statusbar/atdecc/atdecc.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
-#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/sm/sm.hpp"
 #include "statusbar/test/test.hpp"
 
@@ -202,16 +201,41 @@ TEST(talker_gate, a_stream_stopped_through_a_blip_is_admitted_again_within_the_g
     EXPECT_FALSE(gate.should_transmit(1, T0 + 1s + GRACE));
 }
 
-// Without a time, a Listener Ready and its withdrawal are stamped at the gate's clock's now.
-TEST(talker_gate, a_listener_ready_without_a_time_is_stamped_now)
+// The gate reads no clock. A Listener Ready noted without an instant, as an MSRP hook notes it, is
+// known at the instant the loop last told the gate: the reactor cycle's.
+TEST(talker_gate, a_listener_ready_without_an_instant_is_stamped_with_the_time_told)
 {
     MsrpGate msrp;
     auto& gate = msrp.gate;
-    auto const before = net::rx_clock_now();
+    EXPECT_TRUE(gate.told_time() == TalkerGate::RawTimePoint{});
+    gate.tell_time(T0);
     gate.note_listener_ready(sid(3), true);
+    gate.tell_time(T0 + 3s);  // a later cycle
+    EXPECT_TRUE(gate.told_time() == T0 + 3s);
     gate.note_listener_ready(sid(3), false);
-    auto const ends = gate.grace_ends(3);
-    EXPECT_TRUE(ends.has_value() && *ends >= before + GRACE && *ends <= net::rx_clock_now() + GRACE);
+    EXPECT_TRUE(gate.grace_ends(3) == T0 + 3s + GRACE);
+    EXPECT_TRUE(gate.should_transmit(3, T0 + 3s + GRACE - 1ns));
+    EXPECT_FALSE(gate.should_transmit(3, T0 + 3s + GRACE));
+    gate.tell_time(T0 + 60s);  // telling a time stamps nothing by itself
+    EXPECT_TRUE(gate.grace_ends(3) == T0 + 3s + GRACE);
+}
+
+// Told no time, the gate has no instant to stamp: the registration alone admits, and its
+// withdrawal opens no grace. The instant given explicitly is used whatever was told.
+TEST(talker_gate, told_no_time_a_withdrawal_opens_no_grace)
+{
+    MsrpGate msrp;
+    auto& gate = msrp.gate;
+    gate.note_listener_ready(sid(2), true);
+    EXPECT_TRUE(gate.should_transmit(2, T0));
+    gate.note_listener_ready(sid(2), false);
+    EXPECT_FALSE(gate.grace_ends(2).has_value());
+    EXPECT_FALSE(gate.should_transmit(2, T0));
+    EXPECT_FALSE(gate.should_transmit(2, TalkerGate::RawTimePoint{1ns}));
+
+    gate.note_listener_ready(sid(2), true, T0);
+    gate.note_listener_ready(sid(2), false, T0 + 1s);
+    EXPECT_TRUE(gate.grace_ends(2) == T0 + 1s + GRACE);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_gate_test)

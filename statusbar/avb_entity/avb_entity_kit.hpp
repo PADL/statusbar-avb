@@ -154,8 +154,24 @@ class AvbEntityKit
     /// answers 0 until on_admission_timer() runs: an entity that forwards this
     /// must forward admission_deadline() and on_admission_timer() too. Reactor thread only.
     [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns, TalkerGate::RawTimePoint raw_now) const noexcept -> int;
-    /// As above, reading the gate's clock only while an admission deadline is armed.
+    /// As above for a loop that holds the reactor clock alone: the gate's
+    /// clock at @p now_ns is the pair last told (tell_cycle_time) carried
+    /// forward by the reactor clock, raw_at().
     [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns) const noexcept -> int;
+
+    /// The reactor cycle now being served began at reactor-clock @p now_ns,
+    /// which was the instant @p raw_now on the gate's clock: the pair the loop
+    /// read together when the reactor read its clock, before any handler of
+    /// the cycle ran (entity_reactor_clock). The kit reads no clock. Each gate
+    /// input of the cycle (a Listener Ready over MSRP, an ACMP connection) is
+    /// known at @p raw_now, and so is the admitted set asked for with no
+    /// instant. Reactor thread only.
+    void tell_cycle_time(int64_t now_ns, TalkerGate::RawTimePoint raw_now) noexcept;
+    /// The gate's clock at reactor-clock @p now_ns: the pair last told, carried
+    /// forward by the reactor clock. The two clocks' rates differ by parts per
+    /// million and a cycle lasts milliseconds, so within the cycle it is the
+    /// instant to well under a microsecond. Told no pair, RawTimePoint{}.
+    [[nodiscard]] auto raw_at(int64_t now_ns) const noexcept -> TalkerGate::RawTimePoint;
 
     /// The earliest of the MAAP deadline, the MSRP and MVRP timers and the end
     /// of the counters' observation interval. An MRP jointimer is 200 ms, so a
@@ -196,7 +212,7 @@ class AvbEntityKit
     /// Ready registered or within the grace, plus the ACMP connection where the gate needs one; every
     /// stream when the gate is off. A stream STOP_STREAMING stopped, or waiting for MAAP, stays in it.
     [[nodiscard]] auto admitted_talker_streams(RawTimePoint now) const noexcept -> AdmittedStreams;
-    /// As above, at the gate's clock's now, read once.
+    /// As above, at the instant of the reactor cycle last told (tell_cycle_time).
     [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
     /// The hook told the admitted set each time it changes: the reactor thread calls it, at a gate
     /// input or at the admission deadline. It is not called for the set in force at install
@@ -206,8 +222,8 @@ class AvbEntityKit
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
     /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
-    /// known at the RAW instant @p now (the host's hook reads it once). Stamps the gate, then
-    /// re-evaluates admission.
+    /// known at the RAW instant @p now (the host's hook passes the cycle's, tell_cycle_time). Stamps
+    /// the gate, then re-evaluates admission.
     void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
     /// The earliest instant the grace of a stream still admitted runs out (TalkerGate::grace_ends),
     /// armed at each evaluation of admission; nullopt while no such grace runs.
@@ -620,6 +636,8 @@ class AvbEntityKit
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
     std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
+    /// The reactor-clock half of the pair last told (tell_cycle_time); the gate holds the RAW half.
+    int64_t cycle_ns_{0};
     /// The end of the counters' observation interval (poll_counters), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).

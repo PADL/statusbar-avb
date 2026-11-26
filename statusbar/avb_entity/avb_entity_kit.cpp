@@ -14,7 +14,6 @@
 #include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/logging/logging.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
-#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
 #include <algorithm>
@@ -555,10 +554,26 @@ void AvbEntityKit::wire_srp_callbacks()
             (void)host_.components().msrp_handler.talker_withdraw(make_talker_srp_info(spec).stream_id, time);
         }
     });
-    // The per-stream transmit gate tracks MSRP Listener Ready, stamped on the gate's clock.
+    // The per-stream transmit gate tracks MSRP Listener Ready, stamped with the cycle's told instant.
     host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool const ready) {
-        notify_listener_ready(stream_id, ready, net::rx_clock_now());
+        notify_listener_ready(stream_id, ready, gate_.told_time());
     });
+}
+
+void AvbEntityKit::tell_cycle_time(int64_t const now_ns, RawTimePoint const raw_now) noexcept
+{
+    cycle_ns_ = now_ns;
+    gate_.tell_time(raw_now);
+}
+
+auto AvbEntityKit::raw_at(int64_t const now_ns) const noexcept -> RawTimePoint
+{
+    auto const told = gate_.told_time();
+    if (told == RawTimePoint{}) {
+        return told;
+    }
+    using RawClock = RawTimePoint::clock;
+    return RawClock::from_ns(RawClock::to_ns(told) + (now_ns - cycle_ns_));
 }
 
 void AvbEntityKit::notify_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, RawTimePoint const now)
@@ -570,7 +585,7 @@ void AvbEntityKit::notify_listener_ready(nanoavb::StreamId const& stream_id, boo
 void AvbEntityKit::publish_talker_connections(uint16_t const idx)
 {
     gate_.note_acmp_connections(idx, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(idx)));
-    notify_admission(net::rx_clock_now());
+    notify_admission(gate_.told_time());
 }
 
 auto AvbEntityKit::admitted_talker_streams(RawTimePoint const now) const noexcept -> AdmittedStreams
@@ -586,7 +601,7 @@ auto AvbEntityKit::admitted_talker_streams(RawTimePoint const now) const noexcep
 
 auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
 {
-    return admitted_talker_streams(net::rx_clock_now());
+    return admitted_talker_streams(gate_.told_time());
 }
 
 void AvbEntityKit::notify_admission(RawTimePoint const now)
@@ -1302,7 +1317,7 @@ auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns, RawTi
 
 auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
 {
-    return poll_timeout_ms(max_ms, now_ns, admission_deadline_ ? net::rx_clock_now() : RawTimePoint{});
+    return poll_timeout_ms(max_ms, now_ns, raw_at(now_ns));
 }
 
 auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<int64_t>

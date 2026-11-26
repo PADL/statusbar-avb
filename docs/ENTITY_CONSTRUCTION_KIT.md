@@ -409,9 +409,11 @@ entity's data plane has accepted the rate.
 connection (not under Milan), the stream started, and an MSRP Listener
 Ready registered or withdrawn less than the grace ago (five seconds; none
 under Milan). The reactor thread writes it. At each Listener Ready
-registered or withdrawn it stores the instant on CLOCK_MONOTONIC_RAW, read
-once for the event, when the declaration was last known registered, then
-the flag, with release. `admitted(idx, now)` loads the flag with acquire,
+registered or withdrawn it stores the instant on CLOCK_MONOTONIC_RAW when
+the declaration was last known registered, then the flag, with release.
+The gate reads no clock: the instant is its caller's, or the one the loop
+told it for the reactor cycle (`tell_time()`, below). `admitted(idx, now)`
+loads the flag with acquire,
 then that stamp; `should_transmit()` is `admitted()`, told the media
 wake's RAW instant. The media thread and the reactor therefore read one
 predicate and agree on when a grace runs out however the wakes fall: a
@@ -427,15 +429,15 @@ The kit keeps the admitted set on the reactor thread:
 gate admits, and `set_on_admission_changed()` installs the hook told the
 set each time it changes. It is re-evaluated at each gate input: a
 Listener Ready registered or withdrawn (`notify_listener_ready()`, which
-the host's MSRP hook calls with the RAW instant it read) and an ACMP
-connection count changing. A classic stream's grace can run out with no
+the host's MSRP hook calls with the instant of the reactor cycle) and an
+ACMP connection count changing. A classic stream's grace can run out with no
 event at all, so each evaluation also arms one deadline, on the gate's
 clock, at the earliest `grace_ends()` of a stream still admitted whose
 Listener was withdrawn (`admission_deadline()`; none under Milan, which
 has no grace).
 `on_admission_timer(now)` evaluates the set again once it is reached.
 The entity runner calls it each reactor cycle while a deadline is armed,
-reading the gate's clock only then, and `poll_timeout_ms()` counts the
+reading the gate's clock for it only then, and `poll_timeout_ms()` counts the
 deadline among the ones it does not sleep past. From the deadline until
 `on_admission_timer()` runs it answers 0, so an entity that forwards
 `poll_timeout_ms()` forwards both admission calls, and an entity with a
@@ -443,6 +445,24 @@ loop of its own calls the timer as the runner does. The hook is not told the set
 installed; a later install replaces an earlier one. STOP_STREAMING
 stops the talker's slot, not the gate: the reservation stands, so the
 stream stays in the set.
+
+Neither the gate nor the kit reads a clock. The hooks that feed the gate
+(MSRP's Listener Ready, ACMP's connect and disconnect) are not handed the
+time of their event, and the reactor's clock is not the gate's. So the
+loop that drives the reactor tells the entity the time of each cycle on
+both clocks: `entity_reactor_clock(entity)` (`avb_entity_reactor_clock.hpp`)
+is the clock to construct the `net::MessageReactor` with. Once per cycle,
+when the reactor reads its clock and before any handler runs, it reads
+CLOCK_MONOTONIC_RAW as well and calls the entity's
+`tell_cycle_time(now_ns, raw_now)`. The kit stamps every gate input of the
+cycle with `raw_now`; `admitted_talker_streams()` with no instant answers
+for it; and `poll_timeout_ms(max_ms, now_ns)` finds the gate's clock at
+`now_ns` by carrying the pair forward on the reactor clock (`raw_at()`).
+An entity with a `TalkerGate` and no kit forwards the instant to
+`TalkerGate::tell_time()`. A loop that tells no time still runs, with one
+loss: a Listener Ready noted without an instant is not stamped, so its
+withdrawal opens no grace, and the gate says so once in the log. A unit
+test tells the pair it wants and steps it.
 
 ### The format of a stream input
 

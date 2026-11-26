@@ -20,7 +20,6 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
-#include "statusbar/net/net_ethernet_port.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/sm/sm.hpp"
@@ -902,35 +901,168 @@ TEST(avb_entity_kit_admission, the_hook_follows_the_listener_and_the_acmp_connec
     kit->set_on_admission_changed({});
 }
 
+namespace {
+
+/// A bridge that speaks MSRP to a kit, and the loop that drives the kit's reactor as these tests see
+/// it: each cycle the kit is told the pair of clocks, then handed what the bridge sent.
+struct BridgeOverMsrp
+{
+    KitUnderTest& kit;
+    TimePoint now{std::chrono::seconds{2}};
+    std::vector<std::vector<uint8_t>> out{};
+    nanoavb::MsrpHandler<> bridge{
+        statusbar::srp::msrp::MsrpConfig{}, nanoavb::MsrpCallbacks{.send_packet = [this](std::span<uint8_t const> p) {
+            out.emplace_back(p.begin(), p.end());
+            return true;
+        }}};
+
+    /// The gate's clock at reactor time @p at: one hundred seconds ahead of it.
+    [[nodiscard]] static auto raw_of(TimePoint const at) -> AvbEntityKit::RawTimePoint
+    {
+        return AvbEntityKit::RawTimePoint{at.time_since_epoch() + std::chrono::seconds{100}};
+    }
+    [[nodiscard]] static auto ns_of(TimePoint const at) -> int64_t
+    {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(at.time_since_epoch()).count();
+    }
+
+    /// One reactor cycle 120 ms on: the kit told its time, the bridge's PDUs received, the timers run.
+    void cycle()
+    {
+        now += std::chrono::milliseconds{120};
+        kit->tell_cycle_time(ns_of(now), raw_of(now));
+        bridge.tick(now);
+        auto& msrp = kit->host().components().msrp_handler;
+        for (auto const& p : std::exchange(out, {})) {
+            msrp.receive_packet(p, now);
+        }
+        msrp.tick(now);
+    }
+
+    /// Cycles until @p done or @p rounds have gone by.
+    template <typename Done>
+    void cycles_until(int const rounds, Done done)
+    {
+        for (int round = 0; round < rounds && !done(); ++round) {
+            cycle();
+        }
+    }
+};
+
+}  // namespace
+
 // IEEE 802.1Q-2022 Clause 35.2.4.4: a Listener Ready a bridge declares over MSRP reaches the gate through
-// the host, stamped on the gate's clock as it arrives, and admits the connected stream.
+// the host, known at the instant the loop told the kit for that reactor cycle, and admits the connected
+// stream.
 TEST(avb_entity_kit_admission, a_listener_ready_over_msrp_admits_the_connected_stream)
 {
     KitUnderTest kit{make_config(2, "classic")};
     EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    uint16_t const idx = kit.talker_specs()[0].index;
+    BridgeOverMsrp wire{kit};
     auto& msrp = kit->host().components().msrp_handler;
-    TimePoint now{std::chrono::seconds{2}};
-    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), now).has_value());
-    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, kit.talker_specs()[0].index);
+    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), wire.now).has_value());
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, idx);
     AdmissionRecorder recorder;
     recorder.install(kit);
-    std::vector<std::vector<uint8_t>> out;
-    nanoavb::MsrpHandler<> bridge{
-        statusbar::srp::msrp::MsrpConfig{}, nanoavb::MsrpCallbacks{.send_packet = [&out](std::span<uint8_t const> p) {
-            out.emplace_back(p.begin(), p.end());
-            return true;
-        }}};
-    EXPECT_TRUE(bridge.listener_ready(talker_sid(kit, kit.talker_specs()[0].index), now).has_value());
-    for (int round = 0; round < 6 && recorder.told.empty(); ++round) {
-        now += std::chrono::milliseconds{120};
-        bridge.tick(now);
-        for (auto const& p : std::exchange(out, {})) {
-            msrp.receive_packet(p, now);
-        }
-    }
-    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{kit.talker_specs()[0].index}});
-    EXPECT_TRUE(kit->talker_should_transmit(kit.talker_specs()[0].index, net::rx_clock_now()));
+    EXPECT_TRUE(wire.bridge.listener_ready(talker_sid(kit, idx), wire.now).has_value());
+    wire.cycles_until(6, [&recorder] { return !recorder.told.empty(); });
+    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{idx}});
+    EXPECT_TRUE(kit->talker_should_transmit(idx, BridgeOverMsrp::raw_of(wire.now)));
     kit->set_on_admission_changed({});
+}
+
+// The kit reads no clock. A Listener Ready withdrawn over MSRP is stamped with the instant told for
+// the cycle that saw it go, the grace and the admission deadline run from that instant, and a loop that
+// holds the reactor clock alone is given its wait from the pair carried forward.
+TEST(avb_entity_kit_admission, a_withdrawal_over_msrp_is_known_at_the_cycle_the_loop_told)
+{
+    using std::chrono::milliseconds;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    uint16_t const idx = kit.talker_specs()[0].index;
+    BridgeOverMsrp wire{kit};
+    auto& msrp = kit->host().components().msrp_handler;
+    msrp.set_suppress_leaveall(true);
+    wire.bridge.set_suppress_leaveall(true);
+    EXPECT_TRUE(msrp.talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[0]), wire.now).has_value());
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, idx);
+    EXPECT_TRUE(wire.bridge.listener_ready(talker_sid(kit, idx), wire.now).has_value());
+    wire.cycles_until(6, [&] { return kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx}; });
+    EXPECT_TRUE(kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx});
+    EXPECT_FALSE(kit->admission_deadline().has_value());  // registered: no grace runs
+
+    // The bridge withdraws. The kit's registrar lets go a LeaveTime later, in one of the cycles told.
+    EXPECT_TRUE(wire.bridge.listener_withdraw(talker_sid(kit, idx), wire.now).has_value());
+    auto const before = BridgeOverMsrp::raw_of(wire.now);
+    wire.cycles_until(100, [&] { return kit->admission_deadline().has_value(); });
+    auto const deadline = kit->admission_deadline();
+    EXPECT_TRUE(deadline.has_value());
+    auto const stamped = BridgeOverMsrp::raw_of(wire.now);  // the cycle that saw it go
+    EXPECT_TRUE(stamped > before);
+    EXPECT_TRUE(deadline.value_or(AvbEntityKit::RawTimePoint{}) == stamped + TalkerGate::GRACE);
+    EXPECT_TRUE(kit->admitted_talker_streams() == AvbEntityKit::AdmittedStreams{idx});  // within the grace
+
+    // 40 ms further into the cycle, by the reactor clock alone.
+    int64_t const later_ns = BridgeOverMsrp::ns_of(wire.now + milliseconds{40});
+    EXPECT_TRUE(kit->raw_at(later_ns) == stamped + milliseconds{40});
+    EXPECT_TRUE(kit->poll_timeout_ms(60'000, later_ns) <= 4960);  // the deadline is 4960 ms off, or a timer sooner
+    EXPECT_EQ(kit->poll_timeout_ms(60'000, later_ns), kit->poll_timeout_ms(60'000, later_ns, stamped + milliseconds{40}));
+    int64_t const at_deadline_ns = BridgeOverMsrp::ns_of(wire.now) + 5'000'000'000;
+    EXPECT_EQ(kit->poll_timeout_ms(60'000, at_deadline_ns), 0);  // due: no wait until the timer has run
+
+    // A cycle told at the deadline: the set asked for with no instant is the set of that cycle.
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+    kit->tell_cycle_time(BridgeOverMsrp::ns_of(wire.now) + 5'000'000'000, stamped + TalkerGate::GRACE);
+    EXPECT_TRUE(kit->admitted_talker_streams().empty());
+    kit->on_admission_timer(stamped + TalkerGate::GRACE);
+    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
+    EXPECT_FALSE(kit->admission_deadline().has_value());
+    kit->set_on_admission_changed({});
+}
+
+// An ACMP connection is a gate input with no time of its own: the set is evaluated at the instant
+// told for its cycle, so one that arrives after a grace has run out finds it over.
+TEST(avb_entity_kit_admission, an_acmp_connection_is_evaluated_at_the_cycle_the_loop_told)
+{
+    using std::chrono::seconds;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{seconds{1}}));
+    auto connect_from = [&kit](uint8_t const listener) {
+        atdecc::AcmpCommandResponse cmd{};
+        cmd.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND);
+        cmd.talker_entity_id = Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};  // make_config's
+        cmd.talker_unique_id = 1;
+        cmd.listener_entity_id = Eui64{0xAA, 0xBB, 0xCC, 0xFF, 0xFE, 0x11, 0x22, listener};
+        (void)kit->host().components().acmp_talker.receive_command(cmd, TimePoint{});
+    };
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    connect_from(0x01);
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + seconds{1});  // the grace runs to T0 + 1 s + GRACE
+    AdmissionRecorder recorder;
+    recorder.install(kit);
+
+    kit->tell_cycle_time(1, ADMIT_T0 + seconds{2});  // a cycle inside the grace
+    connect_from(0x02);
+    EXPECT_TRUE(recorder.told.empty());
+    EXPECT_EQ(kit->host().components().acmp_talker.connection_count(1), size_t{2});
+
+    kit->tell_cycle_time(2, ADMIT_T0 + seconds{1} + TalkerGate::GRACE);  // a cycle at its end
+    connect_from(0x03);
+    EXPECT_TRUE(recorder.told == std::vector<std::vector<uint16_t>>{{}});
+    kit->set_on_admission_changed({});
+}
+
+// Told no pair, the kit has no instant on the gate's clock: raw_at() says so, and the loop's wait is
+// the control plane's alone.
+TEST(avb_entity_kit_admission, a_kit_told_no_time_has_no_instant_on_the_gates_clock)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_TRUE(kit->raw_at(5'000'000'000) == AvbEntityKit::RawTimePoint{});
+    EXPECT_FALSE(kit->admission_deadline().has_value());
+    EXPECT_EQ(kit->poll_timeout_ms(7, 5'000'000'000), kit->poll_timeout_ms(7, 5'000'000'000, ADMIT_T0));
 }
 
 // Milan v1.3 Section 5.5.4.1: a Milan talker streams while its Listener is registered, with no
@@ -1037,6 +1169,13 @@ template <typename Entity>
 concept ForwardsAdmission = requires(Entity& entity) { entity.on_admission_timer(*entity.admission_deadline()); };
 static_assert(ForwardsAdmission<AvbEntityAudioIO>);
 static_assert(ForwardsAdmission<AvbEntityToneGenerator>);
+
+// An entity whose gate is stamped from an MSRP hook is told the reactor cycle's time by its loop
+// (entity_reactor_clock): the kit's two entities forward it to the kit.
+template <typename Entity>
+concept ToldCycleTime = requires(Entity& entity) { entity.tell_cycle_time(int64_t{}, AvbEntityKit::RawTimePoint{}); };
+static_assert(ToldCycleTime<AvbEntityAudioIO>);
+static_assert(ToldCycleTime<AvbEntityToneGenerator>);
 
 // With the gate off every talker stream transmits from the start: that is the set in force, so
 // nothing is told until a stream leaves it, which none does.

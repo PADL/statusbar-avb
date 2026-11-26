@@ -20,11 +20,14 @@
 /// ctl/media log channels, set_log_verbosity, tx_pcap_* accessors, and
 /// optionally poll_timeout_ms(max_ms, now_ns), which bounds each reactor
 /// wait by the entity's next control-plane deadline, poll_counters(now_ns),
-/// called each reactor cycle to end its counters' observation interval, and
-/// admission_deadline() with on_admission_timer(now), called at the deadline.
+/// called each reactor cycle to end its counters' observation interval,
+/// admission_deadline() with on_admission_timer(now), called at the deadline,
+/// and tell_cycle_time(now_ns, raw_now), called by the reactor's clock
+/// (entity_reactor_clock) so that the entity itself reads none.
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
 #include "statusbar/avb_entity/avb_entity_histogram_csv.hpp"
+#include "statusbar/avb_entity/avb_entity_reactor_clock.hpp"
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
@@ -436,7 +439,7 @@ void entity_poll_counters(Entity& entity)
 }
 
 /// Re-evaluate @p entity's talker admission once its deadline is armed (AvbEntityKit::on_admission_timer),
-/// for an entity that has one; the gate's clock is read only while it is.
+/// for an entity that has one; the loop reads the gate's clock for it only while it is.
 template <typename Entity>
 void entity_admission_timer(Entity& entity)
 {

@@ -23,8 +23,10 @@
 /// state, and stamps each stream's Listener Ready on CLOCK_MONOTONIC_RAW
 /// (note_listener_ready); any thread told a RAW instant reads the same predicate
 /// from that stamp (admitted, should_transmit), so the media thread and the
-/// reactor agree on when a grace runs out. Reads the stream ids through the
-/// components bound at construction.
+/// reactor agree on when a grace runs out. The gate reads no clock: every
+/// instant is told it, by the caller or by the loop that drives the reactor
+/// (tell_time). Reads the stream ids through the components bound at
+/// construction.
 
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/itc/itc_published.hpp"
@@ -77,7 +79,7 @@ struct TalkerGate
     /// data plane's maximum blob-declared stream table (kit phase 1).
     static constexpr size_t STREAM_COUNT = MAX_ENTITY_STREAMS;
     /// The gate's clock, CLOCK_MONOTONIC_RAW: a media wake is told it, and the
-    /// reactor reads it once per event it stamps or evaluates (net::rx_clock_now()).
+    /// reactor thread is told it once per reactor cycle (tell_time).
     using RawTimePoint = realtime::MonotonicRawClock::time_point;
     /// Grace window the MSRP Listener Ready is held across a LeaveAll re-registration
     /// blip (Ready momentarily withdrawn for ~1-3 s on the ~10 s leave-all cycle), so
@@ -90,8 +92,19 @@ struct TalkerGate
     /// by ACMP stream_id (same value MSRP advertises). A registration and the
     /// withdrawal that ends it both stamp @p now, from which the grace runs.
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
-    /// As above, for a caller with no RAW reading in hand: reads the clock once.
+    /// As above, known at the instant last told (tell_time): for an MSRP hook,
+    /// which is not handed the time of its event. Told no time yet, the flag is
+    /// kept and no stamp is made, so a withdrawal then opens no grace; the
+    /// first such call says so in the log.
     void note_listener_ready(nanoavb::StreamId const& stream_id, bool ready);
+
+    /// Reactor thread: the RAW instant of the reactor cycle now being served,
+    /// read by the loop when the reactor read its own clock and before any
+    /// handler of the cycle ran (entity_reactor_clock). Every Listener Ready
+    /// noted without an instant in this cycle is stamped with it.
+    void tell_time(RawTimePoint const now) noexcept { told_now_ = now; }
+    /// The instant last told (tell_time); RawTimePoint{} before the first.
+    [[nodiscard]] auto told_time() const noexcept -> RawTimePoint { return told_now_; }
 
     /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
     /// Stopped suppresses transmit without tearing down the ACMP connection or the
@@ -139,13 +152,16 @@ struct TalkerGate
     std::chrono::nanoseconds grace_{GRACE};         ///< see set_listener_grace
     nanoavb::NanoAvbComponents const& components_;  ///< reads acmp_talker connection state
     std::optional<logging::Logger> logger_{};       ///< reactor-thread gate-transition logging
+    RawTimePoint told_now_{};                       ///< see tell_time; reactor thread
+    bool untold_logged_{false};                     ///< the one log line of an untold note_listener_ready
 
     // --- Owned gate state (cross-thread) ---------------------------------------
     /// "A listener permits transmit" (MSRP Listener Ready), per stream. Written by
     /// note_listener_ready (reactor) after the stamp, with release; read with acquire.
     std::array<std::atomic<bool>, STREAM_COUNT> listener_ready_{};
     /// The RAW instant (ns) each stream's Listener Ready was last known registered; 0
-    /// until it first is. Written by note_listener_ready (reactor) alone.
+    /// until it first is, and while the gate has been told no time. Written by
+    /// note_listener_ready (reactor) alone.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even when connected + Listener Ready.

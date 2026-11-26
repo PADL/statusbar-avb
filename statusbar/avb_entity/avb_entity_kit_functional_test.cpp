@@ -631,12 +631,14 @@ struct KitPair
         }
     }
 
-    /// @p rounds of 125 ms: both kits' protocol timers, then the wire.
+    /// @p rounds of 125 ms: both kits told the cycle's time (the pair's own, on both clocks),
+    /// their protocol timers, then the wire.
     void run(int const rounds)
     {
         for (int i = 0; i < rounds; ++i) {
             now += std::chrono::milliseconds{125};
             for (auto* kit : {&listener, &talker}) {
+                (*kit)->tell_cycle_time(ns_of(now), realtime::MonotonicRawClock::time_point{now.time_since_epoch()});
                 (*kit)->host().components().msrp_handler.tick(now);
                 (*kit)->host().net_handlers()->atdecc_handler().tick(ns_of(now));
             }

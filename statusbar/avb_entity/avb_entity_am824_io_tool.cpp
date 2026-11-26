@@ -21,6 +21,7 @@
 
 #include "statusbar/avb_entity/avb_entity_am824_io.hpp"
 #include "statusbar/avb_entity/avb_entity_identity.hpp"
+#include "statusbar/avb_entity/avb_entity_reactor_clock.hpp"
 #include "statusbar/avb_entity/avb_entity_version.hpp"
 #include "statusbar/buffer/stream_utils.hpp"
 #include "statusbar/config/config.hpp"
@@ -656,7 +657,7 @@ auto loop_then_stop(
 auto run_entity(avb_entity::AvbEntityAm824IO& entity, Config& config) -> int
 {
     itc::StopToken shutdown_flag{};
-    net::MessageReactor reactor{shutdown_flag, net::monotonic_ns, 10};
+    net::MessageReactor reactor{shutdown_flag, avb_entity::entity_reactor_clock(entity), 10};
     if (!start_entity(entity, reactor)) {
         return EXIT_FAILURE;
     }

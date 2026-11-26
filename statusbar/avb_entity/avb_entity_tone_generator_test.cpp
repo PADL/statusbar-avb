@@ -289,7 +289,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     // Fully admit the AAF stream (ACMP connection + MSRP Listener Ready). CRF is
     // left untouched -- it must stay suppressed.
     connect(k_aaf, 0);
-    gate.note_listener_ready(aaf_sid, true);
+    gate.note_listener_ready(aaf_sid, true, RAW_NOW);
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
     EXPECT_EQ(comps.acmp_talker.connection_count(k_crf), size_t{0});
     EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
@@ -297,7 +297,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
 
     // Admit CRF on its OWN merits -> now it transmits, independently.
     connect(k_crf, 1);
-    gate.note_listener_ready(crf_sid, true);
+    gate.note_listener_ready(crf_sid, true, RAW_NOW);
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.

@@ -251,6 +251,12 @@ class AvbEntityAm824IO
     /// Print current state of all state machines
     auto print_state() const -> void;
 
+    /// The reactor cycle now being served began at the instant @p raw_now on
+    /// the talker gate's clock, read by the loop when the reactor read its own
+    /// (entity_reactor_clock): what a Listener Ready of this cycle is stamped
+    /// with (TalkerGate::tell_time). Reactor thread.
+    void tell_cycle_time(int64_t /*now_ns*/, TalkerGate::RawTimePoint const raw_now) noexcept { gate_.tell_time(raw_now); }
+
     /// Handle link up event (call from external link monitor)
     /// @param time Current time point for state machine transition
     auto on_link_up(TimePoint time) -> void;

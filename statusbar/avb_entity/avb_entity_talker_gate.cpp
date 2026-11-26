@@ -7,11 +7,10 @@
 
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 
-#include "statusbar/net/net_ethernet_port.hpp"
-
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -39,7 +38,10 @@ void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool co
 
 void TalkerGate::note_listener_ready(nanoavb::StreamId const& stream_id, bool const ready)
 {
-    note_listener_ready(stream_id, ready, net::rx_clock_now());
+    if (told_now_ == RawTimePoint{} && !std::exchange(untold_logged_, true) && logger_) {
+        logger_->status("srp: the talker gate was told no time (tell_time): a withdrawn Listener opens no grace");
+    }
+    note_listener_ready(stream_id, ready, told_now_);
 }
 
 auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const now) noexcept -> bool
@@ -47,6 +49,7 @@ auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const 
     // The reactor is the one writer. The grace runs from the last instant the
     // declaration was known registered, so a withdrawal seen while already
     // withdrawn does not extend it. The stamp goes before the flag (release).
+    // An instant never told is RawTimePoint{}, which is stored as no stamp.
     bool const was = listener_ready_[idx].load(std::memory_order_relaxed);
     if (ready || was) {
         ready_raw_ns_[idx].store(RawTimePoint::clock::to_ns(now), std::memory_order_relaxed);

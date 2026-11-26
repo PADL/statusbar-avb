@@ -143,6 +143,11 @@ class AvbEntityToneGenerator
     }
     /// See AvbEntityKit::on_admission_timer.
     void on_admission_timer(AvbEntityKit::RawTimePoint const now) { kit_.on_admission_timer(now); }
+    /// See AvbEntityKit::tell_cycle_time.
+    void tell_cycle_time(int64_t const now_ns, AvbEntityKit::RawTimePoint const raw_now) noexcept
+    {
+        kit_.tell_cycle_time(now_ns, raw_now);
+    }
     [[nodiscard]] auto is_ready() const noexcept -> bool { return kit_.host().is_ready(); }
     [[nodiscard]] auto state_string() const -> std::string_view { return kit_.host().state_string(); }
     auto print_state() const -> void;
