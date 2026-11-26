@@ -105,9 +105,9 @@ struct TalkerGate
         }
     }
 
-    /// Any thread: is talker stream @p idx admitted at @p now? True if gating is disabled, or
-    /// the stream is Started, has an ACMP connection (unless set_needs_acmp_connection(false)) and
-    /// a permitting listener declaration is registered now or was within the grace. Time-dependent: the kit re-evaluates it at grace_ends() (AvbEntityKit::on_admission_timer).
+    /// Any thread: is talker stream @p idx admitted at @p now? True if gating is disabled, or the stream is
+    /// Started, has an ACMP connection (unless set_needs_acmp_connection(false)) and a permitting listener
+    /// declaration now or within the grace; the kit re-evaluates it at grace_ends() (on_admission_timer).
     [[nodiscard]] auto admitted(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
     /// Whether stream @p idx has a permitting listener declaration now or within the grace,

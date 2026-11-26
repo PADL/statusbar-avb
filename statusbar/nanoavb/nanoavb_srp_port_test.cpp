@@ -13,6 +13,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -23,6 +24,12 @@ using statusbar::srp::msrp::ListenerDeclaration;
 using TimePoint = statusbar::sm::TimePoint;
 
 namespace {
+
+/// The last Listener declaration an observer was told of; none before the first.
+auto last_received(std::vector<ListenerDeclaration> const& received) -> std::optional<ListenerDeclaration>
+{
+    return received.empty() ? std::nullopt : std::optional{received.back()};
+}
 
 using Pdus = std::vector<std::vector<uint8_t>>;
 
@@ -169,8 +176,9 @@ TEST(nanoavb_srp_port, a_listener_found_by_destination_reaches_the_talker)
         .on_talker_leave = [&](StreamId const&) { ++leaves; },
         .on_listener_state = [&](StreamId const&, ListenerReservationState const s) { states.push_back(s); },
     });
-    std::vector<ListenerDeclaration> heard{};
-    link.t.set_observer(SrpPortObserver{.on_listener = [&](StreamId const&, ListenerDeclaration const d) { heard.push_back(d); }});
+    std::vector<ListenerDeclaration> received{};
+    link.t.set_observer(
+        SrpPortObserver{.on_listener = [&](StreamId const&, ListenerDeclaration const d) { received.push_back(d); }});
 
     EXPECT_TRUE(link.t.declare_talker(talker(7), link.now).has_value());
     link.run(4);
@@ -188,8 +196,8 @@ TEST(nanoavb_srp_port, a_listener_found_by_destination_reaches_the_talker)
     EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Ready);
     link.run(4);
     EXPECT_TRUE(link.t.registered_listener(stream_id(7)) == ListenerDeclaration::Ready);
-    EXPECT_FALSE(heard.empty());
-    EXPECT_TRUE(!heard.empty() && heard.back() == ListenerDeclaration::Ready);
+    EXPECT_FALSE(received.empty());
+    EXPECT_TRUE(last_received(received) == std::optional{ListenerDeclaration::Ready});
 
     EXPECT_TRUE(link.t.withdraw_talker(stream_id(7), link.now).has_value());
     link.run(12);
@@ -197,7 +205,7 @@ TEST(nanoavb_srp_port, a_listener_found_by_destination_reaches_the_talker)
     EXPECT_TRUE(!states.empty() && states.back() == ListenerReservationState::Waiting);
     EXPECT_EQ(link.l.find_registered_talker_advertise(GROUP, 2), nullptr);
     EXPECT_TRUE(link.t.registered_listener(stream_id(7)) == ListenerDeclaration::Ignore);
-    EXPECT_TRUE(!heard.empty() && heard.back() == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(last_received(received) == std::optional{ListenerDeclaration::Ignore});
 }
 
 // A Talker Failed is reported with its failure code and found by destination; a listener attached
@@ -326,11 +334,11 @@ TEST(nanoavb_srp_port, a_priority_only_domain_is_adopted_by_its_class_and_reset)
 TEST(nanoavb_srp_port, a_rejoin_forgets_the_peer_s_listeners_and_asks_for_them_again)
 {
     Bridge b{};
-    std::vector<ListenerDeclaration> heard{};
+    std::vector<ListenerDeclaration> received{};
     int leaves = 0;
     b.port.set_observer(SrpPortObserver{
         .on_talker_leave = [&](StreamId const&) { ++leaves; },
-        .on_listener = [&](StreamId const&, ListenerDeclaration const d) { heard.push_back(d); },
+        .on_listener = [&](StreamId const&, ListenerDeclaration const d) { received.push_back(d); },
     });
     EXPECT_TRUE(b.port.declare_domain(b.now).has_value());
     EXPECT_TRUE(b.port.declare_talker(talker(2), b.now).has_value());
@@ -353,7 +361,7 @@ TEST(nanoavb_srp_port, a_rejoin_forgets_the_peer_s_listeners_and_asks_for_them_a
     b.port.rejoin(b.now);
     EXPECT_FALSE(b.port_out.empty());  // the LeaveAll, now
     EXPECT_TRUE(b.port.registered_listener(stream_id(2)) == ListenerDeclaration::Ignore);
-    EXPECT_TRUE(!heard.empty() && heard.back() == ListenerDeclaration::Ignore);
+    EXPECT_TRUE(last_received(received) == std::optional{ListenerDeclaration::Ignore});
     EXPECT_NE(b.port.find_registered_talker_advertise(GROUP, 2), nullptr);
     EXPECT_EQ(leaves, 0);
     EXPECT_TRUE(b.port.peer_domain_registered());

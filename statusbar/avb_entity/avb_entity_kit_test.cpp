@@ -1020,7 +1020,7 @@ TEST(avb_entity_kit_maap, a_link_up_while_the_link_is_up_is_a_repeat_and_a_resta
 
 TEST(avb_entity_kit_maap, the_first_entity_available_waits_for_the_talker_addresses)
 {
-    // A Milan listener that hears ENTITY_AVAILABLE while the block is still
+    // A Milan listener that receives ENTITY_AVAILABLE while the block is still
     // being probed probes at once, is told TALKER_DEST_MAC_FAIL and sits out
     // TMR_RETRY. Under the hold the host's Link Up starts everything but ADP
     // and owes it; the acquirer's ready callback releases it. A Link Down

@@ -400,12 +400,9 @@ struct AvbEntityAudioIOConfig
     /// media clock owns this lead; see ptpclient::MediaClockGenerator.)
     uint64_t presentation_offset_ns{0};
 
-    /// The kit's own engines are the entity's data plane: a SET_STREAM_FORMAT re-shapes a talker (and,
-    /// with the entity's format hook, a listener) stream, a SET_SAMPLING_RATE re-shapes them after the
-    /// UnitRateFn (sample_rate() and the TSpecs follow), the kit refuses a streaming output's new
-    /// presentation offset, and each dynamic STREAM_PORT starts at the identity its engines route.
-    /// Off (the default): an output keeps its format, an input's goes to the listener alone, the
-    /// UnitRateFn moves the entity's own data plane, and dynamic ports start unmapped.
+    /// The kit's own engines are the entity's data plane: SET_STREAM_FORMAT and SET_SAMPLING_RATE re-shape them,
+    /// a streaming output's new offset is refused, dynamic ports start at their identity (docs/AVB_ENTITY_KIT.md).
+    /// Off (the default): the UnitRateFn and the listener carry those changes, and dynamic ports start unmapped.
     bool kit_data_plane{false};
 
     /// Number of stream packets emitted per stream per media-timer wake. Default 1

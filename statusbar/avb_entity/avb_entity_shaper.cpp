@@ -788,7 +788,7 @@ void PortShaper::shutdown()
 void PortShaper::park()
 {
     // Leave the root and the cbs for the next install(), parked at the
-    // placeholders: no stream is ours any more, and taking the last cbs away
+    // placeholders: no stream is ours any more, and removing the last cbs
     // would reset an igb/igc adapter now and again at the next start.
     (void)qdiscs_.program(targets(false), link_mbps());  // logged
     qdiscs_.release();

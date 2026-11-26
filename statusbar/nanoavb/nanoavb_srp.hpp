@@ -1438,7 +1438,7 @@ class MsrpHandler
             return;
         }
         if (withdrawn_) {
-            return;  // withdrawn: nothing declares until the next run's declare_domain(), which hears it again
+            return;  // withdrawn: nothing declares until the next run's declare_domain(), which receives it again
         }
         take_domain(
             DomainInfo{
@@ -1461,12 +1461,9 @@ class MsrpHandler
         }
     }
 
-    /// The remote talker's registration for @p sid changed (Advertise or
-    /// Failed registered, or the talker left): re-derive the declaration of
-    /// an attached listener stream — AskingFailed -> Ready when the
-    /// Advertise appears, Ready -> AskingFailed when it goes away — and
-    /// surface the change through on_listener_state_change, told the time
-    /// of the receive_packet()/tick() this fires from (last_event_time_; a leave once the MRPDU is read).
+    /// The remote talker's registration for @p sid changed: an attached listener's declaration re-derived
+    /// (Ready while the Advertise is registered, Asking Failed when it goes) and reported to on_listener_state_change,
+    /// told the time of the receive_packet()/tick() this fires from (a leave once the MRPDU is read).
     void on_remote_talker_changed(tsn::StreamId const& sid)
     {
         follow_remote_talker(sid, last_event_time_);
