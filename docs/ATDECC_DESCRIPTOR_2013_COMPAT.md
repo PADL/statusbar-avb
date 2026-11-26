@@ -91,6 +91,38 @@ catch. The static_assert in invariant 1 at least makes the boundary
 visible and load-bearing, so a developer adding a new 2021-only field
 sees the pattern.
 
+## STREAM: the formats are where `formats_offset` says
+
+The STREAM descriptor is the one of the five whose 2021 fields were
+added in the middle: between the fixed fields and the list of formats.
+So the list starts at 132 in a 1722.1-2013 descriptor and at 138 in a
+2021 one, and IEEE 1722.1-2021 7.2.6 says how a reader finds it:
+
+> The formats field is variable length data and shall be accessed by
+> using the formats_offset field as any fields added in the future will
+> be added before the formats field.
+
+Devices send a third layout too: `formats_offset` 136, the 2021 fields
+without `timing`.
+
+`DescriptorStream` has the 2021 layout, with the formats at 138. Laid
+over a received descriptor it reads the formats of a 132 or 136 sender
+from the wrong place. So a received STREAM descriptor is loaded into a
+`DescriptorStream`, and the struct is never laid over the octets:
+
+```cpp
+auto const stream = load_stream_descriptor(wire);  // std::optional<DescriptorStream>
+```
+
+`load_stream_descriptor()` takes the formats from `formats_offset`,
+leaves the fields a sender does not have at zero, and refuses a
+descriptor whose formats do not lie inside it. Its result is in the
+2021 layout (`formats_offset` = 138). `received_stream_formats()` gives
+the offset and count as they were sent. `parse_descriptor()` bounds the
+formats by the same offset, `format_descriptor()` prints through the
+loader and shows the offset that was sent, and the model validator reads
+through it.
+
 ## Why not fix it globally?
 
 Three architectural fixes would eliminate this class of bug instead of

@@ -115,6 +115,55 @@ TEST(aem_validate, well_formed_model_has_no_errors)
     EXPECT_EQ(count_sev(f, Severity::Error), 0);
 }
 
+TEST(aem_validate, a_2013_stream_descriptor_with_formats_is_not_truncated)
+{
+    // 132 octets of fixed fields and one format after them: IEEE 1722.1-2013.
+    auto d = stream(DESCRIPTOR_STREAM_INPUT, 0, /*with_format=*/true);
+    d.formats_offset = static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH);
+    std::vector<uint8_t> wire(DescriptorStream::MINIMUM_LENGTH + sizeof(Eui64));
+    span_copy(make_span(wire), make_const_span(d, {.start = 0, .length = DescriptorStream::MINIMUM_LENGTH}));
+    span_copy(make_span(wire, {.start = DescriptorStream::MINIMUM_LENGTH, .length = sizeof(Eui64)}), d.current_format.span());
+
+    std::vector<RawDescriptor> descs;
+    descs.push_back({.type = DESCRIPTOR_STREAM_INPUT, .index = 0, .data = wire});
+    auto const f = validate_aem_model(descs);
+    EXPECT_FALSE(has_msg(f, "STREAM_INPUT[0]", Severity::Error));
+    EXPECT_FALSE(has_msg(f, "STREAM_INPUT[0]", Severity::Warn));
+    // It is told where its formats were read from.
+    EXPECT_TRUE(has_msg(f, "STREAM_INPUT[0]", Severity::Info));
+
+    // One octet short of its format, it is an error.
+    descs[0].data.pop_back();
+    EXPECT_TRUE(has_msg(validate_aem_model(descs), "STREAM_INPUT[0]", Severity::Error));
+}
+
+TEST(aem_validate, a_2013_stream_descriptor_with_no_formats_is_not_truncated)
+{
+    // The 132 octets of IEEE 1722.1-2013 and nothing after them.
+    auto d = stream(DESCRIPTOR_STREAM_OUTPUT, 0, /*with_format=*/true);
+    d.formats_offset = static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH);
+    d.number_of_formats = 0;
+    std::vector<uint8_t> wire(DescriptorStream::MINIMUM_LENGTH);
+    span_copy(make_span(wire), make_const_span(d, {.start = 0, .length = DescriptorStream::MINIMUM_LENGTH}));
+
+    std::vector<RawDescriptor> descs;
+    descs.push_back({.type = DESCRIPTOR_STREAM_OUTPUT, .index = 0, .data = wire});
+    auto const f = validate_aem_model(descs);
+    EXPECT_FALSE(has_msg(f, "STREAM_OUTPUT[0]", Severity::Error));
+    EXPECT_TRUE(has_msg(f, "STREAM_OUTPUT[0]", Severity::Warn));  // no format list
+
+    // One octet shorter it is no STREAM descriptor of any revision.
+    descs[0].data.pop_back();
+    EXPECT_TRUE(has_msg(validate_aem_model(descs), "STREAM_OUTPUT[0]", Severity::Error));
+}
+
+TEST(aem_validate, a_2021_stream_descriptor_gets_no_note_on_its_offset)
+{
+    std::vector<RawDescriptor> descs;
+    descs.push_back(to_raw(stream(DESCRIPTOR_STREAM_INPUT, 0, /*with_format=*/true), DESCRIPTOR_STREAM_INPUT, 0));
+    EXPECT_FALSE(has_msg(validate_aem_model(descs), "STREAM_INPUT[0]", Severity::Info));
+}
+
 TEST(aem_validate, stream_with_zero_format_is_error)
 {
     std::vector<RawDescriptor> descs;

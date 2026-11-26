@@ -3,6 +3,8 @@
 
 #include "statusbar/atdecc/atdecc_aem_format.hpp"
 
+#include <limits>
+
 namespace statusbar::atdecc::aem {
 
 namespace {
@@ -26,6 +28,19 @@ namespace {
 /// fixed-header (min_length) check alone suffices — this is what allows a valid
 /// zero-trailer STREAM sent at MINIMUM_LENGTH (< LENGTH). The count field itself
 /// lives within min_length, so reading it here (via used_*()) is in-bounds.
+/// The end of the formats a STREAM descriptor's formatter reads. They lie
+/// where formats_offset says (IEEE 1722.1-2021 7.2.6), which is not always
+/// the struct's own LENGTH. An offset inside the fixed fields can never be
+/// satisfied, whatever the descriptor's length.
+[[nodiscard]] auto stream_trailer_end(DescriptorStream const& head) -> size_t
+{
+    auto const formats = stream_formats_extent(head);
+    if (!formats) {
+        return std::numeric_limits<size_t>::max();
+    }
+    return formats->count == 0 ? size_t{0} : formats->end();
+}
+
 /// Returns 0 when no trailer bytes are read (fixed descriptors, or empty trailer).
 [[nodiscard]] auto descriptor_trailer_end(ParsedDescriptor const* d, uint16_t desc_type) -> size_t
 {
@@ -39,7 +54,7 @@ namespace {
             return trailer_end(DescriptorAudioUnit::LENGTH, d->data.audio_unit.used_sampling_rates().size_bytes());
         case DESCRIPTOR_STREAM_INPUT:
         case DESCRIPTOR_STREAM_OUTPUT:
-            return trailer_end(DescriptorStream::LENGTH, d->data.stream.used_stream_formats().size_bytes());
+            return stream_trailer_end(d->data.stream);
         case DESCRIPTOR_AUDIO_MAP:
             return trailer_end(DescriptorAudioMap::LENGTH, d->data.audio_map.used_mappings().size_bytes());
         case DESCRIPTOR_VIDEO_MAP:

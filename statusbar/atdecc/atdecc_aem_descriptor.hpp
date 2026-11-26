@@ -737,7 +737,10 @@ static_assert(offsetof(DescriptorSensorUnit, base_control_block) == 134);
 /// STREAM_INPUT/STREAM_OUTPUT Descriptor - Clause 7.2.6
 ///
 /// Wire format: 138-byte fixed header followed by `number_of_formats` ×
-/// 8-byte stream-format EUI-64 entries. IEEE 1722.1-2021 also appends
+/// 8-byte stream-format EUI-64 entries. That is the layout this struct has
+/// and the one we send. A descriptor that was RECEIVED may keep its formats
+/// elsewhere: read it with load_stream_descriptor(), never by laying this
+/// struct over the octets. IEEE 1722.1-2021 also appends
 /// a `number_of_redundant_streams` trailer of doublet_t descriptor
 /// indices after the stream_formats array; the current inline storage
 /// models only the primary stream_formats trailer. Entities that
@@ -840,6 +843,114 @@ static_assert(
 static_assert(
     sizeof(DescriptorStream) == DescriptorStream::LENGTH + (DescriptorStream::MAX_STREAM_FORMATS * sizeof(Eui64)),
     "DescriptorStream must have no padding around the inline stream_formats array");
+
+/// Where the formats of a received STREAM_INPUT or STREAM_OUTPUT descriptor lie.
+struct StreamFormatsExtent
+{
+    size_t offset{0};  ///< formats_offset as received
+    size_t count{0};   ///< number_of_formats, at most DescriptorStream::MAX_STREAM_FORMATS
+
+    /// The octet just past the last format.
+    [[nodiscard]] constexpr auto end() const noexcept -> size_t { return offset + (count * sizeof(Eui64)); }
+};
+
+/// The formats of a received STREAM descriptor, found through its
+/// formats_offset field.
+///
+/// IEEE 1722.1-2021 7.2.6: "The formats field is variable length data and
+/// shall be accessed by using the formats_offset field as any fields added in
+/// the future will be added before the formats field." The offset is 132 in
+/// an IEEE 1722.1-2013 descriptor and 138 in a 2021 one, and devices send 136
+/// too: the 2021 fields without timing.
+///
+/// @param head A descriptor whose first MINIMUM_LENGTH octets are valid. No
+///             later octet is read, so it may be laid over a received buffer.
+/// @return nullopt when the descriptor has formats and the offset points into
+///         the fields every revision has.
+[[nodiscard]] inline auto stream_formats_extent(DescriptorStream const& head) noexcept -> std::optional<StreamFormatsExtent>
+{
+    size_t const count = std::min(static_cast<size_t>(head.number_of_formats.get()), DescriptorStream::MAX_STREAM_FORMATS);
+    size_t const offset = head.formats_offset.get();
+    if (count != 0 && offset < DescriptorStream::MINIMUM_LENGTH) {
+        return std::nullopt;
+    }
+    return StreamFormatsExtent{.offset = offset, .count = count};
+}
+
+namespace detail {
+
+/// The fields every revision of the STREAM descriptor has, the rest zero.
+[[nodiscard]] inline auto load_stream_head(std::span<uint8_t const> const wire) noexcept -> DescriptorStream
+{
+    DescriptorStream d{};
+    span_load_padded(d, wire.first(std::min(wire.size(), DescriptorStream::MINIMUM_LENGTH)));
+    return d;
+}
+
+/// How many octets of fixed fields a received STREAM descriptor carries
+/// before its formats, at most those of IEEE 1722.1-2021. An offset below
+/// the 2013 length is only accepted with no formats; the descriptor's own
+/// length then says which fields it has.
+[[nodiscard]] constexpr auto stream_fixed_length(StreamFormatsExtent const& formats, size_t const wire_size) noexcept -> size_t
+{
+    size_t const by_offset = formats.offset < DescriptorStream::MINIMUM_LENGTH ? DescriptorStream::LENGTH : formats.offset;
+    return std::min({by_offset, DescriptorStream::LENGTH, wire_size});
+}
+
+/// Copy the fields past the 2013 length and the formats of @p wire into
+/// @p d, each to its place in the IEEE 1722.1-2021 layout.
+inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const wire, StreamFormatsExtent const& formats) noexcept
+{
+    size_t const fixed = stream_fixed_length(formats, wire.size());
+    octet_range_t const newer{.start = DescriptorStream::MINIMUM_LENGTH, .length = fixed - DescriptorStream::MINIMUM_LENGTH};
+    span_copy(make_span(d, newer), newer.apply(wire));
+    if (formats.count != 0) {
+        size_t const octets = formats.count * sizeof(Eui64);
+        span_copy(make_span(d, {.start = DescriptorStream::LENGTH, .length = octets}), wire.subspan(formats.offset, octets));
+    }
+    d.formats_offset = static_cast<uint16_t>(DescriptorStream::LENGTH);
+    d.number_of_formats = static_cast<uint16_t>(formats.count);
+}
+
+}  // namespace detail
+
+/// The formats of the received STREAM descriptor @p wire, by its
+/// formats_offset field (see stream_formats_extent()).
+/// @return nullopt when @p wire is shorter than a 2013 descriptor, or its
+///         formats do not lie inside it.
+[[nodiscard]] inline auto received_stream_formats(std::span<uint8_t const> const wire) noexcept
+    -> std::optional<StreamFormatsExtent>
+{
+    if (wire.size() < DescriptorStream::MINIMUM_LENGTH) {
+        return std::nullopt;
+    }
+    auto const formats = stream_formats_extent(detail::load_stream_head(wire));
+    bool const inside = formats && (formats->count == 0 || formats->end() <= wire.size());
+    return inside ? formats : std::nullopt;
+}
+
+/// Load a received STREAM_INPUT or STREAM_OUTPUT descriptor into the
+/// IEEE 1722.1-2021 layout, whichever layout it was sent in.
+///
+/// The formats are taken from where formats_offset says they are (see
+/// received_stream_formats()), and the fields a sender does not have are zero.
+/// The result has formats_offset = LENGTH and its formats in stream_formats,
+/// so used_stream_formats() is right for it. redundant_offset is kept as
+/// received: it counts octets of the received descriptor, and the list it
+/// points at is not held here.
+///
+/// @return nullopt when @p wire is shorter than a 2013 descriptor, or its
+///         formats do not lie inside it.
+[[nodiscard]] inline auto load_stream_descriptor(std::span<uint8_t const> const wire) noexcept -> std::optional<DescriptorStream>
+{
+    auto const formats = received_stream_formats(wire);
+    if (!formats) {
+        return std::nullopt;
+    }
+    auto d = detail::load_stream_head(wire);
+    detail::load_stream_tail(d, wire, *formats);
+    return d;
+}
 
 //
 // Jack Descriptor - Clause 7.2.7

@@ -213,9 +213,33 @@ def _unit_ranges(d: bytes) -> dict:
     }
 
 
+def _stream_formats_offset(d: bytes, n_formats: int) -> int:
+    """Where a STREAM descriptor keeps its formats: its formats_offset field.
+
+    IEEE 1722.1-2021 7.2.6 says the formats "shall be accessed by using the
+    formats_offset field": 132 in an IEEE 1722.1-2013 descriptor, 138 in a
+    2021 one, and devices send 136 too. With no formats the field points at
+    nothing and some senders leave it 0; the descriptor's own length then says
+    which fixed fields it has.
+    """
+    offset = unpack_u16(d, 82)
+    if offset >= 132:
+        return offset
+    if n_formats:
+        raise ValueError(
+            f"STREAM descriptor: formats_offset {offset} lies inside its fixed fields"
+        )
+    return min(len(d), 138)
+
+
 def _parse_stream(d: bytes) -> Stream:
     n_formats = unpack_u16(d, 84)
-    n_redundant = unpack_u16(d, 134)
+    formats_offset = _stream_formats_offset(d, n_formats)
+    if formats_offset + 8 * n_formats > len(d):
+        raise ValueError("STREAM descriptor: its formats do not lie inside it")
+    # The fields IEEE 1722.1-2021 added lie between 132 and the formats. A
+    # sender whose formats start before one of them does not have it.
+    n_redundant = unpack_u16(d, 134) if formats_offset >= 136 else 0
     stream = Stream(
         object_name=unpack_string64(d, 4),
         localized_description=_loc(d, 68),
@@ -232,11 +256,10 @@ def _parse_stream(d: bytes) -> Stream:
         backedup_talker_unique_id=unpack_u16(d, 124),
         avb_interface_index=unpack_u16(d, 126),
         buffer_length=unpack_u32(d, 128),
-        redundant_offset=unpack_u16(d, 132),
+        redundant_offset=unpack_u16(d, 132) if formats_offset >= 134 else 0,
         number_of_redundant_streams=n_redundant,
-        timing=unpack_u16(d, 136),
+        timing=unpack_u16(d, 136) if formats_offset >= 138 else 0,
     )
-    formats_offset = 138
     stream.formats = [unpack_eui64(d, formats_offset + 8 * i) for i in range(n_formats)]
     redundant_offset = formats_offset + 8 * n_formats
     stream.redundant_streams = [

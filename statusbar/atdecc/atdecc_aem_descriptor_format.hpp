@@ -248,6 +248,26 @@ auto format_stream_descriptor(OutputIt out, DescriptorStream const& d, char cons
     return out;
 }
 
+/// Format a STREAM_INPUT or STREAM_OUTPUT descriptor as it was received: its
+/// formats are read from where its formats_offset says they are (IEEE
+/// 1722.1-2021 7.2.6), and the offset printed is the one the sender used.
+/// @param out Output iterator to write formatted text to
+/// @param wire The descriptor's octets, from descriptor_type on
+/// @param type_name Human-readable stream type name
+template <typename OutputIt>
+auto format_received_stream(OutputIt out, std::span<uint8_t const> const wire, char const* type_name) -> OutputIt
+{
+    auto stream = load_stream_descriptor(wire);
+    auto const sent = received_stream_formats(wire);
+    if (!stream || !sent) {
+        return std::format_to(out, "        {} Descriptor: its formats do not lie inside it\n", type_name);
+    }
+    // The loader has the formats where the 2021 layout keeps them. What is
+    // shown is the descriptor as it came, so the offset is put back.
+    stream->formats_offset = static_cast<uint16_t>(sent->offset);
+    return format_stream_descriptor(out, *stream, type_name);
+}
+
 /// @param out Output iterator to write formatted text to
 /// @param d Stream descriptor to format (uses STREAM as generic banner)
 template <typename OutputIt>

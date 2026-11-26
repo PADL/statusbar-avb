@@ -191,6 +191,54 @@ def test_model_creation():
     print("  [+] model creation: OK")
 
 
+def _stream_descriptor_at(formats_offset: int, formats: list[int]) -> bytes:
+    """A STREAM_INPUT descriptor with its formats at formats_offset: the fixed
+    fields up to that offset, the formats, one redundant stream index."""
+    from aemxml.flatten import _serialize_stream
+
+    full = _serialize_stream(
+        Stream(
+            object_name="in",
+            current_format=formats[0],
+            formats=formats,
+            buffer_length=0x0027AC40,
+            redundant_streams=[9],
+            timing=0x7777,
+        ),
+        0x0005,
+        3,
+    )
+    head = bytearray(full[:formats_offset])
+    head[82:84] = pack_u16(formats_offset)
+    return bytes(head) + full[138:]
+
+
+def test_stream_formats_are_read_at_formats_offset():
+    """IEEE 1722.1-2021 7.2.6: the formats are where formats_offset says."""
+    from aemxml.unflatten import _parse_stream
+
+    formats = [0x0205021800406000 + (i << 16) for i in range(18)]
+    for offset in (132, 136, 138):
+        stream = _parse_stream(_stream_descriptor_at(offset, formats))
+        assert stream.formats == formats, f"formats at {offset}"
+        assert stream.buffer_length == 0x0027AC40
+        # A field the sender does not have is not taken from the formats.
+        assert stream.timing == (0x7777 if offset >= 138 else 0)
+        assert stream.redundant_streams == ([9] if offset >= 136 else [])
+    assert len(_stream_descriptor_at(136, formats)) == 282
+
+    for bad in (
+        _stream_descriptor_at(136, formats)[:-4],
+        _stream_descriptor_at(100, formats),
+    ):
+        try:
+            _parse_stream(bad)
+        except ValueError:
+            continue
+        raise AssertionError("a STREAM descriptor with formats outside it was read")
+    print("  [+] STREAM formats read at formats_offset: OK")
+
+
 def test_flatten_minimal():
     """Test flattening a minimal entity model."""
     entity = Entity(
@@ -2890,6 +2938,7 @@ def main():
         test_upgrade_then_downgrade_round_trip,
         test_downgrade_rejects_2021_only_descriptors,
         test_downgrade_strip_removes_2021_only_descriptors,
+        test_stream_formats_are_read_at_formats_offset,
     ]
     passed = 0
     failed = 0

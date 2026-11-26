@@ -9,7 +9,9 @@
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
@@ -1469,6 +1471,197 @@ TEST(aem_print, format_operation_status_command_does_not_read_payload)
             std::span<uint8_t const>(empty));
         EXPECT_TRUE(result.empty());
     }
+}
+
+//
+// A received STREAM descriptor keeps its formats where formats_offset says
+// (IEEE 1722.1-2021 7.2.6)
+//
+
+namespace {
+
+/// The formats a test descriptor carries: an AAF format per channel count.
+auto test_formats(size_t count) -> std::vector<Eui64>
+{
+    std::vector<Eui64> formats;
+    for (size_t i = 0; i < count; ++i) {
+        formats.emplace_back(0x02, 0x05, 0x02, 0x18, 0x00, static_cast<uint8_t>(0x40 + i), 0x60, 0x00);
+    }
+    return formats;
+}
+
+/// A STREAM_INPUT descriptor as a device sends it with its formats at
+/// @p formats_offset: the fixed fields up to that offset, the formats, and
+/// @p trailer octets after them (a list of redundant streams).
+auto stream_wire(size_t formats_offset, std::span<Eui64 const> formats, size_t trailer = 0) -> std::vector<uint8_t>
+{
+    DescriptorStream d{};
+    d.descriptor_type = DESCRIPTOR_STREAM_INPUT;
+    d.descriptor_index = 3;
+    d.current_format = Eui64(0x02, 0x05, 0x02, 0x18, 0x00, 0x40, 0x60, 0x00);
+    d.formats_offset = static_cast<uint16_t>(formats_offset);
+    d.number_of_formats = static_cast<uint16_t>(formats.size());
+    d.buffer_length = 0x0027ac40;
+    d.redundant_offset = static_cast<uint16_t>(formats_offset + (formats.size() * sizeof(Eui64)));
+    d.number_of_redundant_streams = 1;
+    d.timing = 0x7777;
+    std::vector<uint8_t> wire(formats_offset + (formats.size() * sizeof(Eui64)) + trailer, uint8_t{0xEE});
+    size_t const fixed = std::min(formats_offset, DescriptorStream::LENGTH);
+    span_copy(make_span(wire, {.start = 0, .length = fixed}), make_const_span(d, {.start = 0, .length = fixed}));
+    for (size_t i = 0; i < formats.size(); ++i) {
+        span_copy(make_span(wire, {.start = formats_offset + (i * sizeof(Eui64)), .length = sizeof(Eui64)}), formats[i].span());
+    }
+    return wire;
+}
+
+auto formatted(std::span<uint8_t const> wire) -> std::string
+{
+    std::string text;
+    format_descriptor(std::back_inserter(text), wire);
+    return text;
+}
+
+auto text_of(Eui64 const& format) -> std::string
+{
+    std::string text;
+    ieee::format_to(std::back_inserter(text), format);
+    return text;
+}
+
+/// Whether @p loaded holds exactly @p formats.
+auto holds(DescriptorStream const& loaded, std::span<Eui64 const> formats) -> bool
+{
+    auto const got = loaded.used_stream_formats();
+    return got.size() == formats.size() && std::equal(got.begin(), got.end(), formats.begin());
+}
+
+}  // namespace
+
+TEST(aem_stream_formats_offset, a_2021_descriptor_loads_as_it_is)
+{
+    auto const formats = test_formats(5);
+    auto const loaded = load_stream_descriptor(stream_wire(138, formats));
+    EXPECT_TRUE(loaded.has_value());
+    EXPECT_TRUE(holds(*loaded, formats));
+    EXPECT_EQ(loaded->formats_offset.get(), 138);
+    EXPECT_EQ(loaded->number_of_redundant_streams.get(), 1);
+    EXPECT_EQ(loaded->timing.get(), 0x7777);
+}
+
+TEST(aem_stream_formats_offset, formats_at_136_are_read_from_136)
+{
+    // 18 formats at 136 and one redundant stream index after them: 282 octets,
+    // a layout met in the field. Read at 138 every format would be two octets off.
+    auto const formats = test_formats(18);
+    auto const wire = stream_wire(136, formats, 2);
+    EXPECT_EQ(wire.size(), size_t{282});
+    auto const loaded = load_stream_descriptor(wire);
+    EXPECT_TRUE(loaded.has_value());
+    EXPECT_TRUE(holds(*loaded, formats));
+    EXPECT_EQ(loaded->formats_offset.get(), 138);
+    EXPECT_EQ(loaded->number_of_formats.get(), 18);
+    EXPECT_EQ(loaded->buffer_length.get(), 0x0027ac40U);
+    EXPECT_EQ(loaded->redundant_offset.get(), 280);
+    EXPECT_EQ(loaded->number_of_redundant_streams.get(), 1);
+    // This sender has no timing field: it is not taken from the first format.
+    EXPECT_EQ(loaded->timing.get(), 0);
+}
+
+TEST(aem_stream_formats_offset, a_2013_descriptor_has_its_formats_at_132)
+{
+    auto const formats = test_formats(3);
+    auto const wire = stream_wire(132, formats);
+    EXPECT_EQ(wire.size(), DescriptorStream::MINIMUM_LENGTH + 24);
+    auto const loaded = load_stream_descriptor(wire);
+    EXPECT_TRUE(loaded.has_value());
+    EXPECT_TRUE(holds(*loaded, formats));
+    EXPECT_EQ(loaded->buffer_length.get(), 0x0027ac40U);
+    // None of the fields IEEE 1722.1-2021 added is taken from the formats.
+    EXPECT_EQ(loaded->redundant_offset.get(), 0);
+    EXPECT_EQ(loaded->number_of_redundant_streams.get(), 0);
+    EXPECT_EQ(loaded->timing.get(), 0);
+}
+
+TEST(aem_stream_formats_offset, formats_past_the_end_are_refused)
+{
+    auto const formats = test_formats(4);
+    auto wire = stream_wire(136, formats);
+    EXPECT_TRUE(load_stream_descriptor(wire).has_value());
+    wire.pop_back();
+    EXPECT_FALSE(load_stream_descriptor(wire).has_value());
+    EXPECT_FALSE(received_stream_formats(wire).has_value());
+    EXPECT_FALSE(parse_descriptor(wire).has_value());
+}
+
+TEST(aem_stream_formats_offset, an_offset_inside_the_fixed_fields_is_refused)
+{
+    auto const formats = test_formats(2);
+    auto wire = stream_wire(138, formats);
+    span_store(make_span(wire, {.start = offsetof(DescriptorStream, formats_offset), .length = 2}), doublet_t{100});
+    EXPECT_FALSE(load_stream_descriptor(wire).has_value());
+    EXPECT_FALSE(parse_descriptor(wire).has_value());
+}
+
+TEST(aem_stream_formats_offset, a_descriptor_shorter_than_2013_is_refused)
+{
+    std::vector<uint8_t> const wire(DescriptorStream::MINIMUM_LENGTH - 1);
+    EXPECT_FALSE(load_stream_descriptor(wire).has_value());
+}
+
+TEST(aem_stream_formats_offset, no_formats_and_no_offset_loads_by_its_length)
+{
+    // No formats: the offset points at nothing, and some senders leave it 0.
+    auto wire = stream_wire(138, {});
+    span_store(make_span(wire, {.start = offsetof(DescriptorStream, formats_offset), .length = 2}), doublet_t{0});
+    auto const full = load_stream_descriptor(wire);
+    EXPECT_TRUE(full.has_value());
+    EXPECT_EQ(full->timing.get(), 0x7777);
+    EXPECT_EQ(full->number_of_formats.get(), 0);
+
+    wire.resize(DescriptorStream::MINIMUM_LENGTH);
+    auto const shorter = load_stream_descriptor(wire);
+    EXPECT_TRUE(shorter.has_value());
+    EXPECT_EQ(shorter->timing.get(), 0);
+    EXPECT_EQ(shorter->buffer_length.get(), 0x0027ac40U);
+}
+
+TEST(aem_stream_formats_offset, more_formats_than_fit_are_cut_to_what_fits)
+{
+    auto const formats = test_formats(DescriptorStream::MAX_STREAM_FORMATS + 2);
+    auto const loaded = load_stream_descriptor(stream_wire(138, formats));
+    EXPECT_TRUE(loaded.has_value());
+    EXPECT_EQ(static_cast<size_t>(loaded->number_of_formats.get()), DescriptorStream::MAX_STREAM_FORMATS);
+    EXPECT_TRUE(holds(*loaded, std::span<Eui64 const>{formats}.first(DescriptorStream::MAX_STREAM_FORMATS)));
+}
+
+TEST(aem_stream_formats_offset, parse_accepts_a_2013_descriptor_with_formats)
+{
+    auto const formats = test_formats(3);
+    EXPECT_TRUE(parse_descriptor(stream_wire(132, formats)).has_value());
+    EXPECT_TRUE(parse_descriptor(stream_wire(136, formats)).has_value());
+    EXPECT_TRUE(parse_descriptor(stream_wire(138, formats)).has_value());
+}
+
+TEST(aem_stream_formats_offset, the_printed_formats_are_the_ones_sent)
+{
+    auto const formats = test_formats(18);
+    for (size_t const offset : {size_t{132}, size_t{136}, size_t{138}}) {
+        auto const text = formatted(stream_wire(offset, formats, 2));
+        EXPECT_TRUE(text.find("STREAM_INPUT Descriptor [3]") != std::string::npos);
+        EXPECT_TRUE(text.find("formats: count=18") != std::string::npos);
+        EXPECT_TRUE(text.find("[0] = " + text_of(formats[0]) + "\n") != std::string::npos);
+        EXPECT_TRUE(text.find("[17] = " + text_of(formats[17]) + "\n") != std::string::npos);
+        // 0xEE is what follows the formats: no format is read from there.
+        EXPECT_TRUE(text.find("ee:ee") == std::string::npos);
+    }
+}
+
+TEST(aem_stream_formats_offset, the_offset_printed_is_the_one_received)
+{
+    auto const formats = test_formats(2);
+    EXPECT_TRUE(formatted(stream_wire(132, formats)).find("formats: count=2 offset=132\n") != std::string::npos);
+    EXPECT_TRUE(formatted(stream_wire(136, formats)).find("formats: count=2 offset=136\n") != std::string::npos);
+    EXPECT_TRUE(formatted(stream_wire(138, formats)).find("formats: count=2 offset=138\n") != std::string::npos);
 }
 
 //

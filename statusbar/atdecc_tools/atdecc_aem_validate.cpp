@@ -134,6 +134,30 @@ void check_jacks(std::vector<RawDescriptor> const& descs, Add const& add)
     }
 }
 
+/// One STREAM descriptor: formats that lie inside it, a usable current_format
+/// and a format list. The formats are read from where formats_offset says
+/// (IEEE 1722.1-2021 7.2.6), and a sender that keeps them elsewhere than that
+/// revision does is told so.
+void check_stream(Add const& add, std::string const& where, std::span<uint8_t const> const data)
+{
+    auto const s = load_stream_descriptor(data);
+    if (!s) {
+        add(Severity::Error, where, "truncated, or its formats do not lie inside it.");
+        return;
+    }
+    if (!s->current_format.is_set()) {
+        add(Severity::Error, where, "current_format is 0.");
+    }
+    if (s->number_of_formats.get() == 0) {
+        add(Severity::Warn, where, "number_of_formats is 0 — no advertised format list.");
+    }
+    if (auto const sent = received_stream_formats(data); sent && sent->count != 0 && sent->offset != DescriptorStream::LENGTH) {
+        add(Severity::Info,
+            where,
+            std::format("formats_offset is {} where IEEE 1722.1-2021 has 138; the formats were read from there.", sent->offset));
+    }
+}
+
 /// STREAMs: a usable current_format and a format list.
 void check_streams(std::vector<RawDescriptor> const& descs, Add const& add)
 {
@@ -143,18 +167,7 @@ void check_streams(std::vector<RawDescriptor> const& descs, Add const& add)
         }
         std::string const where =
             std::format("{}[{}]", r.type == DESCRIPTOR_STREAM_INPUT ? "STREAM_INPUT" : "STREAM_OUTPUT", r.index);
-        if (r.data.size() < DescriptorStream::LENGTH) {
-            add(Severity::Error, where, "truncated.");
-            continue;
-        }
-        DescriptorStream s{};
-        span_load_padded(s, make_const_span(r.data));
-        if (!s.current_format.is_set()) {
-            add(Severity::Error, where, "current_format is 0.");
-        }
-        if (s.number_of_formats.get() == 0) {
-            add(Severity::Warn, where, "number_of_formats is 0 — no advertised format list.");
-        }
+        check_stream(add, where, make_const_span(r.data));
     }
 }
 
