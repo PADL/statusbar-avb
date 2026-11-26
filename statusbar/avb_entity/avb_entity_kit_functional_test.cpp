@@ -2258,4 +2258,44 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+TEST(avb_entity_kit_output_counters, a_classic_output_counts_its_starts_stops_and_avtpdus)
+{
+    // IEEE 1722.1-2021 Table 7-158: STREAM_START, STREAM_STOP, MEDIA_RESET,
+    // TIMESTAMP_UNCERTAIN and FRAMES_TX, counted as the talker's media
+    // thread sends: here the tick is driven by hand, with the gate it is told.
+    KitPair pair{"classic"};
+    (void)aaf_input_of(pair);
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    auto& talker = pair.talker->talker();
+    auto* const slot = talker.slot_for(AAF_STREAM);
+    EXPECT_TRUE(slot != nullptr);
+    auto media_tick = [&] { talker.transmit_if_due(*slot, {}, pair.talker_transmits(), 0, {}); };
+    media_tick();
+    auto counters = counters_of(output);
+    EXPECT_EQ(counters.counters_valid.get(), 0x0000'009BU);
+    EXPECT_EQ(counters.counters[0].get(), 0U);  // not yet streaming
+
+    pair.bind();
+    pair.run(2 * ROUNDS_PER_SECOND);
+    media_tick();
+    for (int i = 0; i < 10; ++i) {
+        talker.count_sent(*slot, /*tu=*/i >= 8, /*mr=*/i >= 5);
+    }
+    counters = counters_of(output);
+    EXPECT_EQ(counters.counters[0].get(), 1U);   // STREAM_START
+    EXPECT_EQ(counters.counters[1].get(), 0U);   // STREAM_STOP
+    EXPECT_EQ(counters.counters[3].get(), 1U);   // MEDIA_RESET: one toggle
+    EXPECT_EQ(counters.counters[4].get(), 2U);   // TIMESTAMP_UNCERTAIN
+    EXPECT_EQ(counters.counters[7].get(), 10U);  // FRAMES_TX
+
+    EXPECT_EQ(streaming_command(output, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    media_tick();
+    counters = counters_of(output);
+    EXPECT_EQ(counters.counters[0].get(), 1U);
+    EXPECT_EQ(counters.counters[1].get(), 1U);
+    EXPECT_EQ(counters.counters[7].get(), 10U);
+    EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

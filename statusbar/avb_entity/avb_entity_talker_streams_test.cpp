@@ -235,4 +235,65 @@ TEST(talker_streams, close_tx_lets_a_restart_open_the_streams_afresh)
     EXPECT_EQ(talker.slot_of(statusbar::avb_entity::StreamKind::aaf), talker.slot_for(3));
 }
 
+// --- What a stream output sent: Milan v1.3 Table 5.4, IEEE 1722.1-2021 Table 7-158 ---
+
+TEST(talker_tx_counters, what_is_sent_counts_avtpdus_tu_and_mr_toggles)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    avb_entity::TalkerStreamSlot slot{};
+    slot.spec.index = 3;
+    talker.count_sent(slot, /*tu=*/false, /*mr=*/false);
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/false);
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/true);  // mr toggled
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/true);
+    auto const* const c = talker.tx_counters(3);
+    EXPECT_TRUE(c != nullptr);
+    EXPECT_EQ(c->pdus.load(), 4U);
+    EXPECT_EQ(c->tu_pdus.load(), 3U);
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(slot.tx_packets, 4U);
+    EXPECT_EQ(talker.tx_counters(4)->pdus.load(), 0U);  // each stream its own
+    EXPECT_TRUE(talker.tx_counters(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)) == nullptr);
+
+    // A stream opened again after close_tx(): its first mr is compared with nothing.
+    talker.close_tx();
+    talker.count_sent(slot, /*tu=*/false, /*mr=*/false);
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(c->pdus.load(), 5U);
+}
+
+TEST(talker_tx_counters, a_stream_starts_when_its_gate_opens_and_stops_when_it_closes)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    avb_entity::TalkerStreamSlot slot{};
+    slot.spec.index = 2;
+    auto const& changes = talker.tx_counters(2)->streaming_changes;
+    auto tick = [&](bool const gate_open) { talker.transmit_if_due(slot, {}, gate_open, 0, {}); };
+    auto starts_stops = [&] {
+        return std::array{avb_entity::stream_starts(changes.load()), avb_entity::stream_stops(changes.load())};
+    };
+
+    tick(false);
+    EXPECT_EQ(starts_stops(), (std::array{0U, 0U}));
+    tick(true);
+    tick(true);  // streaming on: one start
+    EXPECT_EQ(starts_stops(), (std::array{1U, 0U}));
+    tick(false);
+    EXPECT_EQ(starts_stops(), (std::array{1U, 1U}));
+    tick(true);
+    talker.set_stream_stopped(2, true);  // STOP_STREAMING is a closed gate
+    tick(true);
+    EXPECT_EQ(starts_stops(), (std::array{2U, 2U}));
+    talker.set_stream_stopped(2, false);
+    tick(true);
+    EXPECT_EQ(starts_stops(), (std::array{3U, 2U}));
+    // The streams end with the run: a streaming one counts its stop.
+    talker.close_tx();
+    EXPECT_EQ(starts_stops(), (std::array{3U, 3U}));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)

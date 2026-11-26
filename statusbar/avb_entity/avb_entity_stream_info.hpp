@@ -16,6 +16,7 @@
 #include "statusbar/buffer/span_utils.hpp"
 
 #include <array>
+#include <atomic>
 #include <cstdint>
 
 namespace statusbar::avb_entity {
@@ -24,6 +25,12 @@ namespace statusbar::avb_entity {
 /// of counters_valid (bits 0-6: STREAM_START, STREAM_STOP, STREAM_INTERRUPTED,
 /// MEDIA_RESET, TIMESTAMP_UNCERTAIN, TIMESTAMP_VALID, TIMESTAMP_NOT_VALID).
 inline constexpr unsigned stream_output_frames_tx_bit = 7;
+/// The other STREAM_OUTPUT counters a talker counts, by bit (Table 7-158;
+/// Milan v1.3 Table 5.14 has the same).
+inline constexpr unsigned stream_output_stream_start_bit = 0;
+inline constexpr unsigned stream_output_stream_stop_bit = 1;
+inline constexpr unsigned stream_output_media_reset_bit = 3;
+inline constexpr unsigned stream_output_timestamp_uncertain_bit = 4;
 
 /// Copy a stream descriptor's current_format into @p out (read from the blob
 /// via the symbol-aware host); true when the descriptor exists.
@@ -145,19 +152,26 @@ template <typename ListenerSink>
     return true;
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index: FRAMES_TX
-/// (IEEE 1722.1-2021 Clause 7.4.42, Table 7-158 bit 7) from the talker
-/// slot's TX packet count — what tells a reader our actual transmit rate.
-/// The tx counter is single-threaded with the media timer, read plain.
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index (IEEE 1722.1-2021
+/// Clause 7.4.42, Table 7-158) from what the talker sent (TalkerTxCounters):
+/// STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX,
+/// as running counts. False for a stream the talker has no slot for.
 [[nodiscard]] inline auto fill_talker_stream_counters(
     TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
-{
-    auto const* slot = talker.slot_for(descriptor_index);
-    if (slot == nullptr) {
+{  // NOLINT(statusbar-block-statements) one line per STREAM_OUTPUT counter, read top to bottom
+    auto const* const c = talker.tx_counters(descriptor_index);
+    if (talker.slot_for(descriptor_index) == nullptr || c == nullptr) {
         return false;
     }
-    valid |= (1U << stream_output_frames_tx_bit);
-    out[stream_output_frames_tx_bit] = static_cast<uint32_t>(slot->tx_packets);
+    auto const relaxed = std::memory_order_relaxed;
+    uint32_t const changes = c->streaming_changes.load(relaxed);
+    valid |= (1U << stream_output_stream_start_bit) | (1U << stream_output_stream_stop_bit) |
+        (1U << stream_output_media_reset_bit) | (1U << stream_output_timestamp_uncertain_bit) | (1U << stream_output_frames_tx_bit);
+    out[stream_output_stream_start_bit] = stream_starts(changes);
+    out[stream_output_stream_stop_bit] = stream_stops(changes);
+    out[stream_output_media_reset_bit] = c->mr_toggles.load(relaxed);
+    out[stream_output_timestamp_uncertain_bit] = c->tu_pdus.load(relaxed);
+    out[stream_output_frames_tx_bit] = c->pdus.load(relaxed);
     return true;
 }
 

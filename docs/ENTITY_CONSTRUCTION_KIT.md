@@ -351,6 +351,17 @@ the end of the interval among its deadlines. A loop that never calls it
 ends no interval: a Milan input then answers its event counters and zero
 for every interval counter, and nothing is notified.
 
+A stream output counts what its sender puts on the wire
+(`TalkerTxCounters`, kept by `TalkerStreams` per STREAM_OUTPUT index):
+the AVTPDUs, those with tu set, the mr toggles among them, and each start
+and stop of the stream. The stream streams while its gate is open and it
+is not stopped, as the media thread finds at each tick
+(`transmit_if_due`), and the end of a run (`close_tx`) is a stop. The
+sender is the one writer, so the counters are atomics written with a load
+and a store, read by the reactor thread. GET_COUNTERS reports them at the
+bits of IEEE 1722.1-2021 Table 7-158: STREAM_START, STREAM_STOP,
+MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX.
+
 ### The format of a stream input
 
 A stream input starts on the format its model authors and takes any other
