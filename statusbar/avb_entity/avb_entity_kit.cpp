@@ -342,44 +342,56 @@ void AvbEntityKit::wire_dynamic_mappings()
     // Dynamic input mappings (Milan v1.2 Section 5.3.10): each port starts at its default
     // (the identity the data plane routes); a controller's change goes
     // through the entity's hook.
-    auto& aem = host_.components().aem_handler;
-    for (uint16_t port = 0; port < UINT16_MAX && host_.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port).has_value();
-         ++port) {
-        if (aem.has_dynamic_input_map(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port)) {
-            dynamic_input_ports_.push_back(port);
-        }
-    }
+    install_dynamic_maps();
     reset_input_mappings();
-    // Dynamic output ports carry the kit's identity map while their stream is at the unit's rate.
-    for (uint16_t port = 0; port < UINT16_MAX && host_.get_descriptor(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port).has_value();
-         ++port) {
-        if (aem.has_dynamic_output_map(port)) {
-            dynamic_output_ports_.push_back(port);
+    refresh_output_mappings();  // dynamic output ports carry the kit's identity while at the unit's rate
+    host_.components().aem_handler.set_on_audio_mappings_changed(
+        [this](uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings)
+            -> uint8_t { return change_input_mappings(port_type, port_index, mappings); });
+}
+
+void AvbEntityKit::install_dynamic_maps()
+{
+    auto& aem = host_.components().aem_handler;
+    aem.set_dynamic_audio_maps(&audio_maps_);
+    aem.set_output_mappings_follow_streams(config_.kit_data_plane);  // the kit's output identity is its own to drop
+    dynamic_input_ports_ = dynamic_ports(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT);
+    dynamic_output_ports_ = dynamic_ports(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT);
+}
+
+auto AvbEntityKit::dynamic_ports(uint16_t const port_type) const -> std::vector<uint16_t>
+{
+    std::vector<uint16_t> ports;
+    auto const& aem = host_.components().aem_handler;
+    for (uint16_t port = 0; port < UINT16_MAX && host_.get_descriptor(port_type, port).has_value(); ++port) {
+        if (aem.has_dynamic_map(port_type, port)) {
+            ports.push_back(port);
         }
     }
-    refresh_output_mappings();
-    aem.set_on_audio_mappings_changed(
-        [this](uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings)
-            -> uint8_t {
-            if (port_type != atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT || !on_input_mappings_changed_) {
-                return atdecc::AEM_STATUS_NOT_SUPPORTED;
-            }
-            auto const status = on_input_mappings_changed_(port_index, mappings);
-            if (status == atdecc::AEM_STATUS_SUCCESS) {
-                host_.ctl_log().status("aem: STREAM_PORT_INPUT {}: {} dynamic mapping(s)", port_index, mappings.size());
-            }
-            return status;
-        });
+    return ports;
+}
+
+auto AvbEntityKit::change_input_mappings(
+    uint16_t const port_type, uint16_t const port_index, std::span<nanoavb::DynamicAudioMapping const> const mappings) -> uint8_t
+{
+    if (port_type != atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT || !on_input_mappings_changed_) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    auto const status = on_input_mappings_changed_(port_index, mappings);
+    if (status == atdecc::AEM_STATUS_SUCCESS) {
+        host_.ctl_log().status("aem: STREAM_PORT_INPUT {}: {} dynamic mapping(s)", port_index, mappings.size());
+    }
+    return status;
 }
 
 auto AvbEntityKit::input_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
 {
-    return host_.components().aem_handler.dynamic_audio_maps().port(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
+    return held_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index);
 }
 
 auto AvbEntityKit::output_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
 {
-    return host_.components().aem_handler.output_audio_maps().port(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
+    return held_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port_index);
 }
 
 auto AvbEntityKit::default_input_mappings(uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
@@ -466,12 +478,10 @@ auto AvbEntityKit::input_cluster_channel(uint16_t const port_index, nanoavb::Dyn
 
 auto AvbEntityKit::fall_back_to_default_mappings(uint16_t const port_index) -> nanoavb::DynamicAudioMaps::Mappings
 {
-    auto& aem = host_.components().aem_handler;
     auto mappings = default_input_mappings(port_index);
-    if (aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, mappings, false) !=
-        atdecc::AEM_STATUS_SUCCESS) {
+    if (put_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, mappings, false) != atdecc::AEM_STATUS_SUCCESS) {
         mappings.clear();
-        (void)aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, {}, false);
+        (void)put_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, {}, false);
     }
     host_.ctl_log().warning(
         "kit: STREAM_PORT_INPUT {}: the entity cannot route its mappings: {} default mapping(s) instead",
@@ -480,15 +490,50 @@ auto AvbEntityKit::fall_back_to_default_mappings(uint16_t const port_index) -> n
     return mappings;
 }
 
+auto AvbEntityKit::put_mappings(
+    uint16_t const port_type,
+    uint16_t const port_index,
+    std::span<nanoavb::DynamicAudioMapping const> const mappings,
+    bool const apply) -> uint8_t
+{
+    auto const held = held_mappings(port_type, port_index);
+    (void)audio_maps_.replace(port_type, port_index, {});  // the handler seeds an empty port
+    auto const status = seed_mappings(port_type, port_index, mappings, apply);
+    if (status != atdecc::AEM_STATUS_SUCCESS) {
+        (void)audio_maps_.replace(port_type, port_index, held);  // as it was
+    }
+    return status;
+}
+
+auto AvbEntityKit::seed_mappings(
+    uint16_t const port_type,
+    uint16_t const port_index,
+    std::span<nanoavb::DynamicAudioMapping const> const mappings,
+    bool const apply) -> uint8_t
+{
+    auto const status = host_.components().aem_handler.seed_audio_mappings(port_type, port_index, mappings);
+    if (status != atdecc::AEM_STATUS_SUCCESS || !apply || !on_input_mappings_changed_) {
+        return status;
+    }
+    return on_input_mappings_changed_(port_index, mappings);
+}
+
+auto AvbEntityKit::held_mappings(uint16_t const port_type, uint16_t const port_index) const -> nanoavb::DynamicAudioMaps::Mappings
+{
+    auto const held = audio_maps_.port(port_type, port_index);
+    nanoavb::DynamicAudioMaps::Mappings out{};
+    out.assign(held.begin(), held.end());
+    return out;
+}
+
 void AvbEntityKit::reset_input_mappings()
 {
-    auto& aem = host_.components().aem_handler;
     for (auto const port : dynamic_input_ports_) {
         auto const mappings = default_input_mappings(port);
-        if (auto const status = aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, mappings, /*apply=*/false);
+        if (auto const status = put_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, mappings, /*apply=*/false);
             status != atdecc::AEM_STATUS_SUCCESS) {
             host_.ctl_log().warning("kit: STREAM_PORT_INPUT {}: its default mappings were refused (status {})", port, status);
-            (void)aem.set_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
+            (void)put_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port, {}, false);
         }
     }
 }
@@ -497,18 +542,18 @@ void AvbEntityKit::refresh_output_mappings()
 {
     auto& aem = host_.components().aem_handler;
     for (auto const port : dynamic_output_ports_) {
-        if (auto const status = aem.set_output_mappings(port, default_output_mappings(port));
+        if (auto const status =
+                aem.follow_local_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port, default_output_mappings(port));
             status != atdecc::AEM_STATUS_SUCCESS) {
             host_.ctl_log().warning(
                 "kit: STREAM_PORT_OUTPUT {}: its identity mappings were refused (status {}): unmapped", port, status);
-            (void)aem.set_output_mappings(port, {});
+            (void)aem.follow_local_audio_mappings(atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT, port, {});
         }
     }
 }
 
 void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
 {
-    auto& aem = host_.components().aem_handler;
     using atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT;
     // Through the entity's hook when there is one (a restarted kit's data
     // plane may route another map); without it validated and kept only: the
@@ -544,20 +589,20 @@ void AvbEntityKit::apply_saved_audio_maps(PersistentState const& saved)
                          .cluster_channel = m.cluster_channel});
                 }
             }
-            auto const status = aem.set_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, mappings, apply);
+            auto const status = put_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, mappings, apply);
             if (status == atdecc::AEM_STATUS_SUCCESS) {
                 continue;
             }
             host_.ctl_log().warning(
                 "kit: saved audio mappings of STREAM_PORT_INPUT {} refused (status {}): the default", port, status);
         }
-        if (auto const status = aem.set_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, default_input_mappings(port), apply);
+        if (auto const status = put_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, default_input_mappings(port), apply);
             status != atdecc::AEM_STATUS_SUCCESS) {
             // Unmapped (silent), and the data plane told so: never a map
             // the entity reports but does not route.
             host_.ctl_log().warning(
                 "kit: STREAM_PORT_INPUT {}: its default mappings were refused (status {}): unmapped", port, status);
-            (void)aem.set_audio_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, {}, apply);
+            (void)put_mappings(DESCRIPTOR_STREAM_PORT_INPUT, port, {}, apply);
         }
     }
 }
@@ -604,12 +649,11 @@ auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const 
     }
     bool named = false;
     if (!output) {
-        host_.components().aem_handler.dynamic_audio_maps().for_each(
-            [this, &named, index](uint16_t const type, uint16_t const port_index, nanoavb::DynamicAudioMapping const& m) {
-                named = named ||
-                    (type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == index &&
-                     !port_converts(type, port_index));
-            });
+        audio_maps_.for_each([this, &named, index](
+                                 uint16_t const type, uint16_t const port_index, nanoavb::DynamicAudioMapping const& m) {
+            named = named ||
+                (type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == index && !port_converts(type, port_index));
+        });
     }
     return named;
 }
@@ -617,9 +661,10 @@ auto AvbEntityKit::stream_mapped(bool const output, uint16_t const index) const 
 auto AvbEntityKit::identity_installed(uint16_t const index) const -> bool
 {
     bool named = false;
-    host_.components().aem_handler.output_audio_maps().for_each(
+    audio_maps_.for_each(
         [this, &named, index](uint16_t const type, uint16_t const port_index, nanoavb::DynamicAudioMapping const& m) {
-            named = named || (m.stream_index == index && !port_converts(type, port_index));
+            named = named ||
+                (type == atdecc::aem::DESCRIPTOR_STREAM_PORT_OUTPUT && m.stream_index == index && !port_converts(type, port_index));
         });
     return named;
 }
@@ -733,12 +778,11 @@ auto AvbEntityKit::mappings_allow_format(bool const output, StreamSpec const& up
         return updated.format.channels >= output_static_map_channels(updated.index);
     }
     bool lost = false;
-    host_.components().aem_handler.dynamic_audio_maps().for_each(
-        [&](uint16_t const port_type, uint16_t /*port_index*/, nanoavb::DynamicAudioMapping const& m) {
-            lost = lost ||
-                (port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == updated.index &&
-                 m.stream_channel >= updated.format.channels);
-        });
+    audio_maps_.for_each([&](uint16_t const port_type, uint16_t /*port_index*/, nanoavb::DynamicAudioMapping const& m) {
+        lost = lost ||
+            (port_type == atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT && m.stream_index == updated.index &&
+             m.stream_channel >= updated.format.channels);
+    });
     return !lost;
 }
 
@@ -1014,10 +1058,7 @@ void AvbEntityKit::flush_format_notifications()
 
 auto AvbEntityKit::local_change_refusal() const noexcept -> std::optional<uint8_t>
 {
-    if (!lock_refuses_local_changes_) {
-        return std::nullopt;
-    }
-    return host_.components().aem_handler.exclusive_access_status(ieee::Eui64{});  // as no controller's command
+    return host_.components().aem_handler.local_change_refusal();
 }
 
 auto AvbEntityKit::request_entity_name(std::string_view const name) -> uint8_t
@@ -1037,7 +1078,7 @@ auto AvbEntityKit::request_clock_source(uint16_t const clock_domain_index, uint1
     auto& aem = host_.components().aem_handler;
     auto const body = clock_source_command(clock_domain_index, clock_source_index);
     applying_local_clock_source_ = true;
-    auto const status = aem.apply_local_descriptor_value(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, body);
+    auto const status = aem.follow_local_descriptor_value(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, body);  // never refused
     applying_local_clock_source_ = false;
     return status;
 }
@@ -1047,7 +1088,12 @@ auto AvbEntityKit::request_audio_mappings(
     std::span<nanoavb::DynamicAudioMapping const> const add,
     std::span<nanoavb::DynamicAudioMapping const> const remove) -> uint8_t
 {
-    return host_.components().aem_handler.apply_local_audio_mappings(port_index, add, remove);
+    auto const status = host_.components().aem_handler.apply_local_audio_mappings(
+        atdecc::aem::DESCRIPTOR_STREAM_PORT_INPUT, port_index, add, remove);
+    if (status == atdecc::AEM_STATUS_SUCCESS) {
+        persist();  // a local change runs no settings hook
+    }
+    return status;
 }
 
 void AvbEntityKit::on_control_symbol(uint32_t const symbol_code, ControlChangedFn fn)
