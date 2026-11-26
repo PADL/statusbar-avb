@@ -364,10 +364,11 @@ TEST(tone_print, print_state_does_not_crash)
 }
 
 //
-// AAF-only variant (single 8-ch AAF stream output at index 0).
+// AAF-only variant (single 8-ch AAF stream output at index 0, and the CRF
+// media clock input Milan v1.3 7.2.2 asks of an AAF Media Talker).
 //
 
-TEST(tone_aaf_model, declares_one_aaf_output_no_inputs)
+TEST(tone_aaf_model, declares_one_aaf_output_and_a_crf_clock_input)
 {
     auto blob = load_file(entity_tone_aaf_bin_path());
     auto storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
@@ -379,10 +380,19 @@ TEST(tone_aaf_model, declares_one_aaf_output_no_inputs)
         }
         return n;
     };
-    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 0u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_INPUT), 1u);   // the CRF clock input
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_STREAM_OUTPUT), 1u);  // AAF only
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_CLUSTER), 8u);  // eight one-channel clusters
     EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_AUDIO_MAP), 1u);
+    EXPECT_EQ(count(atdecc::aem::DESCRIPTOR_CLOCK_SOURCE), 2u);  // Internal, and the CRF input (5.3.3.6)
+    // STREAM_INPUT[0] is the Milan Clock Reference Format (Table 7.1).
+    auto const crf_in = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0);
+    EXPECT_TRUE(crf_in.has_value());
+    if (crf_in.has_value()) {
+        atdecc::aem::DescriptorStream si{};
+        span_load_padded(si, *crf_in);
+        EXPECT_EQ(si.current_format.to_uint64(), uint64_t{0x041060010000BB80ULL});
+    }
     // STREAM_OUTPUT[0] must be the AAF int32 format (0x0207022002 00C000).
     auto const desc = storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_OUTPUT, 0);
     EXPECT_TRUE(desc.has_value());
@@ -403,6 +413,13 @@ TEST(tone_aaf_create, aaf_only_builds_and_gates)
         return;
     }
     EXPECT_EQ((*result)->channels(), 8U);
+    // The model's CRF clock input is the entity's one stream input, and its
+    // only sink in ACMP.
+    EXPECT_EQ((*result)->listener_specs().size(), 1U);
+    EXPECT_EQ((*result)->listener_specs().front().format.kind, StreamKind::crf);
+    EXPECT_EQ((*result)->listener_specs().front().format.crf_base_frequency_hz, 48000U);
+    EXPECT_TRUE((*result)->components().listener_sink(0).has_value());
+    EXPECT_FALSE((*result)->components().listener_sink(1).has_value());
     // Gate closed (no listener): the AAF stream (index 0 in AafOnly) stays off.
     EXPECT_FALSE((*result)->talker_should_transmit(0, RAW_NOW));
     (*result)->process_audio(sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()}, RAW_NOW);

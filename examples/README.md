@@ -35,9 +35,9 @@ stamped by the build so the blob's ENTITY descriptor matches the package version
 |------|-------|--------|
 | `bridge.json` | 1 AM824 in + 1 out | `AvbEntityAm824IO` |
 | `dual.json` | 2 in (AM824, AAF) + 3 out (AM824, AAF, CRF) | `AvbEntityAudioIO` |
-| `tone.json` | talker-only, 3 out (AM824, AAF, CRF) | `AvbEntityToneGenerator` (All) |
-| `tone-aaf.json` | talker-only, 1 out (AAF) | ToneGenerator (AafOnly) |
-| `tone-aaf-crf.json` | talker-only, 2 out (AAF, CRF) | ToneGenerator (AafCrf) |
+| `tone.json` | talker, 3 out (AM824, AAF, CRF) + a CRF clock input | `AvbEntityToneGenerator` (All) |
+| `tone-aaf.json` | talker, 1 out (AAF) + a CRF clock input | ToneGenerator (AafOnly) |
+| `tone-aaf-crf.json` | talker, 2 out (AAF, CRF) + a CRF clock input | ToneGenerator (AafCrf) |
 | `simple_stereo.json` | 2-ch stereo AM824 in + out | the `descriptor_storage_cross_check` fixture |
 
 ## Source of truth
@@ -69,6 +69,9 @@ Every model here keeps the Milan v1.3 descriptor rules that a model decides
 | An AVB_INTERFACE has GPTP_SUPPORTED and SRP_SUPPORTED (5.3.3.5) | both in `avb_interfaces[].flags` |
 | A Stream Input that lists the Base format at a rate lists it for 1, 2, 4, 6 and 8 channels (6.5) | one entry of `formats` with `"up_to": true` beside the `format` the input starts on (below) |
 | A stream's `format` is one its `formats` describe (5.3.3.4) | follows from the two keys; a `formats` list that leaves the `format` out fails the model |
+| An AAF Media Talker has a CRF Media Clock Input in each clock domain (7.2.2) | every model with an AAF output has a `streams_in` entry in the Milan Clock Reference Format, `"format": "0x041060010000BB80"` |
+| An AAF Media Listener with two or more AAF inputs in a clock domain has a CRF Media Clock Input and Output there (7.2.2, 7.2.3) | no model has two AAF inputs; one that gains a second needs both |
+| Each CRF input is one CLOCK_SOURCE, an INPUT_STREAM located at that STREAM_INPUT, and a configuration with a stream output has an INTERNAL one (5.3.3.6) | `clock_sources`: `"type": "INPUT_STREAM", "location_type": 5, "location_index": <the input>` beside the `"INTERNAL"` entry, both in the clock domain's `sources` |
 
 `buffer_length` says how much audio the input can hold. The entity kit
 hands received samples on with their presentation time and holds none
@@ -106,8 +109,7 @@ out the list is the `format` alone, which is what a stream output wants:
 its static mappings hold in that one format.
 
 Not yet Milan in the models: the stream port inputs carry static maps,
-where 5.3.3.9 has the input mappings dynamic, and `tone-aaf.json` has no
-CRF stream.
+where 5.3.3.9 has the input mappings dynamic.
 
 The data plane takes its channel count from the first stream port: the
 channels of its clusters, summed.

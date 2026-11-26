@@ -21,9 +21,11 @@ interface = "eth0"
 #   "aaf+crf"  AAF int32 8ch audio + a CRF media-clock reference (default).
 #              This is the macOS-validated config -- it presents as a clean 8ch
 #              CoreAudio device whose clock source is the CRF stream.
-#   "aaf"      AAF audio only (no CRF).
+#   "aaf"      AAF audio only (no CRF output).
 #   "all"      AM824 + AAF + CRF (note: the AM824+AAF aggregate shows up as a
 #              16ch device that some CoreAudio hosts will not open).
+# Each of the three also has a CRF media-clock input, which a controller may
+# connect and select as the clock source.
 # The descriptor-storage blob is auto-selected to match this value.
 streams = "aaf+crf"
 

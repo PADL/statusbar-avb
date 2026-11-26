@@ -81,6 +81,7 @@ struct Config
     /// Stream set: "all" = AM824 + AAF + CRF (3 outputs); "aaf" = a single AAF
     /// 8-ch stream (diagnostic — a clean device for listeners that stall on the
     /// mixed AM824+AAF aggregate). "aaf" auto-selects the entity_tone_aaf.bin blob.
+    /// Every set has the CRF media clock input as well.
     std::string streams_mode{"all"};
 };
 
@@ -111,8 +112,8 @@ auto build_arg_specs(Config& config) -> args::ArgumentSpecs
     specs.add_choice(
         "streams",
         "Stream set: 'all' = AM824 + AAF + CRF (3 outputs); 'aaf' = a single 8-ch AAF stream; 'aaf+crf' = AAF audio "
-        "+ CRF media clock (clean 8-ch device WITH a clock reference for the listener). 'aaf'/'aaf+crf' auto-select "
-        "their blob unless --descriptor-storage is given",
+        "+ CRF media clock (clean 8-ch device WITH a clock reference for the listener). Each set has a CRF clock input "
+        "too. 'aaf'/'aaf+crf' auto-select their blob unless --descriptor-storage is given",
         {"all", "aaf", "aaf+crf"},
         "all",
         [&](auto v) { config.streams_mode = std::string{v}; });

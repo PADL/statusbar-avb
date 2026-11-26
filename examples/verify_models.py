@@ -34,7 +34,11 @@ from aemxml.blob_reader import read_blob  # noqa: E402
 from aemxml.blob_writer import write_blob  # noqa: E402
 from aemxml.flatten import flatten  # noqa: E402
 from aemxml.json_reader import read_json  # noqa: E402
-from aemxml.model import INTERFACE_FLAGS_NAMES  # noqa: E402
+from aemxml.model import (  # noqa: E402
+    CLOCK_SOURCE_TYPE_NAMES,
+    DESCRIPTOR_STREAM_INPUT,
+    INTERFACE_FLAGS_NAMES,
+)
 from aemxml.stream_formats import (  # noqa: E402
     AAF_FORMAT_INT_32,
     decode_aaf_stream_format,
@@ -95,6 +99,78 @@ def _input_format_faults(config) -> list[str]:
     return faults
 
 
+# The AVTP subtype octet of a stream format: AAF, and CRF.
+AAF_SUBTYPE = 0x02
+CRF_SUBTYPE = 0x04
+
+
+def _streams_of(streams, subtype: int, domain: int) -> list:
+    """The streams of @p streams in clock domain @p domain whose current
+    format has the AVTP subtype @p subtype."""
+    return [
+        s
+        for s in streams
+        if (s.current_format >> 56) == subtype and s.clock_domain_index == domain
+    ]
+
+
+def _media_clock_stream_faults(config) -> list[str]:
+    """7.2.2 and 7.2.3: per clock domain, an AAF Media Talker has a CRF Media
+    Clock Input, and an AAF Media Listener with two or more AAF Media Inputs
+    has a CRF Media Clock Input and a CRF Media Clock Output."""
+    faults = []
+    for domain in range(len(config.clock_domains)):
+        aaf_out = _streams_of(config.streams_output, AAF_SUBTYPE, domain)
+        aaf_in = _streams_of(config.streams_input, AAF_SUBTYPE, domain)
+        crf_in = _streams_of(config.streams_input, CRF_SUBTYPE, domain)
+        crf_out = _streams_of(config.streams_output, CRF_SUBTYPE, domain)
+        if aaf_out and not crf_in:
+            faults.append(
+                f"clock domain {domain} has an AAF output and no CRF Media Clock Input"
+            )
+        if len(aaf_in) >= 2 and not (crf_in and crf_out):
+            faults.append(
+                f"clock domain {domain} has {len(aaf_in)} AAF inputs and lacks a CRF "
+                "Media Clock Input or Output"
+            )
+    return faults
+
+
+def _stream_input_clock_sources(config, index: int) -> int:
+    """How many CLOCK_SOURCE descriptors are STREAM_INPUT @p index as an INPUT_STREAM."""
+    return sum(
+        1
+        for source in config.clock_sources
+        if source.clock_source_type == CLOCK_SOURCE_TYPE_NAMES["INPUT_STREAM"]
+        and source.clock_source_location_type == DESCRIPTOR_STREAM_INPUT
+        and source.clock_source_location_index == index
+    )
+
+
+def _clock_source_faults(config) -> list[str]:
+    """5.3.3.6: one INPUT_STREAM CLOCK_SOURCE for each CRF input, or for the
+    single AAF input of a configuration with no CRF input; and an INTERNAL one
+    where the configuration has a stream output."""
+    inputs = list(enumerate(config.streams_input))
+    crf = [i for i, s in inputs if (s.current_format >> 56) == CRF_SUBTYPE]
+    aaf = [i for i, s in inputs if (s.current_format >> 56) == AAF_SUBTYPE]
+    wanted = crf if crf else (aaf if len(aaf) == 1 else [])
+    faults = [
+        f"STREAM_INPUT {i} has {_stream_input_clock_sources(config, i)} INPUT_STREAM "
+        "CLOCK_SOURCE descriptors, not one"
+        for i in wanted
+        if _stream_input_clock_sources(config, i) != 1
+    ]
+    internal = CLOCK_SOURCE_TYPE_NAMES["INTERNAL"]
+    if config.streams_output and not any(
+        s.clock_source_type == internal for s in config.clock_sources
+    ):
+        faults.append(
+            "a configuration with a stream output has no INTERNAL CLOCK_SOURCE"
+        )
+    return faults
+
+
 def _current_format_faults(config) -> list[str]:
     """5.3.3.4: current_format is one of the formats the formats list describes."""
     return [
@@ -149,6 +225,8 @@ def milan_model_faults(entity) -> list[str]:
         faults += _output_mapping_faults(config)
         faults += _input_format_faults(config)
         faults += _current_format_faults(config)
+        faults += _media_clock_stream_faults(config)
+        faults += _clock_source_faults(config)
         faults += [
             f"STREAM_INPUT '{s.object_name}' buffer_length {s.buffer_length} ns"
             for s in config.streams_input

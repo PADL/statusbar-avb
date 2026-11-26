@@ -9,8 +9,9 @@
 /// STREAM_OUTPUT descriptor's current_format decides the stream kind — AM824
 /// (IEC 61883-6 MBLA), AAF (32-bit PCM), or CRF (media clock) — so the same
 /// C++ serves examples/tone.json (AM824+AAF+CRF), tone-aaf.json (AAF only),
-/// tone-aaf-crf.json (AAF+CRF), or any other talker-only model without code
-/// changes. Each audio channel carries a continuous sine tone; by default the
+/// tone-aaf-crf.json (AAF+CRF), or any other talker model without code
+/// changes. Each of the three has a CRF media clock input beside its
+/// outputs, as Milan v1.3 7.2.2 asks of an AAF Media Talker. Each audio channel carries a continuous sine tone; by default the
 /// channels are the white piano keys upward from the base MIDI note.
 ///
 /// The media clock is locked to gPTP at ratio r = 1.0 by default. When the

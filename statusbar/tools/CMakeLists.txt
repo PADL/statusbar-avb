@@ -97,7 +97,8 @@ install(
   DESTINATION "${CMAKE_INSTALL_DATADIR}/statusbar-avb"
   COMPONENT runtime)
 
-# AAF-only tone-generator blob (single 8-ch AAF output). entity_tone_aaf.bin.
+# AAF-only tone-generator blob (single 8-ch AAF output, and the CRF clock
+# input). entity_tone_aaf.bin.
 set(STATUSBAR_AVB_TONE_AAF_BLOB
     "${CMAKE_CURRENT_BINARY_DIR}/entity_tone_aaf.bin")
 _statusbar_avb_entity_blob("${STATUSBAR_AVB_TONE_AAF_BLOB}" "tone-aaf"
