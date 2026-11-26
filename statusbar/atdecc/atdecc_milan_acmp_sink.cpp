@@ -161,6 +161,7 @@ void MilanSink::expire_timer(TimePoint const now)
 void MilanSink::reset(TimePoint const now)
 {
     if (ctx_.srp_active && ctx_.env->stop_srp) {
+        ctx_.srp_stop = MilanSrpStop::Released;
         ctx_.env->stop_srp(ctx_.index, now);
     }
     ctx_ = MilanSinkContext{.env = ctx_.env, .index = ctx_.index};

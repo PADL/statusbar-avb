@@ -168,14 +168,15 @@ void save_binding(MilanSinkContext& ctx)
     }
 }
 
-/// "Clear the SRP parameters and stop SRP", in the states that have any.
-void drop_srp(MilanSinkContext& ctx, sm::TimePoint const now)
+/// "Clear the SRP parameters and stop SRP", in the states that have any, for @p why.
+void drop_srp(MilanSinkContext& ctx, sm::TimePoint const now, MilanSrpStop const why)
 {
     ctx.srp = MilanSrpParameters{};
     if (!ctx.srp_active) {
         return;
     }
     ctx.srp_active = false;
+    ctx.srp_stop = why;
     if (ctx.env->stop_srp) {
         ctx.env->stop_srp(ctx.index, now);
     }
@@ -185,7 +186,7 @@ void drop_srp(MilanSinkContext& ctx, sm::TimePoint const now)
 /// reservation, the discovery of the old talker, the state's timer.
 void release_binding_state(MilanSinkContext& ctx, sm::TimePoint const now)
 {
-    drop_srp(ctx, now);
+    drop_srp(ctx, now, MilanSrpStop::Released);
     ctx.discovery_stop_requested = true;
     ctx.timer.reset();
 }
@@ -379,7 +380,7 @@ void note_registered(MilanSinkContext& ctx, sm::TimePoint /*now*/)
 void drop_srp_and_delay(MilanSinkContext& ctx, sm::TimePoint const now)
 {
     // 5.5.3.6.36 and .48, the talker discovered
-    drop_srp(ctx, now);
+    drop_srp(ctx, now, MilanSrpStop::TalkerLost);
     set_status(ctx, MilanProbingStatus::Active, ACMP_STATUS_SUCCESS);
     arm_delay(ctx, now);
 }
@@ -387,7 +388,7 @@ void drop_srp_and_delay(MilanSinkContext& ctx, sm::TimePoint const now)
 void drop_srp_and_wait(MilanSinkContext& ctx, sm::TimePoint const now)
 {
     // 5.5.3.6.36 and .48, the talker not discovered
-    drop_srp(ctx, now);
+    drop_srp(ctx, now, MilanSrpStop::TalkerLost);
     ctx.timer.reset();
     set_status(ctx, MilanProbingStatus::Passive, ACMP_STATUS_SUCCESS);
 }
