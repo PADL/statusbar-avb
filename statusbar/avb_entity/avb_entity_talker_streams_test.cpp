@@ -1450,10 +1450,9 @@ TEST(talker_template, a_patched_template_equals_the_serialized_frame)
 // A stream sent outside the kit
 //
 
-// A data plane outside the kit starts a stream at the kit's sequence and mr; what it sends is counted as the kit's own
-// AVTPDUs are (an mr toggle once an AVTPDU carries it), runs down the mr hold, and leaves the stream's sequence where
-// it stopped, so the kit's own path goes on from there; tu AVTPDUs are at most the AVTPDUs. A stream being re-shaped
-// answers "try again" and one that is not there "no such device", and neither is counted.
+// A data plane outside the kit starts a stream at the kit's sequence and mr; what it sends counts as the kit's own
+// AVTPDUs do, runs down the mr hold and leaves the sequence where it stopped. A stream being re-shaped answers "try
+// again" and one that is not there "no such device", and neither counts.
 TEST(talker_outside, the_kit_keeps_the_sequence_and_mr_and_counts_what_was_sent)
 {
     avb_entity::StreamPort port;

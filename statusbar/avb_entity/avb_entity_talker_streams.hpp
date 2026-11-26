@@ -344,10 +344,9 @@ struct TalkerStreams
     [[nodiscard]] auto frame_template(uint16_t stream_index, uint16_t frames, ieee::Eui48 const& src_mac) const noexcept
         -> std::optional<StreamFrameTemplate>;
 
-    /// Told, on the control thread that made it, each change of an open stream's frame_template(): a new VID or PCP
-    /// (set_vlan(), every open stream), destination (set_destination(), a MAAP block) or format (tell_frames_changed()
-    /// from AvbEntityKit, once the entity's format hook accepted it). Not for open_stream(). Before streams flow; it must
-    /// not throw (set_vlan() is noexcept), and what it captures must outlive this TalkerStreams.
+    /// Told on the control thread that made it of each change of an open stream's frame_template(): VID or PCP
+    /// (set_vlan()), destination (set_destination()) or an accepted format (tell_frames_changed()); not open_stream().
+    /// Set before streams flow; it must not throw, and what it captures must outlive this TalkerStreams.
     using FramesChangedFn = sg14::inplace_function<void(uint16_t stream_index), 32>;
     void set_on_frames_changed(FramesChangedFn fn) noexcept { on_frames_changed_ = std::move(fn); }
     /// STREAM_OUTPUT @p stream_index's frames go to @p dest_mac from now on (a MAAP block), told as a change of its
@@ -364,12 +363,8 @@ struct TalkerStreams
     }
 
     //
-    // A stream sent outside the kit
+    // A stream sent outside the kit (docs/AVB_ENTITY_KIT.md): the reporting thread must be the stream's only writer
     //
-    // Something beside the stream port may send a STREAM_OUTPUT's frames itself (frame_template()) while the kit sends
-    // none of it. The kit keeps the stream's sequence_num and mr and counts what it sent; see docs/AVB_ENTITY_KIT.md.
-    // The reporting thread must be the stream's only writer: the guard these calls try protects against a re-shape
-    // (reformat_stream()) only, not against the kit's own transmits (transmit_crf_raw() does not lock it).
 
     /// The varying header fields a data plane outside the kit gives its next AVTPDU of a stream.
     struct OutsideHeader

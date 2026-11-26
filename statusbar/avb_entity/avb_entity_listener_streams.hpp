@@ -420,22 +420,17 @@ struct ListenerStreams
     void set_stream_stopped(uint16_t stream_index, bool stopped) noexcept;
 
     //
-    // A stream received outside the kit
+    // A stream received outside the kit (docs/AVB_ENTITY_KIT.md)
     //
-    // Something beside the stream port may receive a STREAM_INPUT's stream itself while the kit receives none of it.
-    // The kit keeps the input's connection and counters; see docs/AVB_ENTITY_KIT.md.
 
-    /// Told, on the reactor, each change of what STREAM_INPUT @p stream_index receives: the stream ID it matches
-    /// frames by (ListenerStreamSlot::rx_stream_id, 0 for none), and whether it discards them (stopped). Not for the
-    /// state at install. Before streams flow; an empty function removes it. It must not throw (set_stream_stopped() is
-    /// noexcept), and what it captures must outlive the kit: stop() releases every input through it.
+    /// Told on the reactor of each change of what STREAM_INPUT @p stream_index receives: the stream ID it matches frames
+    /// by (0: none) and whether it discards them (stopped); not the state at install. Set before streams flow; an empty
+    /// function removes it. It must not throw, and what it captures must outlive the kit: stop() releases every input.
     using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, uint64_t stream_id, bool stopped), 32>;
     void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
     /// A data plane outside the kit received @p counts of STREAM_INPUT @p stream_index since it last said, @p samples
-    /// sample frames of them accepted: added to its counters (add_stream_input_counts(), so GET_COUNTERS) and
-    /// telemetry. A lock lost while the input is stopped or unbound goes without an interruption (Milan v1.2 Sections
-    /// 5.3.8.7, 5.3.8.10). False for no such input. The one thread that reports the stream, at least once an
-    /// observation interval (StreamInputIntervals::silent()), while the kit receives none of it.
+    /// sample frames of them accepted: added to its counters and telemetry. False for no such input. Called by the one
+    /// thread that reports the stream, at least once an observation interval, while the kit receives none of it.
     [[nodiscard]] auto notify_received_outside(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
         -> bool;
 

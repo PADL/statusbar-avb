@@ -107,10 +107,9 @@ struct StreamInputCounts
     std::optional<bool> media_locked{};  ///< nullopt: it does not check the lock
 };
 
-/// Add @p counts to @p c. A lock gained counts MEDIA_LOCKED and a lock lost MEDIA_UNLOCKED and STREAM_INTERRUPTED, as
-/// tally_stream_input_packet() does. A report with AVTPDUs or a lock value clears the reactor's pending unlock
-/// (restart_run), as a packet's tally does, and gains no lock in that report. The thread that reports the stream, the
-/// RX thread's place; report each input at least once an observation interval (StreamInputIntervals::silent()).
+/// Add @p counts to @p c, a lock gained or lost counted as tally_stream_input_packet() counts it. A report with AVTPDUs
+/// or a lock value clears the reactor's pending unlock (restart_run) and gains no lock. Called by the thread that
+/// reports the stream, in the RX thread's place, at least once an observation interval.
 void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept;
 
 /// Drop @p c's media lock without an interruption (an unbind, or a reset):
