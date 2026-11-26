@@ -497,8 +497,16 @@ class AemCommandHandler
     /// @p body to every registered controller (plus the IDENTIFY multicast when the
     /// change targets the IDENTIFY control). Exposed so an entity can push a
     /// notification it framed itself; apply_local_descriptor_value() is the usual
-    /// entry point. No-op if no send_response callback is wired.
+    /// entry point. No-op if no send_response callback is wired. Raised while a
+    /// command is dispatched (from a hook), it is sent after that command's response,
+    /// up to MAX_QUEUED_NOTIFICATIONS of them; past those, a side effect goes at once
+    /// after the side effects held, and one of the command's type is not sent but
+    /// spends each controller's sequence id (Milan v1.3 Section 5.4.5.1), a gap it sees.
     void emit_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// The notifications one command's dispatch holds for after its response, the last
+    /// kept for one of the command's own type.
+    static constexpr size_t MAX_QUEUED_NOTIFICATIONS = 4;
 
     /// Emit an unsolicited MVU response (u bit set) carrying @p command_type and @p body to
     /// every registered controller, each with its own MVU sequence id, which advances whether
@@ -928,6 +936,41 @@ class AemCommandHandler
     [[nodiscard]] auto process_aem_command(
         Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, Eui64 const& our_entity_id) -> bool;
 
+    /// handle_command() for a command off the wire from @p src_mac, the notifications it
+    /// raises held for after its response.
+    [[nodiscard]] auto dispatch_aem_command(
+        Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// Send the response to @p header, then the notifications its dispatch held.
+    [[nodiscard]] auto answer_aem_command(
+        Eui48 const& src_mac, AemDu const& header, AemCommandResponse const& response, std::span<uint8_t const> body) -> bool;
+
+    /// Hold a notification raised while a command is dispatched, or spend one of the command's own
+    /// type that finds no slot; false (send it now, after the side effects held) for a side effect
+    /// with no slot free, or a body longer than MAX_AEM_RESPONSE_SIZE.
+    [[nodiscard]] auto queue_notification(uint16_t command_type, std::span<uint8_t const> body) -> bool;
+
+    /// Send nothing for a notification of the command's own type the queue cannot hold, but spend
+    /// each recipient's sequence id as a failed send does (Milan v1.3 Section 5.4.5.1).
+    void spend_notification(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// Put @p body, raised as @p command_type, in a slot make_room() found.
+    void hold_notification(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// Whether a notification of @p command_type is the dispatched command's own.
+    [[nodiscard]] auto is_commands_own(uint16_t command_type) const noexcept -> bool;
+
+    /// Whether a notification of @p command_type has a slot, after sending the held side
+    /// effects if need be; the last slot is kept for the command's own.
+    [[nodiscard]] auto make_room(uint16_t command_type) -> bool;
+
+    /// Send the held notifications other than the command's own, in the order raised.
+    void release_side_effects();
+
+    /// Send every held notification, after the command's response.
+    void flush_notifications();
+
     /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
         -> bool;
@@ -1091,6 +1134,22 @@ class AemCommandHandler
     /// (handle_command, answer_completed) and zero between: a notification
     /// the entity originates itself has no requester to leave out.
     Eui64 requester_{};
+
+    // Notifications a command's dispatch raises, held until its response is sent; the last
+    // slot is kept for the command's own (of the command's type), each with its requester_.
+    // A body is held up to any length the entity frames, Milan's larger AECPDUs included.
+    struct QueuedNotification
+    {
+        uint16_t command_type{0};
+        Eui64 requester{};
+        std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> body{};
+        size_t body_size{0};
+    };
+    /// Send held notification @p n, leaving out the requester_ it was raised with.
+    void emit_held(QueuedNotification const& n);
+    statusbar::sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
+    // A command off the wire is being dispatched (dispatch_aem_command); a read_back() does not set it.
+    bool dispatching_{false};
 
     // Pending acquire state for CONTROLLER_AVAILABLE handshake.
     // When active, the requester is waiting on a final response that will

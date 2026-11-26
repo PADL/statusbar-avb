@@ -141,17 +141,36 @@ auto AemCommandHandler::process_aem_command(
 {
     // Keep our id current for unsolicited notifications (their target_entity_id).
     our_entity_id_ = our_entity_id;
-    // Stash the source MAC so per-command handlers can retain it if they
-    // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
-    // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
-    current_src_mac_ = src_mac;
     // One output buffer per dispatch — handlers write into this and return
     // status + bytes-written, avoiding the per-return 1 KB struct copy that
     // the previous AemCommandResult shape incurred.
     std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> out_buffer{};
+    auto const response = dispatch_aem_command(src_mac, header, command_data, out_buffer);
+    return answer_aem_command(src_mac, header, response, std::span<uint8_t const>{out_buffer.data(), response.size});
+}
+
+auto AemCommandHandler::dispatch_aem_command(
+    Eui48 const& src_mac, AemDu const& header, std::span<uint8_t const> const command_data, std::span<uint8_t> const out_buffer)
+    -> AemCommandResponse
+{  // NOLINT(statusbar-block-statements) the per-dispatch state, set and cleared around the one call
+    // Stash the source MAC so per-command handlers can retain it if they
+    // need to emit an out-of-band late response (e.g. ACQUIRE_ENTITY's
+    // CONTROLLER_AVAILABLE handshake). Cleared after dispatch.
+    current_src_mac_ = src_mac;
+    dispatching_ = true;
     auto const response = handle_command(header, command_data, out_buffer);
+    dispatching_ = false;
     current_src_mac_ = {};
-    return send_response(src_mac, header, response.status, std::span<uint8_t const>{out_buffer.data(), response.size});
+    return response;
+}
+
+auto AemCommandHandler::answer_aem_command(
+    Eui48 const& src_mac, AemDu const& header, AemCommandResponse const& response, std::span<uint8_t const> const body) -> bool
+{
+    // The response, then the notifications the command raised (Milan v1.3 Section 5.4.5.3).
+    bool const sent = send_response(src_mac, header, response.status, body);
+    flush_notifications();
+    return sent;
 }
 
 auto AemCommandHandler::handle_command(AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
@@ -2072,6 +2091,9 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
     if (!callbacks_.send_response) {
         return;
     }
+    if (dispatching_ && queue_notification(command_type, body)) {
+        return;  // sent after the command's response
+    }
 
     for (auto& reg : unsolicited_registrations_) {
         // IEEE 1722.1-2021 7.5.2: the unsolicited response goes to the acquired
@@ -2107,6 +2129,89 @@ void AemCommandHandler::emit_unsolicited(uint16_t const command_type, std::span<
             callbacks_.identify_changed(body.size() > 4 && body[4] != 0);
         }
     }
+}
+
+auto AemCommandHandler::queue_notification(uint16_t const command_type, std::span<uint8_t const> body) -> bool
+{
+    if (body.size() > MAX_AEM_RESPONSE_SIZE) {
+        release_side_effects();  // the held ones go first, so the order on the wire is the order raised
+        return false;
+    }
+    if (make_room(command_type)) {
+        hold_notification(command_type, body);
+        return true;
+    }
+    if (is_commands_own(command_type)) {
+        spend_notification(command_type, body);  // never ahead of the response
+        return true;
+    }
+    return false;
+}
+
+void AemCommandHandler::spend_notification(uint16_t const command_type, std::span<uint8_t const> const body)
+{
+    // Milan v1.3 Section 5.4.5.1: sent as a send that fails, each controller's id spent, so each sees the gap.
+    auto sender = std::exchange(callbacks_.send_response, [](Eui48 const&, std::span<uint8_t const>) { return false; });
+    dispatching_ = false;
+    emit_unsolicited(command_type, body);
+    dispatching_ = true;
+    callbacks_.send_response = std::move(sender);
+}
+
+void AemCommandHandler::hold_notification(uint16_t const command_type, std::span<uint8_t const> const body)
+{
+    auto& queued = queued_notifications_.emplace_back();
+    queued.command_type = command_type;
+    queued.requester = requester_;
+    queued.body_size = body.size();
+    span_copy(std::span{queued.body}.first(body.size()), body);
+}
+
+auto AemCommandHandler::is_commands_own(uint16_t const command_type) const noexcept -> bool
+{
+    return command_type == current_header_.command_code();
+}
+
+auto AemCommandHandler::make_room(uint16_t const command_type) -> bool
+{
+    // A side effect may not use the last slot, which is kept for the command's own notification.
+    auto const fits = [&] {
+        return queued_notifications_.size() + (is_commands_own(command_type) ? 0U : 1U) < MAX_QUEUED_NOTIFICATIONS;
+    };
+    if (fits()) {
+        return true;
+    }
+    release_side_effects();
+    return fits();
+}
+
+void AemCommandHandler::release_side_effects()
+{
+    dispatching_ = false;  // send them rather than hold them again
+    for (auto const& n : queued_notifications_) {
+        if (!is_commands_own(n.command_type)) {
+            emit_held(n);
+        }
+    }
+    dispatching_ = true;
+    auto const sent = std::ranges::remove_if(
+        queued_notifications_, [this](QueuedNotification const& n) { return !is_commands_own(n.command_type); });
+    queued_notifications_.erase(sent.begin(), sent.end());
+}
+
+void AemCommandHandler::flush_notifications()
+{
+    for (auto const& n : queued_notifications_) {
+        emit_held(n);
+    }
+    queued_notifications_.clear();
+}
+
+void AemCommandHandler::emit_held(QueuedNotification const& n)
+{
+    Eui64 const requester = std::exchange(requester_, n.requester);  // left out as when it was raised
+    emit_unsolicited(n.command_type, std::span<uint8_t const>{n.body}.first(n.body_size));
+    requester_ = requester;
 }
 
 auto AemCommandHandler::apply_local_descriptor_value(uint16_t const command_type, std::span<uint8_t const> command_body) -> uint8_t

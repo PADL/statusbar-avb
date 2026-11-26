@@ -4146,6 +4146,228 @@ TEST(nanoavb_entity_controller_monitor, the_holders_answer_ends_the_acquire_hand
     }
 }
 
+//
+// Notification order - Milan v1.3 Section 5.4.5.3: a command's notifications follow its response
+//
+
+namespace {
+
+/// Accepts every SET, raising @p side_effects notifications of its own from the hook.
+class NotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t /*command_type*/, DescriptorId /*id*/, std::span<uint8_t const> /*value*/)
+        -> uint8_t override
+    {
+        for (size_t n = 0; n < side_effects; ++n) {
+            std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, static_cast<uint8_t>(n)};  // STREAM_OUTPUT n
+            aem->emit_unsolicited(AEM_COMMAND_GET_STREAM_INFO, body);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    size_t side_effects{0};
+};
+
+/// Accepts every SET, its hook raising a notification of the command's type, its own (true), or a side
+/// effect (false), in turn.
+class ScriptedNotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
+    {
+        std::array<uint8_t, 4> const body{0x00, 0x06, 0x00, 0x00};
+        for (bool const own : script) {
+            aem->emit_unsolicited(own ? command_type : AEM_COMMAND_GET_STREAM_INFO, body);
+        }
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+    std::vector<bool> script;
+};
+
+/// The first solicited response in @p sends.
+auto first_response(std::vector<CapturedSend> const& sends) -> std::vector<CapturedSend>::const_iterator
+{
+    return std::ranges::find_if(sends, [](CapturedSend const& s) { return !header_of(s).is_unsolicited(); });
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_notification_order, the_response_is_sent_before_its_notification)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONTROL, kSetControl0);
+    EXPECT_EQ(sends.size(), size_t{2});
+    if (sends.size() != 2) {
+        return;
+    }
+    EXPECT_FALSE(header_of(sends[0]).is_unsolicited());
+    EXPECT_EQ(sends[0].dest, kMacA);
+    EXPECT_TRUE(header_of(sends[1]).is_unsolicited());
+    EXPECT_EQ(sends[1].dest, kMacB);
+}
+
+TEST(nanoavb_entity_notification_order, the_commands_own_notification_follows_its_response)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 6;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_EQ(sends.size(), size_t{8});
+    auto const response = first_response(sends);
+    EXPECT_TRUE(response != sends.end() && response->dest == kMacA);
+    EXPECT_TRUE(header_of(sends.back()).is_unsolicited());
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_EQ(
+        std::ranges::count_if(response, sends.cend(), [](CapturedSend const& s) { return header_of(s).is_unsolicited(); }),
+        4);  // three side effects and its own
+}
+
+TEST(nanoavb_entity_notification_order, every_own_notification_follows_the_response)
+{
+    ScriptedNotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.script = {true, false, false, true};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    auto const response = first_response(sends);
+    EXPECT_TRUE(response != sends.end());
+    auto const own_before = std::ranges::count_if(
+        sends.cbegin(), response, [](CapturedSend const& s) { return header_of(s).command_code() != AEM_COMMAND_GET_STREAM_INFO; });
+    EXPECT_EQ(own_before, 0);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB), 3);
+}
+
+// Milan v1.3 Sections 5.4.5.1 and 5.4.5.3: six of the command's own type (five raised by its hook,
+// then its own) find four slots; none goes ahead of the response, and the two not held spend the
+// other controller's sequence ids, so it sees the gap.
+TEST(nanoavb_entity_notification_order, own_notifications_past_the_queue_never_precede_the_response)
+{
+    ScriptedNotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.script = {true, true, true, true, true};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_TRUE(first_response(sends) == sends.begin());
+    EXPECT_TRUE((unsolicited_sequence_ids(sends, AEM_COMMAND_SET_STREAM_FORMAT, kMacB) == std::vector<uint16_t>{2, 3, 4, 5}));
+    EXPECT_EQ(sends.size(), size_t{1} + AemCommandHandler::MAX_QUEUED_NOTIFICATIONS);
+}
+
+TEST(nanoavb_entity_notification_order, notifications_past_the_queue_keep_their_order)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 7;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    std::vector<uint8_t> raised;
+    for (auto const& s : sends) {
+        if (header_of(s).is_unsolicited() && header_of(s).command_code() == AEM_COMMAND_GET_STREAM_INFO) {
+            raised.push_back(body_of(s)[3]);
+        }
+    }
+    EXPECT_TRUE(raised == (std::vector<uint8_t>{0, 1, 2, 3, 4, 5, 6}));
+    EXPECT_EQ(header_of(sends.back()).command_code(), AEM_COMMAND_SET_STREAM_FORMAT);
+    EXPECT_TRUE(first_response(sends) < sends.end() - 1);
+}
+
+TEST(nanoavb_entity_notification_order, a_notification_raised_outside_a_command_goes_at_once)
+{
+    NotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    app.side_effects = 1;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    // The entity's own change: hook side effect, then the change's own, as raised.
+    EXPECT_EQ(handler.apply_local_descriptor_value(AEM_COMMAND_SET_CONTROL, kSetControl0), AEM_STATUS_SUCCESS);
+    EXPECT_EQ(sends.size(), size_t{2});
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 1);
+    EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_SET_CONTROL, kMacB), 1);
+}
+
+namespace {
+
+/// Accepts every SET, its hook raising a notification of the command's type whose body fills a
+/// whole response, longer than one IEEE 1722.1 AECPDU carries (Milan v1.3 Section 5.4.1).
+class LongNotifyingHandler : public AemEntityHandler
+{
+  public:
+    auto on_set_descriptor_value(uint16_t command_type, DescriptorId /*id*/, std::span<uint8_t const> /*value*/) -> uint8_t override
+    {
+        std::array<uint8_t, MAX_AEM_RESPONSE_SIZE> body{};
+        body.fill(0x5A);
+        aem->emit_unsolicited(command_type, body);
+        return AEM_STATUS_SUCCESS;
+    }
+
+    AemCommandHandler* aem{nullptr};
+};
+
+}  // namespace
+
+TEST(nanoavb_entity_notification_order, a_notification_longer_than_an_aecpdu_follows_the_response)
+{
+    LongNotifyingHandler app;
+    AemCommandHandler handler{app};
+    app.aem = &handler;
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    register_controller(handler, kEntity, kControllerB, kMacB);
+    sends.clear();
+
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_STREAM_FORMAT, kSetFormatOut0);
+    EXPECT_EQ(sends.size(), size_t{3});
+    EXPECT_TRUE(first_response(sends) == sends.begin());
+    auto const long_one = std::ranges::find_if(sends, [](CapturedSend const& s) { return body_of(s).size() > MAX_AEM_BODY; });
+    EXPECT_TRUE(long_one != sends.end());
+    if (long_one == sends.end()) {
+        return;
+    }
+    EXPECT_TRUE(header_of(*long_one).is_unsolicited());
+    EXPECT_EQ(body_of(*long_one).size(), MAX_AEM_RESPONSE_SIZE);
+}
+
 int statusbar_nanoavb_nanoavb_entity_test(int argc, char** argv)
 {
     (void)argc;
