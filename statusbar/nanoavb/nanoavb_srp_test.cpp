@@ -1780,14 +1780,15 @@ TEST(nanoavb_srp_msrp, a_talker_advertise_on_another_vlan_declares_no_listener)
     EXPECT_TRUE(b.listener.declare_domain(b.now).has_value());
     b.run(12);
     EXPECT_EQ(
-        *b.listener.listener_attach(sid, b.now, TalkerMatch{.destination = group, .vid = 2}), ListenerReservationState::Waiting);
+        *b.listener.listener_attach(sid, b.now, TalkerMatch{.dest_address = group, .vlan_id = 2}),
+        ListenerReservationState::Waiting);
     b.run(12);
     EXPECT_EQ(b.state(sid), ListenerReservationState::Waiting);
     auto const* const declared = b.talker.find_listener(sid);
     EXPECT_FALSE(declared != nullptr && declared->registrar_is_registered());
 
     EXPECT_TRUE(b.listener.listener_asking_failed(sid, b.now).has_value());  // declared again: the match stays
-    EXPECT_TRUE(b.listener.get_listener_stream(sid)->talker.has_value());
+    EXPECT_TRUE(b.listener.get_listener_stream(sid)->follows.has_value());
 
     (void)b.talker.withdraw_talker(sid, b.now);
     fv.vlan_identifier = 2;

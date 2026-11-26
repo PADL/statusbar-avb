@@ -326,8 +326,8 @@ auto MsrpParticipantT<Limits>::find_registered_talker_advertise(tsn::StreamId co
     -> TalkerAdvertiseFirstValue const*
 {
     for (auto const& rec : talker_adv_) {
-        if (rec.first_value.stream_id == id && rec.registrar_is_registered()) {
-            return &rec.first_value;
+        if (rec.first_value.stream_id == id) {
+            return rec.registrar_is_registered() ? &rec.first_value : nullptr;
         }
     }
     return nullptr;
@@ -374,8 +374,8 @@ auto MsrpParticipantT<Limits>::find_registered_talker_failed(tsn::StreamId const
     -> TalkerFailedFirstValue const*
 {
     for (auto const& rec : talker_failed_) {
-        if (rec.first_value.advertise.stream_id == id && rec.registrar_is_registered()) {
-            return &rec.first_value;
+        if (rec.first_value.advertise.stream_id == id) {
+            return rec.registrar_is_registered() ? &rec.first_value : nullptr;
         }
     }
     return nullptr;
