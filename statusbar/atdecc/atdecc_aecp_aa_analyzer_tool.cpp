@@ -8,6 +8,7 @@
 /// retransmits, upload state machine tracking, and transfer integrity.
 
 #include "statusbar/atdecc/atdecc_aecp_aa_analysis.hpp"
+#include "statusbar/avtp/avtp_capture_walk.hpp"
 #include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/config/config.hpp"
 #include "statusbar/ieee/ieee.hpp"
@@ -18,6 +19,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <map>
+#include <optional>
 #include <print>
 #include <string>
 #include <vector>
@@ -365,6 +367,97 @@ static void print_usage(char const* program_name, args::ArgumentSpecs const& spe
         "Analyzes AA conversations and firmware upload sessions in pcap captures.");
 }
 
+/// What the walk over a capture has counted.
+struct WalkCounts
+{
+    uint32_t total{0};         ///< every packet of the file
+    uint32_t aa{0};            ///< AECP Address Access PDUs analysed
+    uint32_t aem{0};           ///< AEM PDUs that belong to an upload
+    uint64_t last_time_us{0};  ///< the last packet's capture time
+};
+
+/// The AECPDU common header of @p payload, when the packet is an AECPDU that
+/// the controller and target filters of @p cfg let through.
+[[nodiscard]] static auto accepted_aecpdu(AnalyzerConfig const& cfg, uint16_t ethertype, Packet const& payload)
+    -> std::optional<AecpDuCommon>
+{
+    bool const is_aecp =
+        ethertype == protocols::ETHERTYPE_AVTP && payload.size() >= AecpDuCommon::LENGTH && payload[0] == avtp::AvtpSubtype::aecp;
+    if (!is_aecp) {
+        return std::nullopt;
+    }
+    AecpDuCommon common{};
+    span_load(common, make_const_span(payload).first<AecpDuCommon::LENGTH>());
+    bool const filtered_out = (cfg.has_controller_filter && common.controller_entity_id != cfg.controller_filter) ||
+        (cfg.has_target_filter && common.target_entity_id != cfg.target_filter);
+    return filtered_out ? std::nullopt : std::optional{common};
+}
+
+/// Hand an accepted AECPDU to the Address Access or the AEM analysis.
+static void analyze_aecpdu(
+    AnalyzerConfig const& cfg,
+    AnalysisState& state,
+    WalkCounts& counts,
+    AecpDuCommon const& common,
+    Packet const& payload,
+    uint64_t capture_us)
+{
+    if (common.is_address_access() && payload.size() >= AecpAaDu::LENGTH) {
+        ++counts.aa;
+        handle_aa_packet(state, payload, capture_us, cfg.verbose);
+    } else if (common.is_aem() && payload.size() >= AemDu::LENGTH) {
+        if (handle_aem_packet(state, payload, capture_us, cfg.verbose)) {
+            ++counts.aem;
+        }
+    }
+}
+
+/// One packet of the capture: counted, and analysed when it is an AECPDU the
+/// filters let through.
+static void analyze_packet(
+    AnalyzerConfig const& cfg,
+    AnalysisState& state,
+    WalkCounts& counts,
+    uint64_t capture_us,
+    uint16_t ethertype,
+    Packet const& payload)
+{
+    ++counts.total;
+    if (state.capture_start_us == 0) {
+        state.capture_start_us = capture_us;
+    }
+    counts.last_time_us = capture_us;
+    if (auto const common = accepted_aecpdu(cfg, ethertype, payload)) {
+        analyze_aecpdu(cfg, state, counts, *common, payload, capture_us);
+    }
+}
+
+/// Close what the capture left open and print the report.
+static auto report_analysis(AnalyzerConfig const& cfg, AnalysisState& state, WalkCounts const& counts) -> int
+{
+    finalize_pending(state);
+    print_report(cfg.input_file, state, counts.total, counts.aa, counts.aem, counts.last_time_us);
+    return EXIT_SUCCESS;
+}
+
+/// Walk the capture, a classic pcap or a pcapng file (avtp::walk_capture), and
+/// print the report.
+static auto analyze_capture(AnalyzerConfig const& cfg) -> int
+{
+    AnalysisState state;
+    WalkCounts counts;
+    auto const walk = avtp::walk_capture(
+        cfg.input_file,
+        [&](uint64_t capture_us, Eui48 const& /*da*/, Eui48 const& /*sa*/, uint16_t ethertype, Packet const& payload) {
+            analyze_packet(cfg, state, counts, capture_us, ethertype, payload);
+        });
+    if (!walk) {
+        std::println(stderr, "Error: capture '{}': {}", cfg.input_file, walk.error().message());
+        return EXIT_FAILURE;
+    }
+    return report_analysis(cfg, state, counts);
+}
+
 auto main(int argc, char* argv[]) -> int
 {
     AnalyzerConfig cfg;
@@ -377,65 +470,5 @@ auto main(int argc, char* argv[]) -> int
         std::println(stderr, "Error: --input is required");
         return EXIT_FAILURE;
     }
-
-    auto reader_result = PcapngReader::open(cfg.input_file);
-    if (!reader_result) {
-        std::println(stderr, "Error: open pcap '{}': {}", cfg.input_file, reader_result.error().message());
-        return EXIT_FAILURE;
-    }
-    auto& reader = *reader_result;
-
-    AnalysisState state;
-    uint32_t total_packets = 0;
-    uint32_t aa_packets = 0;
-    uint32_t aem_packets = 0;
-    uint64_t last_time_us = 0;
-
-    auto walk_status = for_each_packet(
-        reader, [&](uint64_t capture_us, Eui48 const& da, Eui48 const& sa, uint16_t ethertype, Packet const& payload) {
-            (void)da;
-            (void)sa;
-            ++total_packets;
-            if (state.capture_start_us == 0) {
-                state.capture_start_us = capture_us;
-            }
-            last_time_us = capture_us;
-
-            if (ethertype != protocols::ETHERTYPE_AVTP) {
-                return;
-            }
-            if (payload.empty() || payload[0] != avtp::AvtpSubtype::aecp) {
-                return;
-            }
-            if (payload.size() < AecpDuCommon::LENGTH) {
-                return;
-            }
-
-            AecpDuCommon common{};
-            span_load(common, make_const_span(payload).first<AecpDuCommon::LENGTH>());
-
-            if (cfg.has_controller_filter && common.controller_entity_id != cfg.controller_filter) {
-                return;
-            }
-            if (cfg.has_target_filter && common.target_entity_id != cfg.target_filter) {
-                return;
-            }
-
-            if (common.is_address_access() && payload.size() >= AecpAaDu::LENGTH) {
-                ++aa_packets;
-                handle_aa_packet(state, payload, capture_us, cfg.verbose);
-            } else if (common.is_aem() && payload.size() >= AemDu::LENGTH) {
-                if (handle_aem_packet(state, payload, capture_us, cfg.verbose)) {
-                    ++aem_packets;
-                }
-            }
-        });
-    if (!walk_status) {
-        std::println(stderr, "Error: pcap read failed: {}", walk_status.error().message());
-        return EXIT_FAILURE;
-    }
-
-    finalize_pending(state);
-    print_report(cfg.input_file, state, total_packets, aa_packets, aem_packets, last_time_us);
-    return EXIT_SUCCESS;
+    return analyze_capture(cfg);
 }
