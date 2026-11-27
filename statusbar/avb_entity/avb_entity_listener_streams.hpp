@@ -300,6 +300,10 @@ struct ListenerStreams
     /// LATE/EARLY classification. Reactor/RX thread.
     void on_stream_rx_frame(std::span<uint8_t const> frame, int64_t gptp_now_ns);
 
+    /// on_stream_rx_frame() told the receive time as avtp::Nanoseconds, a count
+    /// on the stream's timeline that is never below zero.
+    void on_stream_rx_frame(std::span<uint8_t const> frame, avtp::Nanoseconds const now) { on_stream_rx_frame(frame, now.count()); }
+
     /// The stream kind @p frame's AVTP subtype carries (other: none a listener receives).
     [[nodiscard]] static auto subtype_kind(std::span<uint8_t const> frame) noexcept -> StreamKind;
     /// Whether @p frame is for @p slot: it carries the slot's connected stream_id, whatever its subtype.
@@ -379,24 +383,19 @@ struct ListenerStreams
     [[nodiscard]] auto fill_stream_input_counters(uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const
         -> bool;
 
-    /// GET_COUNTERS for a STREAM_INPUT index as Milan v1.2 Table 5.16 has them
-    /// (StreamInputIntervals: interval counters as of the last fold). True if
-    /// it is one of our stream inputs. Reactor thread.
+    /// The same as Milan v1.3 Table 5.13 has them: the slot's StreamInputIntervals,
+    /// current(). True if it is one of our stream inputs. Reactor thread.
     [[nodiscard]] auto fill_interval_stream_input_counters(
         uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) const -> bool;
 
     /// End STREAM_INPUT @p descriptor_index's observation interval
-    /// (StreamInputIntervals::fold): true when a counter changed. Reactor thread.
+    /// (StreamInputIntervals::fold), a stopped input's lock dropped first with
+    /// no interruption: true when a value changed. Reactor thread.
     [[nodiscard]] auto fold_input_counters(uint16_t descriptor_index) -> bool;
 
-    /// The input became bound: zero its counters (Milan v1.2 Section 5.3.8.10).
-    /// Reactor thread.
+    /// The input became bound: zero its Milan counters (Milan v1.3 Section
+    /// 5.3.8.10). Reactor thread.
     void reset_input_counters(uint16_t descriptor_index);
-
-    /// The input was unbound (a controller's UNBIND_RX, or a classic
-    /// DISCONNECT_RX): its media lock goes without counting an interruption.
-    /// Reactor thread.
-    void notify_input_unbound(uint16_t descriptor_index);
 
     /// Our listener connected to a remote talker: reserve via MSRP (Listener Ready)
     /// and join the talker's stream group on the RX socket -- when the
@@ -440,8 +439,8 @@ struct ListenerStreams
     /// tally_discarded_stream_input_packet() has it. The connection, the MSRP
     /// Listener declaration and the group membership stay as they are: a
     /// stopped input is still bound and still reserves. Kept by stream index,
-    /// so it outlives close_rx() and open_stream(). A change is told to
-    /// set_on_input_changed()'s function. Reactor thread; the RX thread reads it for each frame.
+    /// so it outlives close_rx() and open_stream(). Reactor thread; the RX
+    /// thread reads it for each frame.
     void set_stream_stopped(uint16_t stream_index, bool stopped) noexcept;
     [[nodiscard]] auto stream_stopped(uint16_t const stream_index) const noexcept -> bool
     {
@@ -473,17 +472,26 @@ struct ListenerStreams
     [[nodiscard]] auto stream_format(uint16_t stream_index) const noexcept -> uint64_t;
 
     //
-    // A listener stream offloaded from the kit (docs/AVB_ENTITY_KIT.md)
+    // A listener stream received beside the stream port (docs/ENTITY_CONSTRUCTION_KIT.md)
     //
 
-    /// Told on the reactor of each change of what STREAM_INPUT @p stream_index receives: the stream ID it matches frames
-    /// by (0: none) and whether it discards them (stopped); not the state at install. Set before streams flow; an empty
-    /// function removes it. It must not throw, and what it captures must outlive the kit: stop() releases every input.
-    using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, uint64_t stream_id, bool stopped), 32>;
+    /// What a STREAM_INPUT receives, as a data plane beside the port that receives its stream needs it.
+    struct InputState
+    {
+        uint64_t stream_id{0};  ///< the stream whose frames it receives (frame_is_for_listener()); 0: none
+        bool stopped{false};    ///< its AVTPDUs discarded unread (set_stream_stopped())
+        uint64_t format{0};     ///< the format in force (stream_format())
+    };
+    /// Called on the reactor thread with an open input's InputState at open_stream(), at each change and, stream ID 0,
+    /// at close_rx(). A later install replaces an earlier one; it must not throw. The data plane discards an AAF AVTPDU
+    /// not of the format itself, counted UNSUPPORTED_FORMAT (Milan v1.3 4.4.2.2).
+    using InputChangedFn = sg14::inplace_function<void(uint16_t stream_index, InputState const& state), 32>;
     void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
-    /// An offload data plane received @p counts of STREAM_INPUT @p stream_index since it last said, @p samples
-    /// sample frames of them accepted: added to its counters and telemetry. False for no such input. Called by the one
-    /// thread that reports the stream, at least once an observation interval, while the kit receives none of it.
+    /// STREAM_INPUT @p stream_index's InputState now; nullopt for an input that is not open. Reactor thread.
+    [[nodiscard]] auto input_state(uint16_t stream_index) const noexcept -> std::optional<InputState>;
+    /// The data plane received @p counts of STREAM_INPUT @p stream_index, @p samples frames accepted: added to its counters
+    /// and telemetry; false for no such input. One thread, while the port receives none of it and never across
+    /// open_stream() or close_rx() (it walks the slots), at least twice an observation interval: none reported is silence.
     [[nodiscard]] auto notify_offload_received(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
         -> bool;
 
@@ -514,6 +522,16 @@ struct ListenerStreams
     /// Whether @p frame (an AVTPDU) carries the stream @p slot has published
     /// as its connection; false for a frame too short to carry one. RX thread.
     [[nodiscard]] static auto slot_receives(ListenerStreamSlot const& slot, std::span<uint8_t const> frame) -> bool;
+    /// The stream the slot now receives, for the RX thread, and whether a Milan sink settled on it.
+    void publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool settled);
+    /// @p slot receives the frames of @p stream_id (0: none) from now on, told to on_input_changed_ when that moved.
+    void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
+    /// on_input_changed_ told @p slot's InputState, if set.
+    void notify_input_changed(ListenerStreamSlot const& slot) const noexcept;
+    /// @p counts of a stopped @p slot, or one with no stream: no lock gained, and only a stopped one's dropped.
+    void count_offload_idle(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
+    /// @p slot's telemetry for a report of @p counts and @p samples: its AVTPDUs accepted and refused, its samples.
+    static void count_offload_delivered(ListenerStreamSlot& slot, StreamInputCounts const& counts, uint64_t samples) noexcept;
     /// The status line of a connect: log_settled with a match, log_connected without.
     void log_attached(uint16_t stream_index, ieee::Eui48 dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool ready);
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);
@@ -539,16 +557,10 @@ struct ListenerStreams
     /// Build @p slot's deserializer for @p spec: what open_stream and
     /// reformat_stream share. Errors as open_stream's.
     [[nodiscard]] static auto shape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
-    /// Apply @p spec to the newly shaped @p slot and bind its pending callbacks.
+    /// Apply @p spec to the newly shaped @p slot, bind its pending callbacks and tell the input hook.
     void begin_slot(ListenerStreamSlot& slot, StreamSpec const& spec);
-    /// @p slot matches frames of @p stream_id (0: none) from now on, told to on_input_changed_.
-    void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
-    /// on_input_changed_ told of @p slot as it stands, if set.
-    void notify_input_changed(ListenerStreamSlot const& slot) const noexcept;
-    /// @p counts added to @p slot's counters; a lost lock as unlock_stream_input() while it is stopped or unbound.
-    static void count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts, bool stopped) noexcept;
-    /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard.
-    [[nodiscard]] static auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
+    /// Re-shape @p slot for @p spec through a trial, swapped in under the slot's guard; a new format is told.
+    [[nodiscard]] auto reshape(ListenerStreamSlot& slot, StreamSpec const& spec) -> Status;
     /// Move @p trial's deserializers and @p spec's format into @p slot. Under the guard.
     static void adopt_shape(ListenerStreamSlot& slot, ListenerStreamSlot const& trial, StreamSpec const& spec) noexcept;
     /// Receive one frame told @p rx_now (false: none queued): through rx_buf_ on a serialized
@@ -582,6 +594,8 @@ struct ListenerStreams
         StreamInputCounters::margin_histogram_config_for(StreamInputCounters::DEFAULT_PRESENTATION_OFFSET_NS)};
     nanoavb::NanoAvbComponents& components_;  ///< for acmp_listener (connection state) + msrp_handler (reservation)
     std::atomic<int64_t> const& last_gptp_ns_;
+    /// Told what each input receives (set_on_input_changed). Reactor thread.
+    InputChangedFn on_input_changed_{};
     /// Where accepted listener audio goes (today the WAN tunnel). The listener does
     /// not know what the sink does with it. Nullable.
     StreamRxAudioSink* audio_sink_{nullptr};

@@ -13,6 +13,7 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/net/net_test_port.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/test/test.hpp"
@@ -22,7 +23,9 @@
 #include <atomic>
 #include <cstdint>
 #include <memory_resource>
+#include <random>
 #include <span>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -240,6 +243,759 @@ TEST(talker_streams, close_tx_lets_a_restart_open_the_streams_afresh)
     EXPECT_EQ(talker.slot_of(statusbar::avb_entity::StreamKind::aaf), talker.slot_for(3));
 }
 
+// --- What a stream output sent: Milan v1.3 Table 5.4, IEEE 1722.1-2021 Table 7-158 ---
+
+TEST(talker_tx_counters, what_is_sent_counts_avtpdus_tu_and_mr_toggles)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    avb_entity::TalkerStreamSlot slot{};
+    slot.spec.index = 3;
+    talker.count_sent(slot, /*tu=*/false, /*mr=*/false);
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/false);
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/true);  // mr toggled
+    talker.count_sent(slot, /*tu=*/true, /*mr=*/true);
+    auto const* const c = talker.tx_counters(3);
+    EXPECT_TRUE(c != nullptr);
+    EXPECT_EQ(c->pdus.load(), 4U);
+    EXPECT_EQ(c->tu_pdus.load(), 3U);
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(slot.tx_packets, 4U);
+    EXPECT_EQ(talker.tx_counters(4)->pdus.load(), 0U);  // each stream its own
+    EXPECT_TRUE(talker.tx_counters(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)) == nullptr);
+
+    // A stream opened again after close_tx(): its first mr is compared with nothing.
+    talker.close_tx();
+    talker.count_sent(slot, /*tu=*/false, /*mr=*/false);
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(c->pdus.load(), 5U);
+}
+
+TEST(talker_tx_counters, a_stream_starts_when_its_gate_opens_and_stops_when_it_closes)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    avb_entity::TalkerStreamSlot slot{};
+    slot.spec.index = 2;
+    auto const& changes = talker.tx_counters(2)->streaming_changes;
+    auto tick = [&](bool const gate_open) { talker.transmit_if_due(slot, {}, gate_open, 0, {}); };
+    auto starts_stops = [&] {
+        return std::array{avb_entity::stream_starts(changes.load()), avb_entity::stream_stops(changes.load())};
+    };
+
+    tick(false);
+    EXPECT_EQ(starts_stops(), (std::array{0U, 0U}));
+    tick(true);
+    tick(true);  // streaming on: one start
+    EXPECT_EQ(starts_stops(), (std::array{1U, 0U}));
+    tick(false);
+    EXPECT_EQ(starts_stops(), (std::array{1U, 1U}));
+    tick(true);
+    talker.set_stream_stopped(2, true);  // STOP_STREAMING is a closed gate
+    tick(true);
+    EXPECT_EQ(starts_stops(), (std::array{2U, 2U}));
+    talker.set_stream_stopped(2, false);
+    tick(true);
+    EXPECT_EQ(starts_stops(), (std::array{3U, 2U}));
+    // The streams end with the run: a streaming one counts its stop.
+    talker.close_tx();
+    EXPECT_EQ(starts_stops(), (std::array{3U, 3U}));
+}
+
+// --- AVTP mr: IEEE 1722-2016 Clauses 4.4.4.3 and 10.4.3 ---
+
+namespace {
+
+/// An AAF STREAM_OUTPUT @p index opened on @p talker, with no port behind it.
+auto open_aaf_output(avb_entity::TalkerStreams& talker, uint16_t const index) -> avb_entity::TalkerStreamSlot&
+{
+    avb_entity::StreamSpec spec{};
+    spec.index = index;
+    spec.format_word = 0x0205022002006000ULL;  // AAF 48k int32 2ch, 6 frames
+    spec.format = avb_entity::decode_stream_format(spec.format_word);
+    EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
+    return *talker.slot_for(index);
+}
+
+/// The mr of @p count AVTPDUs of @p slot, each stored and counted as transmit_* does.
+auto send_mr(avb_entity::TalkerStreams& talker, avb_entity::TalkerStreamSlot& slot, int const count) -> std::vector<bool>
+{
+    std::vector<bool> sent;
+    for (int i = 0; i < count; ++i) {
+        sent.push_back(talker.next_mr(slot));
+        talker.count_sent(slot, false, sent.back());
+    }
+    return sent;
+}
+
+}  // namespace
+
+TEST(talker_mr, a_restart_toggles_mr_on_the_next_avtpdu_and_holds_it_for_eight)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+
+    // A second restart inside the hold toggles mr back on the first AVTPDU after it, not sooner.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 1) == std::vector<bool>{true});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 7) == std::vector<bool>(7, true));
+    EXPECT_TRUE(send_mr(talker, slot, 9) == std::vector<bool>(9, false));
+
+    // Restarts asked before the AVTPDU that carries them toggle mr once.
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(send_mr(talker, slot, 10) == std::vector<bool>(10, true));
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 3U);  // MEDIA_RESET
+}
+
+TEST(talker_mr, a_stream_not_open_refuses_a_restart_and_a_reopened_one_starts_clear)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    EXPECT_FALSE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)).has_value());
+
+    // A restart asked of a run that ended before its AVTPDU went is not the next run's.
+    (void)open_aaf_output(talker, 3);
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    talker.close_tx();
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 3) == std::vector<bool>(3, false));
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 0U);
+}
+
+TEST(talker_mr, a_media_clock_re_anchored_on_a_stepped_gptp_timeline_toggles_mr)
+{
+    // The timestamps jump with the gPTP time the media clock re-anchors on: a restart of it.
+    ptpclient::MediaClockGenerator mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    (void)mc.advance(1'000'000'000, 1.0, 6);
+    auto& slot = open_aaf_output(talker, 2);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+    (void)mc.advance(1'000'125'000, 1.0, 6);  // on time: no step
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+
+    (void)mc.advance(9'000'000'000, 1.0, 6);  // gPTP stepped seconds ahead
+    EXPECT_EQ(mc.step_count(), 1U);
+    EXPECT_TRUE(send_mr(talker, slot, 8) == std::vector<bool>(8, true));
+    (void)mc.advance(1'000'000'000, 1.0, 6);  // and back, the hold over: the next AVTPDU
+    EXPECT_TRUE(send_mr(talker, slot, 1) == std::vector<bool>{false});
+    EXPECT_EQ(talker.tx_counters(2)->mr_toggles.load(), 2U);
+}
+
+// A CRF stream format names up to 255 timestamps per AVTPDU; the talker's frame holds
+// MAX_CRF_TIMESTAMPS_PER_PDU. A format that asks for more is refused when the stream is opened,
+// since its AVTPDU would be sent from beyond the frame.
+TEST(talker_streams, a_crf_stream_with_more_timestamps_than_the_frame_holds_is_refused)
+{
+    constexpr uint64_t CRF_48K_NO_COUNT = 0x041060010000BB80ULL & ~(0xFFULL << 32);
+    auto const open_with = [](uint64_t const timestamps) {
+        ptpclient::MediaClockGenerator const mc{};
+        std::atomic<int64_t> const gptp_now{0};
+        avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+        avb_entity::StreamSpec spec{};
+        spec.index = 2;
+        spec.format_word = CRF_48K_NO_COUNT | (timestamps << 32);
+        spec.format = avb_entity::decode_stream_format(spec.format_word);
+        EXPECT_TRUE(spec.format.kind == avb_entity::StreamKind::crf);
+        EXPECT_EQ(uint64_t{spec.format.crf_timestamps_per_pdu}, timestamps);
+        return talker.open_stream(spec, {}, {}).has_value();
+    };
+    constexpr uint64_t most = avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU;
+    EXPECT_TRUE(open_with(1));
+    EXPECT_TRUE(open_with(most));
+    EXPECT_FALSE(open_with(most + 1));
+    EXPECT_FALSE(open_with(255));
+    EXPECT_FALSE(open_with(0));
+}
+
+// --- AVTP tu: IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2 and Annex B.1.1 ---
+
+TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_none_is_in_force)
+{
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{1}}));  // nothing told: certain
+
+    talker.notify_grandmaster_changed(Raw{seconds{10}});
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{10}}));
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{10}} + WINDOW - nanoseconds{1}));
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{10}} + WINDOW));
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{100}}));  // until one is in force, however long
+    talker.notify_grandmaster_changed(Raw{seconds{200}});
+    EXPECT_TRUE(talker.timestamp_uncertain(Raw{seconds{200}} + nanoseconds{1}));
+    EXPECT_FALSE(talker.timestamp_uncertain(Raw{seconds{200}} + WINDOW));
+}
+
+// The calls that take nanoseconds are as they were: the same window, on whatever clock the caller
+// times tu on, with 0 for an instant never told.
+TEST(talker_tu, the_calls_that_take_nanoseconds_time_the_same_window)
+{
+    constexpr int64_t SECOND_NS = 1'000'000'000;
+    constexpr int64_t WINDOW_NS = avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS;
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.timestamp_uncertain(0));  // nothing told: certain
+
+    talker.notify_grandmaster_changed(10 * SECOND_NS);
+    EXPECT_TRUE(talker.timestamp_uncertain(10 * SECOND_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain((10 * SECOND_NS) + WINDOW_NS - 1));
+    EXPECT_FALSE(talker.timestamp_uncertain((10 * SECOND_NS) + WINDOW_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain(avb_entity::TalkerStreams::RawTimePoint{std::chrono::seconds{10}}));  // one state
+    EXPECT_FALSE(talker.timestamp_uncertain(0));  // an instant never told is in no window
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.timestamp_uncertain(100 * SECOND_NS));
+    EXPECT_TRUE(talker.timestamp_uncertain(0));
+    talker.notify_grandmaster_changed(int64_t{0});  // stamped by a caller told no time: no window
+    EXPECT_FALSE(talker.timestamp_uncertain(int64_t{1}));
+}
+
+// The talker reads no clock: the AVTPDUs of a media wake take their tu at the instant the wake was
+// told, and an instant never told is in no window.
+TEST(talker_tu, an_avtpdu_takes_its_tu_at_the_wake_the_talker_was_told)
+{
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());  // told nothing at all
+
+    talker.notify_grandmaster_changed(Raw{seconds{50}});
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());  // a window, and no wake told: not in it
+    talker.tell_wake_time(Raw{seconds{50}} + nanoseconds{125'000});
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());
+    talker.tell_wake_time(Raw{seconds{50}} + WINDOW);
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());
+
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());  // no grandmaster: tu whatever the wake
+    talker.tell_wake_time(Raw{});
+    EXPECT_TRUE(talker.wake_timestamp_uncertain());
+
+    // A grandmaster change stamped by a reactor that was told no time opens no window.
+    talker.notify_grandmaster_changed(Raw{});
+    talker.tell_wake_time(Raw{nanoseconds{1}});
+    EXPECT_FALSE(talker.wake_timestamp_uncertain());
+}
+
+TEST(talker_tx_counters, signal_presence_is_unreported_until_set_and_kept_to_sixty_channels)
+{
+    // Milan v1.3 Section 5.3.7.7.1: channels 0-59 in two counters; nothing until the entity reports.
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, nullptr};
+    EXPECT_FALSE(talker.signal_presence(3).has_value());
+    EXPECT_TRUE(talker.set_signal_presence(3, 0).has_value());
+    EXPECT_EQ(talker.signal_presence(3), std::optional<uint64_t>{0});  // reported: no signal
+    EXPECT_TRUE(talker.set_signal_presence(3, ~uint64_t{0}).has_value());
+    EXPECT_EQ(talker.signal_presence(3), std::optional<uint64_t>{(uint64_t{1} << 60U) - 1U});
+    EXPECT_FALSE(talker.signal_presence(4).has_value());  // each stream its own
+    auto const past = static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS);
+    EXPECT_FALSE(talker.set_signal_presence(past, 1).has_value());
+    EXPECT_FALSE(talker.signal_presence(past).has_value());
+}
+
+// --- A talker stream sent beside the stream port ---
+
+namespace {
+
+using Sent = avb_entity::TalkerStreams::OffloadSent;
+
+/// STREAM_START and STREAM_STOP of STREAM_OUTPUT @p index.
+auto starts_stops_for(avb_entity::TalkerStreams const& talker, uint16_t const index) -> std::array<uint32_t, 2>
+{
+    uint32_t const changes = talker.tx_counters(index)->streaming_changes.load();
+    return {avb_entity::stream_starts(changes), avb_entity::stream_stops(changes)};
+}
+
+}  // namespace
+
+TEST(talker_offload, the_data_plane_starts_at_the_kit_s_sequence_with_a_pending_restart_applied)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+    EXPECT_TRUE(slot.aaf.has_value());
+    slot.aaf->sequence_num = 42;  // where the kit's own path left it
+
+    auto header = talker.offload_header(slot);
+    EXPECT_EQ(header.sequence_num, uint8_t{42});
+    EXPECT_FALSE(header.mr);
+    EXPECT_FALSE(header.tu);
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    header = talker.offload_header(slot);
+    EXPECT_TRUE(header.mr);  // toggled as for the kit's next AVTPDU, and held
+    EXPECT_EQ(slot.mr_hold, avb_entity::TalkerStreams::MR_HOLD_PDUS);
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    EXPECT_EQ(talker.tx_counters(3)->pdus.load(), 2U);  // a header sends nothing
+}
+
+TEST(talker_offload, what_it_sent_counts_as_the_kit_s_own_and_the_kit_goes_on_from_its_sequence)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(slot.aaf.has_value() && slot.reframer.has_value());
+    auto& aaf = *slot.aaf;
+    auto& reframer = *slot.reframer;
+    std::array<float, 12> const audio{};
+    reframer.push(audio, 6, 0);  // a block the kit's own path held
+
+    auto const header = talker.notify_offload_sent(slot, true, Sent{.pdus = 10, .tu_pdus = 3, .next_sequence = 10});
+    EXPECT_EQ(header.sequence_num, uint8_t{10});
+    auto const* const c = talker.tx_counters(3);
+    EXPECT_EQ(c->pdus.load(), 10U);
+    EXPECT_EQ(c->tu_pdus.load(), 3U);
+    EXPECT_EQ(slot.tx_packets, 10U);
+    EXPECT_EQ(slot.aaf->sequence_num, uint8_t{10});          // the kit's own path goes on from it
+    EXPECT_EQ(slot.reframer->buffered_frames(), size_t{0});  // and starts clean
+
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .tu_pdus = 5, .next_sequence = 12});
+    EXPECT_EQ(c->tu_pdus.load(), 5U);  // at most the AVTPDUs sent
+    (void)talker.notify_offload_sent(slot, true, Sent{});
+    EXPECT_EQ(aaf.sequence_num, uint8_t{12});  // nothing sent: nothing moves
+    EXPECT_EQ(c->pdus.load(), 12U);
+    EXPECT_EQ(c->mr_toggles.load(), 0U);
+}
+
+TEST(talker_offload, the_stream_starts_and_stops_as_its_gate_and_stop_streaming_have_it)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 2);
+    (void)talker.notify_offload_sent(slot, false, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{0U, 0U}));
+    (void)talker.notify_offload_sent(slot, true, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{1U, 0U}));
+    talker.set_stream_stopped(2, true);
+    (void)talker.notify_offload_sent(slot, true, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{1U, 1U}));
+    talker.set_stream_stopped(2, false);
+    (void)talker.notify_offload_sent(slot, true, {});
+    (void)talker.notify_offload_sent(slot, false, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{2U, 2U}));
+}
+
+// IEEE 1722-2016 Clause 4.4.4.3: a toggle holds for MR_HOLD_PDUS AVTPDUs sent; a restart within the hold
+// toggles mr at the first header after it, and MEDIA_RESET counts each toggle the AVTPDUs carry.
+TEST(talker_offload, the_mr_hold_runs_down_by_the_avtpdus_reported)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 4});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 5, .next_sequence = 9}).mr);
+    EXPECT_EQ(slot.mr_hold, uint8_t{3});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .next_sequence = 11}).mr);   // still held
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 12}).mr);  // the hold is over
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 1U);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 13});
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 2U);
+}
+
+// With last_mr, a toggle is counted, and its hold run down, only by the AVTPDUs the wire shows carrying it.
+TEST(talker_offload, with_last_mr_a_toggle_counts_once_the_wire_carries_it)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 4, .last_mr = false});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    auto const* const c = talker.tx_counters(3);
+
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 8, .last_mr = false});
+    EXPECT_EQ(c->mr_toggles.load(), 0U);  // latched before the new mr
+    EXPECT_EQ(slot.mr_hold, avb_entity::TalkerStreams::MR_HOLD_PDUS);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 12, .last_mr = true});
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(slot.mr_hold, uint8_t{7});  // the last of the four carried it
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 7, .next_sequence = 19, .last_mr = true});
+    EXPECT_EQ(slot.mr_hold, uint8_t{0});
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+}
+
+// IEEE 1722-2016 Clause 4.4.4.3: restarts owed while nothing is sent toggle mr once, at the first AVTPDU
+// after; reports on closed ticks run no hold down and arm none, so no second toggle follows.
+TEST(talker_offload, restarts_owed_while_the_gate_is_closed_toggle_mr_once_when_it_opens)
+{
+    ptpclient::MediaClockGenerator mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    (void)mc.advance(1'000'000'000, 1.0, 6);
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, {}).mr);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .next_sequence = 2}).mr);
+
+    (void)mc.advance(9'000'000'000, 1.0, 6);  // gPTP stepped: a re-anchor, on one closed tick
+    EXPECT_FALSE(talker.notify_offload_sent(slot, false, {}).mr);
+    (void)mc.advance(1'000'000'000, 1.0, 6);  // and another, on the next
+    EXPECT_FALSE(talker.notify_offload_sent(slot, false, {}).mr);
+    EXPECT_EQ(slot.mr_hold, uint8_t{0});
+    EXPECT_EQ(mc.step_count(), 2U);
+
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, {}).mr);  // the gate opens: one toggle
+    for (uint8_t seq = 2; seq < 26; seq += 8) {
+        EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 8, .next_sequence = static_cast<uint8_t>(seq + 8)}).mr);
+    }
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 1U);  // MEDIA_RESET
+}
+
+// Milan v1.3 Section 4.3.5.2 and Annex B.1.1: the header carries tu as the kit's own AVTPDUs would.
+TEST(talker_offload, the_header_carries_tu_while_the_kit_s_avtpdus_would)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    talker.tell_wake_time(Raw{seconds{300}});
+    EXPECT_FALSE(talker.offload_header(slot).tu);  // before the first grandmaster notice
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.offload_header(slot).tu);
+
+    talker.notify_grandmaster_changed(Raw{seconds{301}});  // the reactor cycle's instant
+    talker.tell_wake_time(Raw{seconds{301}} + WINDOW - nanoseconds{1});
+    EXPECT_TRUE(talker.offload_header(slot).tu);  // a wake within the window after the change
+    talker.tell_wake_time(Raw{seconds{301}} + WINDOW);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 1}).tu);  // one from its end
+    talker.tell_wake_time(Raw{});
+    EXPECT_FALSE(talker.offload_header(slot).tu);  // a wake never told is in no window
+}
+
+// --- Stream frame templates: IEEE 1722-2016 Clauses 4.4.3, 7.2 and 10.4 ---
+
+namespace {
+
+/// A small deterministic generator, so a failing case can be found again.
+struct Lcg
+{
+    uint64_t state{0x2545F4914F6CDD1DULL};
+    auto next(uint32_t const bound) -> uint32_t
+    {
+        state = (state * 6364136223846793005ULL) + 1442695040888963407ULL;
+        return static_cast<uint32_t>((state >> 33U) % bound);
+    }
+};
+
+auto eui48_for(Lcg& rng) -> ieee::Eui48
+{
+    ieee::Eui48 mac{};
+    for (auto& octet : mac.value) {
+        octet = static_cast<uint8_t>(rng.next(256));
+    }
+    return mac;
+}
+
+/// Where a frame goes and how it is tagged.
+struct Addressing
+{
+    ieee::Eui48 dest{};
+    ieee::Eui48 src{};
+    uint16_t vid{2};
+    uint8_t pcp{3};
+
+    [[nodiscard]] auto header() const -> ieee::EthernetFrame { return avb_entity::stream_frame_header(dest, src, vid, pcp); }
+};
+
+auto addressing_for(Lcg& rng) -> Addressing
+{
+    return {
+        .dest = eui48_for(rng),
+        .src = eui48_for(rng),
+        .vid = static_cast<uint16_t>(1 + rng.next(4094)),
+        .pcp = static_cast<uint8_t>(rng.next(8))};
+}
+
+/// The frame headers transmit_aaf() sends: aaf_stream_serialize()'s header behind build_stream_frame().
+auto aaf_frame_headers(
+    avtp::AafStreamOutputContext ctx,
+    uint16_t const frames,
+    uint32_t const timestamp,
+    bool const mr,
+    bool const tu,
+    Addressing const& eth) -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> payload(static_cast<size_t>(frames) * ctx.channel_count * avtp::aaf_bytes_per_sample(ctx.format));
+    avtp::AafPdu pdu{};
+    auto const silence = [](uint8_t, std::span<float> dest) { std::ranges::fill(dest, 0.0F); };
+    EXPECT_EQ(avtp::aaf_stream_serialize(ctx, pdu, payload, frames, uint64_t{timestamp}, silence), payload.size());
+    pdu.set_tu(tu);
+    pdu.set_mr(mr);
+    std::array<uint8_t, avtp::AafPdu::HEADER_LENGTH> header{};
+    span_store(std::span<uint8_t>{header}, pdu);
+    std::vector<uint8_t> frame(64);
+    auto const length = avb_entity::build_stream_frame(frame, eth.dest, eth.src, eth.vid, eth.pcp, header);
+    frame.resize(length);
+    return frame;
+}
+
+/// The frame headers transmit_crf() sends for @p ctx's next AVTPDU.
+auto crf_frame_headers(avtp::CrfStreamOutputContext const& ctx, bool const mr, bool const tu, Addressing const& eth)
+    -> std::vector<uint8_t>
+{
+    avtp::CrfPdu pdu{};
+    pdu.init_audio_sample(ctx.stream_id, ctx.base_frequency, ctx.pull, ctx.timestamp_interval, ctx.timestamps_per_packet);
+    pdu.set_sequence_num(ctx.sequence_num);
+    pdu.set_tu(tu);
+    pdu.set_mr(mr);
+    std::array<uint8_t, avtp::CrfPdu::HEADER_LENGTH> header{};
+    span_store(std::span<uint8_t>{header}, pdu);
+    std::vector<uint8_t> frame(64);
+    auto const length = avb_entity::build_stream_frame(frame, eth.dest, eth.src, eth.vid, eth.pcp, header);
+    frame.resize(length);
+    return frame;
+}
+
+/// @p tmpl written for one frame, as many octets as its header.
+auto written_for(
+    avb_entity::StreamFrameTemplate const& tmpl, uint8_t const sequence, uint32_t const timestamp, bool const mr, bool const tu)
+    -> std::vector<uint8_t>
+{
+    std::vector<uint8_t> out(tmpl.length);
+    EXPECT_TRUE(tmpl.write(sequence, timestamp, mr, tu, out));
+    return out;
+}
+
+constexpr std::array<avtp::AafFormat, 4> AAF_FORMATS{
+    avtp::AafFormat::float_32bit, avtp::AafFormat::int_32bit, avtp::AafFormat::int_24bit, avtp::AafFormat::int_16bit};
+constexpr std::array<avtp::AafSampleRate, 3> AAF_RATES{
+    avtp::AafSampleRate::rate_44_1_khz, avtp::AafSampleRate::rate_48_khz, avtp::AafSampleRate::rate_96_khz};
+
+}  // namespace
+
+TEST(stream_frame_template, the_aaf_template_s_fields_sit_where_ieee_1722_puts_them)
+{
+    avtp::AafStreamOutputContext const ctx{tsn::StreamId{}, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    auto const tmpl = avb_entity::aaf_frame_template(ctx, 6, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_EQ(tmpl->length, size_t{42});
+    EXPECT_EQ(tmpl->mr_offset, size_t{19});  // octet 1 of the AVTPDU, behind 18 octets of tagged header
+    EXPECT_EQ(tmpl->sequence_offset, size_t{20});
+    EXPECT_EQ(tmpl->tu_offset, size_t{21});
+    EXPECT_EQ(tmpl->timestamp_offset, size_t{30});
+    EXPECT_EQ(tmpl->bytes[18], uint8_t{0x02});  // subtype AAF
+    EXPECT_EQ(tmpl->bytes[19], uint8_t{0x81});  // sv, tv; mr clear
+    EXPECT_EQ(tmpl->bytes[21], uint8_t{0x00});  // tu clear
+    EXPECT_EQ(tmpl->bytes[38], uint8_t{0x00});  // stream_data_length 6 x 8 x 4 = 192
+    EXPECT_EQ(tmpl->bytes[39], uint8_t{0xC0});
+}
+
+TEST(stream_frame_template, the_crf_template_s_fields_sit_where_ieee_1722_puts_them)
+{
+    avtp::CrfStreamOutputContext const ctx{
+        tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    auto const tmpl = avb_entity::crf_frame_template(ctx, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_EQ(tmpl->length, size_t{38});
+    EXPECT_EQ(tmpl->mr_offset, size_t{19});  // mr and tu share octet 1 (Clause 10.4)
+    EXPECT_EQ(tmpl->tu_offset, size_t{19});
+    EXPECT_EQ(tmpl->sequence_offset, size_t{20});
+    EXPECT_EQ(tmpl->timestamp_offset, size_t{0});  // its timestamps are its payload
+    EXPECT_EQ(tmpl->bytes[18], uint8_t{0x04});     // subtype CRF
+}
+
+TEST(stream_frame_template, written_an_aaf_template_is_the_header_the_talker_sends)
+{
+    Lcg rng{};
+    for (int i = 0; i < 2000; ++i) {
+        auto const format = AAF_FORMATS[rng.next(AAF_FORMATS.size())];
+        auto const channels = static_cast<uint16_t>(1 + rng.next(8));
+        auto const frames = static_cast<uint16_t>(1 + rng.next(12));
+        tsn::StreamId stream_id{};
+        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        avtp::AafStreamOutputContext ctx{stream_id, format, AAF_RATES[rng.next(AAF_RATES.size())], channels, 32, 0};
+        ctx.sequence_num = static_cast<uint8_t>(rng.next(256));
+        auto const eth = addressing_for(rng);
+        uint32_t const timestamp = rng.next(0xFFFF'FFFFU);
+        bool const mr = rng.next(2) != 0;
+        bool const tu = rng.next(2) != 0;
+
+        auto const tmpl = avb_entity::aaf_frame_template(ctx, frames, eth.header());
+        EXPECT_TRUE(tmpl.has_value());
+        EXPECT_TRUE(
+            written_for(*tmpl, ctx.sequence_num, timestamp, mr, tu) == aaf_frame_headers(ctx, frames, timestamp, mr, tu, eth));
+    }
+}
+
+TEST(stream_frame_template, written_a_crf_template_is_the_header_the_talker_sends)
+{
+    Lcg rng{};
+    for (int i = 0; i < 500; ++i) {
+        tsn::StreamId stream_id{};
+        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        avtp::CrfStreamOutputContext ctx{
+            stream_id,
+            avtp::CrfType::audio_sample,
+            rng.next(2) != 0 ? 48'000U : 96'000U,
+            avtp::CrfPull::multiply_1_0,
+            static_cast<uint16_t>(1 + rng.next(192)),
+            static_cast<uint16_t>(1 + rng.next(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU))};
+        ctx.sequence_num = static_cast<uint8_t>(rng.next(256));
+        auto const eth = addressing_for(rng);
+        bool const mr = rng.next(2) != 0;
+        bool const tu = rng.next(2) != 0;
+
+        auto const tmpl = avb_entity::crf_frame_template(ctx, eth.header());
+        EXPECT_TRUE(tmpl.has_value());
+        EXPECT_TRUE(written_for(*tmpl, ctx.sequence_num, 0, mr, tu) == crf_frame_headers(ctx, mr, tu, eth));
+    }
+}
+
+TEST(stream_frame_template, a_frame_the_talker_would_not_send_has_no_template)
+{
+    auto const eth = avb_entity::stream_frame_header({}, {}, 2, 3);
+    avtp::AafStreamOutputContext const aaf{tsn::StreamId{}, avtp::AafFormat::int_32bit, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    EXPECT_FALSE(avb_entity::aaf_frame_template(aaf, 0, eth).has_value());   // no frames
+    EXPECT_TRUE(avb_entity::aaf_frame_template(aaf, 46, eth).has_value());   // 24 + 1472 octets: an Ethernet payload
+    EXPECT_FALSE(avb_entity::aaf_frame_template(aaf, 47, eth).has_value());  // 24 + 1504: past one
+    avtp::AafStreamOutputContext const unlaid{
+        tsn::StreamId{}, avtp::AafFormat::user_specified, avtp::AafSampleRate::rate_48_khz, 8, 32, 0};
+    EXPECT_FALSE(avb_entity::aaf_frame_template(unlaid, 6, eth).has_value());  // no byte layout
+
+    auto crf_template_for = [&](uint16_t const timestamps) {
+        avtp::CrfStreamOutputContext const crf{
+            tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, timestamps};
+        return avb_entity::crf_frame_template(crf, eth).has_value();
+    };
+    EXPECT_FALSE(crf_template_for(0));
+    EXPECT_TRUE(crf_template_for(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU));
+    EXPECT_FALSE(crf_template_for(avb_entity::TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU + 1));
+}
+
+TEST(stream_frame_template, write_leaves_a_buffer_too_short_for_the_headers_alone)
+{
+    avtp::CrfStreamOutputContext const ctx{
+        tsn::StreamId{}, avtp::CrfType::audio_sample, 48'000, avtp::CrfPull::multiply_1_0, 96, 1};
+    auto const tmpl = avb_entity::crf_frame_template(ctx, avb_entity::stream_frame_header({}, {}, 2, 3));
+    EXPECT_TRUE(tmpl.has_value());
+    std::vector<uint8_t> out(tmpl->length - 1, 0xEE);
+    EXPECT_FALSE(tmpl->write(7, 0, true, true, out));
+    EXPECT_TRUE(std::ranges::all_of(out, [](uint8_t const b) { return b == 0xEE; }));
+}
+
+TEST(stream_frame_template, a_talker_stream_s_template_follows_its_destination_and_the_vlan_in_force)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        mc,
+        gptp_now,
+        std::pmr::get_default_resource()};
+    ieee::Eui48 const dest{0x91, 0xE0, 0xF0, 0x00, 0x0E, 0x80};
+    ieee::Eui48 const src{0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    auto open = [&talker, &dest](uint16_t const index, uint64_t const word) {
+        avb_entity::StreamSpec spec{};
+        spec.index = index;
+        spec.format_word = word;
+        spec.format = avb_entity::decode_stream_format(word);
+        EXPECT_TRUE(talker.open_stream(spec, {}, dest).has_value());
+    };
+    open(0, 0x0205022002006000ULL);  // AAF 48k int32 2ch, 6 frames
+    open(1, 0x041060010000BB80ULL);  // CRF 48k
+    open(2, 0x00A0020840000800ULL);  // AM824: no template
+
+    talker.set_vlan(0x123, 5);
+    Addressing const tagged{.dest = dest, .src = src, .vid = 0x123, .pcp = 5};
+    auto const aaf = talker.frame_template(0, src);
+    EXPECT_TRUE(aaf.has_value());
+    auto const& aaf_slot = *talker.slot_for(0);
+    EXPECT_TRUE(aaf_slot.aaf.has_value());
+    EXPECT_TRUE(
+        written_for(*aaf, 0, 0, false, false) == aaf_frame_headers(*aaf_slot.aaf, aaf_slot.aaf_samples, 0, false, false, tagged));
+    EXPECT_EQ(aaf->bytes[14], uint8_t{0xA1});  // PCP 5, VID 0x123
+    EXPECT_EQ(aaf->bytes[15], uint8_t{0x23});
+
+    auto const crf = talker.frame_template(1, src);
+    EXPECT_TRUE(crf.has_value());
+    auto const& crf_ctx = talker.slot_for(1)->crf;
+    EXPECT_TRUE(crf_ctx.has_value());
+    EXPECT_TRUE(written_for(*crf, 0, 0, false, false) == crf_frame_headers(*crf_ctx, false, false, tagged));
+    EXPECT_FALSE(talker.frame_template(2, src).has_value());
+    EXPECT_FALSE(talker.frame_template(3, src).has_value());  // no stream there
+}
+
+TEST(stream_frame_template, each_change_of_a_stream_s_frames_is_told_and_nothing_else)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        mc,
+        gptp_now,
+        std::pmr::get_default_resource()};
+    std::vector<uint16_t> told;
+    talker.set_on_frames_changed([&told](uint16_t const index) { told.push_back(index); });
+    (void)open_aaf_output(talker, 0);
+    (void)open_aaf_output(talker, 4);
+    EXPECT_TRUE(told.empty());  // not at open
+
+    talker.set_vlan(2, 3);
+    EXPECT_TRUE(told.empty());  // the VLAN in force again
+    talker.set_vlan(0x123, 3);
+    EXPECT_TRUE((told == std::vector<uint16_t>{0, 4}));
+    talker.set_vlan(0x123, 5);  // the priority alone
+    EXPECT_TRUE((told == std::vector<uint16_t>{0, 4, 0, 4}));
+
+    told.clear();
+    ieee::Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    talker.set_destination(4, block);
+    EXPECT_TRUE(told == std::vector<uint16_t>{4});
+    auto const tmpl = talker.frame_template(4, {});
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_TRUE(std::ranges::equal(tmpl->header().first(6), block.value));
+    talker.set_destination(4, block);  // no move
+    talker.set_destination(9, block);  // no such stream
+    EXPECT_EQ(told.size(), size_t{1});
+
+    talker.set_on_frames_changed({});
+    talker.set_vlan(7, 3);
+    EXPECT_EQ(told.size(), size_t{1});
+}
+
 // The raw-bytes render seam (a host's copy-only path): the payload is
 // exactly what the render wrote, the header carries the presentation time and
 // dimensions, and a refused render sends nothing and consumes no sequence number.
@@ -419,28 +1175,6 @@ TEST(raw_mr, an_aaf_frame_carries_the_media_clock_restart_bit)
     EXPECT_TRUE(pdu.has_value() && pdu->mr() && !pdu->tu());
 }
 
-// Milan v1.2 Annex B.1.1: "In case of a change of grandmaster, the tu bit
-// shall be set to 1 for the duration of 0.25 seconds"; and while no
-// grandmaster is known at all.
-TEST(talker_tu, set_for_a_quarter_second_after_a_grandmaster_change_and_while_lost)
-{
-    ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<int64_t> last_gptp_ns{0};
-    avb_entity::TalkerStreams talker{
-        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
-    constexpr int64_t t0 = 5'000'000'000;
-    EXPECT_FALSE(talker.timestamp_uncertain(t0));  // never told: certain
-    talker.notify_grandmaster_changed(t0);
-    EXPECT_TRUE(talker.timestamp_uncertain(t0));
-    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 249'999'999));
-    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 250'000'000));
-    talker.notify_grandmaster_lost();
-    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 10'000'000'000));
-    talker.notify_grandmaster_changed(t0 + 20'000'000'000);  // a grandmaster again
-    EXPECT_TRUE(talker.timestamp_uncertain(t0 + 20'100'000'000));
-    EXPECT_FALSE(talker.timestamp_uncertain(t0 + 20'300'000'000));
-}
-
 // The grandmaster in force is this entity's own clock: its time base does not step, so tu is clear at once, a
 // running window or a loss cut short.
 TEST(talker_tu, clear_while_this_entity_is_the_grandmaster)
@@ -460,38 +1194,6 @@ TEST(talker_tu, clear_while_this_entity_is_the_grandmaster)
     talker.notify_grandmaster_lost();
     talker.notify_own_grandmaster();
     EXPECT_FALSE(talker.timestamp_uncertain(t0 + 4));
-}
-
-// GET_COUNTERS' transmit totals (Milan v1.2 Table 5.4): every PDU handed to
-// the socket, those with tu set (octet 3 of an AAF PDU, octet 1 of a CRF
-// one), and each mr toggle, per STREAM_OUTPUT.
-TEST(talker_tx_counters, pdus_tu_and_mr_toggles)
-{
-    ptpclient::MediaClockGenerator media_clock{};
-    std::atomic<int64_t> last_gptp_ns{0};
-    avb_entity::TalkerStreams talker{
-        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3}, media_clock, last_gptp_ns, nullptr};
-    avb_entity::TalkerStreamSlot slot{};
-    slot.spec.index = 3;
-    std::array<uint8_t, 24> aaf{avtp::AvtpSubtype::aaf, 0x81, 0x00, 0x00};
-    (void)talker.send_stream_frame(slot, aaf);
-    aaf[3] = 0x01;  // tu
-    (void)talker.send_stream_frame(slot, aaf);
-    aaf[1] = 0x89;  // mr toggled
-    (void)talker.send_stream_frame(slot, aaf);
-    (void)talker.send_stream_frame(slot, aaf);
-    auto const* c = talker.tx_counters(3);
-    EXPECT_TRUE(c != nullptr);
-    EXPECT_EQ(c->pdus.load(), 4U);
-    EXPECT_EQ(c->tu_pdus.load(), 3U);
-    EXPECT_EQ(c->mr_toggles.load(), 1U);
-
-    avb_entity::TalkerStreamSlot crf_slot{};
-    crf_slot.spec.index = 4;
-    std::array<uint8_t, 24> crf{avtp::AvtpSubtype::crf, 0x81, 0x00, 0x00};  // tu in octet 1
-    (void)talker.send_stream_frame(crf_slot, crf);
-    EXPECT_EQ(talker.tx_counters(4)->tu_pdus.load(), 1U);
-    EXPECT_TRUE(talker.tx_counters(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)) == nullptr);
 }
 
 //
@@ -1151,6 +1853,140 @@ TEST(talker_port, a_kind_change_sends_the_new_kind_with_continuing_sequence_numb
     EXPECT_TRUE(slot->aaf.has_value());
 }
 
+//
+// Stream frame templates
+//
+
+namespace {
+
+/// An AAF format word (IEEE 1722-2016 Clause 7.3.4): nsr, sample format, bit depth, channels, samples per frame.
+constexpr auto aaf_word(
+    uint8_t const nsr, avtp::AafFormat const format, uint8_t const depth, uint16_t const channels, uint16_t const samples)
+    -> uint64_t
+{
+    return (uint64_t{avtp::AvtpSubtype::aaf} << 56U) | (uint64_t{nsr} << 48U) | (uint64_t{static_cast<uint8_t>(format)} << 40U) |
+        (uint64_t{depth} << 32U) | (uint64_t{channels} << 22U) | (uint64_t{samples} << 12U);
+}
+
+constexpr std::array<uint64_t, 4> kTemplateFormats{
+    aaf_word(0x07, avtp::AafFormat::int_32bit, 32, 8, 12),
+    aaf_word(0x05, avtp::AafFormat::int_24bit, 24, 2, 6),
+    aaf_word(0x05, avtp::AafFormat::int_16bit, 16, 1, 6),
+    aaf_word(0x09, avtp::AafFormat::float_32bit, 32, 4, 24)};
+
+/// A render writing each payload byte from the packet's first index.
+avb_entity::StreamRawRenderFn const kPatternRender = [](std::span<uint8_t> payload, uint32_t, uint64_t first_index, uint64_t) {
+    for (size_t i = 0; i < payload.size(); ++i) {
+        payload[i] = static_cast<uint8_t>(first_index + (i * 7U));
+    }
+    return true;
+};
+
+/// Whether @p frame is @p tmpl written with @p sequence, @p timestamp, @p mr and @p tu, then @p payload_length octets.
+auto is_template_frame(
+    avb_entity::StreamFrameTemplate const& tmpl,
+    std::span<uint8_t const> const frame,
+    size_t const payload_length,
+    uint8_t const sequence,
+    uint32_t const timestamp,
+    bool const mr,
+    bool const tu) -> bool
+{
+    std::array<uint8_t, avb_entity::StreamFrameTemplate::CAPACITY> expected{};
+    return tmpl.write(sequence, timestamp, mr, tu, expected) && frame.size() == tmpl.length + payload_length &&
+        same_bytes(frame.first(tmpl.length), std::span{expected}.first(tmpl.length));
+}
+
+}  // namespace
+
+// A template patched with random fields equals serialize_aaf_raw() behind build_stream_frame() byte for byte, over
+// random streams, formats, channel counts, frames, destinations, VIDs and PCPs.
+TEST(talker_template, a_patched_template_equals_the_serialized_frame)
+{
+    std::mt19937 rng{0x1722};
+    constexpr std::array<avtp::AafFormat, 4> formats{
+        avtp::AafFormat::float_32bit, avtp::AafFormat::int_32bit, avtp::AafFormat::int_24bit, avtp::AafFormat::int_16bit};
+    std::array<uint8_t, net::MAX_ETHERNET_PAYLOAD + 32> serialized{};
+    std::array<uint8_t, net::MAX_ETHERNET_PAYLOAD + 32> frame{};
+    for (int k = 0; k < 2000; ++k) {
+        auto const format = formats[rng() % formats.size()];
+        auto const channels = static_cast<uint16_t>(1 + (rng() % 64));
+        auto const frames = static_cast<uint16_t>(1 + (rng() % 24));
+        ieee::Eui48 dest{};
+        for (auto& b : dest.value) {
+            b = static_cast<uint8_t>(rng());
+        }
+        tsn::StreamId const id{dest, static_cast<uint16_t>(rng())};
+        avtp::AafStreamOutputContext ctx{id, format, avtp::AafSampleRate::rate_48_khz, channels, 24, /*pres_offset=*/0};
+        ctx.sequence_num = static_cast<uint8_t>(rng());
+        auto const vid = static_cast<uint16_t>(rng() & 0x0FFFU);
+        auto const pcp = static_cast<uint8_t>(rng() & 0x07U);
+        uint64_t const pts = (uint64_t{rng()} << 32U) | rng();
+        bool const tu = (rng() & 1U) != 0;
+        bool const mr = (rng() & 1U) != 0;
+        auto const tmpl = avb_entity::aaf_frame_template(ctx, frames, avb_entity::stream_frame_header(dest, kPortMac, vid, pcp));
+        uint8_t const sequence = ctx.sequence_num;
+        size_t const pdu = avb_entity::serialize_aaf_raw(
+            ctx, std::span{serialized}.first(net::MAX_ETHERNET_PAYLOAD), frames, 0, pts, kPatternRender, tu, mr);
+        EXPECT_EQ(tmpl.has_value(), pdu != 0);
+        if (!tmpl || pdu == 0) {
+            continue;
+        }
+        size_t const length = avb_entity::build_stream_frame(frame, dest, kPortMac, vid, pcp, std::span{serialized}.first(pdu));
+        EXPECT_TRUE(is_template_frame(
+            *tmpl,
+            std::span{frame}.first(length),
+            pdu - avtp::AafPdu::HEADER_LENGTH,
+            sequence,
+            static_cast<uint32_t>(pts),
+            mr,
+            tu));
+    }
+}
+
+//
+// A talker stream offloaded from the kit
+//
+
+// Each change of an open stream's frames is told, its template then the new one: a new VID or PCP for every open
+// stream, a new destination for its stream; a set_vlan() or set_destination() that changes nothing tells nothing,
+// and neither does reformat_stream(), whose change the kit tells once the entity accepted it.
+TEST(talker_offload, a_new_vid_pcp_or_format_is_told_as_a_change_of_the_frames)
+{
+    ptpclient::MediaClockGenerator const media_clock{};
+    std::atomic<int64_t> const last_gptp_ns{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        media_clock,
+        last_gptp_ns,
+        std::pmr::get_default_resource()};
+    EXPECT_TRUE(talker.open_stream(spec_of(0, aaf_word(0x05, avtp::AafFormat::int_32bit, 32, 8, 6)), kStreamId, kDest).has_value());
+    EXPECT_TRUE(talker.open_stream(spec_of(1, 0x041060010000BB80ULL), kStreamId, kDest).has_value());  // Milan CRF
+    std::vector<uint16_t> told;
+    talker.set_on_frames_changed([&told](uint16_t const idx) { told.push_back(idx); });
+    talker.set_vlan(2, 3);
+    EXPECT_TRUE(told.empty());
+    talker.set_vlan(5, 3);
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1}));
+    talker.set_vlan(5, 6);
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1, 0, 1}));
+    auto const tagged = talker.frame_template(0, kPortMac);
+    EXPECT_TRUE(tagged && same_bytes(std::span{tagged->bytes}.subspan(14, 2), std::array<uint8_t, 2>{0xC0, 0x05}));
+
+    ieee::Eui48 const moved{0x91, 0xE0, 0xF0, 0x00, 0xFE, 0x42};
+    talker.set_destination(1, kDest);
+    talker.set_destination(1, moved);
+    talker.set_destination(7, moved);  // no such stream
+    EXPECT_TRUE(told == (std::vector<uint16_t>{0, 1, 0, 1, 1}));
+    auto const crf = talker.frame_template(1, kPortMac);
+    EXPECT_TRUE(crf && same_bytes(std::span{crf->bytes}.first(6), moved.value));
+
+    EXPECT_TRUE(talker.reformat_stream(spec_of(0, aaf_word(0x05, avtp::AafFormat::int_32bit, 32, 2, 6))).has_value());
+    auto const narrowed = talker.frame_template(0, kPortMac);
+    EXPECT_TRUE(narrowed && same_bytes(std::span{narrowed->bytes}.subspan(38, 2), std::array<uint8_t, 2>{0x00, 48}));  // 6 x 2 x 4
+    EXPECT_EQ(told.size(), size_t{5});
+}
+
 // IEEE 1722-2016 Clause 10.4: a media clock restart toggles mr on the next CRF PDU and the bit
 // stays toggled; two requests before a PDU toggle it once; an index with no stream has none to toggle.
 TEST(talker_crf, a_toggled_restart_sets_mr_on_the_next_pdu)
@@ -1246,75 +2082,6 @@ TEST(talker_crf, close_tx_forgets_the_open_streams)
     EXPECT_TRUE(talker.toggle_media_clock_restart(1).has_value());
 }
 
-// IEEE 1722-2016 Clause 4.4.4.3: a talker whose timestamps follow a CRF toggles mr on its AAF stream too. The
-// next PDU carries the toggle and the bit stays; each toggle counts one MEDIA_RESET (Milan v1.3 Table 5.4).
-TEST(talker_mr, a_toggled_restart_sets_mr_on_the_next_aaf_pdu)
-{
-    avb_entity::StreamPort port;
-    auto& wire = open_test_port(port);
-    ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<int64_t> const last_gptp_ns{0};
-    avb_entity::TalkerStreams talker{
-        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
-        media_clock,
-        last_gptp_ns,
-        std::pmr::get_default_resource()};
-    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x0205022000806000ULL), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.open_tx(port).has_value());
-    auto* const slot = talker.slot_for(0);
-    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
-    std::vector<bool> mr;
-    uint64_t index = 0;
-    auto const send = [&] {
-        EXPECT_TRUE(talker.transmit_aaf_raw(*slot, index, 1'000'000 + (index * 20'833), 6, render));
-        index += 6;
-        auto const sent = wire.pop_tx();
-        auto const pdu =
-            sent ? avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH)) : std::nullopt;
-        mr.push_back(pdu.has_value() && pdu->mr());
-    };
-    send();
-    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    for (int i = 0; i < avb_entity::TalkerStreams::MR_HOLD_PDUS; ++i) {
-        send();
-    }
-    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());
-    send();
-    EXPECT_TRUE(mr.size() == 10 && !mr[0] && mr[1] && mr[8] && !mr[9]);
-    EXPECT_EQ(talker.tx_counters(0)->mr_toggles.load(), uint32_t{2});
-}
-
-// IEEE 1722-2016 Clause 4.4.4.3: a toggled mr stays in its new state for at least eight AVTPDUs; a restart asked for
-// sooner toggles it on the first PDU after them, never earlier.
-TEST(talker_mr, a_toggle_holds_for_eight_pdus_before_the_next)
-{
-    avb_entity::StreamPort port;
-    auto& wire = open_test_port(port);
-    ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<int64_t> const last_gptp_ns{0};
-    avb_entity::TalkerStreams talker{
-        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
-        media_clock,
-        last_gptp_ns,
-        std::pmr::get_default_resource()};
-    EXPECT_TRUE(talker.open_stream(spec_of(0, 0x0205022000806000ULL), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.open_tx(port).has_value());
-    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
-    std::vector<bool> mr;
-    for (uint64_t index = 0; index < 12 * 6; index += 6) {
-        EXPECT_TRUE(talker.toggle_media_clock_restart(0).has_value());  // asked before every PDU
-        EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), index, 1'000'000 + (index * 20'833), 6, render));
-        auto const sent = wire.pop_tx();
-        auto const pdu =
-            sent ? avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH)) : std::nullopt;
-        mr.push_back(pdu.has_value() && pdu->mr());
-    }
-    std::vector<bool> expected(8, true);
-    expected.insert(expected.end(), 4, false);
-    EXPECT_TRUE(mr == expected);
-}
-
 // The hold counts PDUs sent: a render refused within it neither sends nor shortens it, so the toggled state still
 // reaches eight PDUs on the wire before the next request toggles it back.
 TEST(talker_mr, a_refused_render_does_not_shorten_the_hold)
@@ -1377,35 +2144,6 @@ TEST(talker_mr, the_float_paths_carry_a_toggle)
     auto const am824_pdu =
         am824 ? avtp::am824_parse_header(std::span<uint8_t const>{am824->frame}.subspan(VLAN_HEADER_LENGTH)) : std::nullopt;
     EXPECT_TRUE(am824_pdu.has_value() && am824_pdu->stream_header.mr());
-}
-
-// A restart asked for of a stream that then stops is no restart of the stream reopened at that index, even when the
-// request lands after the reopen (a caller stalled between its open check and its store).
-TEST(talker_mr, a_request_racing_a_stop_is_dropped_at_the_reopen)
-{
-    avb_entity::StreamPort port;
-    auto& wire = open_test_port(port);
-    ptpclient::MediaClockGenerator const media_clock{};
-    std::atomic<int64_t> const last_gptp_ns{0};
-    avb_entity::TalkerStreams talker{
-        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
-        media_clock,
-        last_gptp_ns,
-        std::pmr::get_default_resource()};
-    constexpr uint64_t AAF = 0x0205022000806000ULL;
-    EXPECT_TRUE(talker.open_stream(spec_of(0, AAF), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.open_tx(port).has_value());
-    uint32_t const before = talker.open_generation_[0].load();  // what a stalled request read before the stop
-    talker.close_tx();
-    EXPECT_TRUE(talker.open_stream(spec_of(0, AAF), kStreamId, kDest).has_value());
-    EXPECT_TRUE(talker.open_tx(port).has_value());
-    talker.mr_pending_[0].store(before);  // its store, after the reopen
-    avb_entity::StreamRawRenderFn const render = [](std::span<uint8_t>, uint32_t, uint64_t, uint64_t) { return true; };
-    EXPECT_TRUE(talker.transmit_aaf_raw(*talker.slot_for(0), 0, 1'000'000, 6, render));
-    auto const sent = wire.pop_tx();
-    auto const pdu =
-        sent ? avtp::aaf_parse_header(std::span<uint8_t const>{sent->frame}.subspan(VLAN_HEADER_LENGTH)) : std::nullopt;
-    EXPECT_TRUE(pdu.has_value() && !pdu->mr());
 }
 
 // An AM824 stream toggles on request as AAF does; a restart pending across a change of the stream's kind reaches the

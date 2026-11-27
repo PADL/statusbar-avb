@@ -62,6 +62,13 @@ constexpr auto am824_rx_samples(uint8_t const channels, size_t const payload_siz
     return blocks > MAX_BLOCKS ? 0 : static_cast<uint8_t>(blocks);
 }
 
+/// @p counts with no media lock in them.
+auto without_lock(StreamInputCounts counts) noexcept -> StreamInputCounts
+{
+    counts.media_locked.reset();
+    return counts;
+}
+
 }  // namespace
 
 auto aaf_timed_packet(
@@ -284,7 +291,11 @@ auto ListenerStreams::set_stream_format(uint16_t const stream_index, uint64_t co
     // The opened word is kept as 0: a slot opened from fields alone has no
     // word of its own to be decoded again.
     bool const as_opened = format_word == slot_for(stream_index)->spec.format_word;
+    uint64_t const before = stream_format(stream_index);
     stream_format_[stream_index].store(as_opened ? 0 : format_word, std::memory_order_release);
+    if (format_word != before) {
+        notify_input_changed(*slot_for(stream_index));
+    }
     return true;
 }
 
@@ -339,6 +350,7 @@ void ListenerStreams::begin_slot(ListenerStreamSlot& slot, StreamSpec const& spe
     slot.counters.margin_histogram.configure(margin_histogram_config_);
     slot.kind.store(spec.format.kind, std::memory_order_relaxed);
     bind_pending_consume(slot);
+    notify_input_changed(slot);  // open: the hook learns the input and the format in force
 }
 
 void ListenerStreams::set_presentation_offset_ns(uint64_t const presentation_offset_ns)
@@ -395,8 +407,14 @@ auto ListenerStreams::reshape(ListenerStreamSlot& slot, StreamSpec const& spec) 
     if (auto status = shape(trial, spec); !status) {
         return status;
     }
-    std::scoped_lock const lock{slot.guard};
-    adopt_shape(slot, trial, spec);
+    uint64_t const before = stream_format(slot.spec.index);
+    {
+        std::scoped_lock const lock{slot.guard};
+        adopt_shape(slot, trial, spec);
+    }
+    if (stream_format(slot.spec.index) != before) {
+        notify_input_changed(slot);
+    }
     return success();
 }
 
@@ -554,7 +572,7 @@ void ListenerStreams::close_rx() noexcept
 void ListenerStreams::release_connections(sm::TimePoint const now)
 {
     for (auto& slot : slots_) {
-        slot.rx_stream_id.publish(0);  // no frame is this input's any more
+        publish_rx_stream(slot, 0);  // no frame is this input's any more
         release_connection(slot.connection, now);
     }
 }
@@ -1010,6 +1028,14 @@ void ListenerStreams::update_stream_input_counters(
         gptp_now_ns,
         lock_tolerance_ns_,
         slot.spec.format.kind == StreamKind::crf ? slot.spec.format.crf_base_frequency_hz : slot.spec.format.sample_rate_hz);
+    // An AVTPDU taken up just before the input lost its stream may lock it
+    // after the reactor thread has dropped the lock (on_listener_disconnected).
+    // The reactor clears the stream id first and the lock after, so a lock
+    // set after that sees the id gone here, and is dropped; the run restarts,
+    // so this AVTPDU is not the one the next stream's first is compared with.
+    if (slot.rx_stream_id.load() == 0) {
+        restart_stream_input(slot.counters);
+    }
 }
 
 namespace {
@@ -1042,20 +1068,8 @@ auto ListenerStreams::fill_stream_input_counters(
     }
     for (auto const& [bit, counter] : STREAM_INPUT_COUNTERS) {
         valid |= (1U << bit);
-        out[bit] = v;
-    };
-    set(0, c.media_locked.load(relaxed));
-    set(1, c.media_unlocked.load(relaxed));
-    set(2, c.stream_interrupted.load(relaxed));
-    set(3, c.seq_num_mismatch.load(relaxed));
-    set(4, c.media_reset.load(relaxed));
-    set(5, c.timestamp_uncertain.load(relaxed));
-    set(6, c.timestamp_valid.load(relaxed));
-    set(7, c.timestamp_not_valid.load(relaxed));
-    set(8, c.unsupported_format.load(relaxed));
-    set(9, c.late_timestamp.load(relaxed));
-    set(10, c.early_timestamp.load(relaxed));
-    set(11, c.frames_rx.load(relaxed));
+        out[bit] = (slot->counters.*counter).load(std::memory_order_relaxed);
+    }
     return true;
 }
 
@@ -1067,9 +1081,10 @@ auto ListenerStreams::fill_interval_stream_input_counters(
         return false;
     }
     valid |= StreamInputIntervals::VALID;
-    for (size_t i = 0; i < slot->intervals.values.size(); ++i) {
+    auto const values = slot->intervals.current(slot->counters);
+    for (size_t i = 0; i < values.size(); ++i) {
         if ((StreamInputIntervals::VALID & (1U << i)) != 0) {
-            out[i] = slot->intervals.values[i];
+            out[i] = values[i];
         }
     }
     return true;
@@ -1081,8 +1096,7 @@ auto ListenerStreams::fold_input_counters(uint16_t const descriptor_index) -> bo
     if (slot == nullptr) {
         return false;
     }
-    // A stopped input discards its AVTPDUs on purpose (STOP_STREAMING): its
-    // lock goes without an interruption.
+    // A stopped input discards its stream on purpose (5.3.8.7): no interruption.
     if (stream_stopped(descriptor_index)) {
         unlock_stream_input(slot->counters);
     }
@@ -1093,13 +1107,6 @@ void ListenerStreams::reset_input_counters(uint16_t const descriptor_index)
 {
     if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
         slot->intervals.reset(slot->counters);
-    }
-}
-
-void ListenerStreams::notify_input_unbound(uint16_t const descriptor_index)
-{
-    if (auto* const slot = slot_for(descriptor_index); slot != nullptr) {
-        unlock_stream_input(slot->counters);
     }
 }
 
@@ -1252,6 +1259,84 @@ void ListenerStreams::on_listener_connected(
     log_attached(stream_index, dest_mac, only, ready);
 }
 
+void ListenerStreams::publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool const settled)
+{
+    slot.connection.settled = settled;
+    publish_rx_stream(slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
+}
+
+void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
+{
+    bool const moved = slot.rx_stream_id.load() != stream_id;
+    slot.rx_stream_id.publish(stream_id);
+    if (moved) {
+        notify_input_changed(slot);
+    }
+}
+
+void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
+{
+    if (auto const state = input_state(slot.spec.index); state && on_input_changed_) {
+        on_input_changed_(slot.spec.index, *state);
+    }
+}
+
+auto ListenerStreams::input_state(uint16_t const stream_index) const noexcept -> std::optional<InputState>
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return std::nullopt;
+    }
+    return InputState{
+        .stream_id = slot->rx_stream_id.load(), .stopped = stream_stopped(stream_index), .format = stream_format(stream_index)};
+}
+
+auto ListenerStreams::notify_offload_received(
+    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr) {
+        return false;
+    }
+    if (stream_stopped(stream_index) || slot->rx_stream_id.load() == 0) {
+        count_offload_idle(*slot, counts);  // nothing delivered
+        return true;
+    }
+    add_stream_input_counts(slot->counters, counts);
+    count_offload_delivered(*slot, counts, samples);
+    return true;
+}
+
+void ListenerStreams::count_offload_idle(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept
+{
+    add_stream_input_counts(slot.counters, without_lock(counts));
+    // A stopped input is not synchronized and loses no lock as an interruption (Milan v1.3 5.3.8.7). One with no
+    // stream is left to the reactor, which drops its lock as it releases the stream (5.3.8.10, Table 5.6).
+    if (stream_stopped(slot.spec.index)) {
+        unlock_stream_input(slot.counters);
+    }
+}
+
+void ListenerStreams::count_offload_delivered(
+    ListenerStreamSlot& slot, StreamInputCounts const& counts, uint64_t const samples) noexcept
+{
+    uint32_t const bad = std::min(counts.unsupported_format, counts.frames_rx);
+    slot.rx_bad.add(bad);
+    slot.rx_packets.add(counts.frames_rx - bad);
+    slot.rx_samples.add(samples);
+}
+
+void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
+{
+    if (stream_index >= stream_stopped_.size() ||
+        stream_stopped_[stream_index].exchange(stopped, std::memory_order_acq_rel) == stopped) {
+        return;
+    }
+    if (auto const* const slot = slot_for(stream_index); slot != nullptr) {
+        notify_input_changed(*slot);
+    }
+}
+
 void ListenerStreams::log_attached(
     uint16_t const stream_index, ieee::Eui48 const dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool const ready)
 {
@@ -1280,61 +1365,7 @@ void ListenerStreams::log_settled(
         joined ? logging::lit("ok") : logging::lit("none"));
 }
 
-void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
-{
-    bool const changed = slot.rx_stream_id.load() != stream_id;
-    slot.rx_stream_id.publish(stream_id);
-    if (changed) {
-        notify_input_changed(slot);
-    }
-}
-
-void ListenerStreams::notify_input_changed(ListenerStreamSlot const& slot) const noexcept
-{
-    if (on_input_changed_) {
-        on_input_changed_(slot.spec.index, slot.rx_stream_id.load(), stream_stopped(slot.spec.index));
-    }
-}
-
-void ListenerStreams::set_stream_stopped(uint16_t const stream_index, bool const stopped) noexcept
-{
-    if (stream_index >= stream_stopped_.size() ||
-        stream_stopped_[stream_index].exchange(stopped, std::memory_order_acq_rel) == stopped) {
-        return;
-    }
-    if (auto* const slot = slot_for(stream_index); slot != nullptr) {
-        notify_input_changed(*slot);
-    }
-}
-
-auto ListenerStreams::notify_offload_received(
-    uint16_t const stream_index, StreamInputCounts const& counts, uint64_t const samples) noexcept -> bool
-{
-    auto* const slot = slot_for(stream_index);
-    if (slot == nullptr) {
-        return false;
-    }
-    count_offload_received(*slot, counts, stream_stopped(stream_index));
-    slot->rx_packets.add(counts.frames_rx - std::min(counts.unsupported_format, counts.frames_rx));  // those accepted
-    slot->rx_samples.add(samples);
-    return true;
-}
-
-void ListenerStreams::count_offload_received(ListenerStreamSlot& slot, StreamInputCounts const& counts, bool const stopped) noexcept
-{
-    bool const idle = stopped || slot.rx_stream_id.load() == 0;
-    if (!idle || counts.media_locked.value_or(true)) {
-        add_stream_input_counts(slot.counters, counts);
-        return;
-    }
-    // A stopped or unbound input's lock goes without an interruption (Milan v1.2 Sections 5.3.8.7, 5.3.8.10).
-    auto quiet = counts;
-    quiet.media_locked.reset();
-    add_stream_input_counts(slot.counters, quiet);
-    unlock_stream_input(slot.counters);
-}
-
-void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now)
+void ListenerStreams::on_listener_disconnected(uint16_t const stream_index, sm::TimePoint const now, StreamInputLoss const why)
 {
     bool settled = false;
     if (auto* slot = slot_for(stream_index); slot != nullptr) {
