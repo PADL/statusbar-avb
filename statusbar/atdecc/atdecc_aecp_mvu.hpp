@@ -20,12 +20,10 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/ieee/ieee.hpp"
 
-#include <array>
 #include <compare>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
-#include <span>
 #include <string_view>
 
 namespace statusbar::atdecc {
@@ -432,49 +430,6 @@ static_assert(offsetof(MvuGetStreamInputInfoExResponse, talker_unique_id) == 14)
 static_assert(offsetof(MvuGetStreamInputInfoExResponse, pbsta_acmpsta) == 16);
 static_assert(offsetof(MvuGetStreamInputInfoExResponse, reserved_end) == 17);
 
-//
-// SET_SYSTEM_UNIQUE_ID and GET_SYSTEM_UNIQUE_ID - 5.4.4.2, 5.4.4.3
-//
-
-/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response (Milan v1.2
-/// Figure 5.5): one quadlet, as the figure draws it (docs/MVU.md).
-struct MvuSystemUniqueIdPayload
-{
-    static constexpr size_t LENGTH = 6;
-
-    /// Bytes 30-31: reserved
-    doublet_t reserved{0};
-
-    /// Bytes 32-35: system_unique_id (default 0; SET to 0 is invalid)
-    quadlet_t system_unique_id{0};
-
-    auto operator<=>(MvuSystemUniqueIdPayload const&) const noexcept = default;
-};
-
-static_assert(sizeof(MvuSystemUniqueIdPayload) == 6, "MvuSystemUniqueIdPayload must be 6 bytes");
-
-/// SET_SYSTEM_UNIQUE_ID command and response, GET_SYSTEM_UNIQUE_ID response (Milan v1.3
-/// Figure 5.7): a u64 number and a 64-octet name. A v1.2 entity accepts a number that fits its u32.
-struct MvuSystemUniqueIdPayloadV13
-{
-    static constexpr size_t LENGTH = 74;
-
-    /// Bytes 30-31: reserved
-    doublet_t reserved{0};
-
-    /// Bytes 32-39: number
-    ieee::octlet_t number{0};
-
-    /// Bytes 40-103: name (UTF-8, zero padded)
-    aem::AtdeccString name{};
-
-    auto operator<=>(MvuSystemUniqueIdPayloadV13 const&) const noexcept = default;
-};
-
-static_assert(sizeof(MvuSystemUniqueIdPayloadV13) == 74, "MvuSystemUniqueIdPayloadV13 must be 74 bytes");
-static_assert(offsetof(MvuSystemUniqueIdPayloadV13, number) == 2);
-static_assert(offsetof(MvuSystemUniqueIdPayloadV13, name) == 10);
-
 }  // namespace statusbar::atdecc
 
 template <>
@@ -486,20 +441,16 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::M
 {};
 
 template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayload> : std::true_type
-{};
-
-template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayloadV13> : std::true_type
-{};
-
-template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuGetMediaClockReferenceInfoCommand>
     : std::true_type
 {};
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuMediaClockReferenceInfoPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayload> : std::true_type
 {};
 
 template <>

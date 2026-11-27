@@ -389,7 +389,7 @@ CONNECT_TX; the classic listener keeps fast-connect goals.
   response, to every registered controller but the requester in Milan
   (v1.2 Section 5.4.5.2, v1.3 Section 5.4.5.3; Table 5.22 lists no
   GET_STREAM_INFO for an output's offset). In the IEEE 1722.1-2021
-  GET_STREAM_INFO layout (`set_stream_info_layout`) SET_STREAM_INFO's
+  GET_STREAM_INFO layout (the milan13 profile's `stream_info_length()`) SET_STREAM_INFO's
   MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and only
   SET_MAX_TRANSIT_TIME sets the offset.
 - **Notifications.** Each registration has its own MVU sequence id, a space

@@ -90,6 +90,22 @@ auto bytes_of(Payload const& payload) -> std::vector<uint8_t>
     return out;
 }
 
+/// The 8-octet tail of a Milan v1.1/v1.2 GET_STREAM_INFO response (56 octets in all), which
+/// Milan v1.3 drops for IEEE 1722.1-2021's 84: stream_info_flags_ex, then pbsta (3 bits) and
+/// acmpsta (5 bits), then three reserved octets. Kept here so the dissector's older form is tested.
+auto milan_v1_2_stream_info_tail(uint32_t const flags_ex, uint8_t const pbsta) -> std::vector<uint8_t>
+{
+    return {
+        static_cast<uint8_t>(flags_ex >> 24U),
+        static_cast<uint8_t>(flags_ex >> 16U),
+        static_cast<uint8_t>(flags_ex >> 8U),
+        static_cast<uint8_t>(flags_ex),
+        static_cast<uint8_t>(pbsta << 5U),
+        0,
+        0,
+        0};
+}
+
 /// A descriptor's on-wire image (its wire_size() octets)
 template <typename Descriptor>
 auto descriptor_bytes(Descriptor const& descriptor) -> std::vector<uint8_t>
@@ -427,28 +443,25 @@ void add_aem_command_frames(Frames& frames)
         output.msrp_accumulated_latency = 2000000U;
         output.stream_dest_mac = Eui48{0x91, 0xE0, 0xF0, 0x00, 0x83, 0x7E};
         output.stream_vlan_id = 2;
-        AemStreamInfoMilanExtension output_ex{};
-        output_ex.flags_ex = stream_info_flags_ex::REGISTERING;
+        auto const output_ex = milan_v1_2_stream_info_tail(stream_info_flags_ex::REGISTERING, 0);
         frames.push_back(
             {"aem_get_stream_info_response_milan_output",
              aem(AEM_COMMAND_GET_STREAM_INFO,
                  true,
                  11,
                  std::span<uint8_t const>(bytes_of(output)),
-                 std::span<uint8_t const>(bytes_of(output_ex)))});
+                 std::span<uint8_t const>(output_ex))});
         AemStreamInfoPayload input = info;
         input.flags = f::STREAM_FORMAT_VALID | f::STREAM_ID_VALID | f::STREAM_DEST_MAC_VALID | f::STREAM_VLAN_ID_VALID |
             f::MSRP_ACC_LAT_VALID | f::BOUND | f::FAST_CONNECT | f::SAVED_STATE;
-        AemStreamInfoMilanExtension input_ex{};
-        input_ex.flags_ex = stream_info_flags_ex::REGISTERING;
-        input_ex.set_probing(probing_status::COMPLETED, 0);
+        auto const input_ex = milan_v1_2_stream_info_tail(stream_info_flags_ex::REGISTERING, probing_status::COMPLETED);
         frames.push_back(
             {"aem_get_stream_info_response_milan_input",
              aem(AEM_COMMAND_GET_STREAM_INFO,
                  true,
                  12,
                  std::span<uint8_t const>(bytes_of(input)),
-                 std::span<uint8_t const>(bytes_of(input_ex)))});
+                 std::span<uint8_t const>(input_ex))});
 
         // Milan v1.3 Section 5.4.2.30-31: the presentation offset as max transit time.
         AemSetMaxTransitTimePayload transit{};
