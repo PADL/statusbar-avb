@@ -80,6 +80,7 @@ namespace {
         format.crf_type = static_cast<uint8_t>(avtp::CrfType::audio_sample);
         format.crf_base_frequency_hz = AvbEntityAudioIO::CRF_BASE_FREQUENCY;
         format.crf_timestamp_interval = config.crf_timestamp_interval;
+        // In range: create() refuses a cadence that is not (crf_cadence_fits).
         format.crf_timestamps_per_pdu = static_cast<uint8_t>(config.crf_timestamps_per_packet);
     }
     return format;
@@ -126,12 +127,28 @@ struct AudioIoPlan
         .channels = channels};
 }
 
+static_assert(
+    MAX_CRF_TIMESTAMPS_PER_PACKET == TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU,
+    "the configuration's limit is the talker's: what create() lets through, open_stream() takes");
+
+/// The descriptor storage of a configuration an entity can be made from: its
+/// CRF cadence is one a stream can have (crf_cadence_fits; invalid_argument
+/// otherwise, before the value is cut to the stream format's narrower field)
+/// and its blob parses.
+[[nodiscard]] auto checked_storage(AvbEntityAudioIOConfig const& config) -> StatusValue<DescriptorStorage>
+{
+    if (!crf_cadence_fits(config)) {
+        return failure(std::make_error_code(std::errc::invalid_argument));
+    }
+    return DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
+}
+
 }  // namespace
 
 auto AvbEntityAudioIO::create(AvbEntityAudioIOConfig config, std::pmr::memory_resource* memory_resource)
     -> StatusValue<std::unique_ptr<AvbEntityAudioIO>>
 {
-    auto storage_result = DescriptorStorage::create(std::span<uint8_t const>{config.descriptor_storage_blob});
+    auto storage_result = checked_storage(config);
     if (!storage_result) {
         return failure(storage_result.error());
     }

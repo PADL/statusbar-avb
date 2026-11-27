@@ -185,6 +185,49 @@ TEST(audio_io_create, empty_blob_fails)
     EXPECT_FALSE(result.has_value());
 }
 
+TEST(audio_io_create, a_crf_cadence_fits_when_a_stream_can_have_it)
+{
+    AvbEntityAudioIOConfig config{};
+    EXPECT_TRUE(crf_cadence_fits(config));  // the Milan cadence: interval 96, 1 timestamp
+    for (uint16_t const timestamps : {uint16_t{0}, uint16_t{65}, uint16_t{255}, uint16_t{256}, uint16_t{300}, uint16_t{65535}}) {
+        config.crf_timestamps_per_packet = timestamps;
+        EXPECT_FALSE(crf_cadence_fits(config));
+    }
+    for (uint16_t const timestamps : {uint16_t{1}, uint16_t{2}, uint16_t{64}}) {
+        config.crf_timestamps_per_packet = timestamps;
+        EXPECT_TRUE(crf_cadence_fits(config));
+    }
+    for (uint16_t const interval : {uint16_t{0}, uint16_t{4096}, uint16_t{65535}}) {
+        config.crf_timestamp_interval = interval;
+        EXPECT_FALSE(crf_cadence_fits(config));
+    }
+    for (uint16_t const interval : {uint16_t{1}, uint16_t{96}, uint16_t{4095}}) {
+        config.crf_timestamp_interval = interval;
+        EXPECT_TRUE(crf_cadence_fits(config));
+    }
+}
+
+TEST(audio_io_create, a_crf_cadence_no_stream_can_have_is_refused_and_not_cut_to_fit)
+{
+    auto const blob = load_file(entity_audio_bin_path());
+    // 300 timestamps in a PDU used to become 44, and 256 none at all.
+    for (uint16_t const timestamps : {uint16_t{0}, uint16_t{65}, uint16_t{256}, uint16_t{300}}) {
+        auto config = make_config_with_blob(blob);
+        config.crf_timestamps_per_packet = timestamps;
+        auto const result = AvbEntityAudioIO::create(std::move(config));
+        EXPECT_FALSE(result.has_value());
+        EXPECT_TRUE(!result.has_value() && result.error() == std::make_error_code(std::errc::invalid_argument));
+    }
+    auto wide = make_config_with_blob(blob);
+    wide.crf_timestamp_interval = 4096;
+    EXPECT_FALSE(AvbEntityAudioIO::create(std::move(wide)).has_value());
+
+    auto most = make_config_with_blob(blob);
+    most.crf_timestamps_per_packet = MAX_CRF_TIMESTAMPS_PER_PACKET;
+    most.crf_timestamp_interval = MAX_CRF_TIMESTAMP_INTERVAL;
+    EXPECT_TRUE(AvbEntityAudioIO::create(std::move(most)).has_value());
+}
+
 TEST(audio_io_udptun, redundancy_bit_is_collision_proof_and_owlm_maskable)
 {
     // The tunnel redundancy flag bit must (1) be a single bit, (2) live in the
