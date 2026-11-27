@@ -313,7 +313,7 @@ auto open_aaf_output(avb_entity::TalkerStreams& talker, uint16_t const index) ->
 {
     avb_entity::StreamSpec spec{};
     spec.index = index;
-    spec.format_word = 0x0205022002006000ULL;  // AAF 48k int32 2ch, 6 frames
+    spec.format_word = 0x0205022002006000ULL;  // AAF 48k int32 8ch, 6 frames
     spec.format = avb_entity::decode_stream_format(spec.format_word);
     EXPECT_TRUE(talker.open_stream(spec, {}, {}).has_value());
     return *talker.slot_for(index);
@@ -566,8 +566,8 @@ TEST(talker_offload, what_it_sent_counts_as_the_kit_s_own_and_the_kit_goes_on_fr
     EXPECT_TRUE(slot.aaf.has_value() && slot.reframer.has_value());
     auto& aaf = *slot.aaf;
     auto& reframer = *slot.reframer;
-    std::array<float, 12> const audio{};
-    reframer.push(audio, 6, 0);  // a block the kit's own path held
+    std::array<float, 6 * 8> const audio{};  // the format's six frames of eight channels
+    reframer.push(audio, 6, 0);              // a block the kit's own path held
 
     auto const header = talker.notify_offload_sent(slot, true, Sent{.pdus = 10, .tu_pdus = 3, .next_sequence = 10});
     EXPECT_EQ(header.sequence_num, uint8_t{10});
@@ -844,8 +844,7 @@ TEST(stream_frame_template, written_an_aaf_template_is_the_header_the_talker_sen
         auto const format = AAF_FORMATS[rng.next(AAF_FORMATS.size())];
         auto const channels = static_cast<uint16_t>(1 + rng.next(8));
         auto const frames = static_cast<uint16_t>(1 + rng.next(12));
-        tsn::StreamId stream_id{};
-        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        tsn::StreamId const stream_id{eui48_for(rng), static_cast<uint16_t>(rng.next(0x1'0000))};  // a MAC and a unique id
         avtp::AafStreamOutputContext ctx{stream_id, format, AAF_RATES[rng.next(AAF_RATES.size())], channels, 32, 0};
         ctx.sequence_num = static_cast<uint8_t>(rng.next(256));
         auto const eth = addressing_for(rng);
@@ -864,8 +863,7 @@ TEST(stream_frame_template, written_a_crf_template_is_the_header_the_talker_send
 {
     Lcg rng{};
     for (int i = 0; i < 500; ++i) {
-        tsn::StreamId stream_id{};
-        (void)tsn::load_unchecked(eui48_for(rng).span(), &stream_id);
+        tsn::StreamId const stream_id{eui48_for(rng), static_cast<uint16_t>(rng.next(0x1'0000))};  // a MAC and a unique id
         avtp::CrfStreamOutputContext ctx{
             stream_id,
             avtp::CrfType::audio_sample,
@@ -934,7 +932,7 @@ TEST(stream_frame_template, a_talker_stream_s_template_follows_its_destination_a
         spec.format = avb_entity::decode_stream_format(word);
         EXPECT_TRUE(talker.open_stream(spec, {}, dest).has_value());
     };
-    open(0, 0x0205022002006000ULL);  // AAF 48k int32 2ch, 6 frames
+    open(0, 0x0205022002006000ULL);  // AAF 48k int32 8ch, 6 frames
     open(1, 0x041060010000BB80ULL);  // CRF 48k
     open(2, 0x00A0020840000800ULL);  // AM824: no template
 

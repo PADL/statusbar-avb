@@ -3460,6 +3460,12 @@ struct DomainBridge
         });
         bridge.start(now);
     }
+    DomainBridge(DomainBridge const&) = delete;
+    auto operator=(DomainBridge const&) -> DomainBridge& = delete;
+    DomainBridge(DomainBridge&&) = delete;
+    auto operator=(DomainBridge&&) -> DomainBridge& = delete;
+    /// The kit outlives the bridge: what it sends at its stop goes nowhere.
+    ~DomainBridge() { m.kit.host().components().msrp_handler.set_send_packet({}); }
     /// A second of MRP traffic both ways.
     void exchange()
     {
