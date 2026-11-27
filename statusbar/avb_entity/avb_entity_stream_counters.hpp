@@ -25,15 +25,15 @@ namespace statusbar::avb_entity {
 /// IEEE 1722.1 STREAM_INPUT counters (Clause 7.4.42) for incoming-stream
 /// health, queryable via AECP GET_COUNTERS. Published values are atomic
 /// (written on the RX thread, read by the AECP handler); the lock/sequence
-/// detector state below is touched only on the RX thread, except is_locked,
-/// which the reactor also clears (StreamInputIntervals::fold, unlock_stream_input).
+/// detector state below is touched only on the RX thread, but for is_locked
+/// and restart_run, which either thread sets when the input loses its stream
+/// (restart_stream_input).
 struct StreamInputCounters
 {
     std::atomic<uint32_t> media_locked{0};
     std::atomic<uint32_t> media_unlocked{0};
-    /// Each loss of media lock other than an unbind (Milan v1.2 Table 5.6):
-    /// a timestamp step out of tolerance (lost AVTPDUs, wrong timestamps), or
-    /// the stream stopping while locked.
+    /// Each media lock lost for a reason other than a controller's unbind:
+    /// playback interrupted (Milan v1.3 Table 5.6).
     std::atomic<uint32_t> stream_interrupted{0};
     std::atomic<uint32_t> seq_num_mismatch{0};
     std::atomic<uint32_t> media_reset{0};
@@ -83,128 +83,17 @@ struct StreamInputCounters
     uint32_t prev_delta{0};
     bool have_prev_delta{false};
     int locked_run{0};
+    /// Whether the input is synchronized on the media clock: MEDIA_LOCKED is
+    /// then one more than MEDIA_UNLOCKED, and otherwise equal to it (Milan
+    /// v1.3 5.3.8.10). Set on the RX thread alone, after it has counted
+    /// MEDIA_LOCKED; cleared by an exchange on either thread, whose winner
+    /// counts MEDIA_UNLOCKED. So MEDIA_UNLOCKED never runs ahead.
     std::atomic<bool> is_locked{false};
-    /// Set by the reactor when it drops the lock (an unbind, a bind, a stop): the RX thread
-    /// starts its clean-step run and its sequence and mr tracking again.
+    /// Set when the input loses its stream (restart_stream_input); the RX
+    /// thread clears it at its next AVTPDU and forgets the packets before it,
+    /// so that AVTPDU starts a stream.
     std::atomic<bool> restart_run{false};
 };
-
-/// Drop @p c's media lock without an interruption (an unbind, or a reset):
-/// MEDIA_UNLOCKED counts it so MEDIA_LOCKED stays MEDIA_UNLOCKED or one more.
-/// Reactor thread.
-void unlock_stream_input(StreamInputCounters& c) noexcept;
-
-/// Milan v1.2 Table 5.6 STREAM_INPUT counters from the per-packet ones: interval counters count
-/// the observation intervals in which their per-packet counter moved; event counters (MEDIA_LOCKED,
-/// MEDIA_UNLOCKED, STREAM_INTERRUPTED) are the per-packet ones since the last reset. Reactor thread.
-struct StreamInputIntervals
-{
-    /// GET_COUNTERS values, indexed by bit value position (bit value 1 << i
-    /// is values[i]; Milan v1.2 Table 5.16).
-    enum Index : uint8_t
-    {
-        MEDIA_LOCKED = 0,
-        MEDIA_UNLOCKED = 1,
-        STREAM_INTERRUPTED = 2,
-        SEQ_NUM_MISMATCH = 3,
-        MEDIA_RESET = 4,
-        TIMESTAMP_UNCERTAIN = 5,
-        UNSUPPORTED_FORMAT = 8,
-        LATE_TIMESTAMP = 9,
-        EARLY_TIMESTAMP = 10,
-        FRAMES_RX = 11,
-    };
-    /// The counters_valid bits Milan v1.2 Table 5.16 mandates.
-    static constexpr uint32_t VALID = 0x0000'0F3FU;
-
-    std::array<uint32_t, 12> values{};
-    /// The per-packet counters at the last fold (interval counters) or reset
-    /// (event counters), same indices.
-    std::array<uint32_t, 12> last{};
-
-    /// End one observation interval of @p c: a locked stream that received nothing has stopped,
-    /// each interval counter whose per-packet counter moved counts one, and the event counters
-    /// are brought up to date. True when a value changed.
-    [[nodiscard]] auto fold(StreamInputCounters& c) noexcept -> bool;
-
-    /// Zero every counter (Milan v1.2 Section 5.3.8.10: the input became
-    /// bound), dropping any media lock first (unlock_stream_input).
-    void reset(StreamInputCounters& c) noexcept;
-};
-
-/// What a STREAM_OUTPUT has transmitted, as running totals (TalkerTxCounters).
-struct StreamOutputTotals
-{
-    uint32_t pdus{0};
-    uint32_t tu_pdus{0};
-    uint32_t mr_toggles{0};
-};
-
-/// Milan v1.3 Table 5.4 STREAM_OUTPUT counters: STREAM_START / STREAM_STOP count starts and stops;
-/// MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX count intervals with an mr toggle, tu set or any
-/// AVTPDU, zeroed at each start; the optional signal presence (Section 5.3.7.7.1). Reactor thread only.
-struct StreamOutputIntervals
-{
-    /// The counters, each at its V1_3_POSITIONS bit value position in GET_COUNTERS.
-    enum Index : uint8_t
-    {
-        STREAM_START = 0,
-        STREAM_STOP = 1,
-        MEDIA_RESET = 2,
-        TIMESTAMP_UNCERTAIN = 3,
-        FRAMES_TX = 4,
-    };
-    /// Each value's bit value position in Milan v1.3 (Table 5.14), IEEE 1722.1-2021's (Clause 7.4.42.2.5).
-    static constexpr std::array<uint8_t, 5> V1_3_POSITIONS{0, 1, 3, 4, 7};
-    /// ENTITY_SPECIFIC_9 and _10's positions: signal presence of channels 0-31 and 32-59 (Table 5.4).
-    static constexpr uint8_t PRESENCE_0_31 = 23;
-    static constexpr uint8_t PRESENCE_32_59 = 22;
-    static constexpr size_t PRESENCE_CHANNELS = 60;
-
-    std::array<uint32_t, 5> values{};
-    StreamOutputTotals last{};
-    bool streaming{false};
-    /// Signal presence, bit k channel k: reported (once monitored), and what set_presence or
-    /// narrow_presence gave since the last fold.
-    std::optional<uint64_t> presence{};
-    std::optional<uint64_t> pending_presence{};
-
-    /// The latest signal presence of the output's channels, bit k channel k (the stream's channels
-    /// alone, presence_of): reported at the next fold.
-    void set_presence(uint64_t const channels) noexcept { pending_presence = channels; }
-    /// The stream's format now has @p count channels: what is reported or pending is cut to them,
-    /// reported at the next fold (Milan v1.3 Section 5.3.7.7.1: the channels the stream has).
-    void narrow_presence(uint16_t count) noexcept;
-
-    /// The talker is (@p on) or is not streaming, @p totals sent so far. True
-    /// when that starts or stops it.
-    [[nodiscard]] auto set_streaming(bool on, StreamOutputTotals const& totals) noexcept -> bool;
-
-    /// End one observation interval at @p totals, using the latest presence. True when a value changed.
-    [[nodiscard]] auto fold(StreamOutputTotals const& totals) noexcept -> bool;
-    /// Report what set_presence or narrow_presence gave since the last fold; true when that changed what is reported.
-    [[nodiscard]] auto fold_presence() noexcept -> bool;
-};
-
-/// Signal presence @p channels (bit k channel k) with every bit past the stream's @p count clear:
-/// Milan v1.3 Section 5.3.7.7.1, the channels the stream has, as its format is now.
-[[nodiscard]] constexpr auto presence_of(uint64_t const channels, uint16_t const count) noexcept -> uint64_t
-{
-    return count >= 64 ? channels : channels & ((uint64_t{1} << count) - 1);
-}
-
-/// ENTITY_SPECIFIC_9 (@p first 0) or _10 (@p first 32) of signal presence @p channels: channel
-/// first + i at bit i counted from the MSB, channels past 59 clear (Milan v1.3 Figures 5.2-5.3).
-[[nodiscard]] constexpr auto presence_quadlet(uint64_t const channels, size_t const first) noexcept -> uint32_t
-{
-    uint32_t quadlet = 0;
-    for (size_t i = 0; i < 32 && first + i < StreamOutputIntervals::PRESENCE_CHANNELS; ++i) {
-        if (((channels >> (first + i)) & 1U) != 0) {
-            quadlet |= 0x8000'0000U >> i;
-        }
-    }
-    return quadlet;
-}
 
 /// Update one StreamInputCounters from a received stream packet.
 ///

@@ -91,20 +91,15 @@ void tally_media_lock(
         if (c.locked_run < LOCK_RUN_THRESHOLD) {
             ++c.locked_run;
         }
-        // Not while the reactor's unlock since this packet began is pending: its run starts again first.
-        if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.restart_run.load(relaxed) && !c.is_locked.load(relaxed) &&
-            !c.is_locked.exchange(true, relaxed)) {
+        if (c.locked_run >= LOCK_RUN_THRESHOLD && !c.is_locked.load()) {
+            // Counted before it is shown as locked, so that the thread that
+            // clears it never counts MEDIA_UNLOCKED ahead of MEDIA_LOCKED.
             c.media_locked.fetch_add(1, relaxed);
             (void)c.is_locked.exchange(true);
         }
     } else {
         c.locked_run = 0;
-        // The reactor may have dropped the lock already (fold, unbind): the
-        // exchange counts each loss once.
-        if (c.is_locked.load(relaxed) && c.is_locked.exchange(false, relaxed)) {
-            c.media_unlocked.fetch_add(1, relaxed);
-            c.stream_interrupted.fetch_add(1, relaxed);
-        }
+        interrupt_stream_input(c);
     }
     c.prev_delta = actual;
     c.have_prev_delta = true;
@@ -256,9 +251,7 @@ void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& co
 void tally_discarded_stream_input_packet(StreamInputCounters& c) noexcept
 {
     c.frames_rx.fetch_add(1, relaxed);
-    if (c.is_locked.exchange(false, relaxed)) {
-        c.media_unlocked.fetch_add(1, relaxed);
-    }
+    unlock_stream_input(c);
     forget_run(c);
 }
 
@@ -276,10 +269,8 @@ void tally_stream_input_packet(
     uint32_t const lock_tolerance_ns,
     uint32_t const sample_rate_hz)
 {
-    if (c.restart_run.load(relaxed) && c.restart_run.exchange(false, relaxed)) {
-        c.locked_run = 0;
-        c.have_prev_delta = false;
-        c.have_prev = false;  // a new talker's first frame is not compared with the last one's
+    if (c.restart_run.load(relaxed) && c.restart_run.exchange(false)) {
+        forget_run(c);  // the input lost its stream since the last AVTPDU: this one starts a new one
     }
     c.frames_rx.fetch_add(1, relaxed);
     // Every Stream Data AVTPDU counts toward sequence and mr, whatever its format (Milan v1.3 Section 5.3.8.10).
@@ -308,133 +299,110 @@ void tally_stream_input_packet(
     }
 }
 
-void unlock_stream_input(StreamInputCounters& c) noexcept
-{
-    c.restart_run.store(true, std::memory_order_relaxed);
-    if (c.is_locked.exchange(false, std::memory_order_relaxed)) {
-        c.media_unlocked.fetch_add(1, std::memory_order_relaxed);
-    }
-}
-
 namespace {
 
-/// A locked input that received nothing since @p last_frames_rx has stopped: unlock it,
-/// counting an interruption.
-void stop_if_silent(StreamInputCounters& c, uint32_t const last_frames_rx) noexcept
-{
-    auto const relaxed = std::memory_order_relaxed;
-    if (c.frames_rx.load(relaxed) != last_frames_rx || !c.is_locked.load(relaxed)) {
-        return;
-    }
-    c.restart_run.store(true, relaxed);
-    if (c.is_locked.exchange(false, relaxed)) {
-        c.media_unlocked.fetch_add(1, relaxed);
-        c.stream_interrupted.fetch_add(1, relaxed);
-    }
-}
+using RunningCounter = std::atomic<uint32_t> StreamInputCounters::*;
+using I = StreamInputIntervals;
 
-/// Count one for each interval counter of @p c that moved, and bring the event counters up to date.
-void fold_counters(StreamInputIntervals& in, StreamInputCounters const& c) noexcept
-{  // NOLINT(statusbar-block-statements): one line per counter of Milan v1.2 Table 5.16
-    using I = StreamInputIntervals;
-    auto const relaxed = std::memory_order_relaxed;
-    auto const interval = [&](I::Index const i, std::atomic<uint32_t> const& raw) {
-        uint32_t const now = raw.load(relaxed);
-        if (now != in.last[i]) {
-            ++in.values[i];
-            in.last[i] = now;
+/// The running counter behind each interval counter of Milan v1.3 Table 5.6.
+constexpr std::array<std::pair<I::Index, RunningCounter>, 7> INTERVAL_COUNTERS{{
+    {I::SEQ_NUM_MISMATCH, &StreamInputCounters::seq_num_mismatch},
+    {I::MEDIA_RESET, &StreamInputCounters::media_reset},
+    {I::TIMESTAMP_UNCERTAIN, &StreamInputCounters::timestamp_uncertain},
+    {I::UNSUPPORTED_FORMAT, &StreamInputCounters::unsupported_format},
+    {I::LATE_TIMESTAMP, &StreamInputCounters::late_timestamp},
+    {I::EARLY_TIMESTAMP, &StreamInputCounters::early_timestamp},
+    {I::FRAMES_RX, &StreamInputCounters::frames_rx},
+}};
+
+/// The event counters of @p c less @p base into @p out, read at one instant:
+/// MEDIA_UNLOCKED and STREAM_INTERRUPTED between two equal reads of
+/// MEDIA_LOCKED, so neither is ahead of a lock the RX thread counted meanwhile.
+void read_events(
+    StreamInputCounters const& c, std::array<uint32_t, I::COUNT> const& base, std::array<uint32_t, I::COUNT>& out) noexcept
+{
+    for (uint32_t locked = c.media_locked.load();;) {
+        out[I::MEDIA_UNLOCKED] = c.media_unlocked.load() - base[I::MEDIA_UNLOCKED];
+        out[I::STREAM_INTERRUPTED] = c.stream_interrupted.load() - base[I::STREAM_INTERRUPTED];
+        if (std::exchange(locked, c.media_locked.load()) == locked) {
+            out[I::MEDIA_LOCKED] = locked - base[I::MEDIA_LOCKED];
+            return;
         }
-    };
-    interval(I::SEQ_NUM_MISMATCH, c.seq_num_mismatch);
-    interval(I::MEDIA_RESET, c.media_reset);
-    interval(I::TIMESTAMP_UNCERTAIN, c.timestamp_uncertain);
-    interval(I::UNSUPPORTED_FORMAT, c.unsupported_format);
-    interval(I::LATE_TIMESTAMP, c.late_timestamp);
-    interval(I::EARLY_TIMESTAMP, c.early_timestamp);
-    interval(I::FRAMES_RX, c.frames_rx);
-    in.values[I::MEDIA_LOCKED] = c.media_locked.load(relaxed) - in.last[I::MEDIA_LOCKED];
-    in.values[I::MEDIA_UNLOCKED] = c.media_unlocked.load(relaxed) - in.last[I::MEDIA_UNLOCKED];
-    in.values[I::STREAM_INTERRUPTED] = c.stream_interrupted.load(relaxed) - in.last[I::STREAM_INTERRUPTED];
+    }
 }
 
 }  // namespace
 
-auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
+auto StreamInputIntervals::current(StreamInputCounters const& c) const noexcept -> std::array<uint32_t, COUNT>
 {
-    // Nothing received in the interval while locked: the stream stopped.
-    stop_if_silent(c, last[FRAMES_RX]);
-    auto const before = values;
-    fold_counters(*this, c);
-    return values != before;
+    auto out = values;
+    read_events(c, last, out);
+    return out;
 }
 
-auto StreamOutputIntervals::set_streaming(bool const on, StreamOutputTotals const& totals) noexcept -> bool
+auto StreamInputIntervals::fold(StreamInputCounters& c) noexcept -> bool
 {
-    if (on == streaming) {
-        return false;
+    if (c.frames_rx.load(relaxed) == last[FRAMES_RX]) {
+        // Nothing received for a whole interval: the stream stopped, and one that resumes starts afresh.
+        c.restart_run.store(true);
+        interrupt_stream_input(c);
     }
-    streaming = on;
-    if (on) {
-        ++values[STREAM_START];
-        values[MEDIA_RESET] = 0;
-        values[TIMESTAMP_UNCERTAIN] = 0;
-        values[FRAMES_TX] = 0;
-        last = totals;
-    } else {
-        ++values[STREAM_STOP];
+    for (auto const& [index, running] : INTERVAL_COUNTERS) {
+        uint32_t const now = (c.*running).load(relaxed);
+        values[index] += now != std::exchange(last[index], now) ? 1U : 0U;
     }
-    return true;
+    values = current(c);
+    return std::exchange(folded, values) != values;
+}
+
+void StreamInputIntervals::reset(StreamInputCounters const& c) noexcept
+{
+    values = {};
+    for (auto const& [index, running] : INTERVAL_COUNTERS) {
+        last[index] = (c.*running).load(relaxed);
+    }
+    read_events(c, {}, last);
+}
+
+namespace {
+
+using O = StreamOutputIntervals;
+
+/// The total behind each interval counter of Milan v1.3 Table 5.4.
+constexpr std::array<std::pair<O::Index, uint32_t StreamOutputTotals::*>, 3> OUTPUT_INTERVAL_COUNTERS{{
+    {O::MEDIA_RESET, &StreamOutputTotals::mr_toggles},
+    {O::TIMESTAMP_UNCERTAIN, &StreamOutputTotals::tu_pdus},
+    {O::FRAMES_TX, &StreamOutputTotals::pdus},
+}};
+
+/// The interval counters of @p values at the end of an interval in which the totals went from @p last to @p totals.
+void count_output_intervals(
+    std::array<uint32_t, O::COUNT>& values, StreamOutputTotals const& last, StreamOutputTotals const& totals) noexcept
+{
+    bool const started = totals.starts != last.starts;  // Table 5.4: "Reset to 0 each time the Talker starts streaming"
+    for (auto const& [index, total] : OUTPUT_INTERVAL_COUNTERS) {
+        values[index] = (started ? 0U : values[index]) + (totals.*total != last.*total ? 1U : 0U);
+    }
+}
+
+}  // namespace
+
+auto StreamOutputIntervals::current(StreamOutputTotals const& totals) const noexcept -> std::array<uint32_t, COUNT>
+{
+    auto out = totals.starts != last.starts ? std::array<uint32_t, COUNT>{} : values;  // Table 5.4: reset at a start
+    out[STREAM_START] = totals.starts;
+    out[STREAM_STOP] = totals.stops;
+    return out;
 }
 
 auto StreamOutputIntervals::fold(StreamOutputTotals const& totals) noexcept -> bool
 {
     auto const before = values;
-    if (totals.mr_toggles != last.mr_toggles) {
-        ++values[MEDIA_RESET];
-    }
-    if (totals.tu_pdus != last.tu_pdus) {
-        ++values[TIMESTAMP_UNCERTAIN];
-    }
-    if (totals.pdus != last.pdus) {
-        ++values[FRAMES_TX];
-    }
+    values[STREAM_START] = totals.starts;
+    values[STREAM_STOP] = totals.stops;
+    count_output_intervals(values, last, totals);
     last = totals;
-    return fold_presence() || values != before;
-}
-
-void StreamOutputIntervals::narrow_presence(uint16_t const count) noexcept
-{
-    auto const latest = pending_presence ? pending_presence : presence;
-    if (latest) {
-        pending_presence = presence_of(*latest, count);
-    }
-}
-
-auto StreamOutputIntervals::fold_presence() noexcept -> bool
-{
-    if (!pending_presence) {
-        return false;  // nothing reported since the last fold: what is reported stands
-    }
-    bool const changed = pending_presence != presence;
-    presence = std::exchange(pending_presence, std::nullopt);
-    return changed;
-}
-
-void StreamInputIntervals::reset(StreamInputCounters& c) noexcept
-{  // NOLINT(statusbar-block-statements): one line per counter of Milan v1.2 Table 5.16
-    auto const relaxed = std::memory_order_relaxed;
-    unlock_stream_input(c);
-    values = {};
-    last[MEDIA_LOCKED] = c.media_locked.load(relaxed);
-    last[MEDIA_UNLOCKED] = c.media_unlocked.load(relaxed);
-    last[STREAM_INTERRUPTED] = c.stream_interrupted.load(relaxed);
-    last[SEQ_NUM_MISMATCH] = c.seq_num_mismatch.load(relaxed);
-    last[MEDIA_RESET] = c.media_reset.load(relaxed);
-    last[TIMESTAMP_UNCERTAIN] = c.timestamp_uncertain.load(relaxed);
-    last[UNSUPPORTED_FORMAT] = c.unsupported_format.load(relaxed);
-    last[LATE_TIMESTAMP] = c.late_timestamp.load(relaxed);
-    last[EARLY_TIMESTAMP] = c.early_timestamp.load(relaxed);
-    last[FRAMES_RX] = c.frames_rx.load(relaxed);
+    return values != before;
 }
 
 }  // namespace statusbar::avb_entity
