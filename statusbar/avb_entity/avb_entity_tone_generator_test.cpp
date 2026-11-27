@@ -42,7 +42,7 @@ using namespace statusbar::ieee;
 
 namespace {
 
-/// The RAW instant the gate is told in these tests: any instant, the grace
+/// The media wake the gate is told in these tests: any instant, the grace
 /// window is measured from it.
 constexpr auto RAW_NOW = realtime::MonotonicRawClock::from_ns(1'000'000'000);
 /// The reactor's time these tests tell the entity: any instant will do, none is read from a clock.
@@ -293,7 +293,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
     // Fully admit the AAF stream (ACMP connection + MSRP Listener Ready). CRF is
     // left untouched -- it must stay suppressed.
     connect(k_aaf, 0);
-    gate.note_listener_ready(aaf_sid, true);
+    gate.note_listener_ready(aaf_sid, true, RAW_NOW);
     EXPECT_EQ(comps.acmp_talker.connection_count(k_aaf), size_t{1});
     EXPECT_EQ(comps.acmp_talker.connection_count(k_crf), size_t{0});
     EXPECT_TRUE(gate.should_transmit(k_aaf, RAW_NOW));
@@ -301,7 +301,7 @@ TEST(tone_gate, crf_gates_independently_of_audio_streams)
 
     // Admit CRF on its OWN merits -> now it transmits, independently.
     connect(k_crf, 1);
-    gate.note_listener_ready(crf_sid, true);
+    gate.note_listener_ready(crf_sid, true, RAW_NOW);
     EXPECT_TRUE(gate.should_transmit(k_crf, RAW_NOW));
 
     // Stream Started defaults true; Stopping AAF suppresses it, leaving CRF alone.
@@ -776,12 +776,12 @@ TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
     EXPECT_TRUE(entity.stream_port().open_test({.hardware_address = Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x77}}).has_value());
     auto& wire = *entity.stream_port().test_port();
     itc::StopToken stop{};
-    net::MessageReactor reactor{stop, net::monotonic_ns, 0};
-    EXPECT_TRUE(entity.start(reactor).has_value());
+    net::MessageReactor reactor{stop, [] { return int64_t{100'000'000'000}; }, 0};  // a fixed instant: no clock read
+    EXPECT_TRUE(entity.start(reactor, SM_NOW).has_value());
 
     // The wakes' times are the test's own: the media clock anchors at the first, has nothing due at the
     // second, and one packet's samples at each after; a wake flushes once when it has samples.
-    auto t = sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    auto t = SM_NOW;
     std::array<size_t, 6> const flushed_after{1, 1, 2, 3, 4, 5};
     for (size_t const expected : flushed_after) {
         entity.process_audio(t, RAW_NOW);
@@ -790,7 +790,7 @@ TEST(tone_port, each_wake_transmits_then_flushes_the_port_once)
         EXPECT_EQ(wire.cycles_ended(), expected);
     }
     EXPECT_TRUE(wire.tx_flushes() > 0 && wire.tx_pending() > 0);
-    (void)entity.stop();
+    (void)entity.stop(t);
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_tone_generator_test)
