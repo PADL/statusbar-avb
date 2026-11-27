@@ -216,19 +216,31 @@ void follow_media_lock(StreamInputCounters& c, bool const locked, bool const res
     }
 }
 
-}  // namespace
-
-void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
-{  // NOLINT(statusbar-block-statements) one line per counter of StreamInputCounters
+/// add_stream_input_counts(): the AVTPDUs, and those out of sequence or with a media clock restart.
+void add_frame_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
+{
     c.frames_rx.fetch_add(counts.frames_rx, relaxed);
     c.seq_num_mismatch.fetch_add(counts.seq_num_mismatch, relaxed);
     c.media_reset.fetch_add(counts.media_reset, relaxed);
+}
+
+/// add_stream_input_counts(): the AVTPDUs by what their timestamp said, and those of another format.
+void add_timestamp_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
+{
     c.timestamp_uncertain.fetch_add(counts.timestamp_uncertain, relaxed);
     c.timestamp_valid.fetch_add(counts.timestamp_valid, relaxed);
     c.timestamp_not_valid.fetch_add(counts.timestamp_not_valid, relaxed);
     c.unsupported_format.fetch_add(counts.unsupported_format, relaxed);
     c.late_timestamp.fetch_add(counts.late_timestamp, relaxed);
     c.early_timestamp.fetch_add(counts.early_timestamp, relaxed);
+}
+
+}  // namespace
+
+void add_stream_input_counts(StreamInputCounters& c, StreamInputCounts const& counts) noexcept
+{
+    add_frame_counts(c, counts);
+    add_timestamp_counts(c, counts);
     // As at a packet: a pending restart is cleared by any report that says something of the stream.
     bool const restarted = (counts.frames_rx != 0 || counts.media_locked) && c.restart_run.exchange(false);
     if (counts.media_locked) {
