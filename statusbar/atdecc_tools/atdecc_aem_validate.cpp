@@ -35,12 +35,9 @@ namespace {
 /// Takes one finding: its severity, where it is and what it is.
 using Add = std::function<void(Severity, std::string, std::string)>;
 
-auto validate_aem_model(std::vector<RawDescriptor> const& descs) -> std::vector<ModelFinding>
-{  // NOLINT(statusbar-block-statements) the model checks, one per descriptor kind; pre-dates the gate
-    std::vector<ModelFinding> out;
-    auto add = [&](Severity s, std::string where, std::string msg) { out.push_back({s, std::move(where), std::move(msg)}); };
-
-    // ENTITY: a usable static model id is what controllers cache the model under.
+/// ENTITY: a usable static model id is what controllers cache the model under.
+void check_entity(std::vector<RawDescriptor> const& descs, Add const& add)
+{
     if (auto const* e = find_desc(descs, DESCRIPTOR_ENTITY, 0); (e != nullptr) && e->data.size() >= DescriptorEntity::LENGTH) {
         DescriptorEntity d{};
         span_load_padded(d, make_const_span(e->data));

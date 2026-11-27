@@ -34,6 +34,7 @@ from .model import (
     CLOCK_SOURCE_TYPE_VALUES,
     INTERFACE_FLAGS_NAMES,
     PTP_INSTANCE_FLAGS_NAMES,
+    PTP_PORT_FLAGS_NAMES,
     PTP_PORT_TYPE_VALUES,
     TIMING_ALGORITHM_VALUES,
 )
@@ -236,6 +237,10 @@ def _write_clock_source(cs: ClockSource) -> dict:
         result["name"] = cs.object_name
     cs_type = CLOCK_SOURCE_TYPE_VALUES.get(cs.clock_source_type, "INTERNAL")
     result["type"] = cs_type
+    if cs.clock_source_flags:
+        result["flags"] = cs.clock_source_flags
+    if cs.clock_source_identifier:
+        result["identifier"] = f"0x{cs.clock_source_identifier:016x}"
     if cs.clock_source_location_type or cs.clock_source_location_index:
         result["location_type"] = DESCRIPTOR_TYPE_VALUES.get(
             cs.clock_source_location_type, cs.clock_source_location_type
@@ -246,49 +251,51 @@ def _write_clock_source(cs: ClockSource) -> dict:
     return result
 
 
-def _write_timing(t: Timing) -> dict:
-    """Write a TIMING descriptor (IEEE 1722.1-2021 7.2.34) to JSON dict."""
+def _write_timing(timing: Timing) -> dict:
+    """Write a TIMING descriptor to JSON dict."""
     result: dict = {}
-    if t.object_name:
-        result["name"] = t.object_name
-    result["algorithm"] = TIMING_ALGORITHM_VALUES.get(t.algorithm, "SINGLE")
-    if t.ptp_instance_indices:
-        result["ptp_instances"] = list(t.ptp_instance_indices)
-    if t.symbol:
-        result["symbol"] = t.symbol
+    if timing.object_name:
+        result["name"] = timing.object_name
+    result["algorithm"] = TIMING_ALGORITHM_VALUES.get(timing.algorithm, "SINGLE")
+    result["ptp_instances"] = list(timing.ptp_instance_indices)
+    if timing.symbol:
+        result["symbol"] = timing.symbol
     return result
 
 
 def _write_ptp_port(pp: PtpPort) -> dict:
-    """Write a PTP_PORT descriptor (7.2.36) to JSON dict."""
+    """Write a PTP_PORT descriptor to JSON dict."""
     result: dict = {}
     if pp.object_name:
         result["name"] = pp.object_name
     result["port_number"] = pp.port_number
-    result["port_type"] = PTP_PORT_TYPE_VALUES.get(pp.port_type, "P2P_LINK_LAYER")
-    flags = _flags_to_names(pp.flags, PTP_INSTANCE_FLAGS_NAMES)
+    result["type"] = PTP_PORT_TYPE_VALUES.get(pp.port_type, "P2P_LINK_LAYER")
+    flags = _flags_to_names(pp.flags, PTP_PORT_FLAGS_NAMES)
     if flags:
         result["flags"] = flags
-    result["avb_interface_index"] = pp.avb_interface_index
+    result["avb_interface"] = pp.avb_interface_index
     if pp.profile_identifier:
-        result["profile_identifier"] = pp.profile_identifier
+        octets = pp.profile_identifier.to_bytes(6, "big")
+        result["profile_identifier"] = "-".join(f"{b:02X}" for b in octets)
     if pp.symbol:
         result["symbol"] = pp.symbol
     return result
 
 
 def _write_ptp_instance(pi: PtpInstance) -> dict:
-    """Write a PTP_INSTANCE descriptor (7.2.35) and its PTP_PORTs to JSON dict."""
+    """Write a PTP_INSTANCE descriptor and its PTP_PORTs to JSON dict."""
     result: dict = {}
     if pi.object_name:
         result["name"] = pi.object_name
     if pi.clock_identity:
-        result["clock_identity"] = pi.clock_identity
+        result["clock_identity"] = f"0x{pi.clock_identity:016x}"
     flags = _flags_to_names(pi.flags, PTP_INSTANCE_FLAGS_NAMES)
     if flags:
         result["flags"] = flags
-    if pi.ptp_ports:
-        result["ptp_ports"] = [_write_ptp_port(pp) for pp in pi.ptp_ports]
+    if pi.number_of_controls:
+        result["number_of_controls"] = pi.number_of_controls
+        result["base_control"] = pi.base_control
+    result["ptp_ports"] = [_write_ptp_port(pp) for pp in pi.ptp_ports]
     if pi.symbol:
         result["symbol"] = pi.symbol
     return result
@@ -392,7 +399,7 @@ def _write_configuration(config: Configuration, entity: Entity) -> dict:
         )
         result[key] = val
 
-    # TIMING and PTP_INSTANCE (IEEE 1722.1-2021)
+    # Timings and PTP instances (always plural)
     if config.timings:
         result["timings"] = [_write_timing(t) for t in config.timings]
     if config.ptp_instances:

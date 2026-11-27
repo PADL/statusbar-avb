@@ -223,10 +223,8 @@ auto format_to(OutputIt out, DescriptorSensorUnit const& d) -> OutputIt
 }
 
 /// @param out Output iterator to write formatted text to
-/// @param d Stream descriptor to format; @p type_name its human-readable stream type name
-/// @param data_size Valid bytes at @p d (the wire length; formats are read at formats_offset)
-/// @param received The descriptor as received, when it may be longer than DescriptorStream
-///        (a 2013 layout of 508 octets); empty: @p d's own bytes
+/// @param d Stream descriptor to format
+/// @param type_name Human-readable stream type name
 template <typename OutputIt>
 auto format_stream_identity(OutputIt out, DescriptorStream const& d, char const* type_name) -> OutputIt
 {

@@ -3680,6 +3680,7 @@ def main():
         test_downgrade_strip_removes_2021_only_descriptors,
         test_json_timing_clock_source,
         test_json_audio_maps_split_at_62_mappings,
+        test_stream_formats_are_read_at_formats_offset,
     ]
     passed = 0
     failed = 0

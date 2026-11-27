@@ -900,17 +900,19 @@ struct StreamFormatsExtent
 
 namespace detail {
 
-/// The doublet at @p off in @p wire (the caller checks the bounds).
-[[nodiscard]] inline auto wire_doublet(std::span<uint8_t const> const wire, size_t const off) noexcept -> uint16_t
+/// The fields every revision of the STREAM descriptor has, the rest zero.
+[[nodiscard]] inline auto load_stream_head(std::span<uint8_t const> const wire) noexcept -> DescriptorStream
 {
-    doublet_t value{};
-    span_load(value, wire.subspan(off, sizeof(doublet_t)));
-    return value.get();
+    DescriptorStream d{};
+    span_load_padded(d, wire.first(std::min(wire.size(), DescriptorStream::MINIMUM_LENGTH)));
+    return d;
 }
 
-/// A STREAM descriptor's stream_formats at @p formats_offset; fails unless they lie within @p wire.
-[[nodiscard]] inline auto stream_formats(std::span<uint8_t const> const wire, size_t const formats_offset) noexcept
-    -> StatusValue<std::span<Eui64 const>>
+/// How many octets of fixed fields a received STREAM descriptor carries
+/// before its formats, at most those of IEEE 1722.1-2021. An offset below
+/// the 2013 length is only accepted with no formats; the descriptor's own
+/// length then says which fields it has.
+[[nodiscard]] constexpr auto stream_fixed_length(StreamFormatsExtent const& formats, size_t const wire_size) noexcept -> size_t
 {
     size_t const by_offset = formats.offset < DescriptorStream::MINIMUM_LENGTH ? DescriptorStream::LENGTH : formats.offset;
     return std::min({by_offset, DescriptorStream::LENGTH, wire_size});
@@ -934,11 +936,12 @@ inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const
 
 }  // namespace detail
 
-/// Locate a STREAM descriptor's stream_formats (and, for IEEE 1722.1-2021 Clause 7.2.6, the
-/// redundant/timing fields and redundant_streams) in @p wire, honouring formats_offset (2013: 132,
-/// 2021: 138). Fails unless formats_offset >= 132 and the formats and redundant_streams lie within @p wire.
-[[nodiscard]] inline auto stream_descriptor_trailers(std::span<uint8_t const> const wire) noexcept
-    -> StatusValue<StreamDescriptorTrailers>
+/// The formats of the received STREAM descriptor @p wire, by its
+/// formats_offset field (see stream_formats_extent()).
+/// @return nullopt when @p wire is shorter than a 2013 descriptor, or its
+///         formats do not lie inside it.
+[[nodiscard]] inline auto received_stream_formats(std::span<uint8_t const> const wire) noexcept
+    -> std::optional<StreamFormatsExtent>
 {
     if (wire.size() < DescriptorStream::MINIMUM_LENGTH) {
         return std::nullopt;
@@ -987,12 +990,11 @@ inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const
 {
     auto const formats = received_stream_formats(wire);
     if (!formats) {
-        return forward_failure(formats);
+        return std::nullopt;
     }
-    if (formats_offset < DescriptorStream::LENGTH) {
-        return success(StreamDescriptorTrailers{.stream_formats = *formats});
-    }
-    return detail::stream_2021_fields(wire, StreamDescriptorTrailers{.stream_formats = *formats});
+    auto d = detail::load_stream_head(wire);
+    detail::load_stream_tail(d, wire, *formats);
+    return d;
 }
 
 //
