@@ -82,10 +82,11 @@ The gate's clock is `CLOCK_MONOTONIC_RAW` (`TalkerGate::RawTimePoint`,
 `realtime::MonotonicRawClock`): the clock a media wake is told on
 (`TimerWakeInfo::actual_raw`), and the one `net::rx_clock_now()` reads. The
 reactor is told its own time (`sm::TimePoint`, the reactor's `ClockFn`) and has
-no line to RAW, so for each event that changes or evaluates the gate it reads
-RAW once (`AvbEntityKit::notify_listener_ready` receives that reading beside the
-reactor's time; `on_admission_timer` is told one). The reactor is not real-time;
-the media thread never reads a clock for the gate.
+no line to RAW, so the loop reads both clocks once per cycle and tells the kit the
+pair (`AvbEntityKit::tell_cycle_time`, `entity_reactor_clock`): each gate input
+of the cycle is stamped with that RAW instant, and `end_cycle()` carries it
+forward to the admission deadline (`raw_at()`). Neither the gate nor the kit
+reads a clock.
 
 Per stream the gate holds one stamp, `ready_raw_ns_`: the last RAW instant the
 Listener declaration was known registered. `notify_listener_ready` writes it on a
@@ -126,7 +127,7 @@ stamp, so a withdrawn declaration closes the gate the grace later and the
 window cannot be extended without a fresh registration. A genuine departure
 closes the gate; `admitted()` depends on time, so the kit arms one timer at the
 earliest grace end (`AvbEntityKit::admission_deadline()`) and re-evaluates it
-then (`on_admission_timer`), noticing a grace expiry without an MSRP event. `listener_admitted()` reports the listener half alone (whatever
+then (`end_cycle()`), noticing a grace expiry without an MSRP event. `listener_admitted()` reports the listener half alone (whatever
 `gate_enabled_` says, Started/Stopped playing no part).
 
 ## See also
