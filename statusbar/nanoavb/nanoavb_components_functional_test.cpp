@@ -291,6 +291,24 @@ TEST(nanoavb_components_acmp, the_ieee_pair_runs_unless_milan_is_chosen)
     EXPECT_TRUE(components->milan_acmp_talker.get() == talker);
 }
 
+TEST(nanoavb_components_acmp, a_milan_entity_advertises_as_milan_asks)
+{
+    // IEEE 1722.1 as it was: the configured valid time, sent at once.
+    auto components = two_stream_components();
+    EXPECT_FALSE(components->adp_advertiser.config().milan_advertise);
+    EXPECT_TRUE(components->adp_advertiser.adpdu().valid_time() != MILAN_ADP_VALID_TIME);
+
+    // Milan v1.3 5.6.2 and 5.6.3: valid_time 10, and the first
+    // ENTITY_AVAILABLE waits out its random delay.
+    components->use_milan_acmp();
+    auto& adp = components->adp_advertiser;
+    EXPECT_TRUE(adp.config().milan_advertise);
+    EXPECT_EQ(adp.adpdu().valid_time(), MILAN_ADP_VALID_TIME);
+    EXPECT_TRUE(adp.start(TimePoint{std::chrono::seconds{1}}).has_value());
+    EXPECT_TRUE(adp.milan_advertise_delayed());
+    EXPECT_EQ(adp.available_index(), 0U);
+}
+
 TEST(nanoavb_components_acmp, a_streams_parameters_go_to_and_come_from_the_pair_that_runs)
 {
     auto ieee_components = two_stream_components();

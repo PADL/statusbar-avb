@@ -15,6 +15,7 @@
 #include <expected>
 #include <functional>
 #include <system_error>
+#include <vector>
 
 using namespace statusbar::nanoavb;
 using namespace statusbar::atdecc;
@@ -487,6 +488,304 @@ TEST(nanoavb_adp_advertiser, update_config)
     EXPECT_EQ(advertiser.valid_time(), 10);
     EXPECT_EQ(advertiser.adpdu().valid_time(), 10);
     EXPECT_EQ(advertiser.config().reannounce_interval, std::chrono::milliseconds{2000});
+}
+
+//
+// The Milan advertise state machine (Milan v1.3 5.6.3). Time is told, and
+// the random delay is whatever the test says it is.
+//
+
+namespace {
+
+using std::chrono::milliseconds;
+
+/// A Milan advertiser with the times of the ENTITY_AVAILABLE and
+/// ENTITY_DEPARTING messages it sent, and a TMR_DELAY the test sets.
+struct MilanAdvertiser
+{
+    std::vector<milliseconds> available{};  ///< when each ENTITY_AVAILABLE left
+    std::vector<milliseconds> departing{};
+    std::vector<milliseconds> asked_longest{};  ///< the longest delay each draw was allowed
+    AdpDu last{};
+    milliseconds next_delay{0};
+    milliseconds now{0};
+    NanoAvbAdpAdvertiser advertiser{create_test_entity_descriptor()};
+
+    MilanAdvertiser()
+    {
+        AdpAdvertiserCallbacks callbacks;
+        callbacks.send_adpdu = [this](AdpDu const& adpdu) {
+            (adpdu.is_entity_available() ? available : departing).push_back(now);
+            last = adpdu;
+            return true;
+        };
+        advertiser.set_callbacks(callbacks);
+        advertiser.set_random_delay([this](milliseconds longest) {
+            asked_longest.push_back(longest);
+            return next_delay;
+        });
+        advertiser.use_milan_advertise();
+    }
+
+    [[nodiscard]] auto at() const -> TimePoint { return TimePoint{} + now; }
+
+    /// Tick every 10 ms up to and including @p until.
+    void run_until(milliseconds until)
+    {
+        for (; now <= until; now += milliseconds{10}) {
+            advertiser.tick(at());
+        }
+        now = until;
+    }
+
+    void discover(Eui64 const& target = {})
+    {
+        AdpDu d{};
+        d.init_entity_discover();
+        d.entity_id = target;
+        advertiser.receive_adpdu(d, at());
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_adp_milan, the_adpdu_says_valid_time_10)
+{
+    MilanAdvertiser m;
+    EXPECT_EQ(m.advertiser.valid_time(), 10);
+    EXPECT_EQ(m.advertiser.adpdu().valid_time(), 10);
+    EXPECT_TRUE(m.advertiser.config().milan_advertise);
+    // It stays 10 when the ADPDU is built again from the model.
+    m.advertiser.notify_entity_changed();
+    EXPECT_EQ(m.advertiser.adpdu().valid_time(), 10);
+}
+
+TEST(nanoavb_adp_milan, nothing_is_sent_at_start_but_after_the_startup_delay)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{1300};
+    (void)m.advertiser.start(m.at());
+    EXPECT_TRUE(m.available.empty());  // 5.6.3.5.2: DELAY first
+    EXPECT_TRUE(m.advertiser.milan_advertise_delayed());
+    // At start-up the delay is drawn from 0 to 2 s.
+    EXPECT_TRUE(m.asked_longest == (std::vector<milliseconds>{MILAN_ADP_STARTUP_DELAY_MAX}));
+
+    m.run_until(milliseconds{1290});
+    EXPECT_TRUE(m.available.empty());
+    m.run_until(milliseconds{1300});
+    EXPECT_TRUE(m.available == (std::vector<milliseconds>{milliseconds{1300}}));
+    EXPECT_FALSE(m.advertiser.milan_advertise_delayed());  // WAITING
+    EXPECT_EQ(m.advertiser.available_index(), 1U);
+}
+
+TEST(nanoavb_adp_milan, advertisements_are_five_seconds_plus_the_delay_apart)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{0};
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{0});
+    EXPECT_EQ(m.available.size(), size_t{1});
+
+    // TMR_ADVERTISE is 5 s (5.6.3.5.9), then TMR_DELAY of 0 to 4 s (5.6.3.5.5).
+    m.next_delay = milliseconds{2500};
+    m.run_until(milliseconds{4990});
+    EXPECT_FALSE(m.advertiser.milan_advertise_delayed());
+    m.run_until(milliseconds{5000});
+    EXPECT_TRUE(m.advertiser.milan_advertise_delayed());
+    EXPECT_EQ(m.asked_longest.back(), MILAN_ADP_TMR_DELAY_MAX);
+    m.run_until(milliseconds{7490});
+    EXPECT_EQ(m.available.size(), size_t{1});
+    m.run_until(milliseconds{7500});
+    EXPECT_TRUE(m.available == (std::vector<milliseconds>{milliseconds{0}, milliseconds{7500}}));
+
+    // And the next: 5 s after that one, plus its own delay.
+    m.next_delay = milliseconds{4000};
+    m.run_until(milliseconds{16490});
+    EXPECT_EQ(m.available.size(), size_t{2});
+    m.run_until(milliseconds{16500});
+    EXPECT_EQ(m.available.back(), milliseconds{16500});
+}
+
+TEST(nanoavb_adp_milan, a_discover_is_answered_after_a_delay_and_restarts_the_five_seconds)
+{
+    MilanAdvertiser m;
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{0});
+    EXPECT_EQ(m.available.size(), size_t{1});
+
+    // WAITING, 2 s in: a discover for everyone (5.6.3.5.4).
+    m.run_until(milliseconds{2000});
+    m.next_delay = milliseconds{700};
+    m.discover();
+    EXPECT_EQ(m.available.size(), size_t{1});  // not at once
+    EXPECT_TRUE(m.advertiser.milan_advertise_delayed());
+    EXPECT_EQ(m.asked_longest.back(), MILAN_ADP_TMR_DELAY_MAX);
+    m.run_until(milliseconds{2700});
+    EXPECT_EQ(m.available.back(), milliseconds{2700});
+
+    // TMR_ADVERTISE was stopped and started again at that send: nothing at
+    // 5 s from the first, the next is 5 s from 2.7 s.
+    m.next_delay = milliseconds{0};
+    m.run_until(milliseconds{7690});
+    EXPECT_EQ(m.available.size(), size_t{2});
+    m.run_until(milliseconds{7700});
+    EXPECT_EQ(m.available.back(), milliseconds{7700});
+}
+
+TEST(nanoavb_adp_milan, a_discover_while_one_is_owed_changes_nothing)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{1500};
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{500});
+    size_t const draws = m.asked_longest.size();
+
+    // DELAY: ignored (Table 5.56). No new draw, the owed one goes out on time.
+    m.next_delay = milliseconds{4000};
+    m.discover();
+    m.discover(create_test_entity_descriptor().entity_id);
+    EXPECT_EQ(m.asked_longest.size(), draws);
+    m.run_until(milliseconds{1500});
+    EXPECT_TRUE(m.available == (std::vector<milliseconds>{milliseconds{1500}}));
+}
+
+TEST(nanoavb_adp_milan, a_discover_for_another_entity_is_not_ours)
+{
+    MilanAdvertiser m;
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{1000});
+    m.discover(Eui64{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF});
+    EXPECT_FALSE(m.advertiser.milan_advertise_delayed());
+    m.discover(create_test_entity_descriptor().entity_id);  // ours by name: answered
+    EXPECT_TRUE(m.advertiser.milan_advertise_delayed());
+}
+
+TEST(nanoavb_adp_milan, a_new_grandmaster_is_advertised_after_a_delay)
+{
+    MilanAdvertiser m;
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{1000});
+    EXPECT_EQ(m.available.size(), size_t{1});
+
+    // GM_CHANGE in WAITING (5.6.3.5.7): TMR_DELAY, then the new id goes out.
+    ClockIdentity const gm{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x09};
+    m.next_delay = milliseconds{900};
+    m.advertiser.set_gptp_info(gm, 0);
+    m.advertiser.notify_entity_changed();
+    EXPECT_EQ(m.available.size(), size_t{1});  // nothing at once
+    m.run_until(milliseconds{1890});
+    EXPECT_EQ(m.available.size(), size_t{1});
+    m.run_until(milliseconds{1910});
+    EXPECT_EQ(m.available.size(), size_t{2});
+    EXPECT_TRUE(m.last.gptp_grandmaster_id == gm);
+}
+
+TEST(nanoavb_adp_milan, a_change_while_one_is_owed_rides_on_it)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{1000};
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{400});
+    size_t const draws = m.asked_longest.size();
+
+    ClockIdentity const gm{0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x00, 0x00, 0x09};
+    m.advertiser.set_gptp_info(gm, 0);
+    m.advertiser.notify_entity_changed();
+    m.run_until(milliseconds{1000});
+    EXPECT_EQ(m.asked_longest.size(), draws);  // GM_CHANGE in DELAY: ignored
+    EXPECT_EQ(m.available.size(), size_t{1});
+    EXPECT_TRUE(m.last.gptp_grandmaster_id == gm);  // and the one owed says it
+    // It does not ask for another once that one is out.
+    m.run_until(milliseconds{5900});
+    EXPECT_EQ(m.available.size(), size_t{1});
+}
+
+TEST(nanoavb_adp_milan, departing_goes_out_from_either_state_and_ends_it)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{1500};
+    (void)m.advertiser.start(m.at());
+    m.run_until(milliseconds{300});
+    (void)m.advertiser.stop(m.at());  // DELAY / SHUTDOWN, 5.6.3.5.11
+    EXPECT_EQ(m.departing.size(), size_t{1});
+    m.run_until(milliseconds{9000});
+    EXPECT_TRUE(m.available.empty());  // the owed one is not sent after a shutdown
+
+    // A start after that is a LINK_UP: the delay is drawn from 0 to 4 s (5.6.3.5.3).
+    m.next_delay = milliseconds{100};
+    (void)m.advertiser.start(m.at());
+    EXPECT_EQ(m.asked_longest.back(), MILAN_ADP_TMR_DELAY_MAX);
+    m.run_until(milliseconds{9100});
+    EXPECT_EQ(m.available.size(), size_t{1});
+    (void)m.advertiser.stop(m.at());  // WAITING / SHUTDOWN, 5.6.3.5.8
+    EXPECT_EQ(m.departing.size(), size_t{2});
+}
+
+TEST(nanoavb_adp_milan, a_draw_outside_its_range_is_brought_inside)
+{
+    MilanAdvertiser m;
+    m.next_delay = milliseconds{60'000};
+    (void)m.advertiser.start(m.at());
+    m.run_until(MILAN_ADP_STARTUP_DELAY_MAX);
+    EXPECT_TRUE(m.available == (std::vector<milliseconds>{MILAN_ADP_STARTUP_DELAY_MAX}));
+}
+
+TEST(nanoavb_adp_milan, our_own_draws_stay_in_range_and_differ_between_entities)
+{
+    // No set_random_delay(): the generator seeded from the entity ID.
+    auto const first_times = [](Eui64 const& id) {
+        auto entity = create_test_entity_descriptor();
+        entity.entity_id = id;
+        std::vector<milliseconds> sent;
+        milliseconds now{0};
+        AdpAdvertiserCallbacks callbacks;
+        callbacks.send_adpdu = [&](AdpDu const& adpdu) {
+            if (adpdu.is_entity_available()) {
+                sent.push_back(now);
+            }
+            return true;
+        };
+        NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+        advertiser.use_milan_advertise();
+        (void)advertiser.start(TimePoint{});
+        for (; now <= milliseconds{60'000}; now += milliseconds{10}) {
+            advertiser.tick(TimePoint{} + now);
+        }
+        return sent;
+    };
+    auto const a = first_times(Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07});
+    auto const b = first_times(Eui64{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x08});
+    EXPECT_TRUE(a.size() >= 6 && b.size() >= 6);
+    EXPECT_TRUE(a.front() <= MILAN_ADP_STARTUP_DELAY_MAX);
+    for (size_t i = 1; i < a.size(); ++i) {
+        auto const gap = a[i] - a[i - 1];
+        EXPECT_TRUE(gap >= MILAN_TMR_ADVERTISE);
+        EXPECT_TRUE(gap <= MILAN_TMR_ADVERTISE + MILAN_ADP_TMR_DELAY_MAX + milliseconds{20});
+    }
+    EXPECT_TRUE(a != b);  // two entities do not advertise in step
+}
+
+TEST(nanoavb_adp_milan, an_entity_that_does_not_ask_for_it_advertises_as_before)
+{
+    auto entity = create_test_entity_descriptor();
+    int sent = 0;
+    AdpAdvertiserCallbacks callbacks;
+    callbacks.send_adpdu = [&](AdpDu const&) {
+        ++sent;
+        return true;
+    };
+    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+    EXPECT_FALSE(advertiser.config().milan_advertise);
+    EXPECT_EQ(advertiser.valid_time(), 31);
+    (void)advertiser.start(TimePoint{});
+    EXPECT_EQ(sent, 1);  // at once
+    EXPECT_FALSE(advertiser.milan_advertise_delayed());
+    AdpDu discover{};
+    discover.init_entity_discover();
+    advertiser.receive_adpdu(discover, TimePoint{});
+    EXPECT_EQ(sent, 2);  // at once
+    advertiser.notify_entity_changed();
+    EXPECT_EQ(sent, 3);  // at once
 }
 
 //

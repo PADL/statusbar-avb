@@ -301,6 +301,37 @@ last listener left and the Talker attribute was withdrawn. The MSRP
 registrar keeps a Listener registered through a LeaveAll for LeaveTime,
 which is what the grace was for.
 
+## Advertising (5.6.2, 5.6.3)
+
+`use_milan_acmp()` is where an entity becomes one of the Milan profile, so
+it switches the ADP advertiser too (`NanoAvbAdpAdvertiser::use_milan_advertise()`):
+
+- ENTITY_AVAILABLE says valid_time 10, which is 20 s (5.6.2).
+- It goes out by the advertise state machine of 5.6.3. Every one waits out
+  TMR_DELAY first, a random 0 to 4 s (0 to 2 s for the first after
+  start-up). After one is sent TMR_ADVERTISE runs 5 s and asks for the next,
+  so they are 5 to 9 s apart.
+- An ENTITY_DISCOVER for the entity or for all, and a new grandmaster, ask
+  for one through TMR_DELAY when none is waiting, and are ignored while one
+  is (Table 5.56). Nothing is answered at once.
+
+The delay is drawn from a generator seeded with the entity ID, so two
+entities do not advertise in step; `set_random_delay()` replaces the draw.
+An entity of the IEEE 1722.1 profile advertises as before: at start, every
+5 s, and at once for an ENTITY_DISCOVER or a change.
+
+What a controller has to allow for: a Milan entity may take 4 s to answer
+an ENTITY_DISCOVER. `statusbar-atdecc-ctl` waits for an entity a command
+names (see `TOOLS.md`).
+
+Left open:
+
+- The entity_capabilities bits 5.6.2 asks for (VENDOR_UNIQUE_SUPPORTED,
+  AEM_INTERFACE_INDEX_VALID) are the ENTITY descriptor's, as the model has
+  them. The advertiser does not add them.
+- A start after the first counts as a LINK_UP (0 to 4 s), whether the link
+  was down or the entity was stopped.
+
 ## Where the text leaves a choice
 
 - EVT_TK_REGISTERED fires at the settle itself when a matching Talker

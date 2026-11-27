@@ -638,6 +638,10 @@ struct NanoAvbComponents
     /// are configured and before the net handlers are created. The two
     /// objects are made here, once, so an entity that never asks carries
     /// two null pointers and nothing else. Calling it again does nothing.
+    ///
+    /// It is where an entity becomes one of the Milan profile, so its
+    /// discovery follows: adp_advertiser then advertises as Milan v1.3 5.6
+    /// asks (NanoAvbAdpAdvertiser::use_milan_advertise()).
     void use_milan_acmp();
 
     /// True once use_milan_acmp() has been called.

@@ -49,7 +49,23 @@ struct AdpAdvertiserConfig
 
     /// Reannounce interval (should be less than valid_time * 2 seconds)
     std::chrono::milliseconds reannounce_interval{10000};  // 10 seconds default
+
+    /// Advertise by the state machine of Milan v1.3 5.6.3 and not by the
+    /// two fields above: see NanoAvbAdpAdvertiser::use_milan_advertise(),
+    /// which sets this and the valid_time Milan asks for.
+    bool milan_advertise = false;
 };
+
+/// Milan v1.3 5.6.2: "The valid_time field shall be set to 10 in
+/// ENTITY_AVAILABLE messages" (units of 2 s: 20 s).
+inline constexpr uint8_t MILAN_ADP_VALID_TIME = 10;
+/// Milan v1.3 Table 5.55, TMR_ADVERTISE: "a timer with a fixed value of 5 seconds".
+inline constexpr std::chrono::milliseconds MILAN_TMR_ADVERTISE{5000};
+/// Milan v1.3 Table 5.55, TMR_DELAY: "a timer with a random value between 0 and 4 seconds".
+inline constexpr std::chrono::milliseconds MILAN_ADP_TMR_DELAY_MAX{4000};
+/// Milan v1.3 5.6.3.5.2, the start-up of an entity whose link is up: TMR_DELAY
+/// is then a "random value between 0 and 2 seconds".
+inline constexpr std::chrono::milliseconds MILAN_ADP_STARTUP_DELAY_MAX{2000};
 
 //
 // ADP Advertiser Callback Interface
@@ -106,6 +122,7 @@ class NanoAvbAdpAdvertiser
         : entity_{entity}
         , callbacks_{std::move(callbacks)}
         , config_{config}
+        , random_state_{random_seed_from(entity.entity_id)}
     {
         // Initialize the ADPDU from the owned entity snapshot.
         update_adpdu_from_model();
@@ -216,7 +233,77 @@ class NanoAvbAdpAdvertiser
     /// Get the number of consecutive send failures
     [[nodiscard]] auto consecutive_send_failures() const noexcept -> uint32_t { return consecutive_send_failures_; }
 
+    // The Milan advertise state machine
+
+    /// Advertise as Milan v1.3 5.6 has a PAAD-AE do it. Call before start().
+    ///
+    /// The ADPDU says valid_time 10 (5.6.2), and ENTITY_AVAILABLE goes out
+    /// by the advertise state machine of 5.6.3 in place of a fixed interval:
+    ///
+    ///  - every ENTITY_AVAILABLE waits out TMR_DELAY first, a random time of
+    ///    0 to 4 s (0 to 2 s for the first one after start-up), "to avoid
+    ///    storms of ADP ENTITY_AVAILABLE messages, which could collapse the
+    ///    network, when several devices are powered up simultaneously or
+    ///    when a controller sends an ADP ENTITY_DISCOVER";
+    ///  - after one is sent, TMR_ADVERTISE runs for 5 s and then asks for
+    ///    the next, so they are 5 to 9 s apart;
+    ///  - an ENTITY_DISCOVER for this entity or for all, and a change of
+    ///    the entity (a new grandmaster: notify_entity_changed()), ask for
+    ///    one at once when none is waiting, and are ignored while one is
+    ///    (Table 5.56).
+    ///
+    /// An entity that does not call this advertises as before: at start(),
+    /// every reannounce_interval, and at once for an ENTITY_DISCOVER or a
+    /// change.
+    void use_milan_advertise() noexcept
+    {
+        config_.milan_advertise = true;
+        config_.valid_time = MILAN_ADP_VALID_TIME;
+        adpdu_.set_valid_time(config_.valid_time);
+    }
+
+    /// Whether an ENTITY_AVAILABLE is waiting out its TMR_DELAY (the DELAY
+    /// state of Milan v1.3 Table 5.54). False without use_milan_advertise().
+    [[nodiscard]] auto milan_advertise_delayed() const noexcept -> bool
+    {
+        return config_.milan_advertise && state_ == AdpAdvertiserState::Advertising && milan_state_ == MilanAdvertise::Delay;
+    }
+
+    /// Replace the draw of TMR_DELAY: @p draw is given the longest delay
+    /// allowed and answers one from 0 to that (an answer outside is brought
+    /// inside). Without it the delay comes from a generator seeded with the
+    /// entity ID, so that two entities do not draw the same sequence.
+    void set_random_delay(statusbar::sg14::inplace_function<std::chrono::milliseconds(std::chrono::milliseconds), 64> draw)
+    {
+        random_delay_ = std::move(draw);
+    }
+
   private:
+    /// The two states of Milan v1.3 Table 5.54 an advertising entity is in;
+    /// its DOWN is AdpAdvertiserState::Stopped.
+    enum class MilanAdvertise : uint8_t
+    {
+        Delay,    ///< TMR_DELAY runs: an ENTITY_AVAILABLE is owed when it ends
+        Waiting,  ///< TMR_ADVERTISE runs: nothing is owed until it ends or an event asks
+    };
+
+    /// A seed no two entities share and that is never zero (xorshift's fixed point).
+    [[nodiscard]] static constexpr auto random_seed_from(Eui64 const& entity_id) noexcept -> uint32_t
+    {
+        uint64_t const id = entity_id.to_uint64();
+        return (static_cast<uint32_t>(id ^ (id >> 32U)) ^ 0x9E3779B9U) | 1U;
+    }
+
+    /// A delay from 0 to @p longest, from set_random_delay()'s draw or our own.
+    [[nodiscard]] auto draw_delay(std::chrono::milliseconds longest) noexcept -> std::chrono::milliseconds;
+    /// Enter DELAY: an ENTITY_AVAILABLE is owed after a TMR_DELAY of at most @p longest.
+    void begin_milan_delay(TimePoint now, std::chrono::milliseconds longest) noexcept;
+    /// start() under Milan: 5.6.3.5.2 the first time, 5.6.3.5.3 (LINK_UP) after.
+    void start_milan(TimePoint now) noexcept;
+    /// tick() under Milan: TMR_DELAY and TMR_ADVERTISE, and a change that asked.
+    void tick_milan(TimePoint now);
+    /// An ENTITY_DISCOVER that is for us, while advertising.
+    void answer_discover(TimePoint now);
     /// Send Entity Available message
     /// @return true if send succeeded, false if send failed or no callback
     auto send_entity_available() -> bool;
@@ -236,6 +323,13 @@ class NanoAvbAdpAdvertiser
     uint32_t available_index_ = 0;
     uint32_t consecutive_send_failures_ = 0;  // Track send failures for diagnostics
     TimePoint last_announce_time_;
+
+    MilanAdvertise milan_state_ = MilanAdvertise::Delay;
+    TimePoint milan_deadline_{};         ///< when TMR_DELAY (in Delay) or TMR_ADVERTISE (in Waiting) ends
+    bool milan_started_before_ = false;  ///< a start() after the first is a LINK_UP
+    bool milan_change_pending_ = false;  ///< notify_entity_changed() since the last tick()
+    uint32_t random_state_;              ///< xorshift32, for TMR_DELAY
+    statusbar::sg14::inplace_function<std::chrono::milliseconds(std::chrono::milliseconds), 64> random_delay_{};
 };
 
 //

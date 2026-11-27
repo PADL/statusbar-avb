@@ -207,6 +207,9 @@ void NanoAvbComponents::use_milan_acmp()
         std::make_unique<NanoAvbMilanAcmpTalker>(acmp_talker.entity_id(), AcmpTalkerCallbacks{}, acmp_talker.max_streams());
     milan_acmp_listener =
         std::make_unique<NanoAvbMilanAcmpListener>(acmp_listener.entity_id(), AcmpListenerCallbacks{}, acmp_listener.max_streams());
+    // Milan v1.3 5.6: such an entity advertises with valid_time 10 and by
+    // Milan's advertise state machine.
+    adp_advertiser.use_milan_advertise();
 }
 
 auto NanoAvbComponents::configure_talker_stream(

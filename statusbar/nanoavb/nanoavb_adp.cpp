@@ -3,6 +3,10 @@
 
 #include "statusbar/nanoavb/nanoavb_adp.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <utility>
+
 namespace statusbar::nanoavb {
 
 auto NanoAvbAdpAdvertiser::start(TimePoint now) -> Status
@@ -12,6 +16,10 @@ auto NanoAvbAdpAdvertiser::start(TimePoint now) -> Status
     }
 
     state_ = AdpAdvertiserState::Advertising;
+    if (config_.milan_advertise) {
+        start_milan(now);
+        return success();
+    }
 
     // Send initial Entity Available
     send_entity_available();
@@ -40,10 +48,76 @@ auto NanoAvbAdpAdvertiser::notify_entity_changed() -> void
     // Update ADPDU from current model state
     update_adpdu_from_model();
 
+    // Under Milan the change asks for an ENTITY_AVAILABLE through TMR_DELAY
+    // (5.6.3.5.7, GM_CHANGE). There is no time here to start a timer from:
+    // the next tick(), which is told it, does.
+    if (config_.milan_advertise) {
+        milan_change_pending_ = true;
+        return;
+    }
     // If advertising, send updated Entity Available immediately
     // (send_entity_available will increment available_index per IEEE 1722.1)
     if (state_ == AdpAdvertiserState::Advertising) {
         send_entity_available();
+    }
+}
+
+auto NanoAvbAdpAdvertiser::draw_delay(std::chrono::milliseconds const longest) noexcept -> std::chrono::milliseconds
+{
+    if (random_delay_) {
+        return std::clamp(random_delay_(longest), std::chrono::milliseconds{0}, longest);
+    }
+    // xorshift32: spread is all TMR_DELAY asks of it.
+    random_state_ ^= random_state_ << 13U;
+    random_state_ ^= random_state_ >> 17U;
+    random_state_ ^= random_state_ << 5U;
+    return std::chrono::milliseconds{random_state_ % (static_cast<uint32_t>(longest.count()) + 1U)};
+}
+
+void NanoAvbAdpAdvertiser::begin_milan_delay(TimePoint const now, std::chrono::milliseconds const longest) noexcept
+{
+    milan_state_ = MilanAdvertise::Delay;
+    milan_deadline_ = now + draw_delay(longest);
+}
+
+void NanoAvbAdpAdvertiser::start_milan(TimePoint const now) noexcept
+{
+    // 5.6.3.5.2: at start-up with the link up TMR_DELAY is 0 to 2 s.
+    // 5.6.3.5.3: at a later LINK_UP it is 0 to 4 s.
+    bool const first = !std::exchange(milan_started_before_, true);
+    milan_change_pending_ = false;  // what is sent after the delay is current
+    begin_milan_delay(now, first ? MILAN_ADP_STARTUP_DELAY_MAX : MILAN_ADP_TMR_DELAY_MAX);
+}
+
+void NanoAvbAdpAdvertiser::tick_milan(TimePoint const now)
+{
+    bool const changed = std::exchange(milan_change_pending_, false);
+    // 5.6.3.5.7, GM_CHANGE in WAITING, and 5.6.3.5.5, TMR_ADVERTISE: both
+    // start TMR_DELAY. In DELAY a change is ignored (Table 5.56): the
+    // ENTITY_AVAILABLE that is owed will carry it.
+    if (milan_state_ == MilanAdvertise::Waiting && (changed || now >= milan_deadline_)) {
+        begin_milan_delay(now, MILAN_ADP_TMR_DELAY_MAX);
+    }
+    // A delay of nothing ends in the tick that started it.
+    if (milan_state_ == MilanAdvertise::Waiting || now < milan_deadline_) {
+        return;
+    }
+    // 5.6.3.5.9, TMR_DELAY: send, start TMR_ADVERTISE, go to WAITING.
+    send_entity_available();
+    milan_state_ = MilanAdvertise::Waiting;
+    milan_deadline_ = now + MILAN_TMR_ADVERTISE;
+}
+
+void NanoAvbAdpAdvertiser::answer_discover(TimePoint const now)
+{
+    if (!config_.milan_advertise) {
+        send_entity_available();
+        return;
+    }
+    // 5.6.3.5.4: in WAITING, stop TMR_ADVERTISE and start TMR_DELAY. In
+    // DELAY the message is ignored (Table 5.56): one is owed already.
+    if (milan_state_ == MilanAdvertise::Waiting) {
+        begin_milan_delay(now, MILAN_ADP_TMR_DELAY_MAX);
     }
 }
 
@@ -77,7 +151,7 @@ auto NanoAvbAdpAdvertiser::update_adpdu_from_model() -> void
     // For now, leave at defaults (0)
 }
 
-auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint /*now*/) -> void
+auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint now) -> void
 {
     // Check if this is a Discover message targeting us or all entities
     if (adpdu.is_entity_discover()) {
@@ -87,8 +161,8 @@ auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint /*now*/) 
         bool const is_targeted = (adpdu.entity_id == entity_.entity_id);
 
         if ((is_broadcast || is_targeted) && state_ == AdpAdvertiserState::Advertising) {
-            // Respond with Entity Available
-            send_entity_available();
+            // Respond with Entity Available: at once, or after Milan's TMR_DELAY
+            answer_discover(now);
         }
     }
 
@@ -101,6 +175,10 @@ auto NanoAvbAdpAdvertiser::receive_adpdu(AdpDu const& adpdu, TimePoint /*now*/) 
 auto NanoAvbAdpAdvertiser::tick(TimePoint now) -> void
 {
     if (state_ != AdpAdvertiserState::Advertising) {
+        return;
+    }
+    if (config_.milan_advertise) {
+        tick_milan(now);
         return;
     }
 
