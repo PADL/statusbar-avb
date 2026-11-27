@@ -28,6 +28,7 @@ using namespace statusbar;
 using statusbar::avb_entity::crf_aligned_base;
 using statusbar::avb_entity::crf_sample_stride;
 using statusbar::avb_entity::crf_schedule;
+using statusbar::avb_entity::crf_start_base;
 using statusbar::avb_entity::fill_crf_timestamps;
 
 namespace {
@@ -144,15 +145,26 @@ TEST(crf_schedule, pdus_are_spaced_by_samples_whatever_the_wake_carries)
     EXPECT_EQ(sent, 4594);  // the PDUs at 0, 96, ..., 440928: 441000 / 96 = 4593.75, so 4594
 }
 
-// Nothing scheduled starts at the stride-aligned live position, a wake that
-// does not reach the owed index sends nothing and keeps it, the wake that
-// covers it sends it, and a media clock that stepped by more than a span in
-// either direction starts again from the live position.
-TEST(crf_schedule, a_closed_gate_or_a_clock_step_restarts_from_the_aligned_live_position)
+TEST(crf_schedule, a_schedule_starts_at_the_first_stride_boundary_at_or_after_the_live_position)
 {
-    auto const first = crf_schedule(std::nullopt, 1000, 6, 96, 96);
-    EXPECT_TRUE(first.send.has_value());
-    EXPECT_EQ(*first.send, 960U);
+    EXPECT_EQ(crf_start_base(1000, 192), 1152U);  // 960 is 40 samples gone
+    EXPECT_EQ(crf_start_base(960, 192), 960U);    // on the boundary: now
+    EXPECT_EQ(crf_start_base(961, 192), 1152U);
+    EXPECT_EQ(crf_start_base(1151, 192), 1152U);
+    EXPECT_EQ(crf_start_base(0, 96), 0U);
+    EXPECT_EQ(crf_start_base(1234, 0), 1234U);  // stride 0 -> passthrough
+}
+
+// Nothing scheduled starts at the first stride boundary at or after the live
+// position: the boundary before it was owed up to a span ago, and a PDU sent
+// for it now would reach a listener past its timestamp. A wake that does not
+// reach the owed index sends nothing and keeps it, the wake that covers it
+// sends it, and a media clock that stepped by more than a span in either
+// direction starts again in the same way.
+TEST(crf_schedule, a_closed_gate_or_a_clock_step_restarts_at_the_next_owed_index)
+{
+    auto const first = crf_schedule(std::nullopt, 1000, 6, 96, 96);  // 960 is 40 samples gone
+    EXPECT_FALSE(first.send.has_value());
     EXPECT_EQ(*first.due, 1056U);
 
     auto const waiting = crf_schedule(first.due, 1006, 6, 96, 96);  // covers 1006..1011: not yet
@@ -164,14 +176,49 @@ TEST(crf_schedule, a_closed_gate_or_a_clock_step_restarts_from_the_aligned_live_
     EXPECT_EQ(*hit.due, 1152U);
 
     auto const forward = crf_schedule(hit.due, 50'000, 6, 96, 96);  // the clock stepped ahead
-    EXPECT_EQ(*forward.send, crf_aligned_base(50'000, 96));
-    EXPECT_EQ(*forward.due, crf_aligned_base(50'000, 96) + 96);
+    EXPECT_FALSE(forward.send.has_value());
+    EXPECT_EQ(*forward.due, 50'016U);
 
     auto const back = crf_schedule(hit.due, 100, 6, 96, 96);  // and back
-    EXPECT_EQ(*back.send, 96U);
+    EXPECT_FALSE(back.send.has_value());
+    EXPECT_EQ(*back.due, 192U);
+
+    auto const on_it = crf_schedule(std::nullopt, 960, 6, 96, 96);  // opened on a boundary: owed now
+    EXPECT_EQ(*on_it.send, 960U);
+    EXPECT_EQ(*on_it.due, 1056U);
+
+    auto const inside = crf_schedule(std::nullopt, 955, 6, 96, 96);  // covers 955..960
+    EXPECT_EQ(*inside.send, 960U);
 
     auto const degenerate = crf_schedule(std::nullopt, 1000, 6, 0, 0);  // stride 0: never owed
     EXPECT_FALSE(degenerate.send.has_value());
+}
+
+// Whatever the position the gate opens at, every PDU, the first one too, is
+// sent by the wake that covers its index, and the first is sent within a
+// span of the opening. Milan's format under 96 kHz audio: a PDU every 192
+// samples, a wake of 12.
+TEST(crf_schedule, the_first_pdu_after_the_gate_opens_is_sent_by_the_wake_that_covers_it)
+{
+    constexpr uint32_t stride = 192;
+    constexpr uint64_t span = 192;
+    constexpr uint32_t samples = 12;
+    for (uint64_t opened = 9600; opened < 9600 + (2 * span); ++opened) {
+        std::optional<uint64_t> due{};
+        std::optional<uint64_t> first{};
+        int sent = 0;
+        for (uint64_t live = opened; live < opened + (4 * span); live += samples) {
+            auto const plan = crf_schedule(due, live, samples, stride, span);
+            due = plan.due;
+            if (plan.send) {
+                EXPECT_TRUE(*plan.send >= live && *plan.send < live + samples);
+                first = first ? first : plan.send;
+                ++sent;
+            }
+        }
+        EXPECT_TRUE(first.has_value() && *first >= opened && *first < opened + span);
+        EXPECT_EQ(sent, 4);
+    }
 }
 
 // --- An AAF slot is blocked by its format, not by the media clock rate --------

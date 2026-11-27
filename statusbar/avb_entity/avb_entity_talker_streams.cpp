@@ -599,7 +599,7 @@ void TalkerStreams::serve_crf(
         return;
     }
     if (!gate_open) {
-        slot.crf_due.reset();  // gate closed: the next PDU starts from the live position
+        slot.crf_due.reset();  // gate closed: the next PDU is the first one owed after the gate opens
         return;
     }
     // One PDU carries timestamps_per_packet timestamps, each spaced

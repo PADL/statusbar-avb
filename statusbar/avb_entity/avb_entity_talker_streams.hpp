@@ -509,6 +509,20 @@ struct TalkerStreams
     return sample_stride == 0 ? first_index : (first_index / sample_stride) * sample_stride;
 }
 
+/// The media-clock index a CRF schedule starts at: the first sample_stride
+/// boundary at or after the live position. The first PDU is then sent by the
+/// wake that covers its index, as every later one is, and leaves as far ahead
+/// of its timestamp as they do. The boundary before the live position
+/// (crf_aligned_base) is already up to a stride behind: a PDU sent for it
+/// goes out that much after the moment it was owed, and with a presentation
+/// offset shorter than the stride a listener receives it past its timestamp
+/// (LATE_TIMESTAMP, Milan v1.3 Table 5.6).
+[[nodiscard]] constexpr auto crf_start_base(uint64_t const live, uint32_t const sample_stride) noexcept -> uint64_t
+{
+    uint64_t const before = crf_aligned_base(live, sample_stride);
+    return before == live ? live : before + sample_stride;
+}
+
 /// What crf_schedule decided for one wake: the base index of the PDU to send
 /// now, if one is owed, and the schedule to carry to the next wake.
 struct CrfSchedule
@@ -525,14 +539,15 @@ struct CrfSchedule
 /// nullopt when nothing is scheduled; the wake covers [@p live, @p live +
 /// @p samples). Nothing scheduled, or a due index more than a span away from
 /// the live position (the gate just opened, the media clock stepped), starts
-/// again from the stride-aligned live position, as crf_aligned_base did
-/// every PDU.
+/// again at the first stride boundary at or after the live position
+/// (crf_start_base): no PDU is sent for an index a wake before this one
+/// covered.
 [[nodiscard]] constexpr auto crf_schedule(
     std::optional<uint64_t> due, uint64_t const live, uint32_t const samples, uint32_t const stride, uint64_t const span) noexcept
     -> CrfSchedule
 {
     if (!due || *due + span <= live || live + span < *due) {
-        due = crf_aligned_base(live, stride);
+        due = crf_start_base(live, stride);
     }
     if (span == 0 || *due >= live + samples) {
         return {.send = std::nullopt, .due = due};
