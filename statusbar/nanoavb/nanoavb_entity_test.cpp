@@ -3969,6 +3969,227 @@ TEST(nanoavb_entity_registered_controllers, a_plain_entity_sends_no_mvu_notifica
 }
 
 //
+// Notifications from connection management - Milan v1.3 Section 5.4.5.3, Table 5.21
+//
+
+namespace {
+
+/// What stands in for Milan connection management where a command changes a
+/// binding: two stream inputs, each bound or not, whose sink takes a bind or
+/// unbind unless it is told to answer another status.
+struct BoundInputs
+{
+    std::array<std::optional<statusbar::atdecc::MilanBinding>, 2> bindings{};
+    uint8_t acmp_status{statusbar::atdecc::ACMP_STATUS_SUCCESS};
+
+    void attach(AemCommandHandler& handler)
+    {
+        handler.attach_mvu_stream_inputs(
+            this,
+            MvuStreamInputCallbacks{
+                .binding_command =
+                    [this](statusbar::atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond) {
+                        on_binding_command(command, respond);
+                    },
+                .stream_input_info = [](uint16_t const index) { return StreamInputs::info_of(index); },
+                .binding = [this](uint16_t const index) { return index < bindings.size() ? bindings.at(index) : std::nullopt; }});
+    }
+
+    void on_binding_command(statusbar::atdecc::AcmpCommandResponse const& command, MvuStreamInputCallbacks::Respond const& respond)
+    {
+        if (acmp_status == statusbar::atdecc::ACMP_STATUS_SUCCESS) {
+            bindings.at(command.listener_unique_id.get()) = binding_asked(command);
+        }
+        auto response = command;
+        response.set_status(acmp_status);
+        respond(response);
+    }
+
+    static auto binding_asked(statusbar::atdecc::AcmpCommandResponse const& command)
+        -> std::optional<statusbar::atdecc::MilanBinding>
+    {
+        if (command.message_type() != statusbar::atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND) {
+            return std::nullopt;
+        }
+        return statusbar::atdecc::MilanBinding{
+            .listener_unique_id = command.listener_unique_id.get(),
+            .talker_entity_id = command.talker_entity_id,
+            .talker_unique_id = command.talker_unique_id.get(),
+            .controller_entity_id = command.controller_entity_id,
+            .streaming_wait = command.is_streaming_wait()};
+    }
+};
+
+/// A Milan entity with controllers A and B registered and nothing sent yet.
+struct NotifiedEntity
+{
+    SetAcceptingHandler app{};
+    AemCommandHandler handler{app};
+    std::vector<CapturedSend> sends{};
+
+    NotifiedEntity()
+    {
+        handler.set_entity_id(kEntity);
+        handler.set_milan_info(kMilanInfo);
+        capture_sends(handler, sends);
+        register_controller(handler, kEntity, kControllerA, kMacA);
+        register_controller(handler, kEntity, kControllerB, kMacB);
+        sends.clear();
+    }
+    NotifiedEntity(NotifiedEntity const&) = delete;
+    auto operator=(NotifiedEntity const&) -> NotifiedEntity& = delete;
+
+    [[nodiscard]] auto told(uint16_t const command, Eui48 const& dest) const -> std::vector<uint16_t>
+    {
+        return mvu_unsolicited_sequence_ids(sends, command, dest);
+    }
+};
+
+auto same_octets(std::span<uint8_t const> const a, std::span<uint8_t const> const b) -> bool
+{
+    return std::ranges::equal(a, b);
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_mvu_notify, a_bind_stream_that_changes_the_binding_is_told_to_the_others_after_its_response)
+{
+    NotifiedEntity e;
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 7));
+    EXPECT_EQ(e.sends.size(), size_t{2});
+    if (e.sends.size() != 2) {
+        return;
+    }
+    // The response to A first, then the notification to B alone, with B's first MVU sequence id.
+    EXPECT_EQ(e.sends[0].dest, kMacA);
+    EXPECT_FALSE(mvu_header_of(e.sends[0]).is_unsolicited());
+    EXPECT_EQ(mvu_header_of(e.sends[0]).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(e.sends[1].dest, kMacB);
+    EXPECT_TRUE((e.told(MVU_COMMAND_BIND_STREAM, kMacB) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE(e.told(MVU_COMMAND_BIND_STREAM, kMacA).empty());
+    // It is addressed to B and says what the response said.
+    auto const hdr = mvu_header_of(e.sends[1]);
+    EXPECT_EQ(hdr.common.controller_entity_id, kControllerB);
+    EXPECT_EQ(hdr.common.target_entity_id, kEntity);
+    EXPECT_EQ(hdr.common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_TRUE(same_octets(mvu_body_of(e.sends[1]), mvu_body_of(e.sends[0])));
+    EXPECT_EQ(mvu_body_of(e.sends[1]).size(), MvuBindStream::LENGTH);
+}
+
+TEST(nanoavb_entity_mvu_notify, a_bind_stream_that_changes_nothing_is_answered_and_not_told)
+{
+    NotifiedEntity e;
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 7));
+    e.sends.clear();
+
+    // The same bind from the same controller: SUCCESS, and the state is as it was.
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 8));
+    EXPECT_EQ(e.sends.size(), size_t{1});
+    EXPECT_TRUE(e.told(MVU_COMMAND_BIND_STREAM, kMacB).empty());
+
+    // Each binding parameter counts (5.3.8.3): the stopped state, then the controller.
+    auto const stopped = bind_stream(kStreamInput, 1, MVU_BIND_STREAM_FLAG_STREAMING_WAIT);
+    // (B's first MVU notification was the first bind's, so this is its second.)
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, stopped, 9));
+    EXPECT_TRUE((e.told(MVU_COMMAND_BIND_STREAM, kMacB) == std::vector<uint16_t>{1}));
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerB, kMacB, MVU_COMMAND_BIND_STREAM, stopped, 10));
+    EXPECT_TRUE((e.told(MVU_COMMAND_BIND_STREAM, kMacA) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE((e.told(MVU_COMMAND_BIND_STREAM, kMacB) == std::vector<uint16_t>{1}));
+}
+
+TEST(nanoavb_entity_mvu_notify, an_unbind_stream_is_told_when_the_input_was_bound)
+{
+    NotifiedEntity e;
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+
+    // Not bound: SUCCESS from the sink, nothing changed, nobody told.
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, stream_input(kStreamInput, 0), 1));
+    EXPECT_EQ(e.sends.size(), size_t{1});
+
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 0), 2));
+    e.sends.clear();
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerB, kMacB, MVU_COMMAND_UNBIND_STREAM, stream_input(kStreamInput, 0), 3));
+    EXPECT_EQ(e.sends.size(), size_t{2});
+    if (e.sends.size() != 2) {
+        return;
+    }
+    // B asked: A is told, with A's first MVU sequence id (the bind was A's own, told to B).
+    EXPECT_TRUE(e.told(MVU_COMMAND_UNBIND_STREAM, kMacB).empty());
+    EXPECT_TRUE((e.told(MVU_COMMAND_UNBIND_STREAM, kMacA) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE(same_octets(mvu_body_of(e.sends[1]), mvu_body_of(e.sends[0])));
+    EXPECT_EQ(mvu_body_of(e.sends[1]).size(), MvuStreamInput::LENGTH);
+}
+
+TEST(nanoavb_entity_mvu_notify, a_bind_or_unbind_that_is_refused_is_not_told)
+{
+    NotifiedEntity e;
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+    inputs.acmp_status = statusbar::atdecc::ACMP_STATUS_CONTROLLER_NOT_AUTHORIZED;
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 1));
+    // One the handler refuses itself, and one too short to name an input.
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamOutput, 1), 2));
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_UNBIND_STREAM, std::array<uint8_t, 2>{}, 3));
+    EXPECT_EQ(e.sends.size(), size_t{3});
+    EXPECT_TRUE(e.told(MVU_COMMAND_BIND_STREAM, kMacB).empty());
+    EXPECT_TRUE(e.told(MVU_COMMAND_UNBIND_STREAM, kMacB).empty());
+}
+
+TEST(nanoavb_entity_mvu_notify, stream_inputs_that_do_not_tell_their_binding_have_no_bind_told)
+{
+    NotifiedEntity e;
+    StreamInputs inputs;  // answers SUCCESS and gives no binding callback
+    inputs.attach(e.handler, e.sends);
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 1));
+    EXPECT_EQ(e.sends.size(), size_t{1});
+    EXPECT_TRUE(e.told(MVU_COMMAND_BIND_STREAM, kMacB).empty());
+}
+
+TEST(nanoavb_entity_mvu_notify, a_changed_stream_input_is_told_as_its_info_ex_response_to_every_controller)
+{
+    NotifiedEntity e;
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+
+    EXPECT_TRUE(e.handler.notify_stream_input_info_ex(1));
+    EXPECT_EQ(e.sends.size(), size_t{2});
+    EXPECT_TRUE((e.told(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA) == std::vector<uint16_t>{0}));
+    EXPECT_TRUE((e.told(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacB) == std::vector<uint16_t>{0}));
+    if (e.sends.size() != 2) {
+        return;
+    }
+    // Figure 5.12, as a GET_STREAM_INPUT_INFO_EX of that input would be answered.
+    MvuGetStreamInputInfoExResponse told{};
+    span_load(told, mvu_body_of(e.sends[0]));
+    EXPECT_TRUE(told == *StreamInputs::info_of(1));
+    EXPECT_EQ(mvu_body_of(e.sends[0]).size(), MvuGetStreamInputInfoExResponse::LENGTH);
+    EXPECT_EQ(mvu_header_of(e.sends[0]).common.status(), MVU_STATUS_SUCCESS);
+
+    // Each controller's MVU sequence id goes on from its last, whatever raised the notification.
+    EXPECT_TRUE(inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_BIND_STREAM, bind_stream(kStreamInput, 1), 1));
+    EXPECT_TRUE((e.told(MVU_COMMAND_BIND_STREAM, kMacB) == std::vector<uint16_t>{1}));
+    EXPECT_TRUE(e.handler.notify_stream_input_info_ex(0));
+    EXPECT_TRUE((e.told(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacA) == std::vector<uint16_t>{0, 1}));
+    EXPECT_TRUE((e.told(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, kMacB) == std::vector<uint16_t>{0, 2}));
+}
+
+TEST(nanoavb_entity_mvu_notify, a_stream_input_the_entity_does_not_have_is_not_told)
+{
+    NotifiedEntity e;
+    EXPECT_FALSE(e.handler.notify_stream_input_info_ex(0));  // IEEE 1722.1 connection management: nothing attached
+    BoundInputs inputs;
+    inputs.attach(e.handler);
+    EXPECT_FALSE(e.handler.notify_stream_input_info_ex(2));
+    EXPECT_TRUE(e.sends.empty());
+}
+
+//
 // Controller monitor - Milan v1.3 Section 5.4.5.4
 //
 

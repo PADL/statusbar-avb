@@ -347,7 +347,24 @@ void AtdeccNetHandler::attach_mvu_stream_inputs()
             .stream_input_info = [this](uint16_t const index) -> std::optional<atdecc::MvuGetStreamInputInfoExResponse> {
                 auto const* const sink = milan_listener_->sink(index);
                 return sink != nullptr ? std::optional{atdecc::milan_stream_input_info_ex(sink->context())} : std::nullopt;
+            },
+            .binding = [this](uint16_t const index) -> std::optional<atdecc::MilanBinding> {
+                auto const* const sink = milan_listener_->sink(index);
+                return sink != nullptr ? sink->context().binding : std::nullopt;
             }});
+}
+
+void AtdeccNetHandler::notify_stream_input_changes()
+{
+    // Milan v1.3 Table 5.21: a GET_STREAM_INPUT_INFO_EX notification when a
+    // stream input's talker, Probing status, ACMP status or Talker
+    // attribute registration changes. Looked for once a tick, after the
+    // sinks' timers, so whatever changed an input (a command, a probe's
+    // answer, an advertisement, SRP, a timer) is found in one place, and
+    // with no command being answered every registered controller is told,
+    // the one whose bind began the change too.
+    milan_listener_->tell_stream_input_changes(
+        [this](uint16_t const index) { (void)aem_handler_.notify_stream_input_info_ex(index); });
 }
 
 void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, NanoAvbMilanAcmpListener* const listener)
@@ -385,6 +402,7 @@ void AtdeccNetHandler::tick_protocols(sm::TimePoint const now)
     acmp_listener_.tick(now);
     if (milan_listener_ != nullptr) {
         milan_listener_->tick(now);
+        notify_stream_input_changes();
     }
     aem_handler_.tick(now);  // AEM has LOCK / pending-acquire timeout checking
     if (adp_discovery_ != nullptr) {

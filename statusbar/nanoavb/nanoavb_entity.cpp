@@ -2657,7 +2657,7 @@ auto AemCommandHandler::dispatch_mvu_command(Eui48 const& src_mac, MvuCommand co
     // As handle_command() does for AEM: the requester is left out of the fan-out (5.4.5.2).
     Eui64 const outer_requester = std::exchange(requester_, command.header.common.controller_entity_id);
     bool const sent =
-        is_mvu_binding_command(command) ? answer_mvu_binding_command(src_mac, command) : answer_mvu_command(src_mac, command);
+        is_mvu_binding_command(command) ? answer_mvu_binding_and_notify(src_mac, command) : answer_mvu_command(src_mac, command);
     requester_ = outer_requester;
     return sent;
 }
@@ -2864,6 +2864,32 @@ auto AemCommandHandler::give_mvu_binding_to_its_sink(
     return sent.has_value() ? *sent : send_mvu_response(src_mac, header, MVU_STATUS_ENTITY_MISBEHAVING, response_data);
 }
 
+auto AemCommandHandler::mvu_binding_in_force(MvuCommand const& command) const -> std::optional<atdecc::MilanBinding>
+{
+    auto const named = mvu_binding_for(command.header, command.data);
+    if (!named.has_value() || !mvu_stream_inputs_.binding) {
+        return std::nullopt;
+    }
+    return mvu_stream_inputs_.binding(named->as_acmp.listener_unique_id.get());
+}
+
+auto AemCommandHandler::answer_mvu_binding_and_notify(Eui48 const& src_mac, MvuCommand const& command) -> bool
+{
+    // Milan v1.3 5.4.5.3: a BIND_STREAM or UNBIND_STREAM answered SUCCESS
+    // that changed the entity's state is notified to the registered
+    // controllers but the one that sent it, after its response. A sink
+    // changes its binding parameters (5.3.8.3) only for a command it takes,
+    // so a binding that is not what it was says both. The notification
+    // carries what the response carried.
+    auto const before = mvu_binding_in_force(command);
+    bool const sent = answer_mvu_binding_command(src_mac, command);
+    auto const named = mvu_binding_for(command.header, command.data);
+    if (named.has_value() && mvu_binding_in_force(command) != before) {
+        emit_mvu_unsolicited(command.header.command_type(), named->response_data());
+    }
+    return sent;
+}
+
 auto AemCommandHandler::milan_info_response() const noexcept -> MvuGetMilanInfoResponse
 {
     MvuGetMilanInfoResponse info{};
@@ -2907,6 +2933,17 @@ void AemCommandHandler::emit_mvu_unsolicited(uint16_t const command_type, std::s
             mvu_unsolicited_header(our_entity_id_, reg.controller_entity_id, reg.mvu_sequence_id++, command_type, body.size());
         (void)send_mvu_pdu(reg.controller_mac, header, body);
     }
+}
+
+auto AemCommandHandler::notify_stream_input_info_ex(uint16_t const stream_input_index) -> bool
+{
+    auto const& ask = mvu_stream_inputs_.stream_input_info;
+    auto const info = ask ? ask(stream_input_index) : std::nullopt;
+    if (!info.has_value()) {
+        return false;
+    }
+    emit_mvu_unsolicited(MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, make_const_span(*info));
+    return true;
 }
 
 auto AemCommandHandler::handle_register_unsolicited(AemDu const& header) -> AemCommandResponse

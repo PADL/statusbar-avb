@@ -387,6 +387,8 @@ class AtdeccNetHandler : public net::Pollable
     void release_milan_acmp() noexcept;
     /// Give the AEM handler the Milan listener's sinks for the MVU stream input commands.
     void attach_mvu_stream_inputs();
+    /// Send the GET_STREAM_INPUT_INFO_EX notifications that are due (Milan v1.3 Table 5.21).
+    void notify_stream_input_changes();
     /// Send an ACMP PDU to the ACMP multicast address, in the 56-octet form.
     auto send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool;
     void tick_protocols(sm::TimePoint now);

@@ -314,6 +314,19 @@ class NanoAvbMilanAcmpListener
     /// Run the timers that have fallen due.
     void tick(TimePoint now);
 
+    /// Takes the index of a stream input.
+    using TellStreamInput = statusbar::sg14::inplace_function<void(uint16_t stream_index), 64>;
+
+    /// Call @p tell for each stream input of which something Milan v1.3
+    /// Table 5.21 names is not as the call before found it: the talker it is
+    /// bound to, its Probing status, its ACMP status, the registration of
+    /// its Talker attribute (atdecc::MilanStreamInputNotified). That is when
+    /// a GET_STREAM_INPUT_INFO_EX notification is due. However many times an
+    /// input changed between two calls it is told once, and not at all when
+    /// it is back as it was. A listener starts with every input unbound, so
+    /// the first call tells of each binding restored before it.
+    void tell_stream_input_changes(TellStreamInput const& tell);
+
     /// The earliest timer of any sink, nullopt with none running.
     [[nodiscard]] auto next_deadline() const noexcept -> std::optional<TimePoint>;
 
@@ -338,6 +351,8 @@ class NanoAvbMilanAcmpListener
     statusbar::sg14::inplace_function<atdecc::MilanGptpState(), 64> gptp_state_{};
     statusbar::sg14::inplace_function<void(), 64> on_bindings_changed_{};
     statusbar::sg14::inplace_vector<atdecc::MilanSink, MAX_STREAMS> sinks_{};
+    /// Each sink as tell_stream_input_changes() last found it.
+    statusbar::sg14::inplace_vector<atdecc::MilanStreamInputNotified, MAX_STREAMS> told_{};
     uint32_t random_state_{0};
 };
 

@@ -134,4 +134,49 @@ TEST(milan_mvu_stream_input, a_bound_sink_reports_its_talker_and_how_far_probing
     EXPECT_EQ(settled.acmpsta(), 0);
 }
 
+TEST(milan_mvu_stream_input, what_is_notified_is_the_response_and_a_settled_sinks_registration)
+{
+    // Table 5.21
+    MilanListenerEnv env{};
+    MilanTalkerRegistration registers{MilanTalkerRegistration::Advertise};
+    MilanSrpParameters asked{};
+    env.talker_registration = [&](MilanSrpParameters const& srp) {
+        asked = srp;
+        return registers;
+    };
+    MilanSinkContext ctx{};
+    ctx.env = &env;
+    ctx.index = 1;
+    ctx.binding = MilanBinding{
+        .listener_unique_id = 1, .talker_entity_id = TALKER, .talker_unique_id = 5, .controller_entity_id = CONTROLLER};
+    ctx.probing_status = MilanProbingStatus::Active;
+
+    // Not settled: no SRP parameters to match, so SRP is not asked.
+    auto const probing = milan_stream_input_notified(ctx);
+    EXPECT_TRUE(probing.info == milan_stream_input_info_ex(ctx));
+    EXPECT_TRUE(probing.talker_registration == MilanTalkerRegistration::None);
+    EXPECT_TRUE(asked == MilanSrpParameters{});
+
+    // Settled: asked for the parameters of the last probe's answer.
+    ctx.probing_status = MilanProbingStatus::Completed;
+    ctx.srp = MilanSrpParameters{.stream_id = TALKER, .stream_dest_mac = {0x91, 0xE0, 0xF0, 0, 0, 7}, .stream_vlan_id = 2};
+    ctx.srp_active = true;
+    auto const settled = milan_stream_input_notified(ctx);
+    EXPECT_TRUE(settled.talker_registration == MilanTalkerRegistration::Advertise);
+    EXPECT_TRUE(asked == ctx.srp);
+    EXPECT_FALSE(settled == probing);
+
+    // The registration alone makes it another: the response is the same.
+    registers = MilanTalkerRegistration::Failed;
+    auto const failed = milan_stream_input_notified(ctx);
+    EXPECT_TRUE(failed.info == settled.info);
+    EXPECT_FALSE(failed == settled);
+
+    // A listener that cannot say what SRP registers reads as nothing registered.
+    env.talker_registration = nullptr;
+    EXPECT_TRUE(milan_stream_input_notified(ctx).talker_registration == MilanTalkerRegistration::None);
+    ctx.env = nullptr;
+    EXPECT_TRUE(milan_stream_input_notified(ctx).talker_registration == MilanTalkerRegistration::None);
+}
+
 TEST_MAIN(statusbar_atdecc, atdecc_milan_mvu_stream_input_test)

@@ -161,6 +161,14 @@ struct ListenerRig
     }
 
     [[nodiscard]] auto state(uint16_t const sink) const -> MilanSinkState { return listener.sink(sink)->state(); }
+
+    /// The stream inputs tell_stream_input_changes() tells of now, in order.
+    [[nodiscard]] auto changed() -> std::vector<uint16_t>
+    {
+        std::vector<uint16_t> told{};
+        listener.tell_stream_input_changes([&told](uint16_t const index) { told.push_back(index); });
+        return told;
+    }
 };
 
 }  // namespace
@@ -606,6 +614,89 @@ TEST(nanoavb_milan_listener, the_bindings_are_what_was_bound_and_survive_a_resta
     EXPECT_EQ(next.state(2), MilanSinkState::PrbWAvail);
     EXPECT_TRUE(next.log.empty());  // restoring is not a change to save, and answers nobody
     EXPECT_TRUE(next.listener.bindings().front() == saved.front());
+}
+
+//
+// What Table 5.21 has notified
+//
+
+TEST(nanoavb_milan_listener, a_fresh_listener_has_no_stream_input_to_tell_of)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.changed().empty());
+    rig.listener.tick(at(5000));
+    EXPECT_TRUE(rig.changed().empty());
+}
+
+TEST(nanoavb_milan_listener, a_bind_a_settle_and_an_unbind_are_each_told_once_for_their_input)
+{
+    ListenerRig rig;
+    // Bound: the talker is named and probing begins (Probing status).
+    EXPECT_TRUE(rig.bind(1, at(1000)));
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{1}));
+    EXPECT_TRUE(rig.changed().empty());
+    EXPECT_EQ(rig.probes.size(), 1U);
+    if (rig.probes.empty()) {
+        return;
+    }
+
+    // The probe is answered: settled (Probing status again).
+    EXPECT_TRUE(rig.listener.receive_talker_response(ListenerRig::answer_to(rig.probes.back()), at(1010)));
+    EXPECT_TRUE(rig.listener.is_settled(1));
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{1}));
+    EXPECT_TRUE(rig.changed().empty());
+
+    // Unbound: no talker, probing disabled.
+    EXPECT_TRUE(rig.listener.receive_controller_command(
+        command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER, 1, LISTENER, 1), at(2000)));
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{1}));
+    EXPECT_TRUE(rig.changed().empty());
+}
+
+TEST(nanoavb_milan_listener, the_talker_attributes_registration_is_told_for_a_settled_input_alone)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.bind(0, at(1000)));
+    EXPECT_TRUE(rig.bind(2, at(1000)));
+    EXPECT_EQ(rig.probes.size(), 2U);
+    if (rig.probes.size() != 2) {
+        return;
+    }
+    // Input 0 settles, input 2 goes on waiting for its answer.
+    EXPECT_TRUE(rig.listener.receive_talker_response(ListenerRig::answer_to(rig.probes.front()), at(1010)));
+    EXPECT_TRUE(rig.listener.is_settled(0));
+    EXPECT_FALSE(rig.listener.is_settled(2));
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{0, 2}));
+
+    // SRP registers the Talker attribute: nothing in the response moves, and it is told.
+    rig.registration = MilanTalkerRegistration::Advertise;
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{0}));
+    EXPECT_TRUE(rig.changed().empty());
+    // Advertise to Failed is another registration state, and so is its going.
+    rig.registration = MilanTalkerRegistration::Failed;
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{0}));
+    rig.registration = MilanTalkerRegistration::None;
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{0}));
+    EXPECT_TRUE(rig.changed().empty());
+}
+
+TEST(nanoavb_milan_listener, an_input_back_as_it_was_between_two_looks_is_not_told)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.bind(1, at(1000)));
+    EXPECT_TRUE(rig.listener.receive_controller_command(
+        command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER, 1, LISTENER, 1), at(1001)));
+    EXPECT_TRUE(rig.changed().empty());
+}
+
+TEST(nanoavb_milan_listener, a_binding_restored_at_start_is_told_at_the_first_look)
+{
+    ListenerRig rig;
+    EXPECT_TRUE(rig.listener.restore_binding(
+        MilanBinding{
+            .listener_unique_id = 2, .talker_entity_id = TALKER, .talker_unique_id = 1, .controller_entity_id = CONTROLLER},
+        at(0)));
+    EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{2}));
 }
 
 TEST(nanoavb_milan_listener, its_own_random_delay_stays_within_a_second_and_varies)

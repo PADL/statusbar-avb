@@ -235,6 +235,13 @@ struct MvuStreamInputCallbacks
     /// The GET_STREAM_INPUT_INFO_EX response data of STREAM_INPUT @p index,
     /// nullopt when the entity has no such stream input.
     statusbar::sg14::inplace_function<std::optional<atdecc::MvuGetStreamInputInfoExResponse>(uint16_t index), 64> stream_input_info;
+
+    /// The binding parameters of STREAM_INPUT @p index (5.3.8.3), nullopt
+    /// while it is not bound or the entity has no such stream input. It is
+    /// how the handler knows that a BIND_STREAM or UNBIND_STREAM changed the
+    /// entity's state, which is when 5.4.5.3 has the command notified to the
+    /// other registered controllers. Unset, none is notified.
+    statusbar::sg14::inplace_function<std::optional<atdecc::MilanBinding>(uint16_t index), 64> binding;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -638,6 +645,14 @@ class AemCommandHandler
     /// MVU command is being dispatched is left out. No-op for an entity without milan_info()
     /// or a send_response callback.
     void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
+
+    /// Something Milan v1.3 Table 5.21 names of STREAM_INPUT @p stream_input_index has changed
+    /// (its talker, its Probing status, its ACMP status, the registration of its Talker
+    /// attribute): send its GET_STREAM_INPUT_INFO_EX response, as the attached stream inputs
+    /// give it now, to every registered controller as an MVU notification
+    /// (emit_mvu_unsolicited()). False, and nothing sent, when no stream inputs are attached
+    /// or they have no such input.
+    auto notify_stream_input_info_ex(uint16_t stream_input_index) -> bool;
 
     /// Work a hook leaves for after its command's response, such as more notifications than
     /// MAX_QUEUED_NOTIFICATIONS holds.
@@ -1371,6 +1386,16 @@ class AemCommandHandler
     /// True for a BIND_STREAM or UNBIND_STREAM command that the attached
     /// stream inputs take.
     [[nodiscard]] auto is_mvu_binding_command(MvuCommand const& command) const noexcept -> bool;
+
+    /// answer_mvu_binding_command(), and then the command's notification to
+    /// the other registered controllers if it changed the binding of the
+    /// stream input it names (5.4.5.3).
+    auto answer_mvu_binding_and_notify(Eui48 const& src_mac, MvuCommand const& command) -> bool;
+
+    /// The binding in force of the stream input the BIND_STREAM or
+    /// UNBIND_STREAM @p command names; nullopt for one not bound, for a
+    /// command too short to name one and with no binding callback attached.
+    [[nodiscard]] auto mvu_binding_in_force(MvuCommand const& command) const -> std::optional<atdecc::MilanBinding>;
 
     /// BIND_STREAM and UNBIND_STREAM (5.4.4.6, 5.4.4.7): a command the
     /// handler can refuse by itself is answered here, any other goes to its

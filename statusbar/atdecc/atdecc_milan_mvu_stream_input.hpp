@@ -14,7 +14,8 @@
 /// (Table 5.22), the sink treats that, and the status of the ACMP response
 /// it would have sent becomes the status of the MVU response.
 ///
-/// GET_STREAM_INPUT_INFO_EX (5.4.4.8) reads a sink's variables.
+/// GET_STREAM_INPUT_INFO_EX (5.4.4.8) reads a sink's variables, and Table
+/// 5.21 has the same response sent as a notification when they change.
 
 #include "statusbar/atdecc/atdecc_acmp.hpp"
 #include "statusbar/atdecc/atdecc_aecp_mvu.hpp"
@@ -49,5 +50,24 @@ namespace statusbar::atdecc {
 /// (5.3.8.6). descriptor_type is STREAM_INPUT and descriptor_index the
 /// sink's own.
 [[nodiscard]] auto milan_stream_input_info_ex(MilanSinkContext const& ctx) noexcept -> MvuGetStreamInputInfoExResponse;
+
+/// What Table 5.21 names of a stream input: a GET_STREAM_INPUT_INFO_EX
+/// notification is due when any of it changes. The talker, the Probing
+/// status and the ACMP status are the response's own fields. The
+/// registration of the Talker attribute is named with them and is no field
+/// of the response, so a notification for it alone repeats the last one.
+struct MilanStreamInputNotified
+{
+    MvuGetStreamInputInfoExResponse info{};
+    MilanTalkerRegistration talker_registration{MilanTalkerRegistration::None};
+
+    auto operator==(MilanStreamInputNotified const&) const noexcept -> bool = default;
+};
+
+/// That of the sink with the variables @p ctx, now. The registration is
+/// asked of the listener the sink belongs to, for a settled sink's SRP
+/// parameters; a sink that is not settled has none to match and registers
+/// nothing.
+[[nodiscard]] auto milan_stream_input_notified(MilanSinkContext const& ctx) -> MilanStreamInputNotified;
 
 }  // namespace statusbar::atdecc

@@ -275,6 +275,46 @@ The MVU_BINDING flag of GET_MILAN_INFO says that BIND_STREAM and
 UNBIND_STREAM are implemented. The kit sets it under the Milan profile
 and clears it under any other, whatever `milan.features_flags` gives.
 
+### Notifications (5.4.5.3, Table 5.21)
+
+Two kinds of MVU notification come from connection management. Both go
+to the controllers registered with REGISTER_UNSOLICITED_NOTIFICATION,
+each with its own MVU sequence id (5.4.5.2), through
+`AemCommandHandler::emit_mvu_unsolicited()`.
+
+The command's own. A BIND_STREAM or UNBIND_STREAM answered SUCCESS that
+changed the entity's state is sent on, with the data its response
+carried, to every registered controller but the one that sent it
+(5.4.5.3). The handler reads the stream input's binding parameters
+(5.3.8.3) before and after the sink's treatment
+(`MvuStreamInputCallbacks::binding`); a binding that is not what it was
+is a command that was taken and changed something. The notification
+follows the response.
+
+The input's state. Table 5.21 asks for a GET_STREAM_INPUT_INFO_EX
+notification when a stream input's talker, Probing status, ACMP status
+or Talker attribute registration changes. Many things change those: a
+command on either protocol, a probe's answer, an advertisement, SRP, a
+timer. So the change is looked for in one place, once a tick, after the
+sinks' timers have run: `NanoAvbMilanAcmpListener::tell_stream_input_changes()`
+compares each sink with what the last look found
+(`atdecc::MilanStreamInputNotified`), and `AtdeccNetHandler` has
+`AemCommandHandler::notify_stream_input_info_ex()` send the input's
+response as it reads then. No command is being answered at the tick, so
+every registered controller is told.
+
+What follows from that:
+
+| What happened | BIND_STREAM or UNBIND_STREAM notification | GET_STREAM_INPUT_INFO_EX notification |
+|---|---|---|
+| MVU bind that changes the binding | at once, to the others | at the next tick, to all |
+| MVU bind of what is bound already | none | none |
+| MVU unbind of a bound input | at once, to the others | at the next tick, to all |
+| MVU unbind of an unbound input | none | none |
+| Bind or unbind over ACMP | none | at the next tick, to all |
+| Probe answered, timed out or refused | none | when the Probing or ACMP status changed |
+| Talker attribute registered, failed or gone, sink settled | none | at the next tick, to all |
+
 ## The talker
 
 5.5.4 is four responses and no state, so there is no state machine:
@@ -392,16 +432,28 @@ Left open:
   talker's among them, count MEDIA_UNLOCKED alone, unless a silent
   interval ended before them.
 
+- 5.4.5.3 has a command notified when it "modifies the state" and does
+  not say of what. Here it is the stream input's binding parameters
+  (5.3.8.3): the talker, the controller that bound it and the started or
+  stopped state. A BIND_STREAM that names what is bound already, by the
+  same controller, is answered SUCCESS and not notified. So is an
+  UNBIND_STREAM of an input that is not bound.
+- A bind over ACMP raises no BIND_STREAM notification: 5.4.5.3 lists MVU
+  commands. The other controllers learn of it from the
+  GET_STREAM_INPUT_INFO_EX notification of Table 5.21.
+- Table 5.21 names the registration of the Talker attribute, which is no
+  field of the response (Figure 5.12). A change of it alone is notified
+  with the response as it was. Registered as Advertise, registered as
+  Failed and not registered are three states; a sink that is not settled
+  has no stream to match and counts as not registered.
+- The GET_STREAM_INPUT_INFO_EX notification goes to the controller whose
+  bind began the change too. It is sent "asynchronously of any command",
+  and a BIND_STREAM response does not carry the Probing status.
+- An input that changed and changed back between two ticks is not
+  notified: there is nothing new to read.
+
 ## Not done
 
-- MVU unsolicited notifications from connection management (5.4.5.3). A
-  BIND_STREAM or UNBIND_STREAM answered SUCCESS is to be followed by one to
-  the other registered controllers, and Table 5.21 asks for a
-  GET_STREAM_INPUT_INFO_EX notification whenever the talker, the Probing
-  status, the ACMP status or the Talker attribute's registration changes.
-  `AemCommandHandler::emit_mvu_unsolicited()` sends them (each registered
-  controller with its own MVU sequence id, 5.4.5.2; the controller whose
-  command raised one left out); nothing calls it for these yet.
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
 - MVRP is declared for the Class A Domain's VLAN. A sink settled on

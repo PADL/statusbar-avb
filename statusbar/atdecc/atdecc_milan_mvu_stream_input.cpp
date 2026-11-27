@@ -78,4 +78,12 @@ auto milan_stream_input_info_ex(MilanSinkContext const& ctx) noexcept -> MvuGetS
     return info;
 }
 
+auto milan_stream_input_notified(MilanSinkContext const& ctx) -> MilanStreamInputNotified
+{
+    bool const asks = ctx.srp_active && ctx.env != nullptr && ctx.env->talker_registration;
+    return MilanStreamInputNotified{
+        .info = milan_stream_input_info_ex(ctx),
+        .talker_registration = asks ? ctx.env->talker_registration(ctx.srp) : MilanTalkerRegistration::None};
+}
+
 }  // namespace statusbar::atdecc

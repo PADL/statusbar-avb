@@ -104,6 +104,7 @@ NanoAvbMilanAcmpListener::NanoAvbMilanAcmpListener(Eui64 const entity_id, AcmpLi
     sinks_.resize(std::min(max_streams, MAX_STREAMS));
     for (size_t i = 0; i < sinks_.size(); ++i) {
         sinks_[i].attach(env_, static_cast<uint16_t>(i));
+        told_.push_back(atdecc::milan_stream_input_notified(sinks_[i].context()));
     }
 }
 
@@ -269,6 +270,16 @@ void NanoAvbMilanAcmpListener::tick(TimePoint const now)
 {
     for (auto& each : sinks_) {
         each.tick(now);
+    }
+}
+
+void NanoAvbMilanAcmpListener::tell_stream_input_changes(TellStreamInput const& tell)
+{
+    for (size_t i = 0; i < sinks_.size(); ++i) {
+        auto const found = atdecc::milan_stream_input_notified(sinks_[i].context());
+        if (std::exchange(told_[i], found) != found) {
+            tell(static_cast<uint16_t>(i));
+        }
     }
 }
 

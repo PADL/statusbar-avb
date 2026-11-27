@@ -20,6 +20,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <span>
@@ -702,6 +703,162 @@ TEST(nanoavb_components_mvu, a_handler_that_goes_away_takes_the_stream_inputs_ba
     auto const frame = stream_input_frame(atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX, 0);
     EXPECT_TRUE(device.components->aem_handler.process_packet(PEER_MAC, frame, ENTITY));
     EXPECT_EQ(device.sent.back(), std::string{"mvu GET_STREAM_INPUT_INFO_EX NOT_IMPLEMENTED"});
+}
+
+//
+// The notifications of Milan v1.3 5.4.5.3 and Table 5.21 through the handler
+//
+
+namespace {
+
+constexpr ieee::Eui64 WATCHER{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x88};
+constexpr ieee::Eui48 WATCHER_MAC{0x02, 0x00, 0x00, 0x00, 0x00, 0x0A};
+
+/// REGISTER_UNSOLICITED_NOTIFICATION for ENTITY from @p controller, as its octets on the wire.
+auto register_frame(ieee::Eui64 const& controller) -> std::vector<uint8_t>
+{
+    atdecc::AemDu du{};
+    du.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
+    du.target_entity_id = ENTITY;
+    du.controller_entity_id = controller;
+    std::vector<uint8_t> frame(atdecc::AemDu::LENGTH);
+    span_store(std::span<uint8_t>{frame}, du);
+    return frame;
+}
+
+/// A Milan device with two registered controllers: CONTROLLER at PEER_MAC,
+/// which sends the commands, and WATCHER at WATCHER_MAC. Every MVU
+/// notification the device sends is kept with where it went.
+struct WatchedMilanDevice
+{
+    struct Told
+    {
+        ieee::Eui48 dest{};
+        uint16_t command{0};
+        std::vector<uint8_t> data{};
+    };
+
+    MilanDeviceOnNoInterface device{};
+    std::vector<Told> told{};
+
+    WatchedMilanDevice()
+    {
+        device.components->aem_handler.set_send_response([this](ieee::Eui48 const& dest, std::span<uint8_t const> const pdu) {
+            note(dest, pdu);
+            return true;
+        });
+        device.handler->dispatch_frame(ONE_SECOND_NS, PEER_MAC, register_frame(CONTROLLER));
+        device.handler->dispatch_frame(ONE_SECOND_NS, WATCHER_MAC, register_frame(WATCHER));
+    }
+    WatchedMilanDevice(WatchedMilanDevice const&) = delete;
+    auto operator=(WatchedMilanDevice const&) -> WatchedMilanDevice& = delete;
+
+    void note(ieee::Eui48 const& dest, std::span<uint8_t const> const pdu)
+    {
+        if (pdu.size() < atdecc::AecpMvuDu::LENGTH) {
+            return;  // an AEM response
+        }
+        atdecc::AecpMvuDu du{};
+        span_load(du, pdu.first(atdecc::AecpMvuDu::LENGTH));
+        if (du.is_mvu() && du.is_unsolicited()) {
+            auto const data = pdu.subspan(atdecc::AecpMvuDu::LENGTH);
+            told.push_back(Told{.dest = dest, .command = du.command_type(), .data = {data.begin(), data.end()}});
+        }
+    }
+
+    /// The notifications of @p command sent to @p dest, in order.
+    [[nodiscard]] auto told_to(ieee::Eui48 const& dest, uint16_t const command) const -> std::vector<Told>
+    {
+        std::vector<Told> found{};
+        std::ranges::copy_if(
+            told, std::back_inserter(found), [&](Told const& each) { return each.dest == dest && each.command == command; });
+        return found;
+    }
+
+    /// The stream input info of the last GET_STREAM_INPUT_INFO_EX notification sent to @p dest.
+    [[nodiscard]] auto last_info_to(ieee::Eui48 const& dest) const -> atdecc::MvuGetStreamInputInfoExResponse
+    {
+        atdecc::MvuGetStreamInputInfoExResponse info{};
+        auto const found = told_to(dest, atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX);
+        if (!found.empty() && found.back().data.size() == atdecc::MvuGetStreamInputInfoExResponse::LENGTH) {
+            span_load(info, std::span<uint8_t const>{found.back().data});
+        }
+        return info;
+    }
+
+    [[nodiscard]] auto infos_to(ieee::Eui48 const& dest) const -> size_t
+    {
+        return told_to(dest, atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX).size();
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_components_mvu_notify, a_bind_stream_is_told_to_the_other_controller_and_the_input_to_both_at_the_tick)
+{
+    WatchedMilanDevice watched;
+    watched.device.receive(bind_stream_frame(1, REMOTE_TALKER));
+    // 5.4.5.3: the command's notification, to the registered controllers but its sender.
+    EXPECT_EQ(watched.told_to(WATCHER_MAC, atdecc::MVU_COMMAND_BIND_STREAM).size(), 1U);
+    EXPECT_TRUE(watched.told_to(PEER_MAC, atdecc::MVU_COMMAND_BIND_STREAM).empty());
+    EXPECT_EQ(watched.told.size(), 1U);
+
+    // Table 5.21: the input has a talker and a Probing status now. Found at the tick, told to both.
+    watched.device.handler->tick(ONE_SECOND_NS + 10'000'000);
+    EXPECT_EQ(watched.infos_to(PEER_MAC), 1U);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 1U);
+    auto const probing = watched.last_info_to(WATCHER_MAC);
+    EXPECT_EQ(probing.descriptor_index.get(), 1);
+    EXPECT_EQ(probing.talker_entity_id, REMOTE_TALKER);
+    EXPECT_EQ(probing.pbsta(), 2);  // PROBING_ACTIVE
+    EXPECT_TRUE(watched.last_info_to(PEER_MAC) == probing);
+
+    // Nothing changed: nothing more is said.
+    watched.device.handler->tick(ONE_SECOND_NS + 20'000'000);
+    EXPECT_EQ(watched.told.size(), 3U);
+}
+
+TEST(nanoavb_components_mvu_notify, the_input_is_told_again_when_its_acmp_status_changes_and_when_it_is_unbound)
+{
+    WatchedMilanDevice watched;
+    watched.device.receive(bind_stream_frame(1, REMOTE_TALKER));
+    watched.device.handler->tick(ONE_SECOND_NS + 10'000'000);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 1U);
+
+    // The first probe times out and is sent again: the input reads as before.
+    watched.device.handler->tick(ONE_SECOND_NS + 200'000'000);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 1U);
+    // The second times out too: the ACMP status says so (5.5.3.6.25).
+    watched.device.handler->tick(ONE_SECOND_NS + 400'000'000);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 2U);
+    EXPECT_EQ(watched.infos_to(PEER_MAC), 2U);
+    EXPECT_EQ(watched.last_info_to(WATCHER_MAC).acmpsta(), atdecc::ACMP_STATUS_LISTENER_TALKER_TIMEOUT);
+
+    // Unbound: the command's notification at once, the input's at the tick.
+    watched.device.receive(stream_input_frame(atdecc::MVU_COMMAND_UNBIND_STREAM, 1));
+    EXPECT_EQ(watched.told_to(WATCHER_MAC, atdecc::MVU_COMMAND_UNBIND_STREAM).size(), 1U);
+    EXPECT_TRUE(watched.told_to(PEER_MAC, atdecc::MVU_COMMAND_UNBIND_STREAM).empty());
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 2U);
+    watched.device.handler->tick(ONE_SECOND_NS + 410'000'000);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 3U);
+    EXPECT_EQ(watched.last_info_to(WATCHER_MAC).pbsta(), 0);  // PROBING_DISABLED
+    EXPECT_EQ(watched.last_info_to(WATCHER_MAC).talker_entity_id, ieee::Eui64{});
+}
+
+TEST(nanoavb_components_mvu_notify, a_bind_over_acmp_is_told_as_the_changed_input_and_not_as_a_bind_stream)
+{
+    // BIND_RX_COMMAND is no MVU command, so 5.4.5.3 asks for no BIND_STREAM
+    // notification; Table 5.21 has every registered controller told of the input.
+    WatchedMilanDevice watched;
+    watched.device.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, REMOTE_TALKER, ENTITY));
+    EXPECT_TRUE(watched.device.components->milan_acmp_listener->is_bound(0));
+    EXPECT_TRUE(watched.told.empty());
+    watched.device.handler->tick(ONE_SECOND_NS + 10'000'000);
+    EXPECT_EQ(watched.infos_to(PEER_MAC), 1U);
+    EXPECT_EQ(watched.infos_to(WATCHER_MAC), 1U);
+    EXPECT_EQ(watched.told.size(), 2U);
+    EXPECT_EQ(watched.last_info_to(WATCHER_MAC).descriptor_index.get(), 0);
+    EXPECT_EQ(watched.last_info_to(WATCHER_MAC).talker_entity_id, REMOTE_TALKER);
 }
 
 TEST(nanoavb_net_handlers, a_handler_whose_socket_did_not_open_can_still_be_reached)
