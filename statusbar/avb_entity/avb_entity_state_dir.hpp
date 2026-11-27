@@ -11,6 +11,7 @@
 /// with no separators, so entities of different programs on one machine
 /// never share a file:
 ///
+///     <state.dir>/<entity ID>/clock-sources
 ///     <state.dir>/<entity ID>/listener-bindings
 ///     <state.dir>/<entity ID>/maap-range
 ///     <state.dir>/<entity ID>/stream-formats
@@ -33,6 +34,8 @@ inline constexpr std::string_view DEFAULT_ENTITY_STATE_DIR{"/var/lib/statusbar-a
 
 /// The files of an entity's state directory, one per kind of saved state.
 namespace entity_state_file {
+/// The clock domains' chosen clock sources (Milan v1.3 5.3.11.1), in the form avb_entity_clock_sources.hpp reads.
+inline constexpr std::string_view CLOCK_SOURCES{"clock-sources"};
 /// The stream inputs' bindings (Milan v1.3 5.3.8.3), in the form avb_entity_listener_bindings.hpp reads.
 inline constexpr std::string_view LISTENER_BINDINGS{"listener-bindings"};
 /// The MAAP block last defended, probed first at the next start.

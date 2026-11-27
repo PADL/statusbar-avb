@@ -42,6 +42,7 @@ statusbar_add_module(
   statusbar::udptun
   TESTS
   avb_entity_avb_info_mirror_test.cpp
+  avb_entity_clock_sources_test.cpp
   avb_entity_descriptor_helpers_test.cpp
   avb_entity_host_test.cpp
   avb_entity_kit_test.cpp

@@ -35,6 +35,8 @@
 #include "statusbar/test/test.hpp"
 #include "statusbar/test/test_data.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -2570,6 +2572,214 @@ TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_the_domains_outputs_a
     EXPECT_TRUE(slot->mr);
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+//
+// Clock sources: which the entity runs, and the one chosen kept across a
+// restart (Milan v1.3 5.3.11.1). The model is examples/crf-generator.json.
+//
+
+namespace {
+
+constexpr uint16_t LOCAL_SOURCE = 0;
+constexpr uint16_t GPTP_SOURCE = 1;
+constexpr uint16_t SYSTEM_SOURCE = 2;
+constexpr uint16_t PTP_SOURCE = 3;
+
+/// The configuration of a kit over the CRF generator model, with the state directory @p state.
+auto crf_generator_config(std::string state_dir = {}) -> AvbEntityAudioIOConfig
+{
+    auto config = make_config(2, "classic");
+    config.descriptor_storage_blob =
+        load_file(statusbar::test::functional_test_data(__FILE__, "testdata/entity_crf_generator.bin"));
+    config.state_dir = std::move(state_dir);
+    return config;
+}
+
+/// A state directory of this process's own, removed with the object.
+struct OwnStateDir
+{
+    std::filesystem::path state{
+        std::filesystem::temp_directory_path() / ("statusbar_clock_sources_test_" + std::to_string(::getpid()))};
+
+    OwnStateDir()
+    {
+        std::filesystem::remove_all(state);
+        std::filesystem::create_directories(state);
+    }
+    OwnStateDir(OwnStateDir const&) = delete;
+    auto operator=(OwnStateDir const&) -> OwnStateDir& = delete;
+    ~OwnStateDir() { std::filesystem::remove_all(state); }
+
+    /// The file a kit of crf_generator_config() saves its clock sources in.
+    [[nodiscard]] auto file() const -> std::filesystem::path
+    {
+        return state / entity_state_dir_name(crf_generator_config().entity_id) / entity_state_file::CLOCK_SOURCES;
+    }
+
+    /// Put @p text where an earlier run would have saved its clock sources.
+    void save(std::string_view const text) const
+    {
+        std::filesystem::create_directories(file().parent_path());
+        std::ofstream{file(), std::ios::binary} << text;
+    }
+
+    [[nodiscard]] auto saved() const -> std::string
+    {
+        std::ifstream in(file(), std::ios::binary);
+        return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+    }
+};
+
+/// SET_CLOCK_SOURCE of clock domain 0 to @p source, as a controller asks it; the status answered.
+auto ask_clock_source(KitUnderTest& kit, uint16_t const source) -> uint8_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemClockSourcePayload const asked{
+        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
+}
+
+/// The clock source GET_CLOCK_SOURCE reports for clock domain 0.
+auto reported_clock_source(KitUnderTest& kit) -> uint16_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_CLOCK_SOURCE, atdecc::aem::AemGetClockSourceCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetClockSourceCommandPayload const asked{
+        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemClockSourcePayload answered{};
+    span_load(answered, std::span<uint8_t const>{out}.first(atdecc::aem::AemClockSourcePayload::LENGTH));
+    return answered.clock_source_index.get();
+}
+
+constexpr TimePoint CLOCK_TEST_START{std::chrono::seconds{1}};
+
+}  // namespace
+
+TEST(avb_entity_kit_clock_source, the_kit_knows_what_each_clock_source_of_the_model_is)
+{
+    KitUnderTest kit{crf_generator_config()};
+    EXPECT_TRUE(kit->clock_source_kind(LOCAL_SOURCE) == ClockSourceKind::Internal);
+    EXPECT_TRUE(kit->clock_source_kind(GPTP_SOURCE) == ClockSourceKind::Gptp);
+    EXPECT_TRUE(kit->clock_source_kind(SYSTEM_SOURCE) == ClockSourceKind::External);
+    EXPECT_TRUE(kit->clock_source_kind(PTP_SOURCE) == ClockSourceKind::External);
+    EXPECT_FALSE(kit->clock_source_kind(4).has_value());
+    EXPECT_TRUE(kit->clock_source_runs(LOCAL_SOURCE));
+    EXPECT_TRUE(kit->clock_source_runs(GPTP_SOURCE));
+    EXPECT_FALSE(kit->clock_source_runs(SYSTEM_SOURCE));
+    EXPECT_FALSE(kit->clock_source_runs(PTP_SOURCE));
+}
+
+TEST(avb_entity_kit_clock_source, a_source_nothing_can_follow_is_refused_not_supported_and_the_source_in_force_stays)
+{
+    KitUnderTest kit{crf_generator_config()};
+    EXPECT_TRUE(kit.start(CLOCK_TEST_START));
+    EXPECT_EQ(ask_clock_source(kit, GPTP_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::Gptp);
+
+    // IEEE 1722.1-2021 7.4.23: the response carries the old value when the command fails.
+    for (uint16_t const refused : {SYSTEM_SOURCE, PTP_SOURCE}) {
+        EXPECT_EQ(ask_clock_source(kit, refused), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
+        EXPECT_EQ(kit->active_clock_source(), GPTP_SOURCE);
+    }
+    // A source that is not of the clock domain's list is another matter.
+    EXPECT_EQ(ask_clock_source(kit, 4), atdecc::AEM_STATUS_BAD_ARGUMENTS);
+
+    EXPECT_EQ(ask_clock_source(kit, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(reported_clock_source(kit), LOCAL_SOURCE);
+    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::Internal);
+    EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
+}
+
+TEST(avb_entity_kit_clock_source, a_source_the_entity_names_by_its_symbol_is_taken)
+{
+    KitUnderTest kit{crf_generator_config()};
+    kit->run_clock_source("system_clock");
+    kit->run_clock_source("no_such_symbol");  // the blob has none: nothing bound
+    kit->run_clock_source("crf_out");         // a stream output's symbol is no clock source
+    EXPECT_TRUE(kit->clock_source_runs(SYSTEM_SOURCE));
+    EXPECT_FALSE(kit->clock_source_runs(PTP_SOURCE));
+    EXPECT_TRUE(kit.start(CLOCK_TEST_START));
+
+    EXPECT_EQ(ask_clock_source(kit, SYSTEM_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(reported_clock_source(kit), SYSTEM_SOURCE);
+    EXPECT_TRUE(kit->active_clock_source_kind() == ClockSourceKind::External);
+    EXPECT_EQ(ask_clock_source(kit, PTP_SOURCE), atdecc::AEM_STATUS_NOT_SUPPORTED);
+    EXPECT_EQ(reported_clock_source(kit), SYSTEM_SOURCE);
+    EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
+}
+
+TEST(avb_entity_kit_clock_source, the_chosen_source_is_saved_and_in_force_again_after_a_restart)
+{
+    OwnStateDir const dir;
+    {
+        KitUnderTest kit{crf_generator_config(dir.state.string())};
+        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
+        EXPECT_FALSE(std::filesystem::exists(dir.file()));  // nothing chosen, nothing saved
+        EXPECT_EQ(ask_clock_source(kit, GPTP_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 1\n"});
+        // A refused source saves nothing.
+        EXPECT_EQ(ask_clock_source(kit, PTP_SOURCE), atdecc::AEM_STATUS_NOT_SUPPORTED);
+        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 1\n"});
+        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
+    }
+    // Another process: the fixture builds its kit on source 0 until the start restores the saved one.
+    KitUnderTest again{crf_generator_config(dir.state.string())};
+    EXPECT_EQ(again->active_clock_source(), LOCAL_SOURCE);
+    EXPECT_TRUE(again.start(CLOCK_TEST_START));
+    EXPECT_EQ(again->active_clock_source(), GPTP_SOURCE);
+    EXPECT_TRUE(again->active_clock_source_kind() == ClockSourceKind::Gptp);
+    EXPECT_EQ(reported_clock_source(again), GPTP_SOURCE);
+
+    // And the next choice replaces the saved one.
+    EXPECT_EQ(ask_clock_source(again, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 0\n"});
+    EXPECT_TRUE(again.stop(CLOCK_TEST_START));
+}
+
+TEST(avb_entity_kit_clock_source, a_saved_source_the_entity_names_is_restored_and_one_nothing_follows_is_not)
+{
+    OwnStateDir const dir;
+    dir.save("statusbar-clock-sources v1\ndomain 0 2\n");
+    {
+        // Nothing follows the system time here: the model's authored source, gPTP, stays reported.
+        KitUnderTest kit{crf_generator_config(dir.state.string())};
+        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
+        EXPECT_EQ(kit->active_clock_source(), LOCAL_SOURCE);  // as the fixture built it
+        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
+        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
+    }
+    KitUnderTest follows{crf_generator_config(dir.state.string())};
+    follows->run_clock_source("system_clock");
+    EXPECT_TRUE(follows.start(CLOCK_TEST_START));
+    EXPECT_EQ(follows->active_clock_source(), SYSTEM_SOURCE);
+    EXPECT_EQ(reported_clock_source(follows), SYSTEM_SOURCE);
+    EXPECT_TRUE(follows.stop(CLOCK_TEST_START));
+}
+
+TEST(avb_entity_kit_clock_source, a_saved_file_that_names_no_source_of_the_model_or_cannot_be_read_changes_nothing)
+{
+    for (std::string_view const text :
+         {"statusbar-clock-sources v1\ndomain 0 9\n", "statusbar-clock-sources v1\ndomain 3 1\n", "not the file\n"}) {
+        OwnStateDir const dir;
+        dir.save(text);
+        KitUnderTest kit{crf_generator_config(dir.state.string())};
+        EXPECT_TRUE(kit.start(CLOCK_TEST_START));
+        EXPECT_EQ(kit->active_clock_source(), LOCAL_SOURCE);
+        EXPECT_EQ(reported_clock_source(kit), GPTP_SOURCE);
+        // The entity still takes a choice, and saves it over what was there.
+        EXPECT_EQ(ask_clock_source(kit, LOCAL_SOURCE), atdecc::AEM_STATUS_SUCCESS);
+        EXPECT_EQ(dir.saved(), std::string{"statusbar-clock-sources v1\ndomain 0 0\n"});
+        EXPECT_TRUE(kit.stop(CLOCK_TEST_START));
+    }
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_functional_test)

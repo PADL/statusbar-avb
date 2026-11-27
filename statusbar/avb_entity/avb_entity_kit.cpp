@@ -88,6 +88,7 @@ AvbEntityKit::AvbEntityKit(
     , sample_rate_{sample_rate}
     , storage_handler_{handler}
     , retimed_clock_domain_{retimed_clock_domain(handler.storage())}
+    , clock_source_kinds_{clock_source_kinds(handler.storage())}
     , host_{handler, default_adp_advertiser_config(), talker_specs_.size(), 4, listener_specs_.size()}
     , gate_{config.gate_talker_on_listener, host_.components()}
     , talker_{std::make_unique<TalkerStreams>(
@@ -237,10 +238,102 @@ void AvbEntityKit::install_storage_hooks()
 
 auto AvbEntityKit::change_clock_source(uint16_t const domain, uint16_t const source) -> uint8_t
 {
+    // IEEE 1722.1-2021 Table 7-126: "the target of the command is not supported".
+    if (domain == 0 && !clock_source_runs(source)) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
     if (domain == 0 && active_clock_source_.exchange(source, std::memory_order_acq_rel) != source) {
         restart_media_clock(domain);
     }
+    save_clock_sources(domain, source);
     return atdecc::AEM_STATUS_SUCCESS;
+}
+
+void AvbEntityKit::run_clock_source(std::string_view const symbol)
+{
+    auto const entry = host_.descriptor_for_symbol(symbol_code(symbol));
+    if (entry.has_value() && entry->descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_SOURCE &&
+        entry->descriptor_index < MAX_CLOCK_SOURCES) {
+        external_clock_sources_run_.set(entry->descriptor_index);
+    }
+}
+
+auto AvbEntityKit::clock_sources_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::CLOCK_SOURCES, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::CLOCK_SOURCES);
+}
+
+namespace {
+
+[[nodiscard]] auto clock_domain_ref(uint16_t const index) noexcept -> nanoavb::DescriptorRef
+{
+    return {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = index};
+}
+
+}  // namespace
+
+void AvbEntityKit::save_clock_sources(uint16_t const domain, uint16_t const source)
+{
+    // Milan v1.3 5.3.11.1: "The current clock source shall be saved in a
+    // non-volatile memory and restored after a power cycle."
+    auto const path = clock_sources_file(true);
+    if (path.empty()) {
+        return;
+    }
+    SavedClockSources sources{};
+    for (uint16_t index = 0; index < MAX_SAVED_CLOCK_SOURCES; ++index) {
+        auto const in_force =
+            index == domain ? std::optional{source} : storage_handler_.current_clock_source(clock_domain_ref(index));
+        if (in_force.has_value()) {
+            sources.push_back(SavedClockSource{.clock_domain = index, .clock_source = *in_force});
+        }
+    }
+    if (auto const saved = avb_entity::save_clock_sources(path, sources); !saved) {
+        host_.ctl_log().error("state: the clock sources were not saved (error {})", saved.error().value());
+    }
+}
+
+void AvbEntityKit::restore_clock_sources()
+{
+    auto const path = clock_sources_file(false);
+    if (path.empty()) {
+        return;
+    }
+    auto const saved = load_clock_sources(path);
+    if (!saved.has_value()) {
+        host_.ctl_log().error(
+            "state: the saved clock sources cannot be read (error {}); the clock domains keep their authored sources",
+            saved.error().value());
+        return;
+    }
+    for (auto const& one : *saved) {
+        restore_clock_source(one);
+    }
+}
+
+void AvbEntityKit::restore_clock_source(SavedClockSource const& saved)
+{
+    // Asked in this order, so that nothing is taken unless both take it: the
+    // entity can run it, the model still lists it.
+    bool const taken = (saved.clock_domain != 0 || clock_source_runs(saved.clock_source)) &&
+        storage_handler_.set_runtime_clock_source(clock_domain_ref(saved.clock_domain), saved.clock_source);
+    if (!taken) {
+        host_.ctl_log().status(
+            "state: the saved clock source {} of clock domain {} is not one it has now; it keeps its authored source",
+            saved.clock_source,
+            saved.clock_domain);
+        return;
+    }
+    if (saved.clock_domain == 0) {
+        active_clock_source_.store(saved.clock_source, std::memory_order_release);
+    }
 }
 
 void AvbEntityKit::restart_media_clock(uint16_t const domain)
@@ -1144,6 +1237,7 @@ void AvbEntityKit::restore_control_state(TimePoint const now)
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
     restart_milan_sinks(now);
+    restore_clock_sources();
 }
 
 void AvbEntityKit::restart_milan_sinks(TimePoint const now)

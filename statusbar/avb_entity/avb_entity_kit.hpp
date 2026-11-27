@@ -27,6 +27,7 @@
 /// reactor thread (see each hook).
 
 #include "statusbar/avb_entity/avb_entity_audio_io_config.hpp"
+#include "statusbar/avb_entity/avb_entity_clock_sources.hpp"
 #include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_host.hpp"
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
@@ -49,6 +50,7 @@
 
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cstddef>
 #include <cstdint>
 #include <expected>
@@ -336,6 +338,32 @@ class AvbEntityKit
     /// The clock-source index backed by the blob's CRF stream input, or
     /// nullopt when the model declares none (base-rate pacing only).
     [[nodiscard]] auto crf_clock_source_index() const noexcept -> std::optional<uint16_t> { return crf_clock_source_index_; }
+
+    // --- What each clock source is, and which the entity runs -------------
+    /// What CLOCK_SOURCE @p index of the model is; nullopt for one it lacks.
+    [[nodiscard]] auto clock_source_kind(uint16_t const index) const noexcept -> std::optional<ClockSourceKind>
+    {
+        return index < clock_source_kinds_.size() ? std::optional{clock_source_kinds_[index]} : std::nullopt;
+    }
+    /// What clock domain 0's source in force is, for the entity to run its
+    /// media clock by; Internal when the model does not describe it. Any thread.
+    [[nodiscard]] auto active_clock_source_kind() const noexcept -> ClockSourceKind
+    {
+        return clock_source_kind(active_clock_source()).value_or(ClockSourceKind::Internal);
+    }
+    /// The entity knows how to follow the clock source whose blob symbol is
+    /// @p symbol: from here on a SET_CLOCK_SOURCE to it is accepted. It is
+    /// for sources of the External kind; the others run without being named.
+    /// A symbol the blob lacks, or one of another descriptor, binds nothing
+    /// (the menu / selection pattern). Before start().
+    void run_clock_source(std::string_view symbol);
+    /// Whether SET_CLOCK_SOURCE to CLOCK_SOURCE @p index is accepted: every
+    /// source but one of the External kind that no run_clock_source() named.
+    /// The model lists such a source and nothing here can follow it.
+    [[nodiscard]] auto clock_source_runs(uint16_t const index) const noexcept -> bool
+    {
+        return clock_source_kind(index) != ClockSourceKind::External || external_clock_sources_run_.test(index);
+    }
     [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
 
     // --- The owned collaborators (entities + tools reach through) -------------
@@ -493,9 +521,23 @@ class AvbEntityKit
     [[nodiscard]] auto static_dest_mac_for(StreamKind kind) const noexcept -> ieee::Eui48;
     /// The descriptor storage handler's CONTROL, streaming and clock source hooks.
     void install_storage_hooks();
-    /// SET_CLOCK_SOURCE accepted: domain 0's active source is @p source, its streams' media clock
-    /// restarted when that is another. SUCCESS.
+    /// SET_CLOCK_SOURCE asked for @p source in clock domain @p domain. NOT_SUPPORTED, and nothing
+    /// changed, for a source of domain 0 the entity cannot run (clock_source_runs()). Otherwise
+    /// SUCCESS: domain 0's active source is @p source, its streams' media clock restarted when
+    /// that is another, and the choice is saved.
     [[nodiscard]] auto change_clock_source(uint16_t domain, uint16_t source) -> uint8_t;
+    /// The file the clock domains' chosen sources are saved in (Milan v1.3 5.3.11.1), empty when
+    /// the machine has no state directory. To save, @p make the entity's own directory when it is
+    /// not there; to load, only name the file.
+    [[nodiscard]] auto clock_sources_file(bool make) -> std::string;
+    /// Save every clock domain's source in force, clock domain @p domain's as @p source: the one
+    /// a SET_CLOCK_SOURCE being answered is about to put in force.
+    void save_clock_sources(uint16_t domain, uint16_t source);
+    /// The clock sources saved before the last stop, back in force.
+    void restore_clock_sources();
+    /// One saved clock source to its domain, when the model still lists it and the entity can
+    /// still run it; a status line says so when not.
+    void restore_clock_source(SavedClockSource const& saved);
     /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream outputs.
     void restart_media_clock(uint16_t domain);
     /// START_STREAMING or STOP_STREAMING was accepted for a stream.
@@ -678,6 +720,10 @@ class AvbEntityKit
     /// the media thread.
     std::atomic<uint16_t> active_clock_source_{0};
     std::optional<uint16_t> crf_clock_source_index_{};
+    /// What each CLOCK_SOURCE of the model is, by descriptor index. Fixed at construction.
+    ClockSourceKinds clock_source_kinds_;
+    /// The External clock sources run_clock_source() named, by descriptor index.
+    std::bitset<MAX_CLOCK_SOURCES> external_clock_sources_run_{};
 
     /// Each talker stream's presentation offset a controller set (reactor thread); unset,
     /// the configured one.

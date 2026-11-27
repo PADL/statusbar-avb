@@ -514,6 +514,40 @@ dynamic mappings (5.3.10.1, below) gets Milan's check with it: a new
 format that would leave a channel a held mapping names is answered
 BAD_ARGUMENTS (5.4.2.7).
 
+### Clock sources
+
+A clock domain lists the CLOCK_SOURCE descriptors a controller may choose
+between, and the entity runs its media clock from the one in force. The
+kit reads what each source of the model is (`clock_source_kind()`,
+`avb_entity_clock_sources.hpp`):
+
+| Kind | The descriptor | SET_CLOCK_SOURCE to it |
+|---|---|---|
+| `Internal` | INTERNAL | accepted |
+| `InputStream` | INPUT_STREAM: a stream input, the CRF Media Clock Input among them | accepted |
+| `Gptp` | EXTERNAL located at a TIMING descriptor (Milan v1.3 7.5.2) | accepted |
+| `External` | any other source | NOT_SUPPORTED, unless the entity named it with `run_clock_source(symbol)` |
+
+A source of the `External` kind is one only the entity can know how to
+follow: the system time, a word clock input. The model lists it, and the
+entity's code says which of them it runs by the source's symbol, before
+`start()` (the menu and selection pattern of the controls: a symbol the
+blob lacks binds nothing). One nobody named is refused NOT_SUPPORTED,
+"the target of the command is not supported", and the source in force
+stays, as the response says. A source that is not of the domain's list
+is BAD_ARGUMENTS, from the descriptor storage handler, before the kit is
+asked.
+
+`active_clock_source_kind()` tells the entity what its media clock is to
+follow now; it may be read on the media thread. `media_rate()` still
+knows one source by itself, the CRF input it recovers.
+
+The source chosen is saved in `clock-sources` (below) at each accepted
+SET_CLOCK_SOURCE and put back in force at the next start (Milan v1.3
+5.3.11.1). A saved source the model no longer lists, or one the entity
+cannot run any more, is left with a status line, and the domain keeps
+its authored source.
+
 ### Streams carried beside the stream port
 
 Something beside the stream port, a NIC that sends or receives a stream
@@ -640,6 +674,7 @@ different programs on one machine never share a file
 (`avb_entity_state_dir.hpp`):
 
 ```
+/var/lib/statusbar-avb/2ccf67fffe0a0b0c/clock-sources
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/listener-bindings
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/maap-range
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/stream-formats
@@ -647,6 +682,7 @@ different programs on one machine never share a file
 
 | File | Written | By default |
 |---|---|---|
+| `clock-sources` | the clock source of each clock domain (Milan v1.3 5.3.11.1), one line per domain | under either profile, from the first time a controller changes a clock source |
 | `listener-bindings` | the stream inputs' bindings (Milan v1.3 5.3.8.3) | under the Milan profile. The IEEE 1722.1 listener's fast-connect memory changes what a restart does, so it is saved only where `listener.bindings` names a file |
 | `maap-range` | the MAAP block the entity defended, probed first at the next start | wherever the addresses come from MAAP: `stream.address_mode = "maap"` under either profile, and the Milan profile when the key is left empty |
 | `stream-formats` | the current format of each stream input (Milan v1.3 5.3.8.1), one line per input | under either profile, from the first time a controller changes a format; an entity nobody has set a format on has no such file |

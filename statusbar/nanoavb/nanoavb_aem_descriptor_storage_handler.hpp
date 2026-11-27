@@ -1049,6 +1049,29 @@ class DescriptorStorageHandler : public AemEntityHandler
         return atdecc::AEM_STATUS_SUCCESS;
     }
 
+  public:
+    /// The clock source a saved state names for the CLOCK_DOMAIN at @p ref,
+    /// put in force as an accepted SET_CLOCK_SOURCE leaves it, with nobody
+    /// asked and nobody notified (on_clock_source_changed is not called).
+    /// False, and nothing changed, for a domain the model lacks or a source
+    /// that is not one of the domain's list.
+    [[nodiscard]] auto set_runtime_clock_source(DescriptorRef ref, uint16_t const clock_source_index) -> bool
+    {
+        auto const blob = storage_.get_descriptor(ref.configuration_index, ref.descriptor_type, ref.descriptor_index);
+        atdecc::doublet_t const requested{clock_source_index};
+        if (!blob.has_value() || blob->size() < atdecc::aem::DescriptorClockDomain::LENGTH ||
+            !blob_list_contains(*blob, CLOCK_DOMAIN_SOURCES_OFFSET_FIELD, CLOCK_DOMAIN_SOURCES_COUNT_FIELD, requested)) {
+            return false;
+        }
+        auto* const state = find_or_push_state(
+            clock_domain_states_, by_index(ref.descriptor_index), ClockDomainState{.descriptor_index = ref.descriptor_index});
+        if (state != nullptr) {
+            state->clock_source_index = clock_source_index;
+        }
+        return state != nullptr;
+    }
+
+  private:
     statusbar::sg14::inplace_vector<ClockDomainState, MAX_CLOCK_DOMAIN_STATES> clock_domain_states_;
 
     // ---- AVB_INTERFACE runtime fields (see set_avb_interface_runtime) ------
