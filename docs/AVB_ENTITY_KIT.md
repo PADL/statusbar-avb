@@ -113,10 +113,10 @@ STREAM_OUTPUT counters' positions and the TSpec's MaxFrameSize above. Milan
 v1.3 Section 5.3.1 makes GET_MILAN_INFO's fields part of the entity model: an
 entity that changes its features reports another entity_model_id.
 `AudioIoConfig::signal_presence` says the application reports each output's
-signal presence (`set_output_signal_presence`, a channel bit mask, reactor
-thread), kept to the channels the stream's format has, and cut again when a
-SET_STREAM_FORMAT narrows it (the next fold reports and notifies it);
-GET_MILAN_INFO then says TALKER_SIGNAL_PRESENCE (v1.3 only).
+signal presence (`TalkerStreams::set_signal_presence`, a channel bit mask, any
+thread; reported from the start as none), cut to the channels the stream's
+format has when GET_COUNTERS answers; GET_MILAN_INFO then says
+TALKER_SIGNAL_PRESENCE (v1.3 only).
 
 ## Talker admission
 
@@ -171,14 +171,14 @@ is the presentation time offset's, not the network's, and is not counted.
 
 The admitted set changes after an MSRP listener declaration for a talker stream
 is registered or withdrawn, after the Talker declarations are withdrawn, or
-when a stream is Started or Stopped, or when the kit's timer reaches the
-admission deadline (`on_admission_timer()`): the earliest end of a grace window
-whose listener is no longer registered (`admission_deadline()`). The host's `on_listener_ready` hook lands in `notify_listener_ready`.
+when a stream is Started or Stopped, or when `end_cycle()` finds the admission
+deadline reached: the earliest end of a grace window whose stream is still
+admitted (`admission_deadline()`). The host's `on_listener_ready` hook lands in
+`notify_listener_ready`, at the instant the loop told (`tell_cycle_time`).
 
-The presentation time offset (Milan v1.2 Section 5.3.7.6) is changed with
-SET_STREAM_INFO (MSRP_ACC_LAT_VALID) or SET_MAX_TRANSIT_TIME while the stream
-is not streaming; GET_STREAM_INFO (in Milan v1.2's form) and
-GET_MAX_TRANSIT_TIME report it. The kit
+The presentation time offset (Milan v1.3 Section 5.3.7.6) is changed with
+SET_MAX_TRANSIT_TIME (or, classic, SET_STREAM_INFO's MSRP_ACC_LAT_VALID) while
+the stream is not streaming; GET_MAX_TRANSIT_TIME reports it. The kit
 refuses a change no entity hook applies: it never reports an offset the stream
 does not use.
 
@@ -430,13 +430,12 @@ registered controllers as an unsolicited GET_STREAM_INFO. (Milan refuses
 STOP_STREAMING on an output, Milan v1.2 Section 5.4.2.20.) A Milan listener
 queries this to verify the stream before sustaining a connection.
 
-The response form is the AEM handler's `stream_info_layout()`: the profile's
-(Milan's IEEE 1722.1-2021 84 octets, classic IEEE 1722.1-2013's 48) unless
-`set_stream_info_layout` picks another, Milan v1.2's 56 among them. A
+The response form is the profile's (`AemCommandHandler::stream_info_length()`):
+Milan's IEEE 1722.1-2021 84 octets, classic IEEE 1722.1-2013's 48. A
 controller tells them by length, and the form gives an output's
 msrp_accumulated_latency its meaning (Milan v1.3 Section 5.4.2.10.2): the
-presentation time offset in the older forms, the AccumulatedLatency the Talker
-Advertise declares in 2021's. A Milan output in 2021's form uses Milan v1.3 Table 5.9's flags instead of flags_ex:
+presentation time offset in 2013's, the AccumulatedLatency the Talker
+Advertise declares in 2021's. A Milan output uses Milan v1.3 Table 5.9's flags:
 NOT_REGISTERING_SRP while declaring without a Listener, REGISTERING_FAILED with
 Listener Asking Failed, CONNECTED with Listener Ready or Ready Failed. A
 classic output in 2021's form has MSRP_ACC_LAT_VALID only while it declares
@@ -532,6 +531,85 @@ Controllers on the same host (la_avdecc's local protocol interface,
 `statusbar-atdecc-monitor --socket`) reach the
 entity over an AF_UNIX datagram socket, without raw-socket privileges
 (`nanoavb_local_port.hpp`).
+
+## Streams offloaded from the kit
+
+A talker stream's frames may be sent by something beside the stream port (a
+NIC or FPGA that packetises the stream itself), from the stream's
+`TalkerStreams::frame_template()` (STREAM_PORTS.md), while the kit sends none
+of it. The kit keeps the stream's control state and its per-packet decisions;
+that data plane follows them and reports back:
+
+- **Gate.** `set_on_talker_gate_changed` tells each change of
+  `talker_should_transmit()` on the reactor, as STREAM_START and STREAM_STOP
+  count it: a reservation, STOP_STREAMING or START_STREAMING, MAAP, the grace
+  running out. The data plane sends while it is open.
+- **Sequence and mr.** `offload_header()` gives the stream's next sequence_num
+  and mr, a pending `toggle_media_clock_restart` applied as for an AVTPDU the
+  kit sends. `notify_offload_sent()` reports the AVTPDUs sent since, how many
+  with tu set (at most all of them), and the next sequence_num; they are
+  counted as the kit's own (`tx_counters()`, so GET_COUNTERS), run down the mr
+  hold, and leave the serializer's sequence there, so the kit's own path goes
+  on from it. It answers the header the next AVTPDUs carry. Both answer
+  `resource_unavailable_try_again`, applying nothing, while the stream is being
+  re-shaped (report again), and `no_such_device` for no stream.
+- **One writer.** The thread that reports a stream must be its only writer, and
+  the kit must not transmit it meanwhile: the guard the two calls try protects
+  against a re-shape (`reformat_stream()`) only. The kit's own transmits do not
+  all lock it (`transmit_crf_raw()` does not), and its counters are written
+  without read-modify-write.
+- **mr at a report boundary.** AVTPDUs counted before the data plane applied a
+  new mr carry the old one. With `OffloadSent::last_mr`, the mr of the last
+  AVTPDU sent, a toggle is counted once the wire carries it, and the hold runs
+  down only by the AVTPDUs known to carry the new mr: none before it shows, one
+  in the report where it first shows, all after. The hold may so last longer
+  than `MR_HOLD_PDUS`, never less (IEEE 1722-2016 Clause 4.4.4.3 asks for at
+  least). Without `last_mr` every reported AVTPDU counts with the mr last
+  answered, and a toggle near a report boundary can be counted, and its hold
+  run down, a report early.
+- **tu.** Each header `offload_header()` and `notify_offload_sent()` answer
+  carries tu at the media wake last told (`tell_wake_time()`), as the kit's
+  own AVTPDUs have it.
+- **Frames.** `TalkerStreams::set_on_frames_changed` tells each change of an
+  open stream's template on the control thread: a Domain's VID or PCP
+  (`set_vlan()`), a MAAP block's destination (`set_destination()`, from
+  `MaapAddressAcquirer::publish_block`), a format once the entity's
+  `set_on_stream_format_changed` hook accepted it (none for a refused format or
+  the format in force). The data plane reads the template again.
+- **Hooks.** None of them may throw (some are called from `noexcept`
+  functions), and what each captures must outlive the kit: `stop()` closes the
+  gates through `set_on_talker_gate_changed`.
+- **Presentation offset.** As for the kit's own path, through
+  `set_on_presentation_offset_changed`.
+
+A listener stream may likewise be received beside the stream port, which then
+receives none of it; the kit keeps the input's connection, MSRP declaration,
+group membership and counters:
+
+- **What it receives.** `ListenerStreams::set_on_input_changed` tells each
+  change of the stream ID an input matches frames by (published when it
+  connects, classic, or settles, Milan; zero when it disconnects, unsettles or
+  stop() releases it) and of whether it discards them
+  (`set_stream_stopped`, Milan v1.2 Section 5.3.8.7), on the reactor. Its
+  format follows `set_on_stream_format_changed`.
+- **Counters.** `notify_offload_received()` adds a `StreamInputCounts` (the
+  per-packet counts `tally_stream_input_packet()` keeps, and the media lock as
+  the data plane checks it) to the input's counters, so GET_COUNTERS and the
+  observation-interval fold go on, and the accepted AVTPDUs and sample frames
+  to its telemetry. A lock gained counts MEDIA_LOCKED, a lock lost
+  MEDIA_UNLOCKED and STREAM_INTERRUPTED, except while the input is stopped or
+  unbound, when it goes without an interruption (Milan v1.2 Sections 5.3.8.7,
+  5.3.8.10). Any report with AVTPDUs or a lock value clears the reactor's
+  pending unlock (a bind, an unbind, a silent interval), as a packet's tally
+  does, and gains no lock in that report. The presentation margin statistics
+  stay the kit's own path's.
+- **Report cadence.** Report each input at least once an observation interval
+  (1 s). At a fold a locked input counts as silent, and so stopped, when a
+  report arrived and no AVTPDU did, or when no report arrived for
+  `StreamInputIntervals::OFFLOAD_QUIET_INTERVALS` (2) intervals in a row; one
+  slow report is no interruption.
+- **Hooks.** As for talkers: `set_on_input_changed` must not throw, and what it
+  captures must outlive the kit, since `stop()` releases every input through it.
 
 ## Notes on the kit's event wiring
 

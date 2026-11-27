@@ -266,7 +266,7 @@ struct AvbEntityAudioIOConfig
     /// The Milan specification the device supports, as dotted numbers.
     std::string milan_specification_version{"1.3.0.0"};
 
-    /// The application reports each output's signal presence (AvbEntityKit::set_output_signal_presence):
+    /// The application reports each output's signal presence (TalkerStreams::set_signal_presence):
     /// GET_MILAN_INFO says TALKER_SIGNAL_PRESENCE (Milan v1.3 Section 5.3.7.7.1). Milan only.
     bool signal_presence{false};
 
@@ -549,6 +549,28 @@ struct AvbEntityAudioIOConfig
 /// alone keeps 1 ms.
 inline constexpr uint64_t MILAN_DEFAULT_PRESENTATION_OFFSET_NS = 2'000'000;
 inline constexpr uint64_t CLASSIC_DEFAULT_PRESENTATION_OFFSET_NS = 1'000'000;
+
+/// The most CRF timestamps one AVTPDU of this entity's CRF stream carries:
+/// the talker's own limit, TalkerStreams::MAX_CRF_TIMESTAMPS_PER_PDU, which
+/// is below the 255 the stream format's one octet could say (IEEE 1722-2025
+/// I.2.6).
+inline constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PACKET = 64;
+/// The largest timestamp_interval a CRF stream format has room for (IEEE
+/// 1722-2025 I.2.6: "timestamp_interval field: 12 bits").
+inline constexpr uint16_t MAX_CRF_TIMESTAMP_INTERVAL = 0x0FFF;
+
+/// Whether the CRF cadence @p config asks for is one a CRF stream can have:
+/// 1 to MAX_CRF_TIMESTAMPS_PER_PACKET timestamps in an AVTPDU, and a
+/// timestamp_interval of 1 to MAX_CRF_TIMESTAMP_INTERVAL. The two fields are
+/// wider than what they stand for, so a value outside would otherwise be cut
+/// to its low bits on the way to the stream (300 timestamps to 44).
+[[nodiscard]] constexpr auto crf_cadence_fits(AvbEntityAudioIOConfig const& config) noexcept -> bool
+{
+    bool const timestamps_fit =
+        config.crf_timestamps_per_packet >= 1 && config.crf_timestamps_per_packet <= MAX_CRF_TIMESTAMPS_PER_PACKET;
+    bool const interval_fits = config.crf_timestamp_interval >= 1 && config.crf_timestamp_interval <= MAX_CRF_TIMESTAMP_INTERVAL;
+    return timestamps_fit && interval_fits;
+}
 
 /// Whether @p config holds the entity to Milan v1.3: said outright by
 /// atdecc_profile ("milan13"), or, when that is empty, by the model being a

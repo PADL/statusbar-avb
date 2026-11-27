@@ -49,8 +49,9 @@ inline constexpr unsigned stream_output_signal_presence_32_59_bit = 22;
 struct TalkerStreamStatus
 {
     bool milan{true};
-    /// The response form, which gives msrp_accumulated_latency its meaning.
-    atdecc::aem::StreamInfoLayout layout{atdecc::aem::StreamInfoLayout::milan_v1_2};
+    /// The response is IEEE 1722.1-2021's 84 octets (AemCommandHandler::stream_info_length()), which
+    /// gives msrp_accumulated_latency its meaning; else IEEE 1722.1-2013's 48.
+    bool ieee_2021{true};
     /// Declaring its Talker Advertise.
     bool declaring{false};
     /// The Listener declaration registered for it (Ignore: none).
@@ -69,7 +70,7 @@ struct TalkerStreamStatus
 /// the IEEE 1722.1-2021 layout while it declares the attribute the latency is (Clause 7.4.16.2).
 [[nodiscard]] constexpr auto talker_accumulated_latency_flag(TalkerStreamStatus const& status) noexcept -> uint32_t
 {
-    bool const valid = status.milan || status.declaring || status.layout != atdecc::aem::StreamInfoLayout::ieee_2021;
+    bool const valid = status.milan || status.declaring || !status.ieee_2021;
     return valid ? atdecc::aem::stream_info_flags::MSRP_ACC_LAT_VALID : 0U;
 }
 
@@ -77,7 +78,7 @@ struct TalkerStreamStatus
 /// in IEEE 1722.1-2021's (Clause 7.4.16.2), the presentation time offset in the older ones.
 [[nodiscard]] constexpr auto talker_msrp_accumulated_latency(TalkerStreamStatus const& status) noexcept -> uint32_t
 {
-    bool const declared = status.layout == atdecc::aem::StreamInfoLayout::ieee_2021;
+    bool const declared = status.ieee_2021;
     return declared ? status.accumulated_latency_ns : status.presentation_offset_ns;
 }
 
@@ -100,21 +101,6 @@ struct TalkerStreamStatus
         default:
             return stream_info_flags::CONNECTED;
     }
-}
-
-/// The flags of a Milan output with @p status (Milan v1.2 Tables 5.11-5.12, or v1.3 Table
-/// 5.9 in the IEEE 1722.1-2021 layout); in Milan v1.2's, flags_ex and pbsta into @p ext.
-[[nodiscard]] constexpr auto milan_talker_flags(
-    TalkerStreamStatus const& status, atdecc::aem::AemStreamInfoMilanExtension& ext) noexcept -> uint32_t
-{
-    if (status.layout == atdecc::aem::StreamInfoLayout::ieee_2021) {
-        return milan_v13_talker_srp_flags(status);
-    }
-    bool const registering = status.declaring && status.listener != srp::msrp::ListenerDeclaration::Ignore;
-    ext.flags_ex = ieee::quadlet_t{registering ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
-    ext.set_probing(atdecc::aem::probing_status::DISABLED, 0);
-    bool const failed = registering && status.listener == srp::msrp::ListenerDeclaration::AskingFailed;
-    return failed ? atdecc::aem::stream_info_flags::REGISTERING_FAILED : 0U;
 }
 
 /// The flags of classic output @p descriptor_index: CONNECTED from the ACMP connection count,
@@ -159,14 +145,13 @@ struct TalkerStreamStatus
 }
 
 /// Fill the GET_STREAM_INFO response for STREAM_OUTPUT @p index from the live ACMP
-/// stream identity and current_format (Milan v1.2 Section 5.4.2.10.2, v1.3 in the 2021
+/// stream identity and current_format (Milan v1.3 Section 5.4.2.10.2 in the 2021
 /// layout; flag rules in docs/AVB_ENTITY_KIT.md). False if it is not one of the host's talkers.
 [[nodiscard]] inline auto fill_talker_stream_info(
     AvbEntityHost const& host,
     uint16_t const descriptor_index,
     TalkerStreamStatus const& status,
-    atdecc::aem::AemStreamInfoPayload& out,
-    atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool
+    atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
     auto const stream = host.components().talker_stream(descriptor_index);
     if (!stream.has_value()) {
@@ -175,7 +160,7 @@ struct TalkerStreamStatus
     uint32_t const flags = fill_talker_identity(*stream, status, out) | fill_talker_format(host, descriptor_index, out) |
         talker_accumulated_latency_flag(status);
     out.flags = ieee::quadlet_t{
-        flags | (status.milan ? milan_talker_flags(status, ext) : classic_talker_flags(host, descriptor_index, status))};
+        flags | (status.milan ? milan_v13_talker_srp_flags(status) : classic_talker_flags(host, descriptor_index, status))};
     return true;
 }
 
@@ -317,14 +302,11 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
     if (!sink.has_value()) {
         return false;
     }
-    uint32_t flags = fill_milan_listener_fields(host, descriptor_index, *sink, out);
-    bool const registering = sink->is_settled() && milan_input_registering(host, sink->context().srp);
-    if (layout == atdecc::aem::StreamInfoLayout::ieee_2021 && sink->is_bound() && !registering) {
-        flags |= atdecc::aem::stream_info_flags::NOT_REGISTERING_SRP;
-    }
-    out.flags = ieee::quadlet_t{flags};
-    ext.flags_ex = ieee::quadlet_t{registering ? atdecc::aem::stream_info_flags_ex::REGISTERING : 0U};
-    ext.set_probing(static_cast<uint8_t>(sink->context().probing_status), sink->context().acmp_status);
+    uint32_t const format =
+        fill_stream_input_format(host, descriptor_index, out) ? atdecc::aem::stream_info_flags::STREAM_FORMAT_VALID : 0U;
+    uint32_t const state =
+        milan.has_value() ? fill_milan_sink_stream_info(*milan, out) : fill_ieee_sink_stream_info(*sink, stopped, out);
+    out.flags = ieee::quadlet_t{format | state};
     return true;
 }
 
@@ -340,68 +322,109 @@ inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc:
 /// index past MAX_ENTITY_STREAMS. Reactor thread.
 [[nodiscard]] inline auto talker_stream_totals(TalkerStreams const& talker, uint16_t const descriptor_index) -> StreamOutputTotals
 {
-    auto const* c = talker.tx_counters(descriptor_index);
+    auto const* const c = talker.tx_counters(descriptor_index);
     if (c == nullptr) {
         return {};
     }
     auto const relaxed = std::memory_order_relaxed;
-    return {.pdus = c->pdus.load(relaxed), .tu_pdus = c->tu_pdus.load(relaxed), .mr_toggles = c->mr_toggles.load(relaxed)};
+    uint32_t const changes = c->streaming_changes.load(relaxed);
+    return {
+        .starts = stream_starts(changes),
+        .stops = stream_stops(changes),
+        .pdus = c->pdus.load(relaxed),
+        .tu_pdus = c->tu_pdus.load(relaxed),
+        .mr_toggles = c->mr_toggles.load(relaxed)};
 }
 
-/// The classic GET_COUNTERS totals of STREAM_OUTPUT @p descriptor_index
-/// (IEEE 1722.1-2021 Clause 7.4.42.2.5) into @p out, their bits into @p valid.
-inline void fill_classic_talker_counters(
-    TalkerStreams const& talker,
-    uint16_t const descriptor_index,
-    StreamOutputIntervals const& intervals,
-    uint32_t& valid,
-    std::array<uint32_t, 32>& out)
-{  // NOLINT(statusbar-block-statements): one line per counter of IEEE 1722.1-2021 Clause 7.4.42.2.5
-    using I = StreamOutputIntervals;
-    auto const totals = talker_stream_totals(talker, descriptor_index);
-    valid |= (1U << 0U) | (1U << 1U) | (1U << 3U) | (1U << 4U) | (1U << stream_output_frames_tx_bit);
-    out[0] = intervals.values[I::STREAM_START];
-    out[1] = intervals.values[I::STREAM_STOP];
-    out[3] = totals.mr_toggles;
-    out[4] = totals.tu_pdus;
+/// The counters_valid bits of the STREAM_OUTPUT counters a talker counts.
+inline constexpr uint32_t stream_output_counters_valid = (1U << stream_output_stream_start_bit) |
+    (1U << stream_output_stream_stop_bit) | (1U << stream_output_media_reset_bit) | (1U << stream_output_timestamp_uncertain_bit) |
+    (1U << stream_output_frames_tx_bit);
+
+/// @p totals as running counts into the GET_COUNTERS array @p out, each at its bit.
+inline void store_stream_output_totals(StreamOutputTotals const& totals, std::array<uint32_t, 32>& out) noexcept
+{
+    out[stream_output_stream_start_bit] = totals.starts;
+    out[stream_output_stream_stop_bit] = totals.stops;
+    out[stream_output_media_reset_bit] = totals.mr_toggles;
+    out[stream_output_timestamp_uncertain_bit] = totals.tu_pdus;
     out[stream_output_frames_tx_bit] = totals.pdus;
 }
 
-/// A Milan v1.3 STREAM_OUTPUT's GET_COUNTERS (Milan v1.3 Table 5.14): @p intervals at IEEE
-/// 1722.1-2021's positions, and its signal presence once monitored (Section 5.3.7.7.1).
-inline void fill_milan_v13_talker_counters(StreamOutputIntervals const& intervals, uint32_t& valid, std::array<uint32_t, 32>& out)
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index (IEEE 1722.1-2021
+/// Clause 7.4.42, Table 7-158) from what the talker sent (TalkerTxCounters):
+/// STREAM_START, STREAM_STOP, MEDIA_RESET, TIMESTAMP_UNCERTAIN and FRAMES_TX,
+/// as running counts. False for a stream the talker has no slot for.
+[[nodiscard]] inline auto fill_talker_stream_counters(
+    TalkerStreams const& talker, uint16_t const descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& out) -> bool
 {
-    for (size_t i = 0; i < intervals.values.size(); ++i) {
-        auto const position = StreamOutputIntervals::V1_3_POSITIONS[i];
-        valid |= 1U << position;
-        out[position] = intervals.values[i];
+    if (talker.slot_for(descriptor_index) == nullptr || talker.tx_counters(descriptor_index) == nullptr) {
+        return false;
     }
-    if (intervals.presence) {
-        valid |= (1U << StreamOutputIntervals::PRESENCE_0_31) | (1U << StreamOutputIntervals::PRESENCE_32_59);
-        out[StreamOutputIntervals::PRESENCE_0_31] = presence_quadlet(*intervals.presence, 0);
-        out[StreamOutputIntervals::PRESENCE_32_59] = presence_quadlet(*intervals.presence, 32);
-    }
+    valid |= stream_output_counters_valid;
+    store_stream_output_totals(talker_stream_totals(talker, descriptor_index), out);
+    return true;
 }
 
-/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index in a @p milan entity's layout: Milan v1.3
-/// Table 5.14, or classic IEEE 1722.1-2021 Clause 7.4.42.2.5 totals.
-/// False when the talker has no such stream.
-[[nodiscard]] inline auto fill_talker_stream_counters(
+/// The signal presence @p channels (bit k channel k) a STREAM_OUTPUT of @p stream_channels
+/// reports: the bits past its channels, and past TalkerStreams::SIGNAL_PRESENCE_CHANNELS, clear
+/// (Milan v1.3 Section 5.3.7.7.1).
+[[nodiscard]] constexpr auto reported_signal_presence(uint64_t const channels, size_t const stream_channels) noexcept -> uint64_t
+{
+    size_t const reported = std::min(stream_channels, TalkerStreams::SIGNAL_PRESENCE_CHANNELS);
+    return channels & ((uint64_t{1} << reported) - 1U);
+}
+
+/// The signal presence of channels @p first to @p first + 31 of @p channels (bit k channel k) as
+/// one counter: channel first + i at bit i counted from the MSB, channels past 59 clear (Milan v1.3
+/// Section 5.3.7.7.1).
+[[nodiscard]] constexpr auto signal_presence_quadlet(uint64_t const channels, size_t const first) noexcept -> uint32_t
+{
+    uint32_t quadlet = 0;
+    for (size_t i = 0; i < 32 && first + i < TalkerStreams::SIGNAL_PRESENCE_CHANNELS; ++i) {
+        quadlet |= ((channels >> (first + i)) & 1U) != 0 ? 0x8000'0000U >> i : 0U;
+    }
+    return quadlet;
+}
+
+/// @p presence, within a stream of @p stream_channels, into its two counters of @p out; the
+/// counters_valid bits that makes valid, none while the output reports no signal presence.
+[[nodiscard]] inline auto store_signal_presence(
+    std::optional<uint64_t> const presence, size_t const stream_channels, std::array<uint32_t, 32>& out) noexcept -> uint32_t
+{
+    if (!presence) {
+        return 0;
+    }
+    uint64_t const reported = reported_signal_presence(*presence, stream_channels);
+    out[stream_output_signal_presence_0_31_bit] = signal_presence_quadlet(reported, 0);
+    out[stream_output_signal_presence_32_59_bit] = signal_presence_quadlet(reported, 32);
+    return (1U << stream_output_signal_presence_0_31_bit) | (1U << stream_output_signal_presence_32_59_bit);
+}
+
+/// Fill the GET_COUNTERS bitmap for a STREAM_OUTPUT index as Milan v1.3 Table
+/// 5.14 has them: @p intervals, the stream's StreamOutputIntervals, current()
+/// at what the talker has sent, and the signal presence the talker holds now within the stream's
+/// @p stream_channels, once the output reports it. False for a stream the talker has no slot for.
+/// Reactor thread.
+[[nodiscard]] inline auto fill_interval_talker_stream_counters(
     TalkerStreams const& talker,
     uint16_t const descriptor_index,
     StreamOutputIntervals const& intervals,
-    bool const milan,
+    size_t const stream_channels,
     uint32_t& valid,
     std::array<uint32_t, 32>& out) -> bool
 {
     if (talker.slot_for(descriptor_index) == nullptr) {
         return false;
     }
-    if (milan) {
-        fill_milan_v13_talker_counters(intervals, valid, out);
-    } else {
-        fill_classic_talker_counters(talker, descriptor_index, intervals, valid, out);
+    valid |= StreamOutputIntervals::VALID;
+    auto const values = intervals.current(talker_stream_totals(talker, descriptor_index));
+    for (size_t i = 0; i < values.size(); ++i) {
+        if ((StreamOutputIntervals::VALID & (1U << i)) != 0) {
+            out[i] = values[i];
+        }
     }
+    valid |= store_signal_presence(talker.signal_presence(descriptor_index), stream_channels, out);
     return true;
 }
 

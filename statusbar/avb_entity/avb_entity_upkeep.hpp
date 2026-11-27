@@ -15,6 +15,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace statusbar::avb_entity {
@@ -30,10 +31,10 @@ class EntityUpkeep final : public net::Pollable
     /// (both must outlive this).
     EntityUpkeep(AvbEntityKit& kit, logging::LogSink& sink);
 
-    /// The first link-up, a LinkMonitor on @p interface_name and the
+    /// The first link-up at @p now, a LinkMonitor on @p interface_name and the
     /// grandmaster-changed callback, for @p kit on @p reactor. Once, after the
     /// kit has started (the gPTP handler exists from then on).
-    static void attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::string_view interface_name);
+    static void attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::string_view interface_name, sm::TimePoint now);
 
     [[nodiscard]] auto fd() const noexcept -> int override { return -1; }
     void on_ready(int64_t /*now_ns*/) override {}
@@ -45,18 +46,16 @@ class EntityUpkeep final : public net::Pollable
 
   private:
     /// Log a change of the supervisor's state and restart the Init watchdog.
-    void notify_state(std::chrono::steady_clock::time_point now);
+    void notify_state(sm::TimePoint now);
     /// A grandmaster regained under the same identity, and the gPTP lock watchdog.
-    void watch_gptp(std::chrono::steady_clock::time_point now);
-    /// Re-evaluate talker admission and the stream counters at @p now.
-    void reevaluate(std::chrono::steady_clock::time_point now);
+    void watch_gptp(sm::TimePoint now);
 
     AvbEntityKit& kit_;
     logging::LogSink& sink_;
     logging::LogCollector<MAX_LOG_CHANNELS> collector_;
     std::string_view last_state_;
-    std::chrono::steady_clock::time_point state_since_;
-    bool lock_timeout_reported_{false};  ///< the gPTP watchdog fired in this stay in Init
+    std::optional<sm::TimePoint> state_since_{};  ///< the stay in this state began; unset before the first tick
+    bool lock_timeout_reported_{false};           ///< the gPTP watchdog fired in this stay in Init
     bool had_grandmaster_{false};
 };
 

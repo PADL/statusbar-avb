@@ -165,26 +165,17 @@ class AvbEntityKit
     /// Link Down: the state on_link_up() tells a repeat from a bounce by.
     [[nodiscard]] auto link_up() const noexcept -> bool { return link_up_; }
     /// gPTP grandmaster @p grandmaster found or changed / lost (EntityUpkeep wires these to the Announce
-    /// handler): drives AVTP tu (Milan v1.3 Section 4.3.5.2, Annex B.1.1) until the host follows the gPTP
-    /// stack (follow_grandmaster); GPTP_GM_CHANGED follows the grandmaster in force. Reactor thread.
-    void notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster)
-    {
-        host_.notify_grandmaster_changed(grandmaster);
-        if (!host_.follows_parent_grandmaster()) {
-            talker_->notify_grandmaster_changed(net::monotonic_ns());  // the tu window runs on the talker's clock
-        }
-    }
-    void notify_grandmaster_lost()
-    {
-        host_.notify_grandmaster_lost();
-        if (!host_.follows_parent_grandmaster()) {
-            lose_announced_grandmaster();
-        }
-    }
+    /// handler): GPTP_GM_CHANGED follows the grandmaster in force. AVTP tu follows the Announce handler
+    /// itself (follow_grandmaster), or the gPTP stack when the host follows it. Reactor thread.
+    void notify_grandmaster_changed(gptp::ClockIdentity const& grandmaster) { host_.notify_grandmaster_changed(grandmaster); }
+    void notify_grandmaster_lost() { host_.notify_grandmaster_lost(); }
     /// The Announces' gPTP path trace changed (GET_AS_PATH). Reactor thread.
     void notify_as_path_changed() { host_.notify_as_path_changed(); }
     void on_gptp_announce(TimePoint time, bool has_grandmaster) { host_.on_gptp_announce(time, has_grandmaster); }
     void on_timeout(TimePoint time) { host_.on_timeout(time); }
+
+    /// The gate's clock, CLOCK_MONOTONIC_RAW (TalkerGate::RawTimePoint).
+    using RawTimePoint = TalkerGate::RawTimePoint;
 
     /// How long the loop driving the reactor may wait this cycle: @p max_ms,
     /// or less when a MAAP probe or announce, an MRP timer or the admission
@@ -192,7 +183,7 @@ class AvbEntityKit
     /// read and the gate's clock @p raw_now. From the admission deadline on it
     /// answers 0 until end_cycle() runs: an entity that forwards this must
     /// forward end_cycle() too. Reactor thread only.
-    [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns, TalkerGate::RawTimePoint raw_now) const noexcept -> int;
+    [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns, RawTimePoint raw_now) const noexcept -> int;
     /// As above for a loop that holds the reactor clock alone: the gate's
     /// clock at @p now_ns is the pair last told (tell_cycle_time) carried
     /// forward by the reactor clock, raw_at().
@@ -205,12 +196,12 @@ class AvbEntityKit
     /// input of the cycle (a Listener Ready over MSRP, an ACMP connection) is
     /// known at @p raw_now, and so is the admitted set asked for with no
     /// instant. Reactor thread only.
-    void tell_cycle_time(int64_t now_ns, TalkerGate::RawTimePoint raw_now) noexcept;
+    void tell_cycle_time(int64_t now_ns, RawTimePoint raw_now) noexcept;
     /// The gate's clock at reactor-clock @p now_ns: the pair last told, carried
     /// forward by the reactor clock. The two clocks' rates differ by parts per
     /// million and a cycle lasts milliseconds, so within the cycle it is the
     /// instant to well under a microsecond. Told no pair, RawTimePoint{}.
-    [[nodiscard]] auto raw_at(int64_t now_ns) const noexcept -> TalkerGate::RawTimePoint;
+    [[nodiscard]] auto raw_at(int64_t now_ns) const noexcept -> RawTimePoint;
 
     /// The earliest of the MAAP deadline, the MSRP and MVRP timers and the end
     /// of the counters' observation interval. An MRP jointimer is 200 ms, so a
@@ -232,64 +223,26 @@ class AvbEntityKit
     /// served it, at reactor-clock @p now_ns: ends the stream counters'
     /// observation interval when due (the first call starts the first; under the
     /// Milan profile every COUNTERS_NOTIFY_FOLDS-th end notifies the descriptors
-    /// whose counters changed) and, from the admission deadline on, re-evaluates
-    /// admission at raw_at(@p now_ns) on the gate's clock. The loop bounds its
-    /// wait by poll_timeout_ms(), which counts both deadlines. Reactor thread only.
+    /// whose counters changed), runs the work held for after a command's response
+    /// (a save, a TSpec re-declared) and, from the admission deadline on,
+    /// re-evaluates admission at raw_at(@p now_ns) on the gate's clock. The loop
+    /// bounds its wait by poll_timeout_ms(), which counts both deadlines. Reactor thread only.
     void end_cycle(int64_t now_ns);
 
     // --- Media-thread (RT) calls ----------------------------------------------
 
-    /// The gate's clock, CLOCK_MONOTONIC_RAW: a media wake is told it; the reactor reads it once
-    /// per event it stamps or evaluates (net::rx_clock_now()).
-    using GateTimePoint = TalkerGate::RawTimePoint;
-
     /// Whether talker stream @p idx transmits at the wake told as @p now: the gate's admitted()
     /// (the reservation, with its grace) plus the MAAP address ready in "maap" mode and not
-    /// STOP_STREAMING'd. The wire's and the STREAM_OUTPUT streaming counter's predicate.
-    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
+    /// STOP_STREAMING'd. The talker is told that instant too (TalkerStreams::tell_wake_time): it
+    /// is the instant every AVTPDU of this wake carries its tu for, so call this before transmit_if_due().
+    [[nodiscard]] auto talker_should_transmit(uint16_t const idx, RawTimePoint const now) noexcept -> bool
     {
+        talker_->tell_wake_time(now);
         if (!maap_.ready() || talker_->stream_stopped(idx)) {
             return false;
         }
         return gate_.should_transmit(idx, now);
     }
-
-    // --- Talker admission (reactor thread) ------------------------------------
-    /// The gate's clock, CLOCK_MONOTONIC_RAW (TalkerGate::RawTimePoint).
-    using RawTimePoint = TalkerGate::RawTimePoint;
-    /// Talker stream indices, in table order.
-    using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
-    /// The talker streams the gate admits at @p now (TalkerGate::admitted), in table order: a Listener
-    /// Ready registered or within the grace, plus the ACMP connection where the gate needs one; every
-    /// stream when the gate is off. A stream STOP_STREAMING stopped, or waiting for MAAP, stays in it.
-    [[nodiscard]] auto admitted_talker_streams(RawTimePoint now) const noexcept -> AdmittedStreams;
-    /// As above, at the instant of the reactor cycle last told (tell_cycle_time).
-    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
-    /// The hook told the admitted set each time it changes: the reactor thread calls it, at a gate
-    /// input or at the admission deadline. It is not called for the set in force at install
-    /// (admitted_talker_streams() has it); a later install replaces an earlier one, an empty function
-    /// removes it. The span is the kit's, valid only during the call. It must not throw, install a
-    /// hook or feed a gate input.
-    using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
-    void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
-    /// Told each change of whether talker stream @p idx streams (slot open, MAAP ready, admitted, not stopped), on the
-    /// reactor thread, start() and stop() included; not the state at install (talker_gate_open()). A later install
-    /// replaces an earlier one, an empty function removes it. It must not throw, install a hook or feed a gate input.
-    using TalkerGateFn = sg14::inplace_function<void(uint16_t idx, bool open), 32>;
-    void set_on_talker_gate_changed(TalkerGateFn fn) noexcept { on_talker_gate_changed_ = std::move(fn); }
-    /// Whether talker stream @p idx streams, as the reactor last evaluated and told it; false past the table.
-    /// Reactor thread.
-    [[nodiscard]] auto talker_gate_open(uint16_t const idx) const noexcept -> bool
-    {
-        return idx < talker_gates_.size() && talker_gates_[idx];
-    }
-    /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
-    /// known at the RAW instant @p now (the host's hook passes the cycle's, tell_cycle_time). Stamps
-    /// the gate, then re-evaluates admission.
-    void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
-    /// The earliest instant the grace of a stream still admitted runs out (TalkerGate::grace_ends),
-    /// armed at each evaluation of admission; nullopt while no such grace runs.
-    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<RawTimePoint> { return admission_deadline_; }
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
     /// 1.0 for gPTP-locked, or its GPS tracker ratio) unless the CRF-input
@@ -336,38 +289,70 @@ class AvbEntityKit
 
     // --- Talker admission (the hardware shaper's input) ------------------------
 
-    /// The talker stream indices whose reservation the gate admits at @p now (TalkerGate::admitted), in
-    /// table order: the shaper's set, which a STOP_STREAMING'd or MAAP-pending stream stays in
-    /// (docs/MILAN_TALKER.md). The no-argument form reads the gate's clock once.
+    /// Talker stream indices, in table order.
     using AdmittedStreams = sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS>;
-    [[nodiscard]] auto admitted_talker_streams(GateTimePoint now) const noexcept -> AdmittedStreams;
-    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams
-    {
-        return admitted_talker_streams(net::rx_clock_now());
-    }
-    /// Called on the reactor thread with the new admitted set whenever it changes;
-    /// not for the set in force at install (read admitted_talker_streams()).
-    /// Pass an empty function to remove it before whatever it captures goes.
+    /// The talker streams the gate admits at @p now (TalkerGate::admitted), in table order: a Listener
+    /// Ready registered or within the grace, plus the ACMP connection where the gate needs one; every
+    /// stream when the gate is off. A stream STOP_STREAMING stopped, or waiting for MAAP, stays in it.
+    [[nodiscard]] auto admitted_talker_streams(RawTimePoint now) const noexcept -> AdmittedStreams;
+    /// As above, at the instant of the reactor cycle last told (tell_cycle_time).
+    [[nodiscard]] auto admitted_talker_streams() const noexcept -> AdmittedStreams;
+    /// The hook told the admitted set each time it changes: the reactor thread calls it, at a gate
+    /// input or at the admission deadline. It is not called for the set in force at install
+    /// (admitted_talker_streams() has it); a later install replaces an earlier one, an empty function
+    /// removes it. The span is the kit's, valid only during the call. It must not throw, install a
+    /// hook or feed a gate input.
     using AdmissionChangedFn = sg14::inplace_function<void(std::span<uint16_t const> admitted), 32>;
     void set_on_admission_changed(AdmissionChangedFn fn) noexcept { on_admission_changed_ = std::move(fn); }
-    /// Reactor thread: an MSRP listener declaration for @p stream_id was registered
-    /// (@p ready) or withdrawn at the reactor's @p now_ns, the gate's clock reading
-    /// @p gate_now; feeds the gate and the declarations, re-evaluates admission.
-    void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, int64_t now_ns, GateTimePoint gate_now);
-    /// Reactor thread, from the kit's timer: at the admission deadline (the earliest grace end,
-    /// TalkerGate::grace_ends) re-evaluate admission at @p now, so a grace window that runs out
-    /// with no MSRP event still closes the stream's admission and fires the callback.
-    void on_admission_timer(GateTimePoint now);
-    /// The admission deadline armed, on the gate's clock; nullopt: no grace running.
-    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<GateTimePoint> { return admission_deadline_; }
+    /// Told each change of whether talker stream @p idx streams (slot open, MAAP ready, admitted, not stopped), on the
+    /// reactor thread, start() and stop() included; not the state at install (talker_gate_open()). A later install
+    /// replaces an earlier one, an empty function removes it. It must not throw, install a hook or feed a gate input.
+    using TalkerGateFn = sg14::inplace_function<void(uint16_t idx, bool open), 32>;
+    void set_on_talker_gate_changed(TalkerGateFn fn) noexcept { on_talker_gate_changed_ = std::move(fn); }
+    /// Whether talker stream @p idx streams, as the reactor last evaluated and told it; false past the table.
+    /// Reactor thread.
+    [[nodiscard]] auto talker_gate_open(uint16_t const idx) const noexcept -> bool
+    {
+        return idx < talker_gates_.size() && talker_gates_[idx];
+    }
+    /// Reactor thread: an MSRP Listener Ready for @p stream_id was registered (@p ready) or withdrawn,
+    /// known at the RAW instant @p now (the host's hook passes the cycle's, tell_cycle_time). Stamps
+    /// the gate and the declarations, then re-evaluates admission.
+    void notify_listener_ready(nanoavb::StreamId const& stream_id, bool ready, RawTimePoint now);
+    /// The earliest instant the grace of a stream still admitted runs out (TalkerGate::grace_ends),
+    /// armed at each evaluation of admission; nullopt while no such grace runs.
+    [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<RawTimePoint> { return admission_deadline_; }
 
-    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream
-    /// outputs (IEEE 1722-2025 4.7.4.4), on the next AVTPDU of each. The kit calls it when another
-    /// clock source comes into force and when the CRF stream its media clock follows restarts or
-    /// is disrupted (end_cycle()). An entity calls it for a restart only it can see: a data plane
-    /// that receives the CRF stream itself and is told of a toggled mr. Reactor thread; from
-    /// another thread, TalkerStreams::toggle_media_clock_restart() per stream.
-    void restart_media_clock(uint16_t domain);
+    /// The channels of talker stream @p idx's format now (0 for no such stream).
+    [[nodiscard]] auto talker_channels(uint16_t idx) const noexcept -> uint16_t;
+    /// The kit reports signal presence: configured and Milan v1.3.
+    [[nodiscard]] auto reports_signal_presence() const noexcept -> bool { return config_.signal_presence && milan_profile(); }
+
+    // --- Talker Advertise declarations (Milan v1.3 Section 4.3.3.1) -----------
+
+    /// Whether talker stream @p idx's Talker Advertise is declared now: the MSRP handler's,
+    /// which under the Milan profile declares it only while a listener wants the stream.
+    [[nodiscard]] auto talker_declared(uint16_t idx) const noexcept -> bool;
+    /// Reactor thread: a PROBE_TX_COMMAND for talker stream @p idx arrived at @p now (the
+    /// ACMP talker's on_probe lands here): the MSRP handler declares the stream for 15 s.
+    void notify_talker_probe(uint16_t idx, TimePoint now);
+    /// Reactor thread: the talker streams' MAAP addresses became valid (@p valid)
+    /// or were lost to a conflict. Until valid, a Milan probe is answered
+    /// TALKER_DEST_MAC_FAIL and nothing is declared.
+    void notify_talker_addresses(bool valid);
+    // --- Presentation time offset (Milan v1.2 Section 5.3.7.6) ------------------
+
+    /// Talker stream @p idx's presentation time offset in ns (any thread); starts
+    /// at config.presentation_offset_ns, settable by a controller, persisted.
+    [[nodiscard]] auto presentation_offset_ns(uint16_t const idx) const noexcept -> uint32_t
+    {
+        return idx < presentation_offset_ns_.size() ? presentation_offset_ns_[idx].load(std::memory_order_relaxed) : 0;
+    }
+    /// The entity applies a talker stream's new presentation offset (reactor thread,
+    /// before the kit stores it) and answers an AEM status. Without one the kit
+    /// refuses (NOT_SUPPORTED). Pass an empty function to remove it.
+    using PresentationOffsetFn = sg14::inplace_function<uint8_t(uint16_t idx, uint32_t offset_ns), 32>;
+    void set_on_presentation_offset_changed(PresentationOffsetFn fn) noexcept { on_presentation_offset_changed_ = std::move(fn); }
 
     // --- Stream formats and the sampling rate (Milan v1.2 Section 5.4.2.7) ------
     // SET_STREAM_FORMAT goes through the entity's hook and is persisted; SET_SAMPLING_RATE
@@ -480,7 +465,7 @@ class AvbEntityKit
     [[nodiscard]] auto input_running(uint16_t idx) const noexcept -> bool;
     /// Whether STREAM_OUTPUT @p idx streams at @p now: it may transmit, or it
     /// declares with a Listener Ready (Failed) registered (Milan v1.2 Section 5.3.7.3).
-    [[nodiscard]] auto output_streaming(uint16_t idx, GateTimePoint now) const noexcept -> bool;
+    [[nodiscard]] auto output_streaming(uint16_t idx, RawTimePoint now) const noexcept -> bool;
 
     // --- Persistent state (docs/PERSISTENT_STATE.md) -----------------------------
 
@@ -524,6 +509,14 @@ class AvbEntityKit
     {
         return host_.release_clock_domain_lock(clock_domain_index);
     }
+
+    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream
+    /// outputs (IEEE 1722-2025 4.7.4.4), on the next AVTPDU of each. The kit calls it when another
+    /// clock source comes into force and when the CRF stream its media clock follows restarts or
+    /// is disrupted (end_cycle()). An entity calls it for a restart only it can see: a data plane
+    /// that receives the CRF stream itself and is told of a toggled mr. Reactor thread; from
+    /// another thread, TalkerStreams::toggle_media_clock_restart() per stream.
+    void restart_media_clock(uint16_t domain);
 
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// CLOCK_DOMAIN 0's active clock-source index (runtime SET_CLOCK_SOURCE
@@ -571,12 +564,6 @@ class AvbEntityKit
     [[nodiscard]] auto host() const noexcept -> AvbEntityHost const& { return host_; }
     [[nodiscard]] auto talker() noexcept -> TalkerStreams& { return *talker_; }
     [[nodiscard]] auto talker() const noexcept -> TalkerStreams const& { return *talker_; }
-    /// The port the streams go through. One the host opened before start() (a test port,
-    /// StreamPort::open_test) is kept by it; stop() closes it either way.
-    [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return stream_port_; }
-    /// The MAAP acquirer of the talker streams' addresses ("maap" address mode). Reactor thread. The kit
-    /// installs its set_on_ready_changed() hook, which keeps the talker gates; a caller must not replace it.
-    [[nodiscard]] auto maap() noexcept -> MaapAddressAcquirer& { return maap_; }
     /// nullptr when the blob declares no stream inputs.
     [[nodiscard]] auto listener() noexcept -> ListenerStreams* { return listener_.get(); }
     [[nodiscard]] auto listener() const noexcept -> ListenerStreams const* { return listener_.get(); }
@@ -626,6 +613,9 @@ class AvbEntityKit
     /// The stream port, for what a host reads off it (backend, xdp counters,
     /// launch-time order). Acquire its Guard off the media thread.
     [[nodiscard]] auto stream_port() noexcept -> StreamPort& { return stream_port_; }
+    /// The MAAP acquirer of the talker streams' addresses ("maap" address mode). Reactor thread. The kit
+    /// installs its set_on_ready_changed() hook, which keeps the talker gates; a caller must not replace it.
+    [[nodiscard]] auto maap() noexcept -> MaapAddressAcquirer& { return maap_; }
     [[nodiscard]] auto stream_port() const noexcept -> StreamPort const& { return stream_port_; }
     /// Whether "maap" address mode fell back to the static per-kind
     /// destination MACs (the MAAP socket would not open).
@@ -797,9 +787,9 @@ class AvbEntityKit
     [[nodiscard]] auto served_entity_model_id() const -> uint64_t;
     /// The presentation offset a talker stream starts with.
     [[nodiscard]] auto default_presentation_offset_ns() const noexcept -> uint32_t;
-    /// Recompute the admitted set at @p now after a gate input changed (or time
-    /// passed); fire on_admission_changed_ when it differs from the last one.
-    void notify_admission(GateTimePoint now);
+    /// Recompute the admitted set at @p now after a gate input changed, or at the admission
+    /// deadline; tell on_admission_changed_ when it differs from the one last told.
+    void notify_admission(RawTimePoint now);
     /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
     void arm_admission_deadline(RawTimePoint now) noexcept;
     /// At or past the admission deadline (@p now on the gate's clock), re-evaluate admission, so a
@@ -1001,7 +991,13 @@ class AvbEntityKit
     void configure_class_a_domain();
     /// AVTP tu after a gPTP stack's @p transition (IEEE 1722-2016 Clause 4.4.4.7): the usual window for
     /// a change, set while none is named, clear while this entity is the grandmaster.
-    void follow_grandmaster(GrandmasterTransition transition) noexcept;
+    void notify_talker_of_transition(GrandmasterTransition transition) noexcept;
+    /// The talker's tu follows the grandmaster of this start's Announce handler, none at first, unless
+    /// the host follows the gPTP stack's (notify_talker_of_transition).
+    void follow_grandmaster();
+    /// The talker told whether the Announces name a grandmaster in force (@p in_force), as of the
+    /// cycle's instant; none is lose_announced_grandmaster().
+    void notify_talker_of_grandmaster(bool in_force) noexcept;
     /// AVTP tu after the Announces timed out: clear at once when this entity is now its own grandmaster
     /// (its time base does not step), else set until a grandmaster is found.
     void lose_announced_grandmaster();
@@ -1054,8 +1050,27 @@ class AvbEntityKit
     // Declarations and registrations
     //
 
-    /// Fold each stream's counters into the interval just ended, notifying the changed ones.
+    /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS has passed since
+    /// the last, at reactor-clock @p now_ns; under the Milan profile, at every COUNTERS_NOTIFY_FOLDS-th
+    /// end, notify each stream descriptor whose counters changed since it was last told (GET_COUNTERS).
+    /// The first call starts the first interval. end_cycle() calls it.
+    void poll_counters(int64_t now_ns);
+    /// End the observation interval of every stream's counters, and at every
+    /// COUNTERS_NOTIFY_FOLDS-th one notify those that changed.
     void fold_stream_counters();
+    /// The stream outputs' and the stream inputs' halves of fold_stream_counters():
+    /// each notes which descriptors' counters changed.
+    void fold_output_counters();
+    void fold_input_counters();
+    /// Notify each stream descriptor whose counters changed since it was last
+    /// told, under the Milan profile, and forget the changes under either.
+    void notify_changed_counters();
+    /// Whether the counters of stream descriptor @p index, noted in @p changed, are to be told now:
+    /// they changed and the profile is Milan's. The note is cleared.
+    [[nodiscard]] auto take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t index) const noexcept -> bool;
+    /// Keep the signal presence STREAM_OUTPUT @p spec reports now, within its channels, as this
+    /// fold's; true when it changed.
+    [[nodiscard]] auto fold_output_presence(StreamSpec const& spec) noexcept -> bool;
     /// Talker stream @p idx's registered Listener; nullopt for no such stream.
     [[nodiscard]] auto registered_listener_of(uint16_t idx) const -> std::optional<srp::msrp::ListenerDeclaration>;
     /// Every talker stream gated at once (no grace): its Talker Advertise was withdrawn.
@@ -1229,22 +1244,36 @@ class AvbEntityKit
     sg14::inplace_vector<std::pair<uint16_t, uint16_t>, MAX_ENTITY_STREAMS> sink_vlans_{};
     /// The VID each settled Milan input joined (join_sink_vlan), by STREAM_INPUT; 0: none.
     std::array<uint16_t, MAX_ENTITY_STREAMS> input_vid_{};
-    /// The admitted set last reported, and its listener.
+    /// The admitted set last told (notify_admission), and the hook told it.
     AdmittedStreams admitted_{};
     AdmissionChangedFn on_admission_changed_{};
-    /// GET_COUNTERS per talker stream (StreamOutputIntervals), the next end of
-    /// the observation interval, and each Milan input's bound state.
-    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
+    std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
+    /// The reactor-clock half of the pair last told (tell_cycle_time); the gate holds the RAW half.
+    int64_t cycle_ns_{0};
+    /// Each talker stream's gate as last evaluated (notify_talker_gates), and the hook told its changes.
+    std::array<bool, MAX_ENTITY_STREAMS> talker_gates_{};
+    TalkerGateFn on_talker_gate_changed_{};
+    /// The end of the counters' observation interval (end_cycle), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
+    /// The intervals ended since the descriptors were last notified (fold_stream_counters).
+    unsigned counters_folds_{0};
+    /// The stream inputs and outputs whose counters changed since they were last notified.
+    std::array<bool, MAX_ENTITY_STREAMS> input_counters_changed_{};
+    std::array<bool, MAX_ENTITY_STREAMS> output_counters_changed_{};
+    /// Each stream input as tell_changed_input_info() last found it; unset before its first look.
+    std::array<std::optional<atdecc::aem::AemStreamInfoPayload>, MAX_ENTITY_STREAMS> input_info_told_{};
+    /// Each Milan stream input's bound state as last followed (follow_input_bound).
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
+    /// Each stream output's Milan counters, by observation interval (reactor thread).
+    std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
+    /// Each stream output's signal presence within its channels as of the last fold, to tell a
+    /// change (TalkerStreams::signal_presence).
+    std::array<std::optional<uint64_t>, MAX_ENTITY_STREAMS> output_presence_{};
     /// entity_state_dir()'s answer once asked for; unset before.
     std::optional<std::string> entity_state_dir_{};
-    /// Start or stop each talker stream's STREAM_START/STREAM_STOP at @p now:
-    /// streaming while it may transmit (talker_should_transmit).
-    void update_output_streaming(GateTimePoint now);
 
     /// The one port every stream frame goes through, backend from
-    /// config_.net_backend or opened by the host (stream_port()). Declared before the talker, the listener and the
+    /// config_.net_backend. Declared before the talker, the listener and the
     /// RX handler, which hold it by reference.
     StreamPort stream_port_{};
 

@@ -12,9 +12,10 @@ namespace statusbar::avb_entity {
 
 namespace {
 
-auto steady_time_point() -> sm::TimePoint
+/// The reactor-clock instant @p now_ns as the kit's TimePoint.
+auto time_point_at(int64_t const now_ns) -> sm::TimePoint
 {
-    return sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
+    return sm::TimePoint{std::chrono::nanoseconds{now_ns}};
 }
 
 }  // namespace
@@ -23,7 +24,6 @@ EntityUpkeep::EntityUpkeep(AvbEntityKit& kit, logging::LogSink& sink)
     : kit_{kit}
     , sink_{sink}
     , last_state_{kit.host().state_string()}
-    , state_since_{std::chrono::steady_clock::now()}
 {
     (void)collector_.add(kit.host().ctl_log_channel());
     (void)collector_.add(kit.host().media_log_channel());
@@ -32,12 +32,13 @@ EntityUpkeep::EntityUpkeep(AvbEntityKit& kit, logging::LogSink& sink)
     }
 }
 
-void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::string_view const interface_name)
+void EntityUpkeep::attach(
+    net::MessageReactor& reactor, AvbEntityKit& kit, std::string_view const interface_name, sm::TimePoint const now)
 {
     // As run_entity_main_loop: the initial link-up synchronously, so the
     // supervisor leaves Down -> Init before any gPTP announce is processed;
     // then the interface link state continuously.
-    kit.on_link_up(steady_time_point());
+    kit.on_link_up(now);
     reactor.add(std::make_unique<net::LinkMonitor>(interface_name, [kit = &kit](bool const up, int64_t const now_ns) {
         auto const time = sm::TimePoint{std::chrono::nanoseconds{now_ns}};
         if (up) {
@@ -49,14 +50,14 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
     if (auto* handlers = kit.host().net_handlers(); handlers != nullptr) {
         handlers->gptp_handler().set_callbacks(nanoavb::GptpAnnounceCallbacks{
             .grandmaster_id_changed =
-                [kit = &kit](int64_t /*now_ns*/, gptp::ClockIdentity const& grandmaster, gptp::AnnounceMessage const& announce) {
+                [kit = &kit](int64_t const now_ns, gptp::ClockIdentity const& grandmaster, gptp::AnnounceMessage const& announce) {
                     kit->host().ctl_log().status(
                         "gPTP: grandmaster {:016x} (priority1={}, priority2={})",
                         grandmaster.get(),
                         announce.grandmaster_priority1.get(),
                         announce.grandmaster_priority2.get());
                     kit->notify_grandmaster_changed(grandmaster);  // ADP through the host; AVTP tu (Milan v1.2 B.1.1)
-                    kit->on_gptp_announce(steady_time_point(), true);
+                    kit->on_gptp_announce(time_point_at(now_ns), true);
                 },
             .grandmaster_lost =
                 [kit = &kit](int64_t /*now_ns*/) {
@@ -66,17 +67,18 @@ void EntityUpkeep::attach(net::MessageReactor& reactor, AvbEntityKit& kit, std::
     }
 }
 
-void EntityUpkeep::tick(int64_t /*now_ns*/)
+void EntityUpkeep::tick(int64_t const now_ns)
 {
-    auto const now = std::chrono::steady_clock::now();
+    auto const now = time_point_at(now_ns);
     notify_state(now);
     watch_gptp(now);
-    reevaluate(now);
+    kit_.end_cycle(now_ns);  // the counters' interval and the admission deadline
     drain();
 }
 
-void EntityUpkeep::notify_state(std::chrono::steady_clock::time_point const now)
+void EntityUpkeep::notify_state(sm::TimePoint const now)
 {
+    state_since_ = state_since_.value_or(now);  // the first tick starts the first stay
     if (auto const state = kit_.host().state_string(); state != last_state_) {
         kit_.host().ctl_log().status("entity: {} -> {}", logging::static_str(last_state_), logging::static_str(state));
         last_state_ = state;
@@ -85,9 +87,9 @@ void EntityUpkeep::notify_state(std::chrono::steady_clock::time_point const now)
     }
 }
 
-void EntityUpkeep::watch_gptp(std::chrono::steady_clock::time_point const now)
+void EntityUpkeep::watch_gptp(sm::TimePoint const now)
 {
-    auto const sm_now = sm::TimePoint{now.time_since_epoch()};
+    auto const sm_now = now;
     // Grandmaster regained under an unchanged identity; a changed identity is
     // handled by the announce callback. Here, so one thread drives the SM/MSRP.
     if (auto* handlers = kit_.host().net_handlers(); handlers != nullptr) {
@@ -99,20 +101,10 @@ void EntityUpkeep::watch_gptp(std::chrono::steady_clock::time_point const now)
     }
     // The gPTP watchdog reports once per stay in Init (the entity keeps
     // advertising and waiting for a lock either way).
-    if (last_state_ == "Init" && !lock_timeout_reported_ && now - state_since_ > GPTP_LOCK_TIMEOUT) {
+    if (last_state_ == "Init" && !lock_timeout_reported_ && now - state_since_.value_or(now) > GPTP_LOCK_TIMEOUT) {
         kit_.on_timeout(sm_now);
         lock_timeout_reported_ = true;
     }
-}
-
-void EntityUpkeep::reevaluate(std::chrono::steady_clock::time_point const now)
-{
-    // Talker admission is time-dependent (the Listener Ready grace window):
-    // re-evaluate it so an expiry with no MSRP event still reaches the
-    // admission-changed callback (the hardware shaper).
-    auto const now_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
-    kit_.poll_admission(net::rx_clock_now());  // the gate's clock, read once a pass
-    kit_.poll_counters(now_ns);
 }
 
 }  // namespace statusbar::avb_entity

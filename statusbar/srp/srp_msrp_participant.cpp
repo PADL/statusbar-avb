@@ -646,7 +646,7 @@ auto MsrpParticipantT<Limits>::hold_talker_value_after_restart(TalkerAdvertiseFi
     if (find_talker_advertise(previous.stream_id) != nullptr) {
         return success();
     }
-    auto* const rec = find_or_create_talker_advertise(previous.stream_id);
+    auto* const rec = find_or_create_talker_advertise(previous.stream_id, true);
     if (rec == nullptr) {
         return failure(make_error_code(tsn::TsnError::attribute_table_full));
     }
