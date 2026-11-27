@@ -515,6 +515,11 @@ class AvbEntityKit
     /// Whether the counters of stream descriptor @p index, noted in @p changed, are to be told now:
     /// they changed and the profile is Milan's. The note is cleared.
     [[nodiscard]] auto take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t index) const noexcept -> bool;
+    /// Keep the signal presence STREAM_OUTPUT @p spec reports now, within its channels, as this
+    /// fold's; true when it changed.
+    [[nodiscard]] auto fold_output_presence(StreamSpec const& spec) noexcept -> bool;
+    /// The channels of STREAM_OUTPUT @p index's format, 0 for an index the entity has no output for.
+    [[nodiscard]] auto output_channels(uint16_t index) const noexcept -> uint16_t;
     /// SET_STREAM_FORMAT named, for a stream, a format its descriptor
     /// describes: the status of the command. A stream input takes another
     /// channel count (change_input_format); a stream output keeps the one
@@ -674,6 +679,9 @@ class AvbEntityKit
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
     /// Each stream output's Milan counters, by observation interval (reactor thread).
     std::array<StreamOutputIntervals, MAX_ENTITY_STREAMS> output_counters_{};
+    /// Each stream output's signal presence within its channels as of the last fold, to tell a
+    /// change (TalkerStreams::signal_presence).
+    std::array<std::optional<uint64_t>, MAX_ENTITY_STREAMS> output_presence_{};
 
     /// Symbol-bound control handlers (kit phase 4): resolved bindings carry
     /// the CONTROL descriptor index; unresolved ones stay inert (diag at start).

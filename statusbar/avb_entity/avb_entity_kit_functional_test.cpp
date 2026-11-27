@@ -18,6 +18,7 @@
 #include "statusbar/avb_entity/avb_entity_state_dir.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
 #include "statusbar/avtp/avtp_aaf_stream_output.hpp"
 #include "statusbar/avtp/avtp_stream_format.hpp"
@@ -2415,6 +2416,74 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{2});  // four intervals, each with a change: told twice
     EXPECT_TRUE(pair.listener.stop(pair.now));
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_output_counters, signal_presence_puts_channel_0_at_the_msb_within_the_streams_channels)
+{
+    // Milan v1.3 Section 5.3.7.7.1: ENTITY_SPECIFIC_9 for channels 0-31, _10 for 32-59, channel 0
+    // at the MSB; bits for channels the output does not have stay 0.
+    uint64_t const ends = (uint64_t{1} << 0U) | (uint64_t{1} << 31U) | (uint64_t{1} << 32U) | (uint64_t{1} << 59U);
+    EXPECT_EQ(signal_presence_quadlet(ends, 0), 0x8000'0001U);
+    EXPECT_EQ(signal_presence_quadlet(ends, 32), 0x8000'0010U);
+    EXPECT_EQ(signal_presence_quadlet(~uint64_t{0} << 60U, 32), 0U);  // no channel past 59
+    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 8), uint64_t{0xFF});
+    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 64), (uint64_t{1} << 60U) - 1U);
+    EXPECT_EQ(reported_signal_presence(~uint64_t{0}, 0), uint64_t{0});
+
+    std::array<uint32_t, 32> out{};
+    EXPECT_EQ(store_signal_presence(std::nullopt, 8, out), 0U);  // not reported: nothing valid
+    EXPECT_EQ(store_signal_presence(ends, 8, out), (1U << 23U) | (1U << 22U));
+    EXPECT_EQ(out[23], 0x8000'0000U);  // channel 0 alone of the eight
+    EXPECT_EQ(out[22], 0U);
+}
+
+TEST(avb_entity_kit_output_counters, a_milan_output_answers_the_signal_presence_reported_when_asked)
+{
+    // Milan v1.3 Section 5.3.7.7.1: GET_COUNTERS answers the latest report, within the eight
+    // channels of the stream; a change is told as any counter's is (Table 5.20).
+    using O = StreamOutputIntervals;
+    constexpr uint32_t presence_valid = (1U << 23U) | (1U << 22U);
+    KitPair pair{"milan13"};
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    CountersWatcher const watcher{pair.talker, TALKER_ID};
+    int64_t t = 1'000'000'000;
+    pair.talker->poll_counters(t);
+    EXPECT_EQ(counters_of(output).counters_valid.get(), O::VALID);  // not reported
+    size_t const notified = watcher.of(AAF_STREAM, output.type);
+
+    auto& talker = pair.talker->talker();
+    uint64_t const channels = (uint64_t{1} << 0U) | (uint64_t{1} << 7U) | (uint64_t{1} << 8U) | (uint64_t{1} << 59U);
+    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, channels).has_value());
+    auto counters = counters_of(output);  // at once, no fold between
+    EXPECT_EQ(counters.counters_valid.get(), O::VALID | presence_valid);
+    EXPECT_EQ(counters.counters[23].get(), 0x8100'0000U);  // channels 0 and 7; 8 and 59 dropped
+    EXPECT_EQ(counters.counters[22].get(), 0U);
+    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified);  // the first end of an interval
+    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, uint64_t{1} << 7U).has_value());
+    EXPECT_EQ(counters_of(output).counters[23].get(), 0x0100'0000U);  // the latest, between folds
+    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);  // the second: told once
+    EXPECT_EQ(watcher.notified.back().counters[23].get(), 0x0100'0000U);
+
+    // A channel the stream does not have is no change.
+    EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, (uint64_t{1} << 7U) | (uint64_t{1} << 40U)).has_value());
+    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);
+    EXPECT_TRUE(pair.talker.stop(pair.now));
+}
+
+TEST(avb_entity_kit_output_counters, a_classic_output_reports_no_signal_presence)
+{
+    // IEEE 1722.1-2021 Table 7-158 has no signal presence: the running counts alone.
+    KitPair pair{"classic"};
+    StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
+    EXPECT_TRUE(pair.talker->talker().set_signal_presence(AAF_STREAM, 1).has_value());
+    pair.talker->poll_counters(1'000'000'000);
+    pair.talker->poll_counters(1'000'000'000 + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    EXPECT_EQ(counters_of(output).counters_valid.get(), stream_output_counters_valid);
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 

@@ -370,6 +370,18 @@ input's are; under the Milan profile GET_COUNTERS answers STREAM_START and
 STREAM_STOP as they stand and the interval counters as of the last fold,
 zero once the stream has started since.
 
+A Milan output also reports the signal presence of its channels (Milan
+v1.3 Section 5.3.7.7.1) once the entity says what it is:
+`TalkerStreams::set_signal_presence(index, channels)`, bit k for channel
+k, from whichever thread knows the signal (a store, safe on a real-time
+thread). GET_COUNTERS answers the latest report in ENTITY_SPECIFIC_9
+(channels 0 to 31) and ENTITY_SPECIFIC_10 (32 to 59), channel 0 at the
+most significant bit, the bits past the stream's channels dropped. The
+kit compares it at each fold, and a change is notified as any counter's
+is. Until the first report both stay invalid. An entity that
+reports it says so in GET_MILAN_INFO: `milan.features_flags` with
+TALKER_SIGNAL_PRESENCE (Table 5.17). The kit itself measures no signal.
+
 ### tu and mr on the talker's AVTPDUs
 
 Every AVTPDU the talker sends, AM824, AAF and CRF alike, carries tu (IEEE
