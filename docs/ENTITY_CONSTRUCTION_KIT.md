@@ -301,7 +301,7 @@ Everything not listed here is the same under both.
 
 | Point | classic (1722.1-2021) | milan13 (Milan v1.3) |
 |---|---|---|
-| ACQUIRE_ENTITY | granted for the ENTITY descriptor (7.4.1) | NOT_SUPPORTED, never granted (5.4.2.1) |
+| ACQUIRE_ENTITY | granted for the ENTITY descriptor (7.4.1); while another controller holds it, the holder is sent CONTROLLER_AVAILABLE and the contender granted the entity only if no answer with that sequence id comes | NOT_SUPPORTED, never granted (5.4.2.1) |
 | A SET to the value already in force | applied and notified: 7.5.2 notifies every SET answered SUCCESS | answered SUCCESS, not applied, not notified (5.4.5.3) |
 | A registered controller that falls silent | kept until it deregisters or departs (ADP) | sent CONTROLLER_AVAILABLE 30 to 60 s after its last AECP command, AEM or MVU; when neither that nor its one retry (9.3.6) is answered, deregistered and told so alone (5.4.5.4) |
 | A controller's DEREGISTER_UNSOLICITED_NOTIFICATION | the remaining registered controllers are notified (7.5.2 lists the command) | nobody is told: each copy would carry the recipient's own controller_entity_id (5.4.5.1) and read as its own deregistration; Table 5.20 sends one only to the controller removed |

@@ -4446,6 +4446,66 @@ TEST(nanoavb_entity_controller_monitor, the_holders_answer_ends_the_acquire_hand
     }
 }
 
+// IEEE 1722.1-2021 Clauses 7.4.1 and 9.2.1.2.4: with no callback installed the handler asks the
+// holder itself, and only the answer with that command's sequence id ends the handshake.
+TEST(nanoavb_entity_controller_monitor, the_holder_is_asked_by_the_handler_and_answered_by_sequence_id)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> const acquire{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 1);
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 2);
+    EXPECT_TRUE(handler.has_pending_acquire());
+    auto const asked = controller_available_commands(sends, kMacA);
+    EXPECT_EQ(asked.size(), size_t{1});
+    if (asked.size() != 1) {
+        return;
+    }
+    EXPECT_EQ(asked.front().target_entity_id, kControllerA);
+    EXPECT_EQ(asked.front().controller_entity_id, kEntity);
+    sends.clear();
+
+    AemDu other_id = asked.front();
+    other_id.sequence_id = static_cast<uint16_t>(asked.front().sequence_id.get() + 1U);
+    answer_controller_available(handler, other_id, kMacA);
+    EXPECT_TRUE(handler.has_pending_acquire());
+    EXPECT_TRUE(solicited(sends) == nullptr);
+
+    answer_controller_available(handler, asked.front(), kMacA);
+    EXPECT_FALSE(handler.has_pending_acquire());
+    EXPECT_EQ(handler.acquiring_controller(), kControllerA);
+    auto const* reply = solicited(sends);
+    EXPECT_TRUE(reply != nullptr);
+    if (reply != nullptr) {
+        EXPECT_EQ(reply->dest, kMacB);
+        EXPECT_EQ(header_of(*reply).status(), AEM_STATUS_ENTITY_ACQUIRED);
+    }
+}
+
+// An entity that installs send_controller_available asks the holder through it; the handler frames nothing.
+TEST(nanoavb_entity_controller_monitor, an_installed_callback_still_asks_the_holder)
+{
+    SetAcceptingHandler app;
+    AemCommandHandler handler{app};
+    handler.set_entity_id(kEntity);
+    std::vector<CapturedSend> sends;
+    capture_sends(handler, sends);
+    std::vector<Eui64> asked;
+    handler.send_controller_available = [&asked](Eui64 const& owner) {
+        asked.push_back(owner);
+        return true;
+    };
+    std::array<uint8_t, AemAcquireEntityPayload::LENGTH> const acquire{};
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 1);
+    inject_command(handler, kEntity, kControllerB, kMacB, AEM_COMMAND_ACQUIRE_ENTITY, acquire, 2);
+    EXPECT_TRUE(handler.has_pending_acquire());
+    EXPECT_TRUE(asked == std::vector<Eui64>{kControllerA});
+    EXPECT_TRUE(controller_available_commands(sends, kMacA).empty());
+}
+
 //
 // Notification order - Milan v1.3 Section 5.4.5.3: a command's notifications follow its response
 //

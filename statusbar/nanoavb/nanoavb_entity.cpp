@@ -2227,7 +2227,7 @@ auto AemCommandHandler::take_acquisition(
     // its acquisition is PERSISTENT or nobody can carry the question. The final
     // answer then comes from controller_available_response_received() (deny) or
     // controller_available_timed_out() (grant).
-    if (!acquired_persistent_ && send_controller_available) {
+    if (!acquired_persistent_ && (send_controller_available || callbacks_.send_response)) {
         begin_controller_available_handshake(header, cmd.flags, command_data);
         return AEM_STATUS_IN_PROGRESS;
     }
@@ -2243,12 +2243,33 @@ void AemCommandHandler::begin_controller_available_handshake(
         .requester_flags = flags,
         .command_data_copy = {},
         .timeout = event_time_ + std::chrono::milliseconds(AEM_TIMEOUT_MS),
+        .sequence_id = 0,
+        .framed = false,
         .active = true};
     std::copy_n(
         command_data.begin(),
         std::min(command_data.size(), pending_acquire_.command_data_copy.size()),
         pending_acquire_.command_data_copy.begin());
-    send_controller_available(acquiring_controller_);
+    ask_owner_available();
+}
+
+void AemCommandHandler::ask_owner_available()
+{
+    if (send_controller_available) {
+        (void)send_controller_available(acquiring_controller_);
+        return;
+    }
+    pending_acquire_.sequence_id = command_sequence_id_++;
+    pending_acquire_.framed = true;
+    send_controller_available_to(acquiring_controller_mac_, acquiring_controller_, pending_acquire_.sequence_id);
+}
+
+auto AemCommandHandler::answers_pending_acquire(AemDu const& header) const noexcept -> bool
+{
+    if (!pending_acquire_.active || !acquired_ || header.target_entity_id != acquiring_controller_) {
+        return false;
+    }
+    return !pending_acquire_.framed || header.sequence_id.get() == pending_acquire_.sequence_id;
 }
 
 auto AemCommandHandler::acquire_outcome(
@@ -3126,7 +3147,7 @@ void AemCommandHandler::handle_aem_response(AemDu const& header)
         return;
     }
     // The acquire handshake asked the holder whether it is still there: it is.
-    if (pending_acquire_.active && acquired_ && header.target_entity_id == acquiring_controller_) {
+    if (answers_pending_acquire(header)) {
         controller_available_response_received();
     }
     // The monitor's question, answered with any status (Milan v1.3 Section 5.4.5.4).

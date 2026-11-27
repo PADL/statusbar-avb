@@ -504,11 +504,10 @@ class AemCommandHandler
         on_configuration_changed_ = std::move(fn);
     }
 
-    /// Callback to send CONTROLLER_AVAILABLE command to the current owner.
-    /// Set this to enable the CONTROLLER_AVAILABLE handshake on acquire contention.
-    /// Signature: send_controller_available(owner_entity_id) -> bool.
-    /// See SendAemResponseFn for the inline-storage capacity rationale;
-    /// this callback's captures are similarly small in practice.
+    /// Callback to send CONTROLLER_AVAILABLE to the current owner on acquire contention, for an
+    /// entity that frames the command itself; its answer is matched by the owner's entity id alone.
+    /// Without it the handler frames the command through send_response and matches the answer by
+    /// sequence id too (IEEE 1722.1-2021 Clause 7.4.1). Signature: (owner_entity_id) -> bool.
     statusbar::sg14::inplace_function<bool(Eui64 const& owner_entity_id), 64> send_controller_available;
 
     /// Process an incoming AECP packet and send the response: an AEM command
@@ -846,6 +845,13 @@ class AemCommandHandler
 
     /// Park the requester and ask the current owner whether it is still there.
     void begin_controller_available_handshake(AemDu const& header, uint32_t flags, std::span<uint8_t const> command_data);
+
+    /// Send the owner CONTROLLER_AVAILABLE: through send_controller_available when installed, else
+    /// framed here with the next command sequence id, which the pending acquire records.
+    void ask_owner_available();
+
+    /// Whether the CONTROLLER_AVAILABLE response @p header answers the pending acquire's question.
+    [[nodiscard]] auto answers_pending_acquire(AemDu const& header) const noexcept -> bool;
 
     /// The owner is gone or has let go: the parked contender takes the entity
     /// and is told SUCCESS as its owner; the handshake is over.
@@ -1628,6 +1634,8 @@ class AemCommandHandler
         uint32_t requester_flags{0};
         std::array<uint8_t, 16> command_data_copy{};
         sm::TimePoint timeout{};
+        uint16_t sequence_id{0};  ///< of the CONTROLLER_AVAILABLE the handler framed
+        bool framed{false};       ///< the handler framed it, so its answer matches sequence_id too
         bool active{false};
     };
     PendingAcquire pending_acquire_{};
