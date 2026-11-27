@@ -1,0 +1,119 @@
+{
+  "$schema": "../standards/ieee1722.1-schema/atdecc_aem.schema.json",
+  "entity": {
+    "vendor": "Statusbar",
+    "model": "CRF Generator",
+    "name": "Statusbar CRF Generator",
+    "firmware": "${version}",
+    "capabilities": [
+      "AEM_SUPPORTED",
+      "CLASS_A_SUPPORTED",
+      "GPTP_SUPPORTED"
+    ],
+    "talker": {
+      "capabilities": [
+        "IMPLEMENTED",
+        "MEDIA_CLOCK_SOURCE"
+      ],
+      "stream_sources": 1
+    },
+    "configurations": [
+      {
+        "name": "CRFGenerator",
+        "localized_description": { "en-US": "CRF Generator", "de-DE": "CRF-Generator" },
+        "streams_out": [
+          {
+            "name": "StreamOutputCRF",
+            "symbol": "crf_out",
+            "format": "0x041060010000BB80",
+            "flags": [
+              "CLASS_A"
+            ],
+            "localized_description": { "en-US": "CRF Media Clock", "de-DE": "CRF-Medientakt" }
+          }
+        ],
+        "controls": [
+          {
+            "name": "Identify",
+            "control_type": "IDENTIFY",
+            "value_type": "LINEAR_UINT8",
+            "localized_description": { "en-US": "Identify", "de-DE": "Identifizieren" },
+            "values": [
+              { "min": 0, "max": 255, "step": 255, "default": 0, "unit": "UNITLESS" }
+            ],
+            "symbol": "identify"
+          }
+        ],
+        "avb_interfaces": [
+          {
+            "name": "eth0",
+            "flags": [
+              "GPTP_SUPPORTED",
+              "SRP_SUPPORTED"
+            ]
+          }
+        ],
+        "clock_sources": [
+          {
+            "name": "Local",
+            "symbol": "local_clock",
+            "localized_description": { "en-US": "Local oscillator", "de-DE": "Lokaler Oszillator" },
+            "type": "INTERNAL"
+          },
+          {
+            "name": "gPTP",
+            "symbol": "gptp_clock",
+            "localized_description": { "en-US": "gPTP", "de-DE": "gPTP" },
+            "type": "EXTERNAL",
+            "location_type": "TIMING",
+            "location_index": 0
+          },
+          {
+            "name": "SystemTime",
+            "symbol": "system_clock",
+            "localized_description": { "en-US": "System time (NTP or GPS)", "de-DE": "Systemzeit (NTP oder GPS)" },
+            "type": "EXTERNAL"
+          },
+          {
+            "name": "PTPv2",
+            "symbol": "ptp_clock",
+            "localized_description": { "en-US": "IEEE 1588 PTP", "de-DE": "IEEE 1588 PTP" },
+            "type": "EXTERNAL"
+          }
+        ],
+        "clock_domains": [
+          {
+            "name": "ClockDomain",
+            "localized_description": { "en-US": "Clock Domain", "de-DE": "Taktdomäne" },
+            "source": 1,
+            "sources": [
+              0,
+              1,
+              2,
+              3
+            ]
+          }
+        ],
+        "timing": {
+          "name": "gPTPTiming",
+          "localized_description": { "en-US": "gPTP", "de-DE": "gPTP" }
+        },
+        "ptp_instance": {
+          "name": "gPTPInstance",
+          "localized_description": { "en-US": "gPTP instance", "de-DE": "gPTP-Instanz" },
+          "flags": [
+            "GRANDMASTER_CAPABLE"
+          ],
+          "ptp_port": {
+            "name": "gPTPPort",
+            "localized_description": { "en-US": "gPTP port", "de-DE": "gPTP-Port" },
+            "port_number": 1,
+            "type": "P2P_LINK_LAYER",
+            "avb_interface": 0,
+            "profile_identifier": "00-80-C2-00-01-00"
+          }
+        }
+      }
+    ]
+  }
+}

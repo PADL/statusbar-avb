@@ -132,7 +132,15 @@ install(
 # (descriptor_storage_cross_check.py), and the aemxml + control-values Python
 # unit suites must pass.
 set(_aem_json_blobs)
-foreach(_m bridge dual tone tone-aaf tone-aaf-crf simple_stereo)
+foreach(
+  _m
+  bridge
+  crf-generator
+  dual
+  tone
+  tone-aaf
+  tone-aaf-crf
+  simple_stereo)
   add_custom_command(
     OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/aem/${_m}.aem"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/aem"

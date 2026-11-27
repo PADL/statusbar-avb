@@ -38,6 +38,7 @@ stamped by the build so the blob's ENTITY descriptor matches the package version
 | `tone.json` | talker, 3 out (AM824, AAF, CRF) + a CRF clock input | `AvbEntityToneGenerator` (All) |
 | `tone-aaf.json` | talker, 1 out (AAF) + a CRF clock input | ToneGenerator (AafOnly) |
 | `tone-aaf-crf.json` | talker, 2 out (AAF, CRF) + a CRF clock input | ToneGenerator (AafCrf) |
+| `crf-generator.json` | talker, 1 out (CRF); clock sources Local, gPTP, system time and IEEE 1588 PTP | none yet: a dedicated media clock reference (Milan v1.3 Table 7.3) |
 | `simple_stereo.json` | 2-ch stereo AM824 in + out | the `descriptor_storage_cross_check` fixture |
 
 ## Source of truth
@@ -72,7 +73,7 @@ Every model here keeps the Milan v1.3 descriptor rules that a model decides
 | An AAF Media Talker has a CRF Media Clock Input in each clock domain (7.2.2) | every model with an AAF output has a `streams_in` entry in the Milan Clock Reference Format, `"format": "0x041060010000BB80"` |
 | An AAF Media Listener with two or more AAF inputs in a clock domain has a CRF Media Clock Input and Output there (7.2.2, 7.2.3) | no model has two AAF inputs; one that gains a second needs both |
 | Each CRF input is one CLOCK_SOURCE, an INPUT_STREAM located at that STREAM_INPUT, and a configuration with a stream output has an INTERNAL one (5.3.3.6) | `clock_sources`: `"type": "INPUT_STREAM", "location_type": 5, "location_index": <the input>` beside the `"INTERNAL"` entry, both in the clock domain's `sources` |
-| gPTP as a media clock source is an EXTERNAL CLOCK_SOURCE with no flags, located at a TIMING that is SINGLE with one PTP_INSTANCE; that instance is GRANDMASTER_CAPABLE with one PTP_PORT on AVB_INTERFACE 0; the configuration has one AVB_INTERFACE (5.3.3.12 to 5.3.3.14, 7.5) | no shipped model has it yet; see "gPTP as a media clock source" below |
+| gPTP as a media clock source is an EXTERNAL CLOCK_SOURCE with no flags, located at a TIMING that is SINGLE with one PTP_INSTANCE; that instance is GRANDMASTER_CAPABLE with one PTP_PORT on AVB_INTERFACE 0; the configuration has one AVB_INTERFACE (5.3.3.12 to 5.3.3.14, 7.5) | `crf-generator.json` has it; see "gPTP as a media clock source" below |
 
 ### gPTP as a media clock source
 

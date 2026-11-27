@@ -40,6 +40,19 @@ for pair in dual:entity_audio tone:entity_tone tone-aaf:entity_tone_aaf tone-aaf
 done
 ```
 
+## `entity_crf_generator.bin`
+
+`examples/crf-generator.json` compiled the same way: one CRF stream
+output and no audio, and a clock domain of four sources: the local
+oscillator, gPTP (an EXTERNAL source located at a TIMING, Milan v1.3
+7.5), the system time and IEEE 1588 PTP. No tool runs it yet; the tests
+of the clock sources read it.
+
+```
+python3 python/aemxml/aemxml_tool.py json2bin examples/crf-generator.json \
+    statusbar/avb_entity/testdata/entity_crf_generator.bin --set version=0.0.0-test
+```
+
 ## `entity_rates.bin`
 
 The rate model `entity_rates.json` beside it, compiled the same way: an
