@@ -805,11 +805,11 @@ AEM_PAYLOAD_STRUCTS = {
                 "doc": "Bytes 44-45: Stream VLAN ID",
             },
             {
-                "name": "reserved2",
+                "name": "ip_flags",
                 "offset": 46,
                 "size": 2,
                 "kind": "u16",
-                "doc": "Bytes 46-47: Reserved",
+                "doc": "Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)",
             },
         ],
     },

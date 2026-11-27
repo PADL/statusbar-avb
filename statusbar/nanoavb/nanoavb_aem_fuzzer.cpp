@@ -246,6 +246,7 @@ void install_hooks(Rig& rig, uint8_t const verdict)
         path = rig.path;
         return index == 0;
     });
+    rig.aem.set_get_stream_info([](uint16_t, uint16_t const index, AemStreamInfoPayload&) { return index < 2; });
     rig.aem.set_presentation_offset_hooks(
         [](uint16_t const index) { return index < 2 ? std::optional<uint32_t>{2'000'000} : std::nullopt; },
         [verdict](uint16_t, uint32_t) { return verdict; });
@@ -373,6 +374,19 @@ void check_as_path(Sent const& s)
     require(count <= MAX_AS_PATH_LENGTH && s.body().size() == AemAsPathResponseHeader::LENGTH + (count * ieee::Eui64::LENGTH));
 }
 
+/// A GET_STREAM_INFO answered SUCCESS, or notified, is IEEE 1722.1-2021's 84 octets under milan13
+/// (Milan v1.3 Section 5.4.2.10), its IP tail zero, 1722.1-2013's 48 under classic.
+void check_stream_info(Rig const& rig, Sent const& s)
+{
+    AemDu du{};
+    span_load(du, std::span<uint8_t const>{s.frame});
+    if (du.command_code() != AEM_COMMAND_GET_STREAM_INFO || du.status() != AEM_STATUS_SUCCESS) {
+        return;
+    }
+    require(s.body().size() == (rig.milan13 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH));
+    require(std::ranges::all_of(s.body().subspan(AemStreamInfoPayload::LENGTH), [](uint8_t const b) { return b == 0; }));
+}
+
 /// The frames sent from @p first for a command of @p kind and @p type with @p sequence_id: each
 /// well formed; the solicited response echoes the command; no notification of it comes first.
 void check_sent(Rig const& rig, size_t const first, Kind const kind, uint16_t const type, uint16_t const sequence_id)
@@ -388,6 +402,7 @@ void check_sent(Rig const& rig, size_t const first, Kind const kind, uint16_t co
         if (!s.is_mvu() && s.is_response()) {
             check_audio_map(rig, s);
             check_as_path(s);
+            check_stream_info(rig, s);
         }
         if (s.is_response() && !s.unsolicited() && same) {
             require(s.common().sequence_id.get() == sequence_id);

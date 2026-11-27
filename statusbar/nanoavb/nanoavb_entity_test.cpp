@@ -2232,6 +2232,46 @@ TEST(nanoavb_entity_notify_cor1, notify_stream_info_changed_pushes_get_stream_in
     EXPECT_TRUE(sends.empty());
 }
 
+TEST(nanoavb_entity_get_stream_info, a_milan_entity_answers_and_notifies_in_84_octets_and_a_classic_one_in_48)
+{
+    // Milan v1.3 Section 5.4.2.10: IEEE 1722.1-2021's form (Clause 7.4.15.1), its IP fields zero
+    // for a stream over AVTP; a classic entity keeps 1722.1-2013's 48 octets.
+    for (auto const profile : {AemCommandHandler::Profile::classic, AemCommandHandler::Profile::milan13}) {
+        auto model = create_test_model();
+        AemCommandHandler handler{model};
+        handler.set_entity_id(kEntity);
+        handler.set_profile(profile);
+        handler.set_get_stream_info([](uint16_t, uint16_t const index, AemStreamInfoPayload& out) -> bool {
+            out.flags = quadlet_t{stream_info_flags::STREAM_ID_VALID};
+            out.stream_id = Eui64{0x02, 0x00, 0x00, 0xe0, 0x13, 0x60, 0x00, 0x01};
+            out.ip_flags = doublet_t{0xFFFF};  // the handler leaves what the callback fills
+            return index == 0;
+        });
+        std::vector<CapturedSend> sends;
+        capture_sends(handler, sends);
+        register_controller(handler, kEntity, kControllerB, kMacB);
+        sends.clear();
+        std::array<uint8_t, AemGetStreamInfoCommandPayload::LENGTH> const asked{0x00, 0x06, 0x00, 0x00};
+        inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_GET_STREAM_INFO, asked);
+        EXPECT_EQ(handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, 0), AEM_STATUS_SUCCESS);
+
+        size_t const length = profile == AemCommandHandler::Profile::milan13 ? size_t{84} : size_t{48};
+        EXPECT_EQ(handler.stream_info_length(), length);
+        EXPECT_EQ(sends.size(), size_t{2});
+        for (auto const& sent : sends) {
+            EXPECT_EQ(header_of(sent).control_data_length(), AemDu::AEM_DATA_LENGTH + length);
+            EXPECT_EQ(body_of(sent).size(), length);
+            AemStreamInfoPayload payload{};
+            span_load(payload, body_of(sent).first(AemStreamInfoPayload::LENGTH));
+            EXPECT_EQ(payload.stream_id, (Eui64{0x02, 0x00, 0x00, 0xe0, 0x13, 0x60, 0x00, 0x01}));
+            EXPECT_EQ(payload.ip_flags.get(), 0xFFFF);
+            auto const tail = body_of(sent).subspan(AemStreamInfoPayload::LENGTH);
+            EXPECT_TRUE(std::ranges::all_of(tail, [](uint8_t const b) { return b == 0; }));
+        }
+        EXPECT_EQ(count_unsolicited(sends, AEM_COMMAND_GET_STREAM_INFO, kMacB), 1);
+    }
+}
+
 TEST(nanoavb_entity_notify_cor1, reboot_not_implemented_without_callback)
 {
     auto model = create_test_model();

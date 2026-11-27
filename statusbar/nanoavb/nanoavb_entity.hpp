@@ -350,6 +350,13 @@ class AemCommandHandler
     void set_profile(Profile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> Profile { return profile_; }
 
+    /// The GET_STREAM_INFO response length in octets: IEEE 1722.1-2021's 84 under milan13
+    /// (Milan v1.3 Section 5.4.2.10), 1722.1-2013's 48 under classic, for older controllers.
+    [[nodiscard]] auto stream_info_length() const noexcept -> size_t
+    {
+        return profile_ == Profile::milan13 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
+    }
+
     /// What a Milan PAAD-AE says of itself in GET_MILAN_INFO (Milan v1.3
     /// 5.4.4.1), for the currently active Configuration. Set, the entity is a
     /// Milan device: it answers the MVU commands (GET_MILAN_INFO with these
@@ -925,6 +932,14 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// GET_STREAM_INFO of the stream @p cmd names into @p out_buffer: NOT_IMPLEMENTED without the
+    /// get_stream_info callback, NO_SUCH_DESCRIPTOR when it declines the stream.
+    [[nodiscard]] auto answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+    /// @p resp at the head of @p out_buffer in stream_info_length() octets, zero past its 48;
+    /// NOT_SUPPORTED when @p out_buffer is shorter.
+    [[nodiscard]] auto store_stream_info(AemStreamInfoPayload const& resp, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
 
     /// Handle GET_AVB_INFO (7.4.40) through the get_avb_info callback: the
     /// AemAvbInfoPayload followed by the MSRP mappings.

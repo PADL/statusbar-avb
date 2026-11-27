@@ -654,7 +654,7 @@ M.f.atdecc_aem_stream_info_msrp_failure_code = ProtoField.uint8("avb.atdecc.aem.
 M.f.atdecc_aem_stream_info_reserved1 = ProtoField.uint8("avb.atdecc.aem.stream_info.reserved1", "reserved1", base.DEC, nil, nil, "Bytes 35: Reserved")
 M.f.atdecc_aem_stream_info_msrp_failure_bridge_id = ProtoField.uint64("avb.atdecc.aem.stream_info.msrp_failure_bridge_id", "msrp_failure_bridge_id", base.HEX, nil, nil, "Bytes 36-43: MSRP failure bridge ID")
 M.f.atdecc_aem_stream_info_stream_vlan_id = ProtoField.uint16("avb.atdecc.aem.stream_info.stream_vlan_id", "stream_vlan_id", base.DEC, nil, nil, "Bytes 44-45: Stream VLAN ID")
-M.f.atdecc_aem_stream_info_reserved2 = ProtoField.uint16("avb.atdecc.aem.stream_info.reserved2", "reserved2", base.DEC, nil, nil, "Bytes 46-47: Reserved")
+M.f.atdecc_aem_stream_info_ip_flags = ProtoField.uint16("avb.atdecc.aem.stream_info.ip_flags", "ip_flags", base.DEC, nil, nil, "Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)")
 M.f.atdecc_aem_name_command_descriptor_type = ProtoField.uint16("avb.atdecc.aem.name_command.descriptor_type", "descriptor_type", base.HEX, M.values_descriptor_type, nil, "Bytes 0-1: Descriptor type")
 M.f.atdecc_aem_name_command_descriptor_index = ProtoField.uint16("avb.atdecc.aem.name_command.descriptor_index", "descriptor_index", base.DEC, nil, nil, "Bytes 2-3: Descriptor index")
 M.f.atdecc_aem_name_command_name_index = ProtoField.uint16("avb.atdecc.aem.name_command.name_index", "name_index", base.DEC, nil, nil, "Bytes 4-5: Name index")
@@ -1978,7 +1978,7 @@ M.fields = {
     M.f.atdecc_aem_stream_info_reserved1,
     M.f.atdecc_aem_stream_info_msrp_failure_bridge_id,
     M.f.atdecc_aem_stream_info_stream_vlan_id,
-    M.f.atdecc_aem_stream_info_reserved2,
+    M.f.atdecc_aem_stream_info_ip_flags,
     M.f.atdecc_aem_name_command_descriptor_type,
     M.f.atdecc_aem_name_command_descriptor_index,
     M.f.atdecc_aem_name_command_name_index,
@@ -3398,7 +3398,7 @@ function M.add_aem_stream_info(tree, tvb, off)
     tree:add(M.f.atdecc_aem_stream_info_reserved1, tvb(off + 59, 1))
     tree:add(M.f.atdecc_aem_stream_info_msrp_failure_bridge_id, tvb(off + 60, 8))
     tree:add(M.f.atdecc_aem_stream_info_stream_vlan_id, tvb(off + 68, 2))
-    tree:add(M.f.atdecc_aem_stream_info_reserved2, tvb(off + 70, 2))
+    tree:add(M.f.atdecc_aem_stream_info_ip_flags, tvb(off + 70, 2))
 end
 
 --- AEM AemNameCommandPayload (IEEE 1722.1-2021 7.4)

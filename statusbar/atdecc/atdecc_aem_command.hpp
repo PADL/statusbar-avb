@@ -12,6 +12,7 @@
 #include "statusbar/atdecc/atdecc_aem_descriptor.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/ip/ip_ipv6.hpp"
 #include "statusbar/status/status.hpp"
 #include "statusbar/tsn/tsn.hpp"
 
@@ -324,8 +325,8 @@ struct AemStreamInfoPayload
     /// Bytes 44-45: Stream VLAN ID
     doublet_t stream_vlan_id{0};
 
-    /// Bytes 46-47: Reserved
-    doublet_t reserved2{0};
+    /// Bytes 46-47: ip_flags (IEEE 1722.1-2021 Clause 7.4.15.1; reserved in 1722.1-2013)
+    doublet_t ip_flags{0};
 
     // Flag accessors
     [[nodiscard]] constexpr auto is_connected() const noexcept -> bool { return flags.has_flag(stream_info_flags::CONNECTED); }
@@ -343,6 +344,37 @@ struct AemStreamInfoPayload
 };
 
 static_assert(sizeof(AemStreamInfoPayload) == 48, "AemStreamInfoPayload must be 48 bytes");
+static_assert(offsetof(AemStreamInfoPayload, ip_flags) == 46, "ip_flags at SET/GET_STREAM_INFO octet 46");
+
+/// The IEEE 1722.1-2021 tail of SET/GET_STREAM_INFO (Clause 7.4.15.1) after the 48 octets of
+/// AemStreamInfoPayload: the IP transport's ports and addresses, zero for a stream over AVTP alone.
+struct AemStreamInfoIpExtension
+{
+    static constexpr size_t LENGTH = 36;
+
+    /// Bytes 48-49: source_port
+    doublet_t source_port{0};
+
+    /// Bytes 50-51: destination_port
+    doublet_t destination_port{0};
+
+    /// Bytes 52-67: source_ip_address (an IPv4 one IPv4-mapped, RFC 4291 Section 2.5.5.2)
+    ip::IPv6Address source_ip_address{};
+
+    /// Bytes 68-83: destination_ip_address
+    ip::IPv6Address destination_ip_address{};
+
+    auto operator<=>(AemStreamInfoIpExtension const&) const noexcept = default;
+};
+
+static_assert(sizeof(AemStreamInfoIpExtension) == 36, "AemStreamInfoIpExtension must be 36 bytes");
+static_assert(offsetof(AemStreamInfoIpExtension, destination_port) == 2, "destination_port at octet 50");
+static_assert(offsetof(AemStreamInfoIpExtension, source_ip_address) == 4, "source_ip_address at octet 52");
+static_assert(offsetof(AemStreamInfoIpExtension, destination_ip_address) == 20, "destination_ip_address at octet 68");
+
+/// The length of an IEEE 1722.1-2021 SET/GET_STREAM_INFO payload, the 48 octets of 1722.1-2013 and the IP tail.
+inline constexpr size_t AEM_STREAM_INFO_2021_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoIpExtension::LENGTH;
+static_assert(AEM_STREAM_INFO_2021_LENGTH == 84);
 
 //
 // SET_NAME / GET_NAME - Clause 7.4.17 / 7.4.18
@@ -1387,6 +1419,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoIpExtension> : std::true_type
 {};
 
 template <>
