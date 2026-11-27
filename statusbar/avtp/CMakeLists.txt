@@ -81,6 +81,7 @@ statusbar_add_module(
   avtp_am824_stream_test.cpp
   avtp_am824_stream_output_test.cpp
   avtp_capture_frame_test.cpp
+  avtp_capture_walk_test.cpp
   avtp_crf_test.cpp
   avtp_crf_stream_test.cpp
   avtp_crf_v1_test.cpp

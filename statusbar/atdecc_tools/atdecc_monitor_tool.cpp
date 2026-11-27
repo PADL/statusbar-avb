@@ -17,13 +17,13 @@
 #include "statusbar/atdecc_tools/atdecc_enumerator.hpp"
 #include "statusbar/atdecc_tools/atdecc_tools_common.hpp"
 #include "statusbar/avtp/avtp.hpp"
+#include "statusbar/avtp/avtp_capture_walk.hpp"
 #include "statusbar/buffer/buffer.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
 #include "statusbar/nanoavb/nanoavb_controller.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
 #include "statusbar/net/net_rawnet.hpp"
-#include "statusbar/pcap/pcapng_reader.hpp"
 #include "statusbar/sg14/inplace_function.h"
 #include "statusbar/stats/stats_format.hpp"
 #include "statusbar/status/catch_or_status.hpp"
@@ -574,33 +574,34 @@ class MonitorPollable : public Pollable
 // Offline driver — read pcap/pcapng and feed frames into MonitorCore.
 // ---------------------------------------------------------------------------
 
+/// What a run over a capture has seen so far.
+struct CaptureCounts
+{
+    size_t packets{0};  ///< every packet of the file
+    size_t avtp{0};     ///< those of the AVTP ethertype, which the monitor looks at
+};
+
+/// The capture may be a classic pcap or a pcapng file (avtp::walk_capture).
 auto run_pcap_file(MonitorCore& core, std::string const& path) -> bool
 {
-    auto reader_result = pcap::PcapngReader::open(path);
-    if (!reader_result) {
-        std::println(stderr, "Error: open pcap '{}': {}", path, reader_result.error().message());
-        return false;
-    }
     g_now_fn = pcap_now_ns;
-    size_t packet_count = 0;
-    size_t avtp_count = 0;
-    auto const walk = pcap::for_each_packet(
-        *reader_result,
-        [&](uint64_t timestamp_us, Eui48 const& /*da*/, Eui48 const& sa, uint16_t ethertype, pcap::Packet const& payload) {
-            ++packet_count;
+    CaptureCounts seen;
+    auto const walk = avtp::walk_capture(
+        path, [&](uint64_t timestamp_us, Eui48 const& /*da*/, Eui48 const& sa, uint16_t ethertype, pcap::Packet const& payload) {
+            ++seen.packets;
             if (ethertype != avtp::AVTP_ETHERTYPE) {
                 return;
             }
-            ++avtp_count;
+            ++seen.avtp;
             g_pcap_now_ns = static_cast<int64_t>(timestamp_us) * 1000;
             core.dispatch_frame(g_pcap_now_ns, sa, std::span<uint8_t const>{payload.data(), payload.size()});
             core.tick(g_pcap_now_ns);
         });
     if (!walk) {
-        std::println(stderr, "Error: pcap read failed at packet {}: {}", packet_count, walk.error().message());
+        std::println(stderr, "Error: capture '{}', after {} packets: {}", path, seen.packets, walk.error().message());
         return false;
     }
-    std::println(stderr, "\nProcessed {} packets ({} AVTP/ATDECC) from {}", packet_count, avtp_count, path);
+    std::println(stderr, "\nProcessed {} packets ({} AVTP/ATDECC) from {}", seen.packets, seen.avtp, path);
     return true;
 }
 

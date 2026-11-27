@@ -16,6 +16,7 @@
 #include "statusbar/avtp/avtp_am824_stream_input.hpp"
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_capture_frame.hpp"
+#include "statusbar/avtp/avtp_capture_walk.hpp"
 #include "statusbar/avtp/avtp_common_header.hpp"
 #include "statusbar/avtp/avtp_crf_stream_input.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
@@ -189,50 +190,16 @@ struct PcapLoopStats
     uint32_t gptp_syncs{0};
 };
 
-/// The capture's first four octets, or nullopt when the file cannot be read that far.
-[[nodiscard]] auto capture_magic(std::string const& path) -> std::optional<std::array<uint8_t, 4>>
-{
-    std::unique_ptr<FILE, int (*)(FILE*)> const file{std::fopen(path.c_str(), "rb"), &std::fclose};
-    std::array<uint8_t, 4> magic{};
-    if (!file || std::fread(magic.data(), 1, magic.size(), file.get()) != magic.size()) {
-        return std::nullopt;
-    }
-    return magic;
-}
-
-/// Open the capture with @p Reader and walk it; false, with the reason printed, when
-/// it does not open or does not read through.
-template <typename Reader, typename OnPacket>
-auto walk_capture_with(std::string const& path, OnPacket const& on_packet) -> bool
-{
-    auto reader = Reader::open(path);
-    if (!reader) {
-        std::print(stderr, "error: open capture '{}': {}\n", path, reader.error().message());
-        return false;
-    }
-    auto const walk = pcap::for_each_packet(*reader, on_packet);
-    if (!walk) {
-        std::print(stderr, "error: capture read: {}\n", walk.error().message());
-        return false;
-    }
-    return true;
-}
-
-/// Walk a capture whatever its container: classic pcap through pcap::FileReader,
-/// pcapng through PcapngReader, as the first four octets say.
+/// Walk a capture whatever its container (avtp::walk_capture); false, with the reason
+/// printed, when it does not open or does not read through.
 template <typename OnPacket>
-auto walk_capture(std::string const& path, OnPacket const& on_packet) -> bool
+auto walk_capture_or_report(std::string const& path, OnPacket const& on_packet) -> bool
 {
-    auto const magic = capture_magic(path);
-    auto const format = magic ? capture_format_of(*magic) : CaptureFormat::unknown;
-    if (format == CaptureFormat::pcapng) {
-        return walk_capture_with<PcapngReader>(path, on_packet);
+    auto const walk = avtp::walk_capture(path, on_packet);
+    if (!walk) {
+        std::print(stderr, "error: capture '{}': {}\n", path, walk.error().message());
     }
-    if (format == CaptureFormat::pcap) {
-        return walk_capture_with<FileReader>(path, on_packet);
-    }
-    std::print(stderr, "error: '{}' is neither a pcap nor a pcapng capture\n", path);
-    return false;
+    return walk.has_value();
 }
 
 /// The clock and the counts one capture walk accumulates.
@@ -290,7 +257,7 @@ auto run_pcap_loop(RetransmitConfig const& cfg, uint8_t expected_subtype, size_t
         return {};
     }
     PcapLoopState st;
-    (void)walk_capture(
+    (void)walk_capture_or_report(
         cfg.input_file, [&](uint64_t capture_us, Eui48 const& /*da*/, Eui48 const& /*sa*/, uint16_t ethertype, Packet const& raw) {
             handle_capture_frame(
                 cfg,
