@@ -103,7 +103,8 @@ class AvbEntityKit
     /// persisted listener bindings. Logs any inert CONTROL registrations
     /// (menu/selection: never an error). @p now is the control-plane time the
     /// VLAN registration and the MAAP acquisition start at: a setup edge, read
-    /// once here unless the caller holds it.
+    /// once here unless the caller holds it. A failure once the streams began
+    /// to open leaves those opened, as their hooks were told, until stop().
     [[nodiscard]] auto start(net::MessageReactor& reactor, TimePoint now = sm::Clock::now()) -> Status;
     /// Stop the control plane (fails with not_connected when not running),
     /// withdrawing its declarations at @p now.

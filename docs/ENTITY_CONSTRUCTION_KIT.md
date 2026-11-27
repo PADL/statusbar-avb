@@ -591,6 +591,23 @@ Milan v1.3 4.2.7.2.1; every open stream), a destination
 publish_block()`). Not at `open_stream()`: the data plane reads the
 template when the gate opens, and again at each change.
 
+A listener stream may likewise be received beside the port, which then
+receives none of it; the kit keeps the input's connection or binding, its
+MSRP Listener declaration, the group joined, and its counters.
+
+**What an input receives.** `ListenerStreams::set_on_input_changed()`
+tells, on the reactor thread, an input's `InputState`: the stream ID
+whose frames it receives (zero for none), whether it is stopped (Milan v1.3
+5.3.8.7) and the format in force (5.3.8.1). It is told at `open_stream()`,
+so the state in force at open, the stopped state kept by index included;
+at each change of the stream (a classic input's connect and disconnect, a
+Milan sink's settle and loss), of the stopped state and of the format;
+and with stream ID 0 for each input `close_rx()` releases. An index with
+no slot is told nothing; `input_state()` answers the state now. The data
+plane receives the stream's frames as `frame_is_for_listener()` would,
+discards those of a stopped input, and discards an AAF AVTPDU not of the
+format in force itself, as the kit's own path does (4.4.2.2).
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one
