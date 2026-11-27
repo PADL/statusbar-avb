@@ -685,9 +685,9 @@ class AemCommandHandler
     static constexpr size_t MAX_AFTER_RESPONSE = 4;
 
     /// Run @p fn once the command being dispatched is answered and its held notifications are
-    /// sent, in the order given, the command's controller left out of what it notifies. Outside
-    /// a command off the wire (a local change, tick()), or past MAX_AFTER_RESPONSE, it runs at
-    /// once. Reactor thread.
+    /// sent, in the order given. What it notifies goes to every registered controller, the
+    /// command's controller included (Milan v1.3 Section 5.4.5.3). Outside a command off the wire (a
+    /// local change, tick()), or past MAX_AFTER_RESPONSE, it runs at once. Reactor thread.
     void call_after_response(AfterResponseFn fn);
 
     /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
@@ -1363,9 +1363,8 @@ class AemCommandHandler
     /// Send every held notification, after the command's response.
     void flush_notifications();
 
-    /// Run what call_after_response() held, @p requester (the command's controller) left out of
-    /// what it notifies.
-    void run_after_response(Eui64 const& requester);
+    /// Run what call_after_response() held, no controller left out of what it notifies.
+    void run_after_response();
 
     /// A VENDOR_UNIQUE command arrived: answer it if it is Milan's and this is a Milan device.
     [[nodiscard]] auto process_mvu_packet(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)

@@ -227,14 +227,14 @@ auto AemCommandHandler::answer_aem_command(
     // The response, then the notifications the command raised (Milan v1.3 Section 5.4.5.3).
     bool const sent = send_response(src_mac, header, response.status, body);
     flush_notifications();
-    run_after_response(header.controller_entity_id);
+    run_after_response();
     return sent;
 }
 
-void AemCommandHandler::run_after_response(Eui64 const& requester)
+void AemCommandHandler::run_after_response()
 {
-    // As the command's dispatch would: its controller is left out of what the work notifies.
-    Eui64 const outer = std::exchange(requester_, requester);
+    // Changes beyond what the controller asked: every registered controller is told (Milan v1.3 Section 5.4.5.3).
+    Eui64 const outer = std::exchange(requester_, Eui64{});
     for (auto& fn : std::exchange(after_response_, {})) {
         fn();
     }
