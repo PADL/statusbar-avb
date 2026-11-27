@@ -521,6 +521,51 @@ auto execute_stream_op(
     return watch.run(reactor, ctrl, make_stream_action(op, ids->first, ids->second, is_connect));
 }
 
+/// The IdentifyEntity action of @p op for the entity it resolved to.
+auto make_identify_action(Op const& op, Eui64 const& entity) -> ControllerAction
+{
+    ControllerAction action{};
+    action.kind = ControllerActionKind::IdentifyEntity;
+    action.request.talker_entity_id = entity;
+    action.request.identify_state = op.identify_on ? int8_t{1} : int8_t{0};
+    return action;
+}
+
+/// Send an identify's SET_CONTROL and say how it ended. The completion is
+/// what proves the entity heard us (a send failure surfaces as SendFailed on
+/// the same event).
+auto send_identify(MessageReactor& reactor, ControllerSimple& ctrl, ControllerAction const& action) -> bool
+{
+    ctrl.dispatch(action, elapsed_ns());
+    atdecc_tools::CommandCompletedEvent done_ev{};
+    if (!await_command(reactor, ctrl, AEM_COMMAND_SET_CONTROL, done_ev)) {
+        std::println("  FAILED (no completion within 5s)");
+        return false;
+    }
+    std::println("  {}", describe_completion(done_ev));
+    return done_ev.ok();
+}
+
+/// identify: set the entity's primary IDENTIFY control on or off. An entity
+/// says in its ADPDU whether it has one (IEEE 1722.1-2021 6.2.2.19), and it
+/// may have none. That is said as what it is; the SET_CONTROL is not tried, since
+/// there is no control index to send it to.
+auto identify_entity(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, std::vector<EntityDisplayInfo> const& snap)
+    -> bool
+{
+    auto const eid = resolve_or_report(op.entity, snap);
+    if (!eid) {
+        return false;
+    }
+    std::println("identify {} {} ...", op.entity, op.identify_on ? "on" : "off");
+    if (!ctrl.advertises_identify_control(*eid)) {
+        std::println(
+            "  FAILED: '{}' advertises no IDENTIFY control (AEM_IDENTIFY_CONTROL_INDEX_VALID is clear in its ADPDU)", op.entity);
+        return false;
+    }
+    return send_identify(reactor, ctrl, make_identify_action(op, *eid));
+}
+
 auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, bool trace = false) -> bool
 {
     auto const snap = snapshot_with(reactor, ctrl, atdecc_tools::op_entity_names(op));
@@ -609,27 +654,8 @@ auto execute_op(MessageReactor& reactor, ControllerSimple& ctrl, Op const& op, b
             std::println("  {}", text);
             return done_ev.ok();
         }
-        case OpKind::Identify: {
-            auto const eid = resolve_or_report(op.entity, snap);
-            if (!eid) {
-                return false;
-            }
-            ControllerAction action{};
-            action.kind = ControllerActionKind::IdentifyEntity;
-            action.request.talker_entity_id = *eid;
-            action.request.identify_state = op.identify_on ? int8_t{1} : int8_t{0};
-            std::println("identify {} {} ...", op.entity, op.identify_on ? "on" : "off");
-            ctrl.dispatch(action, elapsed_ns());
-            // The SET_CONTROL completion is what proves the entity heard us
-            // (a send failure surfaces as SendFailed on the same event).
-            atdecc_tools::CommandCompletedEvent done_ev{};
-            if (!await_command(reactor, ctrl, AEM_COMMAND_SET_CONTROL, done_ev)) {
-                std::println("  FAILED (no completion within 5s)");
-                return false;
-            }
-            std::println("  {}", describe_completion(done_ev));
-            return done_ev.ok();
-        }
+        case OpKind::Identify:
+            return identify_entity(reactor, ctrl, op, snap);
     }
     return false;
 }

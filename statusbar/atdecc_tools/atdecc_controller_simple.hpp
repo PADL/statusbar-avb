@@ -96,6 +96,13 @@ class ControllerSimple : public net::Pollable
     /// Build a fresh snapshot of discovered entities.
     auto get_display_entities() -> std::vector<EntityDisplayInfo>;
 
+    /// Whether @p id advertises an IDENTIFY control that a SET_CONTROL can be
+    /// sent to: AEM_IDENTIFY_CONTROL_INDEX_VALID in the entity_capabilities of
+    /// its ADPDU (IEEE 1722.1-2021 6.2.2.19; without the flag the
+    /// identify_control_index field is "ignored on receive"). An entity may
+    /// have none. False as well for an entity that is not discovered.
+    [[nodiscard]] auto advertises_identify_control(ieee::Eui64 const& id) const -> bool;
+
     /// Raw descriptors cached for an entity from the READ_DESCRIPTOR crawl
     /// (run fetch_entity_descriptors first and wait for EntityDetailReadyEvent).
     /// Only successfully-read descriptors are returned. For model validation.

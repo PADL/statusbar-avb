@@ -134,6 +134,17 @@ class FakeControllerService final : public ControllerService
         }
     }
 
+    /// An entity whose ADPDU says it has an IDENTIFY control, at @p control_index.
+    void add_entity_with_identify(Eui64 const& id, uint16_t control_index)
+    {
+        DiscoveredEntity e{};
+        e.adpdu.entity_id = id;
+        e.adpdu.identify_control_index = control_index;
+        e.adpdu.entity_capabilities.set_flag(atdecc::entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
+        e.valid = true;
+        entities_.push_back(e);
+    }
+
     [[nodiscard]] auto sink() -> ControllerServiceSink& { return sink_; }
     [[nodiscard]] auto calls() -> std::vector<AemCall>& { return calls_; }
     [[nodiscard]] auto started() const -> bool { return started_; }
@@ -669,6 +680,19 @@ TEST(controller_service_seam, an_error_stream_format_response_with_zeroed_echo_c
             EXPECT_TRUE(!e.listener_stream_formats.empty() && e.listener_stream_formats[0] == "(Not Supported)");
         }
     }
+}
+
+// An entity says in its ADPDU whether it has an IDENTIFY control (IEEE
+// 1722.1-2021 6.2.2.19); a tool asks before it sends a SET_CONTROL nowhere.
+TEST(controller_service_seam, an_identify_control_is_advertised_or_it_is_not)
+{
+    Harness h;
+    h.fake->add_entity(ENTITY_A);                   // no flag: no identify control
+    h.fake->add_entity_with_identify(ENTITY_B, 3);  // the flag and an index
+    EXPECT_FALSE(h.ctrl->advertises_identify_control(ENTITY_A));
+    EXPECT_TRUE(h.ctrl->advertises_identify_control(ENTITY_B));
+    // An entity nobody has seen has no control to speak of.
+    EXPECT_FALSE(h.ctrl->advertises_identify_control(Eui64{0xDE, 0xAD, 0, 0, 0, 0, 0, 0x01}));
 }
 
 // Responses to OUR ACMP commands surface as AcmpCommandCompletedEvents; passive

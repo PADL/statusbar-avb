@@ -90,6 +90,12 @@ auto ControllerSimple::finished() const noexcept -> bool
     return false;
 }
 
+auto ControllerSimple::advertises_identify_control(ieee::Eui64 const& id) const -> bool
+{
+    auto const* entity = service_->find_entity(id);
+    return entity != nullptr && entity->adpdu.has_entity_capability(entity_capabilities::AEM_IDENTIFY_CONTROL_INDEX_VALID);
+}
+
 auto ControllerSimple::get_display_entities() -> std::vector<EntityDisplayInfo>
 {
     std::vector<EntityDisplayInfo> result;
