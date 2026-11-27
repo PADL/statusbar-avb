@@ -23,6 +23,8 @@
 #include "statusbar/avtp/avtp_aaf.hpp"
 #include "statusbar/avtp/avtp_am824.hpp"
 #include "statusbar/avtp/avtp_crf.hpp"
+#include "statusbar/avtp/avtp_maap.hpp"
+#include "statusbar/avtp/avtp_maap_handler.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
@@ -288,6 +290,65 @@ TEST(avb_entity_kit_maap, the_range_file_holds_one_line_and_reads_back_what_was_
     }
     EXPECT_FALSE(load_maap_range(path).has_value());
     std::filesystem::remove_all(dir);
+}
+
+// IEEE 1722-2025 Annex B.3: the streams have their addresses while the block is defended; each change of
+// that is told on the reactor, and the addresses of a block defended are the streams' before it is told.
+TEST(avb_entity_kit_maap, ready_is_told_at_each_change_and_only_then)
+{
+    constexpr int64_t SEC = 1'000'000'000;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    itc::StopToken stop{};
+    std::atomic<int64_t> now_ns{1};
+    net::MessageReactor reactor{stop, FakeClock{&now_ns}, 5};
+    Eui48 const mac{0x02, 0x00, 0x00, 0x00, 0x00, 0x01};
+    std::array<uint16_t, 1> const indices{1};
+    MaapAddressAcquirer maap;
+    std::vector<bool> told;
+    maap.set_on_ready_changed([&told, &kit](bool const ready) {
+        told.push_back(ready);
+        auto const dest = kit->talker().slot_for(1)->dest_mac.to_uint64();
+        bool const in_pool = dest >= avtp::MAAP_DYNAMIC_POOL_START.to_uint64() && dest <= avtp::MAAP_DYNAMIC_POOL_END.to_uint64();
+        if (ready) {
+            EXPECT_TRUE(in_pool);
+        }
+    });
+    // No MAAP socket here: the static addresses stand and the streams stay ready, which is no change.
+    EXPECT_TRUE(maap.setup(
+                        reactor,
+                        "no-such-interface-0",
+                        mac,
+                        kit->host().components(),
+                        kit->talker(),
+                        indices,
+                        kit->host().ctl_log(),
+                        {},
+                        TimePoint{})
+                    .has_value());
+    EXPECT_TRUE(told.empty());
+
+    avtp::MaapHandler handler{mac, 1};
+    handler.set_send([](Eui48 const&, std::span<uint8_t const>) { return true; });
+    maap.wire_handler(handler, kit->host().components(), kit->talker());
+    handler.prepare(1);
+    auto defend = [&handler](int64_t const from_ns) {
+        handler.port_operational(from_ns);
+        for (int k = 1; k <= 12 && !handler.is_acquired(); ++k) {
+            handler.tick(from_ns + (k * SEC));
+        }
+    };
+    defend(SEC);
+    EXPECT_TRUE(told.empty());  // defended while ready: no change
+    handler.release(20 * SEC);
+    EXPECT_TRUE(told == std::vector<bool>{false});
+    EXPECT_FALSE(maap.ready());
+    defend(30 * SEC);
+    EXPECT_TRUE((told == std::vector<bool>{false, true}));
+
+    maap.set_on_ready_changed({});
+    handler.release(60 * SEC);
+    EXPECT_EQ(told.size(), size_t{2});
 }
 
 TEST(avb_entity_kit_maap, the_seed_mixes_the_mac_with_the_real_time_clock)

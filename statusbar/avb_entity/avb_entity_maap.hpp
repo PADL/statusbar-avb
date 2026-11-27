@@ -161,6 +161,11 @@ class MaapAddressAcquirer
 {
   public:
     using ReadyFn = statusbar::sg14::inplace_function<void(sm::TimePoint), 32>;
+    /// Called on the reactor thread with ready() at each change: a set-up that gates, a block defended or lost, stop().
+    /// Not for the state at install; a later install replaces an earlier one, an empty function removes it. It must
+    /// not throw.
+    using ReadyChangedFn = statusbar::sg14::inplace_function<void(bool ready), 32>;
+    void set_on_ready_changed(ReadyChangedFn fn) noexcept { on_ready_changed_ = std::move(fn); }
 
     /// Set up the acquisition of one MAAP block covering the given talker
     /// stream indices (block offset = position in the list). Nothing goes on
@@ -220,7 +225,7 @@ class MaapAddressAcquirer
         }
         net_->retire(to_ns(now));
         net_ = nullptr;
-        ready_.store(false, std::memory_order_release);
+        set_ready(false);
     }
 
     /// TX-address readiness the talker gate consults per tick: true in
@@ -296,17 +301,20 @@ class MaapAddressAcquirer
         auto net_handler = std::make_unique<nanoavb::MaapNetHandler>(interface_name, std::move(handler));
         if (!net_handler->valid()) {
             log_->warning("maap: socket open failed; using static stream dest MACs");
-            ready_.store(true, std::memory_order_release);  // fall back: do not gate
+            set_ready(true);  // fall back: do not gate
             return {};
         }
         // Gate stream TX until the block is defended. ADP/gPTP/SRP/ACMP are
         // unaffected — they keep running in the reactor; only the talker waits.
-        ready_.store(false, std::memory_order_release);
+        set_ready(false);
         net_ = net_handler.get();
         reactor.add(std::move(net_handler));
         return {};
     }
 
+  public:
+    /// @p handler's acquired and lost callbacks onto the streams' addresses, the SRP handler and ready(). setup()
+    /// wires its own handler; a test may wire one it drives. Reactor thread.
     void wire_handler(avtp::MaapHandler& handler, nanoavb::NanoAvbComponents& components, TalkerStreams& talker)
     {
         handler.set_on_acquired(
@@ -316,7 +324,7 @@ class MaapAddressAcquirer
                 // thread's acquire-load sees the new MACs before transmitting.
                 publish_block(components, talker, indices_, block_start);
                 components.msrp_handler.set_talker_addresses_valid(true);
-                ready_.store(true, std::memory_order_release);
+                set_ready(true);
                 log_->status("maap: acquired {} stream address(es) from {:012x}", indices_.size(), block_start.to_uint64());
                 remember(block_start, count);
                 if (on_addresses_ready_) {
@@ -331,12 +339,13 @@ class MaapAddressAcquirer
             // and a talker that declares on demand withdraws its Talker
             // attributes at the SRP handler's next tick (Milan v1.3 4.3.3.1:
             // an address in conflict is not a valid one).
-            ready_.store(false, std::memory_order_release);
+            set_ready(false);
             components.msrp_handler.set_talker_addresses_valid(false);
             log_->warning("maap: no longer defending {:012x}; stream TX gated", start.to_uint64());
         });
     }
 
+  private:
     /// Name the block's size to @p handler, and the start to try first where
     /// the range file holds one: the range of an earlier life, probed first so
     /// the streams keep their destination addresses unless somebody took them.
@@ -365,12 +374,21 @@ class MaapAddressAcquirer
         }
     }
 
+    /// ready() from now on, told to on_ready_changed_ when that changed it. Reactor thread.
+    void set_ready(bool const ready) noexcept
+    {
+        if (ready_.exchange(ready, std::memory_order_acq_rel) != ready && on_ready_changed_) {
+            on_ready_changed_(ready);
+        }
+    }
+
     /// The port on the reactor, which owns it; null when nothing is set up.
     /// Valid until stop() retires it: the reactor drops only finished ports.
     nanoavb::MaapNetHandler* net_{nullptr};
     std::atomic<bool> ready_{true};
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     ReadyFn on_addresses_ready_{};
+    ReadyChangedFn on_ready_changed_{};
     std::optional<logging::Logger> log_{};  ///< set by setup (Logger is not default-constructible)
     std::string range_file_{};              ///< empty: nothing saved, every start draws afresh
 };
