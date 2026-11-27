@@ -891,6 +891,89 @@ TEST(nanoavb_components_mvu_notify, a_bind_over_acmp_is_told_as_the_changed_inpu
     EXPECT_EQ(watched.last_info_to(WATCHER_MAC).talker_entity_id, REMOTE_TALKER);
 }
 
+namespace {
+
+/// A watched Milan device whose sink 0 a controller binds over ACMP, with the probe it sends
+/// kept so the test can answer it as the talker would.
+struct BoundWatchedDevice
+{
+    WatchedMilanDevice watched{};
+    std::vector<atdecc::AcmpCommandResponse> acmp_sent{};
+
+    BoundWatchedDevice()
+    {
+        auto keep = [this](atdecc::AcmpCommandResponse const& pdu) {
+            acmp_sent.push_back(pdu);
+            return true;
+        };
+        watched.device.components->milan_acmp_listener->set_senders(keep, keep);
+        watched.device.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, REMOTE_TALKER, ENTITY));
+    }
+    BoundWatchedDevice(BoundWatchedDevice const&) = delete;
+    auto operator=(BoundWatchedDevice const&) -> BoundWatchedDevice& = delete;
+
+    /// The talker's PROBE_TX_RESPONSE to the probe last sent arrives.
+    void probe_is_answered()
+    {
+        auto answer = acmp_sent.back();
+        answer.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+        answer.stream_id = STREAM;
+        answer.stream_dest_mac = DEST;
+        answer.stream_vlan_id = 2;
+        std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+        auto const wire = atdecc::acmp_serialize_2016(answer, buf);
+        watched.device.receive({wire.begin(), wire.end()});
+    }
+
+    /// The Probing status of each GET_STREAM_INPUT_INFO_EX notification sent to the watcher, in order.
+    [[nodiscard]] auto told_probing() const -> std::vector<uint8_t>
+    {
+        std::vector<uint8_t> statuses{};
+        for (auto const& each : watched.told_to(WATCHER_MAC, atdecc::MVU_COMMAND_GET_STREAM_INPUT_INFO_EX)) {
+            atdecc::MvuGetStreamInputInfoExResponse info{};
+            span_load(info, std::span<uint8_t const>{each.data});
+            statuses.push_back(info.pbsta());
+        }
+        return statuses;
+    }
+};
+
+constexpr uint8_t PROBING_ACTIVE = 2;
+constexpr uint8_t PROBING_COMPLETED = 3;
+
+}  // namespace
+
+TEST(nanoavb_components_mvu_notify, a_probe_answered_a_cycle_after_its_bind_is_told_as_active_and_then_completed)
+{
+    // Table 5.21: the Probing status is one of the things a change of which is told. The change
+    // is looked for once a cycle, after the cycle's frames (the reactor serves, then ticks).
+    BoundWatchedDevice bound;
+    bound.watched.device.handler->tick(ONE_SECOND_NS + 10'000'000);
+    EXPECT_TRUE((bound.told_probing() == std::vector<uint8_t>{PROBING_ACTIVE}));
+
+    bound.probe_is_answered();
+    bound.watched.device.handler->tick(ONE_SECOND_NS + 20'000'000);
+    EXPECT_TRUE((bound.told_probing() == std::vector<uint8_t>{PROBING_ACTIVE, PROBING_COMPLETED}));
+    EXPECT_TRUE(bound.watched.device.components->milan_acmp_listener->is_settled(0));
+}
+
+TEST(nanoavb_components_mvu_notify, a_probe_answered_within_the_cycle_of_its_bind_is_told_once_as_completed)
+{
+    // The talker's answer is read in the cycle that sent the probe, before the look: the sink
+    // was ACTIVE for less than a cycle, and a notification says what the input is, not what it
+    // passed through. One notification, COMPLETED; the controller ends with the same state.
+    BoundWatchedDevice bound;
+    bound.probe_is_answered();
+    EXPECT_TRUE(bound.told_probing().empty());
+    bound.watched.device.handler->tick(ONE_SECOND_NS + 10'000'000);
+    EXPECT_TRUE((bound.told_probing() == std::vector<uint8_t>{PROBING_COMPLETED}));
+    EXPECT_TRUE(bound.watched.device.components->milan_acmp_listener->is_settled(0));
+
+    // Nothing more is owed for the state that went by.
+    bound.watched.device.handler->tick(ONE_SECOND_NS + 20'000'000);
+    EXPECT_EQ(bound.told_probing().size(), 1U);
+}
+
 TEST(nanoavb_net_handlers, a_handler_whose_socket_did_not_open_can_still_be_reached)
 {
     // On no interface nothing opens and the reactor is given nothing; the
