@@ -15,9 +15,11 @@
 #include <cstdint>
 #include <string>
 
+using statusbar::avb_entity::add_stream_input_counts;
 using statusbar::avb_entity::interrupt_stream_input;
 using statusbar::avb_entity::restart_stream_input;
 using statusbar::avb_entity::StreamInputCounters;
+using statusbar::avb_entity::StreamInputCounts;
 using statusbar::avb_entity::StreamInputIntervals;
 using statusbar::avb_entity::StreamOutputIntervals;
 using statusbar::avb_entity::StreamOutputTotals;
@@ -611,6 +613,82 @@ TEST(stream_output_intervals, starts_and_stops_are_answered_as_they_stand)
     EXPECT_EQ(now[O::STREAM_START], 2U);
     EXPECT_EQ(now[O::FRAMES_TX], 0U);  // the start zeroes it
     EXPECT_EQ(out.values[O::FRAMES_TX], 1U);
+}
+
+// --- Counts from a data plane beside the stream port ---
+
+TEST(stream_input_counts, a_report_adds_to_every_counter_and_follows_the_lock)
+{
+    StreamInputCounters c{};
+    add_stream_input_counts(
+        c,
+        StreamInputCounts{
+            .frames_rx = 11,
+            .seq_num_mismatch = 1,
+            .media_reset = 2,
+            .timestamp_uncertain = 3,
+            .timestamp_valid = 4,
+            .timestamp_not_valid = 5,
+            .unsupported_format = 6,
+            .late_timestamp = 7,
+            .early_timestamp = 8});
+    EXPECT_EQ(c.frames_rx.load(), 11U);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 1U);
+    EXPECT_EQ(c.media_reset.load(), 2U);
+    EXPECT_EQ(c.timestamp_uncertain.load(), 3U);
+    EXPECT_EQ(c.timestamp_valid.load(), 4U);
+    EXPECT_EQ(c.timestamp_not_valid.load(), 5U);
+    EXPECT_EQ(c.unsupported_format.load(), 6U);
+    EXPECT_EQ(c.late_timestamp.load(), 7U);
+    EXPECT_EQ(c.early_timestamp.load(), 8U);
+    EXPECT_FALSE(c.is_locked.load());  // no lock told: none followed
+
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 1, .media_locked = true});
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 1, .media_locked = true});
+    EXPECT_EQ(c.media_locked.load(), 1U);  // gained once
+    EXPECT_TRUE(c.is_locked.load());
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 1});
+    EXPECT_TRUE(c.is_locked.load());
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 1, .media_locked = false});
+    EXPECT_EQ(c.media_unlocked.load(), 1U);  // lost: an interruption (Milan v1.3 Table 5.6)
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    EXPECT_FALSE(c.is_locked.load());
+}
+
+// As at the RX thread's next AVTPDU after the input lost its stream: the report that clears the pending
+// restart starts afresh and gains no lock; the next one may.
+TEST(stream_input_counts, a_report_after_a_restart_clears_it_and_gains_no_lock_until_the_next)
+{
+    StreamInputCounters c{};
+    restart_stream_input(c);
+    add_stream_input_counts(c, StreamInputCounts{});
+    EXPECT_TRUE(c.restart_run.load());  // a report of nothing says nothing of the stream
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 3, .media_locked = true});
+    EXPECT_FALSE(c.restart_run.load());
+    EXPECT_EQ(c.media_locked.load(), 0U);
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 3, .media_locked = true});
+    EXPECT_EQ(c.media_locked.load(), 1U);
+
+    restart_stream_input(c);  // unlocks
+    add_stream_input_counts(c, StreamInputCounts{.media_locked = false});
+    EXPECT_FALSE(c.restart_run.load());
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.stream_interrupted.load(), 0U);  // already unlocked: nothing more
+}
+
+// Milan v1.3 Table 5.6: the observation interval reads reported counts as it reads the kit's own; an
+// interval with no AVTPDU reported while locked is an interruption.
+TEST(stream_input_counts, an_interval_with_no_avtpdu_reported_is_silence)
+{
+    StreamInputCounters c{};
+    StreamInputIntervals intervals{};
+    add_stream_input_counts(c, StreamInputCounts{.frames_rx = 8, .media_locked = true});
+    (void)intervals.fold(c);
+    EXPECT_EQ(intervals.values[I::FRAMES_RX], 1U);
+    add_stream_input_counts(c, StreamInputCounts{.media_locked = true});
+    (void)intervals.fold(c);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    EXPECT_FALSE(c.is_locked.load());
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_stream_counters_test)

@@ -397,6 +397,11 @@ struct ListenerStreams
     void set_on_input_changed(InputChangedFn fn) noexcept { on_input_changed_ = std::move(fn); }
     /// STREAM_INPUT @p stream_index's InputState now; nullopt for an input that is not open. Reactor thread.
     [[nodiscard]] auto input_state(uint16_t stream_index) const noexcept -> std::optional<InputState>;
+    /// The data plane received @p counts of STREAM_INPUT @p stream_index, @p samples frames accepted: added to its counters
+    /// and telemetry; false for no such input. One thread, while the port receives none of it and never across
+    /// open_stream() or close_rx() (it walks the slots), at least twice an observation interval: none reported is silence.
+    [[nodiscard]] auto notify_offload_received(uint16_t stream_index, StreamInputCounts const& counts, uint64_t samples) noexcept
+        -> bool;
 
     /// The group a listener joins for a talker destination: the address when
     /// it is multicast, nothing otherwise (8.2.1.13).
@@ -435,6 +440,10 @@ struct ListenerStreams
     void publish_rx_stream(ListenerStreamSlot& slot, uint64_t stream_id) noexcept;
     /// on_input_changed_ told @p slot's InputState, if set.
     void notify_input_changed(ListenerStreamSlot const& slot) const noexcept;
+    /// @p counts of a stopped @p slot, or one with no stream: no lock gained, and only a stopped one's dropped.
+    void count_offload_idle(ListenerStreamSlot& slot, StreamInputCounts const& counts) noexcept;
+    /// @p slot's telemetry for a report of @p counts and @p samples: its AVTPDUs accepted and refused, its samples.
+    static void count_offload_delivered(ListenerStreamSlot& slot, StreamInputCounts const& counts, uint64_t samples) noexcept;
     /// The status line of a connect: log_settled with a match, log_connected without.
     void log_attached(uint16_t stream_index, ieee::Eui48 dest_mac, std::optional<nanoavb::TalkerMatch> const& only, bool ready);
     void log_connected(uint16_t stream_index, ieee::Eui48 dest_mac, bool ready, bool joined);

@@ -1249,4 +1249,95 @@ TEST(listener_offload, the_hook_is_told_what_each_input_receives)
     ls.set_on_input_changed({});
 }
 
+// What a data plane beside the port received reaches the input's counters, so GET_COUNTERS (IEEE 1722.1-2021
+// Clause 7.4.42) goes on, and its telemetry.
+TEST(listener_offload, a_report_reaches_the_counters_and_the_telemetry)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_FALSE(ls.notify_offload_received(5, StreamInputCounts{.frames_rx = 1}, 12));  // no such input
+    EXPECT_TRUE(ls.notify_offload_received(
+        0, StreamInputCounts{.frames_rx = 10, .timestamp_valid = 8, .unsupported_format = 2, .media_locked = true}, 96));
+    auto const* const slot = ls.slot_for(0);
+    EXPECT_EQ(slot->rx_packets.load(), uint64_t{8});
+    EXPECT_EQ(slot->rx_bad.load(), uint64_t{2});
+    EXPECT_EQ(slot->rx_samples.load(), uint64_t{96});
+    uint32_t valid = 0;
+    std::array<uint32_t, 32> out{};
+    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
+    EXPECT_EQ(out[11], 10U);  // FRAMES_RX
+    EXPECT_EQ(out[8], 2U);    // UNSUPPORTED_FORMAT
+    EXPECT_EQ(out[6], 8U);    // TIMESTAMP_VALID
+    EXPECT_EQ(out[0], 1U);    // MEDIA_LOCKED
+    EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = true}, 96));
+    EXPECT_TRUE(ls.fill_stream_input_counters(0, valid, out));
+    EXPECT_EQ(out[0], 1U);  // still locked: no second count
+    EXPECT_EQ(out[11], 18U);
+}
+
+// Milan v1.3 5.3.8.7 and 5.3.8.10: a stopped input is not synchronized, so a lock reported lost then is no
+// interruption, and nothing reaches the telemetry; a started bound one's loss is one; with no stream, the
+// release decides.
+TEST(listener_offload, a_lock_lost_while_stopped_or_without_a_stream_is_no_interruption)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    auto const& c = ls.slot_for(0)->counters;
+    auto lock = [&ls](bool const locked) {
+        EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = locked}, 48));
+    };
+    lock(true);
+    lock(true);
+    EXPECT_TRUE(c.is_locked.load());
+
+    ls.set_stream_stopped(0, true);
+    lock(false);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.stream_interrupted.load(), 0U);
+    lock(true);  // discarded: not synchronized
+    EXPECT_FALSE(c.is_locked.load());
+    EXPECT_EQ(ls.slot_for(0)->rx_packets.load(), uint64_t{16});  // the two reports before the stop
+    ls.set_stream_stopped(0, false);
+    lock(true);
+    EXPECT_TRUE(c.is_locked.load());
+    lock(false);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+
+    lock(true);
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
+    lock(false);
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+}
+
+// Milan v1.3 Table 5.6: an input whose talker goes is interrupted, even when the data plane reports its
+// last counts, the lock lost, from inside the hook that tells it the stream is gone.
+TEST(listener_offload, a_talker_lost_is_an_interruption_with_a_report_from_the_hook)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> const gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{});
+    EXPECT_TRUE(ls.notify_offload_received(0, StreamInputCounts{.frames_rx = 8, .media_locked = true}, 48));
+    bool flushed = false;
+    ls.set_on_input_changed([&ls, &flushed](uint16_t const index, ListenerStreams::InputState const& state) {
+        if (state.stream_id == 0) {
+            flushed = ls.notify_offload_received(index, StreamInputCounts{.frames_rx = 2, .media_locked = false}, 12);
+        }
+    });
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::talker_lost);
+    EXPECT_TRUE(flushed);
+    auto const& c = ls.slot_for(0)->counters;
+    EXPECT_EQ(c.stream_interrupted.load(), 1U);
+    EXPECT_EQ(c.media_unlocked.load(), 1U);
+    EXPECT_EQ(c.frames_rx.load(), 10U);
+    ls.set_on_input_changed({});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_listener_streams_test)
