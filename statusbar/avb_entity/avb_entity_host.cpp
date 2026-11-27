@@ -160,7 +160,7 @@ void AvbEntityHost::withdraw_from_the_network(TimePoint const now)
     // for the join timer would never go. Then ENTITY_DEPARTING.
     components_.msrp_handler.withdraw_all(now);
     components_.mvrp_handler.withdraw_all(now);
-    (void)components_.adp_advertiser.shutdown(now);  // Milan v1.2 Section 5.6.3.5.8
+    (void)components_.adp_advertiser.stop(now);
     // Down, whatever the link: the owner's Link Up after the next start runs start_protocols again.
     supervisor_.handle_event(supervisor_ctx_, nanoavb::supervisor_sm::Def::Event::LinkDown, now);
 }
@@ -341,8 +341,7 @@ void AvbEntityHost::on_mirror_update(
                 notify_parent_grandmaster(info->gptp_grandmaster_id);  // the mirrored device's parent data set
             }
             // ADP and the unsolicited GET_AVB_INFO (IEEE 1722.1 7.5.2) carry the mirrored grandmaster.
-            nanoavb::report_grandmaster(
-                components_, tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number, sm::Clock::now());
+            report_gptp_info(tsn::ClockIdentity{info->gptp_grandmaster_id}, info->gptp_domain_number);
             return;
         }
         (void)components_.aem_handler.notify_avb_info_changed(index);  // IEEE 1722.1 7.5.2
@@ -516,7 +515,9 @@ void AvbEntityHost::release_adp(TimePoint const time)
 
 void AvbEntityHost::start_adp(TimePoint const time)
 {
-    components_.adp_advertiser.link_up(time);
+    if (auto const result = components_.adp_advertiser.start(time); !result) {
+        ctl_log().error("ADP start failed: errno {}", result.error().value());
+    }
 }
 
 void AvbEntityHost::on_gptp_announce(TimePoint const time, bool const has_grandmaster)
@@ -655,7 +656,18 @@ void AvbEntityHost::report_grandmaster(ieee::Eui64 const& grandmaster)
         net_handlers_ != nullptr && !grandmaster_from_parent_ ? net_handlers_->gptp_handler().last_announce() : nullptr;
     uint8_t const domain =
         announce != nullptr ? announce->header.domain_number.get() : components_.adp_advertiser.adpdu().gptp_domain_number.get();
-    nanoavb::report_grandmaster(components_, tsn::ClockIdentity{grandmaster}, domain, sm::Clock::now());
+    report_gptp_info(tsn::ClockIdentity{grandmaster}, domain);
+}
+
+void AvbEntityHost::report_gptp_info(tsn::ClockIdentity const& grandmaster, uint8_t const domain)
+{
+    // ADP changes only with the grandmaster or the domain: another ENTITY_AVAILABLE restarts TMR_DELAY.
+    auto const& adpdu = components_.adp_advertiser.adpdu();
+    if (adpdu.gptp_grandmaster_id == grandmaster && adpdu.gptp_domain_number.get() == domain) {
+        (void)components_.aem_handler.notify_avb_info_changed(0);
+        return;
+    }
+    nanoavb::report_grandmaster(components_, grandmaster, domain, sm::Clock::now());
 }
 
 auto AvbEntityHost::grandmaster_capable() const -> bool
@@ -857,7 +869,7 @@ void AvbEntityHost::wire_supervisor_callbacks()
     };
 
     supervisor_ctx_.callbacks.stop_all = [this](auto& /*ctx*/, TimePoint time) -> void {
-        components_.adp_advertiser.link_down(time);
+        (void)components_.adp_advertiser.stop(time);
         notify_media_clock_locked(false);  // the gPTP reset below drops the lock
         close_stream_gates(time, nanoavb::talker_engine_sm::Def::Event::Fatal);
         gptp_.reset();

@@ -109,18 +109,13 @@ struct Bench
         handlers.set_local_port_config(std::move(config));
         handlers.add_to_reactor(reactor);
         setup_nanoavb_callbacks(components, handlers);
-        components.adp_advertiser.link_up(time());
-        components.adp_advertiser.tick(time() + std::chrono::seconds{2});  // the startup TMR_DELAY
+        (void)components.adp_advertiser.start(time());  // a classic advertiser: its first ENTITY_AVAILABLE at once
     }
 
     [[nodiscard]] auto time() const -> sm::TimePoint { return sm::TimePoint{std::chrono::nanoseconds{now_ns}}; }
 
-    /// One ENTITY_AVAILABLE multicast: an entity change, then its TMR_DELAY (at most 4 s).
-    void advertise()
-    {
-        components.adp_advertiser.notify_entity_changed(time());
-        components.adp_advertiser.tick(time() + std::chrono::seconds{4});
-    }
+    /// One ENTITY_AVAILABLE multicast: an entity change, which a classic advertiser sends at once.
+    void advertise() { components.adp_advertiser.notify_entity_changed(); }
 
     /// A few reactor cycles, 1 ms apart.
     void pump()
@@ -266,7 +261,7 @@ TEST(nanoavb_local_port, a_local_discover_is_answered_to_that_client_alone)
     EXPECT_EQ(count_of(drain(b), avtp::AvtpSubtype::adp, ADP_MESSAGE_TYPE_ENTITY_AVAILABLE), size_t{1});
 }
 
-TEST(nanoavb_local_port, a_local_discover_is_answered_at_once_outside_the_state_machine)
+TEST(nanoavb_local_port, a_local_discover_is_answered_at_once_outside_the_advertise_timers)
 {
     Bench bench;
     auto const index = bench.components.adp_advertiser.available_index();
@@ -279,7 +274,7 @@ TEST(nanoavb_local_port, a_local_discover_is_answered_at_once_outside_the_state_
     span_load(adp, std::span<uint8_t const>{frames.front()});
     EXPECT_EQ(adp.available_index.get(), index);
     EXPECT_EQ(bench.components.adp_advertiser.available_index(), index + 1);  // a transmission
-    EXPECT_TRUE(bench.components.adp_advertiser.state() == AdpAdvertiserState::Waiting);
+    EXPECT_TRUE(bench.components.adp_advertiser.state() == AdpAdvertiserState::Advertising);
 }
 
 TEST(nanoavb_local_port, a_local_client_sees_available_index_strictly_increase)
@@ -306,7 +301,7 @@ TEST(nanoavb_local_port, a_local_client_sees_available_index_strictly_increase)
 TEST(nanoavb_local_port, a_local_discover_is_answered_while_the_network_is_down)
 {
     Bench bench;
-    bench.components.adp_advertiser.link_down(bench.time());
+    (void)bench.components.adp_advertiser.stop(bench.time());
     auto client = open_client(bench.path);
     EXPECT_TRUE(send(client, entity_discover()));
     bench.pump();

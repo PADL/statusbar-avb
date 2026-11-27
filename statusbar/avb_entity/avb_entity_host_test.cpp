@@ -429,6 +429,31 @@ TEST(avb_entity_host_avb_info, host_answers_get_avb_info_from_observed_state)
     EXPECT_EQ(host->components().aem_handler.handle_command(header, other, out).status, AEM_STATUS_NO_SUCH_DESCRIPTOR);
 }
 
+TEST(avb_entity_host_avb_info, adp_advertises_again_for_a_new_grandmaster_not_a_moved_propagation_delay)
+{
+    auto const blob = make_interface_blob();
+    auto host = make_host_from_blob(blob);
+    auto& adp = host->components().adp_advertiser;
+    int available = 0;
+    adp.set_callbacks({.send_adpdu = [&available](statusbar::atdecc::AdpDu const& adpdu) {
+        available += adpdu.is_entity_available() ? 1 : 0;
+        return true;
+    }});
+    EXPECT_TRUE(adp.start(statusbar::sm::TimePoint{}).has_value());
+    int const at_start = available;
+
+    host->set_propagation_delay_ns(1234);  // GET_AVB_INFO changes, ADP carries nothing of it
+    host->set_propagation_delay_ns(5678);
+    EXPECT_EQ(available, at_start);
+
+    statusbar::gptp::ClockIdentity const gm{statusbar::ieee::Eui64{0x00, 0x11, 0x22, 0xFF, 0xFE, 0x33, 0x44, 0x55}};
+    host->notify_grandmaster_changed(gm);
+    EXPECT_EQ(available, at_start + 1);
+    EXPECT_EQ(adp.adpdu().gptp_grandmaster_id, gm);
+    host->set_propagation_delay_ns(910);  // under the new grandmaster too
+    EXPECT_EQ(available, at_start + 1);
+}
+
 TEST(avb_entity_host_as_path, the_path_ends_with_this_entitys_clock_unless_it_is_the_grandmaster)
 {
     using statusbar::avb_entity::compose_as_path;

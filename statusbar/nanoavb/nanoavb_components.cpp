@@ -169,6 +169,9 @@ void GptpAnnounceHandler::tick(int64_t const now_ns)
     if (callbacks_.grandmaster_lost) {
         callbacks_.grandmaster_lost(now_ns);
     }
+    if (on_grandmaster_changed_) {
+        on_grandmaster_changed_(now_ns);
+    }
     set_path_trace(now_ns, AsPath{});
 }
 
@@ -387,7 +390,24 @@ void AtdeccNetHandler::attach_mvu_stream_inputs()
             .stream_input_info = [this](uint16_t const index) -> std::optional<atdecc::MvuGetStreamInputInfoExResponse> {
                 auto const* const sink = milan_listener_->sink(index);
                 return sink != nullptr ? std::optional{atdecc::milan_stream_input_info_ex(sink->context())} : std::nullopt;
+            },
+            .binding = [this](uint16_t const index) -> std::optional<atdecc::MilanBinding> {
+                auto const* const sink = milan_listener_->sink(index);
+                return sink != nullptr ? sink->context().binding : std::nullopt;
             }});
+}
+
+void AtdeccNetHandler::notify_stream_input_changes()
+{
+    // Milan v1.3 Table 5.21: a GET_STREAM_INPUT_INFO_EX notification when a
+    // stream input's talker, Probing status, ACMP status or Talker
+    // attribute registration changes. Looked for once a tick, after the
+    // sinks' timers, so whatever changed an input (a command, a probe's
+    // answer, an advertisement, SRP, a timer) is found in one place, and
+    // with no command being answered every registered controller is told,
+    // the one whose bind began the change too.
+    milan_listener_->tell_stream_input_changes(
+        [this](uint16_t const index) { (void)aem_handler_.notify_stream_input_info_ex(index); });
 }
 
 void AtdeccNetHandler::set_milan_acmp(NanoAvbMilanAcmpTalker* const talker, NanoAvbMilanAcmpListener* const listener)
@@ -422,6 +442,7 @@ void AtdeccNetHandler::tick_protocols(sm::TimePoint const now)
     acmp_listener_.tick(now);
     if (milan_listener_ != nullptr) {
         milan_listener_->tick(now);
+        notify_stream_input_changes();
     }
     aem_handler_.tick(now);  // AEM has LOCK / pending-acquire timeout checking
     if (adp_discovery_ != nullptr) {
@@ -442,25 +463,6 @@ void AtdeccNetHandler::tick(int64_t now_ns)
     }
 }
 
-namespace {
-
-/// The advertise state for the status line.
-[[nodiscard]] auto adp_state_label(AdpAdvertiserState const state) noexcept -> logging::StrLit
-{
-    switch (state) {
-        case AdpAdvertiserState::Down:
-            return logging::lit("Down");
-        case AdpAdvertiserState::Waiting:
-            return logging::lit("Waiting");
-        case AdpAdvertiserState::Delay:
-            return logging::lit("Delay");
-        default:
-            return logging::lit("Start");
-    }
-}
-
-}  // namespace
-
 void AtdeccNetHandler::log_status()
 {
     int64_t const wakes = ptp_wake_count_ != nullptr ? ptp_wake_count_->load() : 0;
@@ -476,7 +478,7 @@ void AtdeccNetHandler::log_status()
         "ticks={} ptp_wakes={} adp={} acmp_t={} acmp_l={}",
         tick_count_,
         wakes,
-        adp_state_label(adp_advertiser_.state()),
+        adp_advertiser_.state() == AdpAdvertiserState::Advertising ? logging::lit("Advertising") : logging::lit("Stopped"),
         talker_connections,
         listener_connections());
 }
@@ -983,10 +985,10 @@ auto grandmaster_after_loss(NanoAvbComponents const& components) -> gptp::ClockI
 }
 
 void report_grandmaster(
-    NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain, sm::TimePoint const now)
+    NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t const domain, sm::TimePoint const /*now*/)
 {
-    // ADP carries it after TMR_DELAY (Milan v1.2 Section 5.6.3.5.7).
-    components.adp_advertiser.set_gptp_info(grandmaster_id, domain, now);
+    components.adp_advertiser.set_gptp_info(grandmaster_id, domain);
+    components.adp_advertiser.notify_entity_changed();
     // IEEE 1722.1 7.5.2: a grandmaster change is also an unsolicited
     // GET_AVB_INFO to the registered controllers (no-op until an entity wires
     // get_avb_info).

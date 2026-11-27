@@ -70,12 +70,13 @@ namespace statusbar::avb_entity {
 
 using statusbar::Status;
 
-/// The default ADP advertiser config shared by every avb_entity: valid_time 10
-/// (20 s) and a 5 s reannounce interval (Milan v1.2 Section 5.6.2).
+/// The default ADP advertiser identity/timing shared by every avb_entity: valid_time 31
+/// (62 s) + a 5 s reannounce interval. All four entities used byte-identical local copies;
+/// this is the single source of truth.
 [[nodiscard]] inline auto default_adp_advertiser_config() noexcept -> nanoavb::AdpAdvertiserConfig
 {
     nanoavb::AdpAdvertiserConfig cfg{};
-    cfg.valid_time = 10;                                        // 20 seconds
+    cfg.valid_time = 31;                                        // 62 seconds
     cfg.reannounce_interval = std::chrono::milliseconds{5000};  // 5 seconds
     return cfg;
 }
@@ -487,6 +488,9 @@ class AvbEntityHost
     /// unsolicited GET_AVB_INFO through nanoavb::report_grandmaster (IEEE 1722.1-2021 Clause 6.2.2.16), in
     /// the last Announce's domain unless the parent data set is the source.
     void report_grandmaster(ieee::Eui64 const& grandmaster);
+    /// @p grandmaster in @p domain to ADP, through nanoavb::report_grandmaster, when either differs from what
+    /// ADP carries; else only the unsolicited GET_AVB_INFO (another field moved, IEEE 1722.1-2021 Clause 7.5.2).
+    void report_gptp_info(tsn::ClockIdentity const& grandmaster, uint8_t domain);
     /// AVB_INTERFACE 0's priority1 is below 255 (IEEE 802.1AS-2020 Clause 8.6.2.1).
     [[nodiscard]] auto grandmaster_capable() const -> bool;
 

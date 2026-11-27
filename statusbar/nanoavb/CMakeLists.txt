@@ -14,7 +14,6 @@ statusbar_add_module(
   nanoavb_acmp_listener_sm.cpp
   nanoavb_acmp_talker_sm.cpp
   nanoavb_adp.cpp
-  nanoavb_adp_adv_sm.cpp
   nanoavb_milan_acmp.cpp
   nanoavb_aem_entity_model.cpp
   nanoavb_entity.cpp
