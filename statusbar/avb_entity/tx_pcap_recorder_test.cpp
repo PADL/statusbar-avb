@@ -10,15 +10,28 @@
 #include "statusbar/pcap/pcap_reader.hpp"
 #include "statusbar/test/test.hpp"
 
+#include <unistd.h>
+
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
+#include <format>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using statusbar::is_success;
 using statusbar::avb_entity::TxPcapRecorder;
 
 namespace {
+
+/// A file of this process alone under /tmp: these tests also run inside the
+/// all-tests binary, at the same time, and the two must not write and remove
+/// each other's captures.
+auto scratch_pcap(std::string_view name) -> std::string
+{
+    return std::format("/tmp/sb_txpcap_{}_{}.pcap", ::getpid(), name);
+}
 
 auto make_frame(uint8_t tag, size_t len) -> std::vector<uint8_t>
 {
@@ -76,7 +89,7 @@ auto read_back_wire_lengths(std::string const& path) -> std::vector<uint32_t>
 TEST(tx_pcap_recorder, window_closes_after_duration_and_writes_file)
 {
     TxPcapRecorder rec;
-    std::string const path = "/tmp/sb_txpcap_window.pcap";
+    std::string const path = scratch_pcap("window");
     rec.configure(path, size_t{1} << 20, /*snaplen=*/1522, /*duration_ns=*/1'000'000ULL);  // 1 ms window
     EXPECT_TRUE(rec.recording());
 
@@ -104,12 +117,13 @@ TEST(tx_pcap_recorder, window_closes_after_duration_and_writes_file)
         EXPECT_EQ(got.size(), f.size());
         EXPECT_TRUE(std::equal(got.begin(), got.end(), f.begin()));
     }
+    (void)std::remove(path.c_str());
 }
 
 TEST(tx_pcap_recorder, snaplen_truncates_captured_bytes)
 {
     TxPcapRecorder rec;
-    std::string const path = "/tmp/sb_txpcap_snap.pcap";
+    std::string const path = scratch_pcap("snap");
     rec.configure(path, size_t{1} << 20, /*snaplen=*/16, /*duration_ns=*/1'000'000'000ULL);
 
     auto const f = make_frame(0x20, 200);  // 200 bytes, snaplen 16
@@ -130,12 +144,13 @@ TEST(tx_pcap_recorder, snaplen_truncates_captured_bytes)
     auto const wire = read_back_wire_lengths(path);
     EXPECT_EQ(wire.size(), 1U);
     EXPECT_EQ(wire[0], 200U);
+    (void)std::remove(path.c_str());
 }
 
 TEST(tx_pcap_recorder, arena_full_closes_window_cleanly)
 {
     TxPcapRecorder rec;
-    std::string const path = "/tmp/sb_txpcap_full.pcap";
+    std::string const path = scratch_pcap("full");
     // Cap fits exactly two records: each is REC_HDR(16) + 64 frame bytes = 80.
     rec.configure(path, /*cap_bytes=*/160, /*snaplen=*/1522, /*duration_ns=*/10'000'000'000ULL);
 
@@ -152,6 +167,7 @@ TEST(tx_pcap_recorder, arena_full_closes_window_cleanly)
 
     EXPECT_TRUE(is_success(rec.write_to_file()));
     EXPECT_EQ(read_back(path).size(), 2U);
+    (void)std::remove(path.c_str());
 }
 
 TEST_MAIN(statusbar_avb_entity, tx_pcap_recorder_test)
