@@ -852,6 +852,23 @@ lock like any other control (7.4.25.2, 5.4.2.17). The last one has a knob,
 `atdecc.identify_bypasses_lock`, off by default, for installations that
 want any controller to be able to make a held box show itself.
 
+An acquisition has a knob of its own, `atdecc.acquire_shared`, off by
+default. Some controllers acquire every entity they use and keep it, and
+an acquired entity answers every other controller's SET with
+ENTITY_ACQUIRED (IEEE 1722.1-2021 7.4.1). Milan settles that by granting
+no acquisition at all (v1.3 5.4.2.1), which such a controller may not
+accept. With the key set, the classic profile grants the acquisition and
+shuts nobody out with it:
+
+| | `acquire_shared` off | `acquire_shared` on |
+|---|---|---|
+| ACQUIRE_ENTITY of a free entity | SUCCESS | SUCCESS |
+| ACQUIRE_ENTITY by a second controller | the CONTROLLER_AVAILABLE handshake, then ENTITY_ACQUIRED or the entity | the same |
+| the owner the entity reports | the acquirer | the acquirer |
+| a SET from another controller | ENTITY_ACQUIRED | answered as the acquirer's is |
+| LOCK_ENTITY from another controller | ENTITY_ACQUIRED | SUCCESS: the lock is then the exclusive access, the acquirer shut out with the rest |
+| under the Milan profile | NOT_SUPPORTED to every ACQUIRE_ENTITY | the same: the key has nothing to act on |
+
 ## Constraints to preserve
 
 - RT discipline: hooks on the media/RX threads must be `inplace_function`

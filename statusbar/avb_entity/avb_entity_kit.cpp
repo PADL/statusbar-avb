@@ -145,6 +145,10 @@ void AvbEntityKit::apply_profile()
     install_milan_info();
     apply_acmp_profile(milan);
     apply_srp_profile(milan);
+    // An acquisition shuts the other controllers out unless the configuration says it is shared.
+    host_.components().aem_handler.set_acquire_mode(
+        config_.acquire_shared ? nanoavb::AemCommandHandler::AcquireMode::shared
+                               : nanoavb::AemCommandHandler::AcquireMode::exclusive);
 }
 
 void AvbEntityKit::apply_acmp_profile(bool const milan)

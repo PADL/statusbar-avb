@@ -829,6 +829,94 @@ TEST(nanoavb_entity_lock, lock_of_a_descriptor_other_than_entity_is_not_supporte
     EXPECT_EQ(result.response_data()[13], DESCRIPTOR_STREAM_INPUT);
 }
 
+namespace {
+
+/// A handler acquired by @p owner under @p mode, and the controller commands of the tests below.
+struct AcquiredHandler
+{
+    statusbar::ieee::Eui64 const owner{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    statusbar::ieee::Eui64 const other{0xBB, 0, 0, 0, 0, 0, 0, 0x01};
+    EntityModel model{create_test_model()};
+    AemCommandHandler handler{model};
+
+    explicit AcquiredHandler(AemCommandHandler::AcquireMode const mode)
+    {
+        handler.set_acquire_mode(mode);
+        EXPECT_EQ(
+            command(AEM_COMMAND_ACQUIRE_ENTITY, owner, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0)).status, AEM_STATUS_SUCCESS);
+    }
+
+    auto command(uint16_t const type, statusbar::ieee::Eui64 const& controller, std::span<uint8_t const> const body)
+        -> TestCommandResult
+    {
+        auto header = create_aem_header(type);
+        header.controller_entity_id = controller;
+        return make_test_result(handler, header, body);
+    }
+
+    /// A SET_CONTROL and a SET_NAME from @p controller: the two statuses answered.
+    auto sets_from(statusbar::ieee::Eui64 const& controller) -> std::array<uint8_t, 2>
+    {
+        std::array<uint8_t, 8> const body{};
+        return {command(AEM_COMMAND_SET_CONTROL, controller, body).status, command(AEM_COMMAND_SET_NAME, controller, body).status};
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_entity_acquire, a_shared_acquisition_is_granted_and_shuts_no_other_controller_out_of_a_set)
+{
+    AcquiredHandler shared{AemCommandHandler::AcquireMode::shared};
+    AcquiredHandler exclusive{AemCommandHandler::AcquireMode::exclusive};
+    EXPECT_TRUE(shared.handler.acquire_mode() == AemCommandHandler::AcquireMode::shared);
+
+    // The other controller's SETs are answered as the owner's are, whatever that is for this model.
+    EXPECT_TRUE(shared.sets_from(shared.other) == shared.sets_from(shared.owner));
+    for (uint8_t const status : shared.sets_from(shared.other)) {
+        EXPECT_NE(status, AEM_STATUS_ENTITY_ACQUIRED);
+    }
+    // The same two commands under the mode of the standard.
+    for (uint8_t const status : exclusive.sets_from(exclusive.other)) {
+        EXPECT_EQ(status, AEM_STATUS_ENTITY_ACQUIRED);
+    }
+}
+
+TEST(nanoavb_entity_acquire, a_shared_acquisition_is_still_an_acquisition_to_whoever_asks_for_one)
+{
+    // The owner is kept and reported: another controller's ACQUIRE_ENTITY is not granted over it
+    // (nobody carries the CONTROLLER_AVAILABLE question here), and the response names the owner.
+    AcquiredHandler shared{AemCommandHandler::AcquireMode::shared};
+    auto const contender = shared.command(AEM_COMMAND_ACQUIRE_ENTITY, shared.other, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(contender.status, AEM_STATUS_ENTITY_ACQUIRED);
+    EXPECT_EQ(contender.response_data()[11], 0x07);
+    // Only the owner releases it.
+    auto const release_by_other =
+        shared.command(AEM_COMMAND_ACQUIRE_ENTITY, shared.other, exclusive_access_body(0x80000000U, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(release_by_other.status, AEM_STATUS_ENTITY_ACQUIRED);
+    auto const release_by_owner =
+        shared.command(AEM_COMMAND_ACQUIRE_ENTITY, shared.owner, exclusive_access_body(0x80000000U, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(release_by_owner.status, AEM_STATUS_SUCCESS);
+}
+
+TEST(nanoavb_entity_lock, under_a_shared_acquisition_any_controller_may_lock_and_the_lock_is_exclusive)
+{
+    AcquiredHandler shared{AemCommandHandler::AcquireMode::shared};
+    auto const locked = shared.command(AEM_COMMAND_LOCK_ENTITY, shared.other, exclusive_access_body(0, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(locked.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(shared.handler.is_locked());
+    // The lock is the exclusive access: it shuts the acquirer out like anyone else.
+    for (uint8_t const status : shared.sets_from(shared.owner)) {
+        EXPECT_EQ(status, AEM_STATUS_ENTITY_LOCKED);
+    }
+    for (uint8_t const status : shared.sets_from(shared.other)) {
+        EXPECT_NE(status, AEM_STATUS_ENTITY_LOCKED);
+    }
+    auto const unlocked =
+        shared.command(AEM_COMMAND_LOCK_ENTITY, shared.other, exclusive_access_body(0x00000001U, DESCRIPTOR_ENTITY, 0));
+    EXPECT_EQ(unlocked.status, AEM_STATUS_SUCCESS);
+    EXPECT_FALSE(shared.handler.is_locked());
+}
+
 TEST(nanoavb_entity_lock, only_the_acquirer_may_lock_or_unlock_an_acquired_entity)
 {
     // 7.4.2.2: while acquired, a LOCK_ENTITY from any other controller answers

@@ -226,6 +226,15 @@ struct AvbEntityAudioIOConfig
     /// entity refuses every other controller's SET_CONTROL, IDENTIFY included.
     bool identify_bypasses_lock{false};
 
+    /// Grant an ACQUIRE_ENTITY and shut no other controller out with it
+    /// (AemCommandHandler::AcquireMode::shared): the acquirer is answered
+    /// SUCCESS and stays the owner the entity reports, and every other
+    /// controller's SET and LOCK_ENTITY goes on as before. Off by default, as
+    /// IEEE 1722.1-2021 7.4.1 has it: an acquired entity answers the others
+    /// ENTITY_ACQUIRED. It is for the classic profile; under the Milan one
+    /// no acquisition is granted at all (Milan v1.3 5.4.2.1).
+    bool acquire_shared{false};
+
     /// The specification the entity answers to where IEEE 1722.1-2021 and
     /// Milan v1.3 differ: "classic" reads 1722.1 as written; "milan13" applies
     /// Milan v1.3 where it says otherwise (a SET to the value already in force

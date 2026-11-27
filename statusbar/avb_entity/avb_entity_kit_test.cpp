@@ -1939,4 +1939,29 @@ TEST(avb_entity_kit_talker_gate, the_gate_follows_the_maap_block)
     kit->set_on_talker_gate_changed({});
 }
 
+// atdecc.acquire_shared: the kit hands the configured mode to the AEM handler; under the Milan
+// profile an ACQUIRE_ENTITY is refused whatever the mode (Milan v1.3 5.4.2.1).
+TEST(avb_entity_kit_acquire, the_configured_acquire_mode_reaches_the_handler_and_milan_grants_none)
+{
+    using AcquireMode = nanoavb::AemCommandHandler::AcquireMode;
+    KitUnderTest by_default{make_config(2, "classic")};
+    EXPECT_TRUE(by_default->host().components().aem_handler.acquire_mode() == AcquireMode::exclusive);
+
+    auto shared_config = make_config(2, "classic");
+    shared_config.acquire_shared = true;
+    KitUnderTest shared{std::move(shared_config)};
+    EXPECT_TRUE(shared->host().components().aem_handler.acquire_mode() == AcquireMode::shared);
+
+    auto milan_config = make_config(2, "milan13", true);
+    milan_config.acquire_shared = true;
+    KitUnderTest milan{std::move(milan_config)};
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_ACQUIRE_ENTITY, atdecc::aem::AemAcquireEntityPayload::LENGTH);
+    header.controller_entity_id = RATE_CONTROLLER_A;
+    atdecc::aem::AemAcquireEntityPayload const asked{};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const answered = milan->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(answered.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)

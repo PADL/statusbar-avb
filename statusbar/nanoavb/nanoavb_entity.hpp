@@ -340,6 +340,25 @@ class AemCommandHandler
     /// show itself while it is held, which some installations prefer.
     void set_identify_bypasses_exclusive_access(bool const enable) noexcept { identify_bypasses_exclusive_access_ = enable; }
 
+    /// What an ACQUIRE_ENTITY the entity grants does to the other controllers.
+    enum class AcquireMode : uint8_t
+    {
+        /// IEEE 1722.1-2021 7.4.1: while acquired, every other controller's
+        /// SET and LOCK_ENTITY is answered ENTITY_ACQUIRED.
+        exclusive,
+        /// The acquisition is granted, kept and reported as under exclusive,
+        /// and shuts nobody out: any controller's SET and LOCK_ENTITY goes
+        /// on as if the entity were not acquired. For an entity that has to
+        /// work with a controller that insists on acquiring it while other
+        /// controllers set its controls, which Milan arranges by having no
+        /// acquisition at all. LOCK_ENTITY stays the one exclusive access.
+        shared,
+    };
+    /// exclusive unless said otherwise. Under milan13 no ACQUIRE_ENTITY is
+    /// granted (Milan v1.3 5.4.2.1), so the mode has nothing to act on.
+    void set_acquire_mode(AcquireMode const mode) noexcept { acquire_mode_ = mode; }
+    [[nodiscard]] auto acquire_mode() const noexcept -> AcquireMode { return acquire_mode_; }
+
     /// The specification the entity answers to where IEEE 1722.1-2021 and
     /// Milan v1.3 differ. Under classic, 7.5.2 is read as written: every
     /// SET_* answered SUCCESS is followed by an unsolicited notification.
@@ -802,6 +821,12 @@ class AemCommandHandler
 
     /// check_exclusive_access() for a command from @p controller_entity_id, AEM or MVU.
     [[nodiscard]] auto exclusive_access_status(Eui64 const& controller_entity_id) const noexcept -> std::optional<uint8_t>;
+    /// Whether the acquisition in force shuts @p controller out: another controller's, under
+    /// AcquireMode::exclusive. Never under AcquireMode::shared.
+    [[nodiscard]] auto acquisition_shuts_out(Eui64 const& controller) const noexcept -> bool
+    {
+        return acquire_mode_ == AcquireMode::exclusive && acquired_ && !(acquiring_controller_ == controller);
+    }
 
     /// Build a rejection response: the given status, echoing the command payload so
     /// the controller can match the response. Applies no mutation.
@@ -1507,6 +1532,7 @@ class AemCommandHandler
     // SET_CONTROL of the IDENTIFY control ignores acquire and lock (an option;
     // the standards refuse it like any other SET_CONTROL).
     bool identify_bypasses_exclusive_access_ = false;
+    AcquireMode acquire_mode_{AcquireMode::exclusive};
 
     // Which specification settles the points where 1722.1 and Milan differ.
     Profile profile_ = Profile::classic;

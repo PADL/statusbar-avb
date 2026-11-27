@@ -533,8 +533,9 @@ auto AemCommandHandler::exclusive_access_status(Eui64 const& controller_entity_i
 {
     // ENTITY_ACQUIRED takes precedence over ENTITY_LOCKED (an acquisition is the
     // stronger claim). Either held by a controller OTHER than the sender blocks the
-    // mutation; the owning controller (or a free entity) proceeds.
-    if (acquired_ && !(acquiring_controller_ == controller_entity_id)) {
+    // mutation; the owning controller (or a free entity) proceeds. An
+    // acquisition shuts nobody out under AcquireMode::shared.
+    if (acquisition_shuts_out(controller_entity_id)) {
         return AEM_STATUS_ENTITY_ACQUIRED;
     }
     if (locked_ && !(locking_controller_ == controller_entity_id)) {
@@ -2334,8 +2335,8 @@ auto AemCommandHandler::lock_refusal(AemDu const& header, AemLockEntityPayload c
         return AEM_STATUS_NOT_SUPPORTED;
     }
     // 7.4.2.2: while acquired, only the acquirer may lock or unlock; every other
-    // controller is told ENTITY_ACQUIRED.
-    if (acquired_ && !(acquiring_controller_ == header.controller_entity_id)) {
+    // controller is told ENTITY_ACQUIRED. Under AcquireMode::shared anyone may.
+    if (acquisition_shuts_out(header.controller_entity_id)) {
         return AEM_STATUS_ENTITY_ACQUIRED;
     }
     return std::nullopt;
