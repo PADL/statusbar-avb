@@ -158,12 +158,14 @@ AvbEntityKit::AvbEntityKit(
           memory_resource)}
     , active_clock_source_{initial_clock_source}
     , crf_clock_source_index_{crf_clock_source_index}
+    , clock_source_kinds_{clock_source_kinds(handler.storage())}
 {  // NOLINT(statusbar-block-statements) the kit's construction phases, in order
     if (!listener_specs_.empty()) {
         listener_ = std::make_unique<ListenerStreams>(config_.lock_tolerance_ns, host_.components(), last_gptp_ns, audio_sink);
         listener_->set_presentation_offset_ns(effective_presentation_offset_ns(config_));
     }
 
+    admitted_ = admitted_talker_streams(RawTimePoint{});  // a new gate has no stamp: any instant will do
     configure_milan();
     // ATDECC descriptor wire version: "2016" emits descriptors at their 1722.1-2013/2016 lengths
     // for controllers that reject the 2021 ones; "2021" the full forms; empty, the profile's
@@ -179,8 +181,8 @@ AvbEntityKit::AvbEntityKit(
 void AvbEntityKit::configure_milan()
 {
     // Advertised, so reported from the start: no signal until the application says otherwise.
-    for (auto const& spec : talker_specs_) {
-        output_counters_[spec.index].presence = reports_signal_presence() ? std::optional<uint64_t>{0} : std::nullopt;
+    for (auto const& spec : reports_signal_presence() ? std::span{talker_specs_} : std::span<StreamSpec const>{}) {
+        (void)talker_->set_signal_presence(spec.index, 0);
     }
 }
 
@@ -203,14 +205,15 @@ void AvbEntityKit::configure_talker_streams()
     // The name the entity was given (a saved one replaces it only while the
     // configuration still says this).
     configured_entity_name_ = std::string{storage_handler_.entity_name().as_string_view()};
-    host_.set_on_grandmaster_transition([this](GrandmasterTransition const transition) { follow_grandmaster(transition); });
+    host_.set_on_grandmaster_transition(
+        [this](GrandmasterTransition const transition) { notify_talker_of_transition(transition); });
 }
 
-void AvbEntityKit::follow_grandmaster(GrandmasterTransition const transition) noexcept
+void AvbEntityKit::notify_talker_of_transition(GrandmasterTransition const transition) noexcept
 {
     switch (transition) {  // NOLINT(statusbar-block-statements) one case per transition
         case GrandmasterTransition::changed:
-            talker_->notify_grandmaster_changed(net::monotonic_ns());  // Milan v1.3 Annex B.1.1's window
+            talker_->notify_grandmaster_changed(gate_.told_time());  // the reactor cycle's instant, as the loop told it
             return;
         case GrandmasterTransition::lost:
             talker_->notify_grandmaster_lost();
@@ -221,6 +224,28 @@ void AvbEntityKit::follow_grandmaster(GrandmasterTransition const transition) no
         case GrandmasterTransition::unchanged:
             return;
     }
+}
+
+void AvbEntityKit::follow_grandmaster()
+{
+    // AVTP tu (IEEE 1722-2016 Clause 4.4.4.7, Milan v1.3 Section 4.3.5.2) from the Announce
+    // handler's own observer, which an integrator's GptpAnnounceCallbacks do not replace.
+    auto& announces = host_.net_handlers()->gptp_handler();
+    announces.set_on_grandmaster_changed(
+        [this, &announces](int64_t) { notify_talker_of_grandmaster(announces.has_grandmaster()); });
+    notify_talker_of_grandmaster(announces.has_grandmaster());
+}
+
+void AvbEntityKit::notify_talker_of_grandmaster(bool const in_force) noexcept
+{
+    if (host_.follows_parent_grandmaster()) {
+        return;  // the gPTP stack's transitions drive tu (notify_talker_of_transition)
+    }
+    if (in_force) {
+        talker_->notify_grandmaster_changed(gate_.told_time());  // the reactor cycle's instant, as the loop told it
+        return;
+    }
+    lose_announced_grandmaster();
 }
 
 void AvbEntityKit::lose_announced_grandmaster()
@@ -261,6 +286,10 @@ void AvbEntityKit::configure_profile()
     // Milan v1.3 4.3.3.1: a Talker attribute is declared only while a listener wants the stream.
     host_.components().msrp_handler.set_talker_waits_for_listener(milan);
     apply_mrp_timers(milan);
+    // An acquisition shuts the other controllers out unless the configuration says it is shared.
+    host_.components().aem_handler.set_acquire_mode(
+        config_.acquire_shared ? nanoavb::AemCommandHandler::AcquireMode::shared
+                               : nanoavb::AemCommandHandler::AcquireMode::exclusive);
 }
 
 void AvbEntityKit::apply_acmp_profile(bool const milan)
@@ -327,19 +356,142 @@ void AvbEntityKit::wire_storage_hooks()
         });
     storage_handler_.set_on_sampling_rate_changed(
         [this](uint16_t const unit, uint32_t const rate) -> uint8_t { return change_sampling_rate(unit, rate); });
-    // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN: the entity's hook
-    // decides; domain 0's active source is what media_rate() reads per tick.
-    storage_handler_.set_on_clock_source_changed([this](uint16_t const domain, uint16_t const source) -> uint8_t {
-        if (on_clock_source_changed_ && !applying_local_clock_source_) {
-            if (auto const status = on_clock_source_changed_(domain, source); status != atdecc::AEM_STATUS_SUCCESS) {
-                return status;
-            }
-        }
-        if (domain == 0) {
-            active_clock_source_.store(source, std::memory_order_release);
-        }
+    // SET_CLOCK_SOURCE (IEEE 1722.1-2021 Clause 7.4.23) on any CLOCK_DOMAIN: a source the entity
+    // runs, then the entity's hook; domain 0's active source is what media_rate() reads per tick.
+    storage_handler_.set_on_clock_source_changed(
+        [this](uint16_t const domain, uint16_t const source) -> uint8_t { return change_clock_source(domain, source); });
+}
+
+auto AvbEntityKit::change_clock_source(uint16_t const domain, uint16_t const source) -> uint8_t
+{
+    // IEEE 1722.1-2021 Table 7-126: "the target of the command is not supported".
+    if (domain == 0 && !clock_source_runs(source)) {
+        return atdecc::AEM_STATUS_NOT_SUPPORTED;
+    }
+    if (auto const status = ask_clock_source_hook(domain, source); status != atdecc::AEM_STATUS_SUCCESS) {
+        return status;
+    }
+    if (domain == 0 && active_clock_source_.exchange(source, std::memory_order_acq_rel) != source) {
+        restart_media_clock(domain);
+    }
+    if (!config_.kit_data_plane) {
+        save_clock_sources(domain, source);  // else in the entity-state, with the other settings
+    }
+    return atdecc::AEM_STATUS_SUCCESS;
+}
+
+auto AvbEntityKit::ask_clock_source_hook(uint16_t const domain, uint16_t const source) -> uint8_t
+{
+    if (!on_clock_source_changed_ || applying_local_clock_source_) {
         return atdecc::AEM_STATUS_SUCCESS;
-    });
+    }
+    return on_clock_source_changed_(domain, source);
+}
+
+void AvbEntityKit::run_clock_source(std::string_view const symbol)
+{
+    auto const entry = host_.descriptor_for_symbol(symbol_code(symbol));
+    if (entry.has_value() && entry->descriptor_type == atdecc::aem::DESCRIPTOR_CLOCK_SOURCE &&
+        entry->descriptor_index < MAX_CLOCK_SOURCES) {
+        external_clock_sources_run_.set(entry->descriptor_index);
+    }
+}
+
+auto AvbEntityKit::clock_sources_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::CLOCK_SOURCES, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::CLOCK_SOURCES);
+}
+
+namespace {
+
+[[nodiscard]] auto clock_domain_ref(uint16_t const index) noexcept -> nanoavb::DescriptorRef
+{
+    return {.configuration_index = 0, .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = index};
+}
+
+}  // namespace
+
+void AvbEntityKit::save_clock_sources(uint16_t const domain, uint16_t const source)
+{
+    // Milan v1.3 5.3.11.1: "The current clock source shall be saved in a
+    // non-volatile memory and restored after a power cycle."
+    auto const path = clock_sources_file(true);
+    if (path.empty()) {
+        return;
+    }
+    SavedClockSources sources{};
+    for (uint16_t index = 0; index < MAX_SAVED_CLOCK_SOURCES; ++index) {
+        auto const in_force =
+            index == domain ? std::optional{source} : storage_handler_.current_clock_source(clock_domain_ref(index));
+        if (in_force.has_value()) {
+            sources.push_back(SavedClockSource{.clock_domain = index, .clock_source = *in_force});
+        }
+    }
+    if (auto const saved = avb_entity::save_clock_sources(path, sources); !saved) {
+        host_.ctl_log().error("state: the clock sources were not saved (error {})", saved.error().value());
+    }
+}
+
+void AvbEntityKit::restore_clock_sources()
+{
+    auto const path = config_.kit_data_plane ? std::string{} : clock_sources_file(false);
+    if (path.empty()) {
+        return;  // kit_data_plane: the entity-state's sources go through SET_CLOCK_SOURCE at its load
+    }
+    auto const saved = load_clock_sources(path);
+    if (!saved.has_value()) {
+        host_.ctl_log().error(
+            "state: the saved clock sources cannot be read (error {}); the clock domains keep their authored sources",
+            saved.error().value());
+        return;
+    }
+    for (auto const& one : *saved) {
+        restore_clock_source(one);
+    }
+}
+
+void AvbEntityKit::restore_clock_source(SavedClockSource const& saved)
+{
+    // Asked in this order, so that nothing is taken unless both take it: the
+    // entity can run it, the model still lists it.
+    bool const taken = (saved.clock_domain != 0 || clock_source_runs(saved.clock_source)) &&
+        storage_handler_.set_runtime_clock_source(clock_domain_ref(saved.clock_domain), saved.clock_source);
+    if (!taken) {
+        host_.ctl_log().status(
+            "state: the saved clock source {} of clock domain {} is not one it has now; it keeps its authored source",
+            saved.clock_source,
+            saved.clock_domain);
+        return;
+    }
+    if (saved.clock_domain == 0) {
+        active_clock_source_.store(saved.clock_source, std::memory_order_release);
+    }
+}
+
+void AvbEntityKit::restart_media_clock(uint16_t const domain)
+{
+    // IEEE 1722-2016 Clause 4.4.4.3: each stream the domain's media clock times toggles mr.
+    for (auto const& spec : talker_specs_) {
+        if (spec.clock_domain_index == domain) {
+            (void)talker_->toggle_media_clock_restart(spec.index);  // a stream not open has no AVTPDU to tell
+        }
+    }
+}
+
+void AvbEntityKit::restart_retimed_outputs(RetimedFormats const& retimed)
+{
+    for (auto const& r : retimed) {
+        if (r.type == DESCRIPTOR_STREAM_OUTPUT) {
+            (void)talker_->toggle_media_clock_restart(r.index);  // its media clock restarts (IEEE 1722-2016 Clause 4.4.4.3)
+        }
+    }
 }
 
 void AvbEntityKit::wire_dynamic_mappings()
@@ -696,9 +848,10 @@ auto AvbEntityKit::input_running(uint16_t const idx) const noexcept -> bool
     return components.acmp_listener.is_connected(idx);
 }
 
-auto AvbEntityKit::output_streaming(uint16_t const idx, GateTimePoint const now) const noexcept -> bool
+auto AvbEntityKit::output_streaming(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
-    return talker_should_transmit(idx, now) || (talker_declared(idx) && gate_.listener_admitted(idx, now));
+    bool const transmits = maap_.ready() && !talker_->stream_stopped(idx) && gate_.should_transmit(idx, now);
+    return transmits || (talker_declared(idx) && gate_.listener_admitted(idx, now));
 }
 
 auto AvbEntityKit::talker_declared(uint16_t const idx) const noexcept -> bool
@@ -766,7 +919,7 @@ auto AvbEntityKit::stream_format_refusal(bool const output, StreamSpec const& sp
         return atdecc::AEM_STATUS_NOT_SUPPORTED;
     }
     // Milan v1.2 Section 5.4.2.7.
-    if (output ? output_streaming(spec.index, net::rx_clock_now()) : input_running(spec.index)) {
+    if (output ? output_streaming(spec.index, gate_.told_time()) : input_running(spec.index)) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     if (!mappings_allow_format(output, updated)) {
@@ -832,6 +985,9 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
         if (!retiming_) {
             refresh_output_mappings();  // a re-time refreshes them once, at its end
         }
+        if (talker_->slot_for(updated.index) != nullptr) {
+            talker_->notify_frames_changed(updated.index);  // the entity's hook accepted it: the frames are the new format's
+        }
     }
     host_.ctl_log().status(
         "aem: {} stream {} format {:016x} -> {:016x}",
@@ -841,9 +997,6 @@ void AvbEntityKit::announce_stream_format(uint16_t const type, uint64_t const be
         updated.format_word);
     if (output) {
         readvertise_pending_.set(updated.index);  // its TSpec, handed to MSRP at the next pass (this hook is told no time)
-    }
-    if (output && reports_signal_presence()) {
-        output_counters_[updated.index].narrow_presence(updated.format.channels);  // its presence, at the next fold
     }
 }
 
@@ -1126,7 +1279,7 @@ auto AvbEntityKit::add_own_retimed(
 auto AvbEntityKit::following_format(bool const output, StreamSpec const& spec, uint32_t const rate) const -> std::optional<uint64_t>
 {
     // Milan v1.2 Section 5.4.2.7: a bound input or a streaming output keeps its format.
-    if (output ? output_streaming(spec.index, net::rx_clock_now()) : input_running(spec.index)) {
+    if (output ? output_streaming(spec.index, gate_.told_time()) : input_running(spec.index)) {
         return std::nullopt;
     }
     uint16_t const type = output ? DESCRIPTOR_STREAM_OUTPUT : DESCRIPTOR_STREAM_INPUT;
@@ -1165,6 +1318,9 @@ auto AvbEntityKit::retime_engines(uint32_t const rate, RetimedFormats const& ret
 {
     uint32_t const before = std::exchange(sample_rate_, rate);
     auto const status = retime_all(before, retimed);
+    if (status == atdecc::AEM_STATUS_SUCCESS) {
+        restart_retimed_outputs(retimed);
+    }
     refresh_output_mappings();
     notify_after_response();
     return status;
@@ -1179,6 +1335,7 @@ auto AvbEntityKit::retime_descriptors(uint32_t const rate, RetimedFormats const&
             {.configuration_index = 0, .descriptor_type = r.type, .descriptor_index = r.index}, ieee::Eui64{}.from_uint64(r.to));
         (void)format_notifications_.try_push_back({r.type, r.index});
     }
+    restart_retimed_outputs(retimed);
     notify_after_response();
     host_.ctl_log().status("aem: AUDIO_UNIT 0 at {} Hz, {} streams re-timed", rate, retimed.size());
     return atdecc::AEM_STATUS_SUCCESS;
@@ -1377,7 +1534,12 @@ auto AvbEntityKit::current_vlan_id() const noexcept -> uint16_t
     return active_vlan_id_ != 0 ? active_vlan_id_ : config_.vlan_id;
 }
 
-auto AvbEntityKit::admitted_talker_streams(GateTimePoint const now) const noexcept -> AdmittedStreams
+auto AvbEntityKit::admitted_talker_streams() const noexcept -> AdmittedStreams
+{
+    return admitted_talker_streams(gate_.told_time());
+}
+
+auto AvbEntityKit::admitted_talker_streams(RawTimePoint const now) const noexcept -> AdmittedStreams
 {
     AdmittedStreams admitted{};
     for (auto const& spec : talker_specs_) {
@@ -1388,48 +1550,91 @@ auto AvbEntityKit::admitted_talker_streams(GateTimePoint const now) const noexce
     return admitted;
 }
 
-void AvbEntityKit::notify_admission(GateTimePoint const now)
+void AvbEntityKit::notify_admission(RawTimePoint const now)
 {
-    update_output_streaming(now);
-    auto admitted = admitted_talker_streams(now);
-    if (std::ranges::equal(admitted, admitted_)) {
-        return;
+    arm_admission_deadline(now);
+    auto const admitted = admitted_talker_streams(now);
+    if (!std::ranges::equal(admitted, admitted_)) {
+        admitted_ = admitted;
+        if (on_admission_changed_) {
+            on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+        }
     }
-    admitted_ = admitted;
-    if (on_admission_changed_) {
-        on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    notify_talker_gates();
+}
+
+auto AvbEntityKit::evaluate_talker_gate(uint16_t const idx) const noexcept -> bool
+{
+    bool const admitted = std::ranges::find(admitted_, idx) != admitted_.end();
+    return admitted && maap_.ready() && talker_->slot_for(idx) != nullptr && !talker_->stream_stopped(idx);
+}
+
+void AvbEntityKit::notify_talker_gates() noexcept
+{
+    for (auto const& spec : talker_specs_) {
+        bool const open = evaluate_talker_gate(spec.index);
+        if (spec.index >= talker_gates_.size() || std::exchange(talker_gates_[spec.index], open) == open) {
+            continue;
+        }
+        if (on_talker_gate_changed_) {
+            on_talker_gate_changed_(spec.index, open);
+        }
     }
 }
 
-void AvbEntityKit::arm_admission_deadline(GateTimePoint const now) noexcept
+void AvbEntityKit::arm_admission_deadline(RawTimePoint const now) noexcept
 {
     admission_deadline_.reset();
     for (auto const& spec : talker_specs_) {
-        // A grace running out: one not yet past, its listener no longer registered (admitted at its end).
-        if (auto const ends = gate_.grace_ends(spec.index); ends && now < *ends && !gate_.listener_admitted(spec.index, *ends)) {
+        if (auto const ends = gate_.grace_ends(spec.index); ends && now < *ends && gate_.admitted(spec.index, now)) {
             admission_deadline_ = std::min(admission_deadline_.value_or(*ends), *ends);
         }
     }
 }
 
-void AvbEntityKit::on_admission_timer(GateTimePoint const now)
+void AvbEntityKit::on_admission_timer(RawTimePoint const now)
 {
     if (admission_deadline_ && now >= *admission_deadline_) {
         notify_admission(now);
     }
 }
 
-void AvbEntityKit::update_output_streaming(GateTimePoint const now)
+void AvbEntityKit::tell_cycle_time(int64_t const now_ns, RawTimePoint const raw_now) noexcept
 {
-    if (talker_ == nullptr) {
-        return;
+    cycle_ns_ = now_ns;
+    gate_.tell_time(raw_now);
+}
+
+auto AvbEntityKit::raw_at(int64_t const now_ns) const noexcept -> RawTimePoint
+{
+    auto const told = gate_.told_time();
+    if (told == RawTimePoint{}) {
+        return told;
     }
-    for (auto const& spec : talker_specs_) {
-        bool const on = talker_should_transmit(spec.index, now);
-        if (output_counters_[spec.index].set_streaming(on, talker_stream_totals(*talker_, spec.index))) {
-            (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
-        }
+    using RawClock = RawTimePoint::clock;
+    return RawClock::from_ns(RawClock::to_ns(told) + (now_ns - cycle_ns_));
+}
+
+auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns, RawTimePoint const raw_now) const noexcept -> int
+{
+    int const control_ms = avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
+    if (!admission_deadline_) {
+        return control_ms;
     }
+    using RawClock = RawTimePoint::clock;
+    return avtp::MaapHandler::poll_timeout_ms(RawClock::to_ns(*admission_deadline_), RawClock::to_ns(raw_now), control_ms);
+}
+
+auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
+{
+    return poll_timeout_ms(max_ms, now_ns, raw_at(now_ns));
+}
+
+void AvbEntityKit::end_cycle(int64_t const now_ns)
+{
+    poll_counters(now_ns);
+    run_held_work(now_ns);
+    on_admission_timer(raw_at(now_ns));
 }
 
 void AvbEntityKit::poll_counters(int64_t const now_ns)
@@ -1444,13 +1649,6 @@ void AvbEntityKit::poll_counters(int64_t const now_ns)
     }
 }
 
-void AvbEntityKit::set_output_signal_presence(uint16_t const idx, uint64_t const channels) noexcept
-{
-    if (reports_signal_presence() && is_talker_index(idx)) {
-        output_counters_[idx].set_presence(presence_of(channels, talker_channels(idx)));
-    }
-}
-
 auto AvbEntityKit::talker_channels(uint16_t const idx) const noexcept -> uint16_t
 {
     auto const* const spec = std::ranges::find(talker_specs_, idx, &StreamSpec::index);
@@ -1459,38 +1657,85 @@ auto AvbEntityKit::talker_channels(uint16_t const idx) const noexcept -> uint16_
 
 void AvbEntityKit::fold_stream_counters()
 {
-    auto& aem = host_.components().aem_handler;
-    if (talker_ != nullptr) {
-        for (auto const& spec : talker_specs_) {
-            if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index))) {
-                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
-            }
-        }
+    fold_output_counters();
+    fold_input_counters();
+    if (++counters_folds_ < COUNTERS_NOTIFY_FOLDS) {
+        return;
     }
-    if (listener_ != nullptr) {
-        for (auto const& spec : listener_specs_) {
-            if (listener_->fold_input_counters(spec.index)) {
-                (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
-            }
+    counters_folds_ = 0;
+    notify_changed_counters();
+}
+
+void AvbEntityKit::fold_output_counters()
+{
+    for (auto const& spec : talker_specs_) {
+        if (spec.index >= output_counters_.size()) {
+            continue;
+        }
+        bool const presence_changed = fold_output_presence(spec);
+        if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index)) || presence_changed) {
+            output_counters_changed_[spec.index] = true;
         }
     }
 }
 
-void AvbEntityKit::notify_listener_ready(
-    nanoavb::StreamId const& stream_id, bool const ready, int64_t const /*now_ns*/, GateTimePoint const gate_now)
+void AvbEntityKit::fold_input_counters()
 {
-    gate_.note_listener_ready(stream_id, ready, gate_now);
+    if (listener_ == nullptr) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        if (listener_->fold_input_counters(spec.index) && spec.index < input_counters_changed_.size()) {
+            input_counters_changed_[spec.index] = true;
+        }
+    }
+}
+
+auto AvbEntityKit::take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t const index) const noexcept -> bool
+{
+    return index < changed.size() && std::exchange(changed[index], false) && milan_profile();
+}
+
+void AvbEntityKit::notify_changed_counters()
+{
+    // Milan v1.3 Table 5.20: a notification when a counter changed, one a second per descriptor
+    // at most. IEEE 1722.1 asks for none: there the changes are dropped untold.
+    auto& aem = host_.components().aem_handler;
+    for (auto const& spec : talker_specs_) {
+        if (take_counters_change(output_counters_changed_, spec.index)) {
+            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
+        }
+    }
+    for (auto const& spec : listener_specs_) {
+        if (take_counters_change(input_counters_changed_, spec.index)) {
+            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
+        }
+    }
+}
+
+auto AvbEntityKit::fold_output_presence(StreamSpec const& spec) noexcept -> bool
+{
+    // For change detection alone: GET_COUNTERS reads the presence when it answers.
+    auto const reported = talker_->signal_presence(spec.index).transform([&spec](uint64_t const channels) {
+        return reported_signal_presence(channels, spec.format.channels);
+    });
+    return std::exchange(output_presence_[spec.index], reported) != reported;
+}
+
+void AvbEntityKit::notify_listener_ready(nanoavb::StreamId const& stream_id, bool const ready, RawTimePoint const now)
+{
+    gate_.note_listener_ready(stream_id, ready, now);
     // GET_STREAM_INFO reports the registered Listener (REGISTERING / REGISTERING_FAILED).
     if (auto const idx = talker_index_of(stream_id); idx && refresh_talker_listener(*idx)) {
         notify_talker_stream_info(*idx);
     }
-    notify_admission(gate_now);
+    notify_admission(now);
 }
 
 void AvbEntityKit::publish_talker_connections(uint16_t const idx)
 {
     gate_.note_acmp_connections(idx, static_cast<uint32_t>(host_.components().acmp_talker.connection_count(idx)));
-    notify_admission(net::rx_clock_now());
+    notify_admission(gate_.told_time());
 }
 
 auto AvbEntityKit::is_talker_index(uint16_t const idx) const noexcept -> bool
@@ -1592,7 +1837,7 @@ void AvbEntityKit::notify_all_talkers_withdrawn()
     // No Talker Advertise, no streaming (Milan v1.3 5.3.7.3): close every
     // stream now, without the grace window.
     gate_.notify_talker_withdrawn();
-    notify_admission(net::rx_clock_now());
+    notify_admission(gate_.told_time());
 }
 
 void AvbEntityKit::wire_stream_callbacks()
@@ -1603,8 +1848,9 @@ void AvbEntityKit::wire_stream_callbacks()
     host_.set_withdraw_streams([this](TimePoint time) { withdraw_talker_streams(time); });
     // The transmit gate tracks the MSRP listener declarations against our talker
     // streams; that alone admits a stream (docs/AVB_ENTITY_KIT.md).
-    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool const ready, TimePoint const time) {
-        notify_listener_ready(stream_id, ready, steady_ns_of(time), net::rx_clock_now());
+    // Stamped with the cycle's told instant: the MSRP handler's time is the reactor's, not the gate's.
+    host_.set_on_listener_ready([this](nanoavb::StreamId const& stream_id, bool const ready, TimePoint /*time*/) {
+        notify_listener_ready(stream_id, ready, gate_.told_time());
     });
 
     wire_acmp_callbacks();
@@ -1617,44 +1863,45 @@ void AvbEntityKit::wire_aecp_queries()
     // a talker stream's identity (a Milan listener checks it), a listener sink's binding.
     host_.components().aem_handler.set_get_counters(
         [this](uint16_t descriptor_type, uint16_t descriptor_index, uint32_t& valid, std::array<uint32_t, 32>& counters) -> bool {
-            bool const milan = milan_profile();
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
-                return is_talker_index(descriptor_index) &&
-                    fill_talker_stream_counters(
-                           *talker_, descriptor_index, output_counters_[descriptor_index], milan, valid, counters);
+                // Milan v1.3 Table 5.14 by observation interval; IEEE 1722.1's running counts otherwise.
+                return milan_profile() && is_talker_index(descriptor_index)
+                    ? fill_interval_talker_stream_counters(
+                          *talker_,
+                          descriptor_index,
+                          output_counters_[descriptor_index],
+                          talker_channels(descriptor_index),
+                          valid,
+                          counters)
+                    : fill_talker_stream_counters(*talker_, descriptor_index, valid, counters);
             }
             if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                // Classic keeps IEEE 1722.1's running totals.
-                return milan ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
-                             : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
+                // Milan v1.3 Table 5.13 by observation interval; IEEE 1722.1's running counts otherwise.
+                return milan_profile() ? listener_->fill_interval_stream_input_counters(descriptor_index, valid, counters)
+                                       : listener_->fill_stream_input_counters(descriptor_index, valid, counters);
             }
             return host_.fill_counters(descriptor_type, descriptor_index, valid, counters);
         });
     host_.components().aem_handler.set_get_stream_info(
-        [this](
-            uint16_t descriptor_type,
-            uint16_t descriptor_index,
-            atdecc::aem::AemStreamInfoPayload& out,
-            atdecc::aem::AemStreamInfoMilanExtension& ext) -> bool {
-            bool const milan = milan_profile();
+        [this](uint16_t descriptor_type, uint16_t descriptor_index, atdecc::aem::AemStreamInfoPayload& out) -> bool {
+            bool const ieee_2021 = host_.components().aem_handler.stream_info_length() == atdecc::aem::AEM_STREAM_INFO_2021_LENGTH;
             bool filled = false;
             if (descriptor_type == DESCRIPTOR_STREAM_OUTPUT) {
                 if (!is_talker_index(descriptor_index)) {
                     return false;
                 }
                 TalkerStreamStatus const status{
-                    .milan = milan,
-                    .layout = host_.components().aem_handler.stream_info_layout(),
+                    .milan = milan_profile(),
+                    .ieee_2021 = ieee_2021,
                     .declaring = talker_declared(descriptor_index),
                     .listener = talker_listener_[descriptor_index],
                     .presentation_offset_ns = presentation_offset_ns(descriptor_index),
                     .accumulated_latency_ns = talker_accumulated_latency_ns(descriptor_index),
                     .stopped = talker_->stream_stopped(descriptor_index)};
-                filled = fill_talker_stream_info(host_, descriptor_index, status, out, ext);
+                filled = fill_talker_stream_info(host_, descriptor_index, status, out);
             } else if (descriptor_type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-                auto const layout = host_.components().aem_handler.stream_info_layout();
                 filled = host_.components().acmp_is_milan()
-                    ? fill_milan_listener_stream_info(host_, descriptor_index, layout, out, ext)
+                    ? fill_milan_listener_stream_info(host_, descriptor_index, ieee_2021, out)
                     : fill_listener_stream_info(host_, descriptor_index, listener_->stream_stopped(descriptor_index), out);
             }
             // The fills read the blob's authored format: the stream's current
@@ -1724,8 +1971,7 @@ void AvbEntityKit::wire_ieee_acmp_callbacks()
             listener_->on_listener_connected(stream_index, stream_id, dest_mac, now);
         },
         [this](uint16_t stream_index, TimePoint now) {
-            listener_->on_listener_disconnected(stream_index, now);
-            listener_->notify_input_unbound(stream_index);
+            listener_->on_listener_disconnected(stream_index, now, StreamInputLoss::released);
         });
 }
 
@@ -1784,6 +2030,14 @@ auto AvbEntityKit::talker_registration_for(atdecc::MilanSrpParameters const& srp
     return registered->failed ? atdecc::MilanTalkerRegistration::Failed : atdecc::MilanTalkerRegistration::Advertise;
 }
 
+auto AvbEntityKit::milan_input_loss(uint16_t const stream_index) const -> StreamInputLoss
+{
+    // Read as the sink stops SRP: why it does (Milan v1.3 Table 5.6 exempts only a controller's unbind).
+    auto const* const sink = host_.components().milan_acmp_listener->sink(stream_index);
+    bool const lost = sink != nullptr && sink->context().srp_stop == atdecc::MilanSrpStop::TalkerLost;
+    return lost ? StreamInputLoss::talker_lost : StreamInputLoss::released;
+}
+
 auto AvbEntityKit::probed_talker(atdecc::MilanSrpParameters const& srp) noexcept -> nanoavb::TalkerMatch
 {
     return nanoavb::TalkerMatch{.dest_address = srp.stream_dest_mac, .vlan_id = srp.stream_vlan_id};
@@ -1810,7 +2064,7 @@ void AvbEntityKit::wire_milan_listener_connections(nanoavb::NanoAvbMilanAcmpList
             if (stream_index < input_vid_.size()) {
                 leave_sink_vlan(std::exchange(input_vid_[stream_index], uint16_t{0}), now);
             }
-            listener_->on_listener_disconnected(stream_index, now);
+            listener_->on_listener_disconnected(stream_index, now, milan_input_loss(stream_index));
         });
 }
 
@@ -1855,11 +2109,8 @@ void AvbEntityKit::follow_input_bound(uint16_t const index)
         return;
     }
     if (bound) {
-        listener_->reset_input_counters(index);
-    } else {
-        listener_->notify_input_unbound(index);
+        listener_->reset_input_counters(index);  // Milan v1.3 5.3.8.10: zeroed at a bind, told at the interval's end
     }
-    (void)host_.components().aem_handler.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, index);
 }
 
 auto AvbEntityKit::on_streaming_changed(uint16_t const type, uint16_t const index, bool const streaming) -> uint8_t
@@ -1882,7 +2133,7 @@ auto AvbEntityKit::start_or_stop_output(uint16_t const index, bool const stopped
     // IEEE 1722.1: STOP_STREAMING gates the talker slot; START reopens. It shows in GET_STREAM_INFO
     // as STREAMING_WAIT (IEEE 1722.1-2021 Table 7-145), told to every subscribed controller (7.5.2).
     talker_->set_stream_stopped(index, stopped);
-    notify_admission(net::rx_clock_now());  // STREAM_START / STREAM_STOP now
+    notify_talker_gates();
     (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     return atdecc::AEM_STATUS_SUCCESS;
 }
@@ -1949,7 +2200,7 @@ auto AvbEntityKit::change_presentation_offset(uint16_t const idx, uint32_t const
     }
     // Streaming as Milan v1.2 Section 5.3.7.3 has it: declaring and a Listener Ready / Ready
     // Failed registered (the grace window included), even with the transmit gate disabled.
-    if (config_.kit_data_plane && talker_declared(idx) && gate_.listener_admitted(idx, net::rx_clock_now())) {
+    if (config_.kit_data_plane && talker_declared(idx) && gate_.listener_admitted(idx, gate_.told_time())) {
         return atdecc::AEM_STATUS_STREAM_IS_RUNNING;
     }
     uint32_t const before = presentation_offset_ns(idx);
@@ -2043,6 +2294,7 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
     for (auto const& spec : talker_specs_) {
         (void)indices.try_push_back(spec.index);
     }
+    maap_.set_on_ready_changed([this](bool) { notify_talker_gates(); });
     // On (re)defend: release the ADP start the Link Up held back; the streams
     // declare against the addresses. A conflict withdraws them and a new block
     // waits out 2 x LeaveAll (Milan v1.2 Table 5.3).
@@ -2151,6 +2403,8 @@ auto AvbEntityKit::start_control(net::MessageReactor& reactor, TimePoint const n
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
     restart_milan_sinks(now);
+    restore_clock_sources();
+    follow_grandmaster();
     return start_declarations(reactor, now);
 }
 
@@ -2159,8 +2413,6 @@ void AvbEntityKit::prepare_control_plane()
     // Bring up the shared control plane (net handlers + generic SM wiring),
     // then attach the stream-specific callbacks (hooks + ACMP + AEM handlers).
     gate_.set_logger(host_.ctl_log());
-    // A restarted kit reports its first admitted set afresh.
-    admitted_.clear();
     if (listener_ != nullptr) {
         listener_->set_logger(host_.ctl_log());
     }
@@ -2228,7 +2480,7 @@ auto AvbEntityKit::start_declarations(net::MessageReactor& reactor, TimePoint co
         void tick(int64_t const now_ns) override
         {
             if (auto const kit = kit_.lock(); kit != nullptr) {
-                (*kit)->on_declaration_timer(now_ns);
+                (*kit)->run_held_work(now_ns);
             }
         }
         [[nodiscard]] auto finished() const noexcept -> bool override { return kit_.expired(); }
@@ -2253,6 +2505,7 @@ auto AvbEntityKit::start_data_plane(net::MessageReactor& reactor) -> Status
         }
     }
     open_stream_tx();
+    notify_talker_gates();  // the slots are open: each gate open now is told
     return success();
 }
 
@@ -2463,6 +2716,7 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
         listener_->release_connections(now);  // a Waiting declaration outlives withdraw_all()
     }
     close_data_plane();
+    notify_talker_gates();  // no slot: every gate closes
     if (!host_.is_running()) {
         return failure(std::make_error_code(std::errc::not_connected));
     }
@@ -2503,21 +2757,6 @@ void AvbEntityKit::close_streams() noexcept
         listener_->close_rx();
     }
     stream_port_.close();
-}
-
-auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns, RawTimePoint const raw_now) const noexcept -> int
-{
-    int const control_ms = avtp::MaapHandler::poll_timeout_ms(next_control_deadline_ns(), now_ns, max_ms);
-    if (!admission_deadline_) {
-        return control_ms;
-    }
-    using RawClock = RawTimePoint::clock;
-    return avtp::MaapHandler::poll_timeout_ms(RawClock::to_ns(*admission_deadline_), RawClock::to_ns(raw_now), control_ms);
-}
-
-auto AvbEntityKit::poll_timeout_ms(int const max_ms, int64_t const now_ns) const noexcept -> int
-{
-    return poll_timeout_ms(max_ms, now_ns, raw_at(now_ns));
 }
 
 auto AvbEntityKit::next_control_deadline_ns() const noexcept -> std::optional<int64_t>
@@ -2667,7 +2906,7 @@ void AvbEntityKit::close_data_plane()
     }
 }
 
-void AvbEntityKit::on_declaration_timer(int64_t const now_ns)
+void AvbEntityKit::run_held_work(int64_t const now_ns)
 {
     // A listener goal change during this pass is saved now, after its ACMP
     // response.
@@ -2889,7 +3128,9 @@ void AvbEntityKit::apply_saved_names(PersistentState const& saved)
 void AvbEntityKit::apply_saved_mvu_settings(PersistentState const& saved)
 {
     auto& aem = host_.components().aem_handler;
-    aem.set_system_unique_id(saved.system_unique_id, atdecc::aem::AtdeccString{saved.system_unique_name});
+    if (!aem.restore_system_unique_id(saved.system_unique_id, atdecc::aem::AtdeccString{saved.system_unique_name})) {
+        host_.ctl_log().warning("persistent state: the saved system unique name is not UTF-8; not restored");
+    }
     for (auto const& mcr : saved.media_clock_references) {
         if (mcr.clock_domain >= clock_domain_count() ||
             !aem.restore_media_clock_reference_info(
@@ -2997,9 +3238,11 @@ void AvbEntityKit::collect_stream_settings(PersistentState& state) const
     }
     storage_handler_.for_each_runtime_sampling_rate(
         [&state](uint16_t const unit, uint32_t const rate) { state.sampling_rates.push_back({.audio_unit = unit, .rate = rate}); });
-    storage_handler_.for_each_runtime_clock_source([&state](uint16_t const domain, uint16_t const source) {
-        state.clock_sources.push_back({.clock_domain = domain, .clock_source = source});
-    });
+    if (config_.kit_data_plane) {  // else in the clock-sources file (save_clock_sources)
+        storage_handler_.for_each_runtime_clock_source([&state](uint16_t const domain, uint16_t const source) {
+            state.clock_sources.push_back({.clock_domain = domain, .clock_source = source});
+        });
+    }
     for (auto const& spec : talker_specs_) {
         if (auto const ns = presentation_offset_ns(spec.index); ns != default_presentation_offset_ns()) {
             state.presentation_offsets.push_back({.stream_output = spec.index, .ns = ns});
@@ -3086,8 +3329,9 @@ void AvbEntityKit::collect_listener_bindings(PersistentState& state) const
 void AvbEntityKit::collect_mvu_settings(PersistentState& state) const
 {
     auto const& aem = host_.components().aem_handler;
-    state.system_unique_id = aem.system_unique_id();
-    state.system_unique_name = std::string{aem.system_unique_name().as_string_view()};
+    auto const unique = aem.system_unique_id();
+    state.system_unique_id = unique.system_unique_id.get();
+    state.system_unique_name = std::string{unique.system_name.as_string_view()};
     for (size_t index = 0; index < clock_domain_count(); ++index) {
         auto const info = aem.media_clock_reference_info(static_cast<uint16_t>(index));
         auto const name = info.media_clock_domain_name.as_string_view();
@@ -3201,97 +3445,6 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
     for (auto const& spec : talker_specs_) {
         readvertise_talker(spec, time);
     }
-}
-
-void AvbEntityKit::end_cycle(int64_t const now_ns)
-{
-    poll_counters(now_ns);
-    on_admission_timer(raw_at(now_ns));
-}
-
-void AvbEntityKit::poll_counters(int64_t const now_ns)
-{
-    if (next_counters_fold_ns_.has_value() && now_ns < *next_counters_fold_ns_) {
-        return;
-    }
-    bool const first = !next_counters_fold_ns_.has_value();
-    next_counters_fold_ns_ = now_ns + COUNTERS_INTERVAL_NS;
-    if (!first) {  // else the first interval starts now
-        fold_stream_counters();
-    }
-}
-
-void AvbEntityKit::fold_stream_counters()
-{
-    fold_output_counters();
-    fold_input_counters();
-    if (++counters_folds_ < COUNTERS_NOTIFY_FOLDS) {
-        return;
-    }
-    counters_folds_ = 0;
-    notify_changed_counters();
-}
-
-void AvbEntityKit::fold_output_counters()
-{
-    for (auto const& spec : talker_specs_) {
-        if (spec.index >= output_counters_.size()) {
-            continue;
-        }
-        bool const presence_changed = fold_output_presence(spec);
-        if (output_counters_[spec.index].fold(talker_stream_totals(*talker_, spec.index)) || presence_changed) {
-            output_counters_changed_[spec.index] = true;
-        }
-    }
-}
-
-void AvbEntityKit::fold_input_counters()
-{
-    if (listener_ == nullptr) {
-        return;
-    }
-    for (auto const& spec : listener_specs_) {
-        if (listener_->fold_input_counters(spec.index) && spec.index < input_counters_changed_.size()) {
-            input_counters_changed_[spec.index] = true;
-        }
-    }
-}
-
-auto AvbEntityKit::take_counters_change(std::array<bool, MAX_ENTITY_STREAMS>& changed, uint16_t const index) const noexcept -> bool
-{
-    return index < changed.size() && std::exchange(changed[index], false) && milan_profile();
-}
-
-void AvbEntityKit::notify_changed_counters()
-{
-    // Milan v1.3 Table 5.20: a notification when a counter changed, one a second per descriptor
-    // at most. IEEE 1722.1 asks for none: there the changes are dropped untold.
-    auto& aem = host_.components().aem_handler;
-    for (auto const& spec : talker_specs_) {
-        if (take_counters_change(output_counters_changed_, spec.index)) {
-            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_OUTPUT, spec.index);
-        }
-    }
-    for (auto const& spec : listener_specs_) {
-        if (take_counters_change(input_counters_changed_, spec.index)) {
-            (void)aem.notify_counters_changed(DESCRIPTOR_STREAM_INPUT, spec.index);
-        }
-    }
-}
-
-auto AvbEntityKit::fold_output_presence(StreamSpec const& spec) noexcept -> bool
-{
-    // For change detection alone: GET_COUNTERS reads the presence when it answers.
-    auto const reported = talker_->signal_presence(spec.index).transform([&spec](uint64_t const channels) {
-        return reported_signal_presence(channels, spec.format.channels);
-    });
-    return std::exchange(output_presence_[spec.index], reported) != reported;
-}
-
-auto AvbEntityKit::output_channels(uint16_t const index) const noexcept -> uint16_t
-{
-    auto const* const it = std::ranges::find(talker_specs_, index, &StreamSpec::index);
-    return it == talker_specs_.end() ? uint16_t{0} : it->format.channels;
 }
 
 }  // namespace statusbar::avb_entity

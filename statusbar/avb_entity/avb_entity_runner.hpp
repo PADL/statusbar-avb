@@ -152,6 +152,14 @@ inline void add_atdecc_arg_specs(args::ArgumentSpecs& specs, AvbEntityAudioIOCon
         "other SET_CONTROL (ENTITY_ACQUIRED / ENTITY_LOCKED).",
         entity.identify_bypasses_lock,
         [&entity](auto v) { entity.identify_bypasses_lock = v; });
+    specs.add<bool>(
+        "atdecc.acquire_shared",
+        "Grant an ACQUIRE_ENTITY without shutting the other controllers out: the acquirer is answered SUCCESS and "
+        "reported as the owner, and any controller's SET and LOCK_ENTITY still goes through. For a controller that "
+        "insists on acquiring the entity while another sets its controls. Default off: IEEE 1722.1-2021 7.4.1 "
+        "answers the others ENTITY_ACQUIRED. No effect under the Milan profile, which grants no acquisition.",
+        entity.acquire_shared,
+        [&entity](auto v) { entity.acquire_shared = v; });
     specs.add<std::string>(
         "atdecc.profile",
         "Where IEEE 1722.1-2021 and Milan v1.3 differ: 'classic' reads 1722.1 as written (every SET answered SUCCESS "
