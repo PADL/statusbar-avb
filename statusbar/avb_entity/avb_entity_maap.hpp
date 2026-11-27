@@ -165,6 +165,11 @@ class MaapAddressAcquirer
     /// conflict, a Link Up re-probe, the stop), after each stream's ACMP
     /// destination address has been zeroed (Milan v1.2 Table 5.3), told the reactor time.
     using LostFn = statusbar::sg14::inplace_function<void(sm::TimePoint), 32>;
+    /// Called on the reactor thread with ready() at each change: a set-up that gates, a block defended or lost, stop().
+    /// Not for the state at install; a later install replaces an earlier one, an empty function removes it. It must
+    /// not throw.
+    using ReadyChangedFn = statusbar::sg14::inplace_function<void(bool ready), 32>;
+    void set_on_ready_changed(ReadyChangedFn fn) noexcept { on_ready_changed_ = std::move(fn); }
 
     /// Set up the acquisition of one MAAP block covering the given talker
     /// stream indices (block offset = position in the list). Nothing goes on
@@ -310,7 +315,7 @@ class MaapAddressAcquirer
         if (!net_handler->valid()) {
             log_->warning("maap: socket open failed; using static stream dest MACs");
             fell_back_to_static_ = true;
-            ready_.store(true, std::memory_order_release);  // fall back: do not gate
+            set_ready(true);  // fall back: do not gate
             return {};
         }
         // Gate stream TX until the block is defended. ADP/gPTP/SRP/ACMP are
@@ -348,7 +353,7 @@ class MaapAddressAcquirer
             // and a talker that declares on demand withdraws its Talker
             // attributes at the SRP handler's next tick (Milan v1.3 4.3.3.1:
             // an address in conflict is not a valid one).
-            ready_.store(false, std::memory_order_release);
+            set_ready(false);
             components.msrp_handler.set_talker_addresses_valid(false);
             // The media slot keeps its MAC; the control plane's is zeroed (Milan v1.2 Table 5.3).
             for (auto const idx : indices_) {
@@ -408,6 +413,7 @@ class MaapAddressAcquirer
     sg14::inplace_vector<uint16_t, MAX_ENTITY_STREAMS> indices_{};
     ReadyFn on_addresses_ready_{};
     LostFn on_addresses_lost_{};
+    ReadyChangedFn on_ready_changed_{};
     std::optional<logging::Logger> log_{};  ///< set by setup (Logger is not default-constructible)
     std::string range_file_{};              ///< empty: nothing saved, every start draws afresh
 };

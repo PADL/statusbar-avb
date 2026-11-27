@@ -37,6 +37,7 @@
 #include "statusbar/net/net_launch_order.hpp"
 #include "statusbar/net/net_linux_xdp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
+#include "statusbar/net/net_test_port.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
 #include "statusbar/status/status.hpp"
 

@@ -27,6 +27,8 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/ieee/ieee_protocols.hpp"
+#include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_rawnet.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
@@ -141,18 +143,6 @@ struct StreamFrameTemplate
     [[nodiscard]] auto write(uint8_t sequence, uint32_t timestamp, bool mr, bool tu, std::span<uint8_t> out) const noexcept -> bool;
 };
 
-/// One STREAM_OUTPUT's transmitted AVTPDUs for GET_COUNTERS: how many, how many
-/// with tu set, how many toggled mr. The media thread is the one writer (a
-/// relaxed load and store, no read-modify-write); the reactor reads.
-struct TalkerTxCounters
-{
-    std::atomic<uint32_t> pdus{0};
-    std::atomic<uint32_t> tu_pdus{0};
-    std::atomic<uint32_t> mr_toggles{0};
-    bool last_mr{false};  ///< media thread only
-    bool have_mr{false};  ///< media thread only
-};
-
 struct TalkerStreams
 {
     TalkerStreams(
@@ -240,6 +230,8 @@ struct TalkerStreams
     }
     /// No grandmaster is in force: tu until one is. Reactor thread, the one writer.
     void notify_grandmaster_lost() noexcept { uncertainty_.store({.grandmaster_lost = true}); }
+    /// This entity is the grandmaster: its time base does not step, so tu is clear and a window cut short.
+    void notify_own_grandmaster() noexcept { uncertainty_.store({}); }
     /// Whether an AVTPDU sent at @p now_ns, on the same clock, carries tu: never before the first
     /// notify_grandmaster_*, and 0, an instant never told, is in no window, so a talker that is
     /// told no time sends tu only while no grandmaster is in force. Any thread; lock-free
@@ -325,6 +317,11 @@ struct TalkerStreams
     /// from CRF, a format open_stream() refuses.
     [[nodiscard]] auto reformat_stream(StreamSpec const& spec) -> Status;
 
+    /// The most timestamps one CRF AVTPDU of this talker carries: the frame
+    /// transmit_crf() builds has room for these and no more. A stream format
+    /// can ask for up to 255.
+    static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
+
     /// The slot whose spec.index == @p stream_index (the STREAM_OUTPUT
     /// descriptor index == ACMP talker unique id), or nullptr.
     [[nodiscard]] auto slot_for(uint16_t stream_index) noexcept -> TalkerStreamSlot*;
@@ -371,35 +368,6 @@ struct TalkerStreams
         bool gate_open,
         size_t samples,
         std::span<float const> src);
-
-    /// How long AVTP tu stays set after a grandmaster change (Milan v1.2 Section 4.3.5.2, Annex
-    /// B.1.1); tu is also set while no grandmaster is known at all. Reactor thread writes,
-    /// media thread reads; an entity that never reports gPTP state never sets tu.
-    static constexpr int64_t TU_AFTER_GM_CHANGE_NS = 250'000'000;
-    /// A grandmaster was found or changed at steady-clock time @p now_ns.
-    void notify_grandmaster_changed(int64_t const now_ns) noexcept
-    {
-        tu_until_ns_.store(now_ns + TU_AFTER_GM_CHANGE_NS, std::memory_order_relaxed);
-        gptp_lost_.store(false, std::memory_order_relaxed);
-    }
-    /// No grandmaster is known (the Announces stopped, or a gPTP stack names none): tu until one is.
-    void notify_grandmaster_lost() noexcept { gptp_lost_.store(true, std::memory_order_relaxed); }
-    /// This entity is the grandmaster: its time base does not step, so tu is clear, a window cut short.
-    void notify_own_grandmaster() noexcept
-    {
-        tu_until_ns_.store(0, std::memory_order_relaxed);
-        gptp_lost_.store(false, std::memory_order_relaxed);
-    }
-    /// Whether a PDU stamped at steady-clock time @p now_ns carries tu = 1.
-    [[nodiscard]] auto timestamp_uncertain(int64_t const now_ns) const noexcept -> bool
-    {
-        return gptp_lost_.load(std::memory_order_relaxed) || now_ns < tu_until_ns_.load(std::memory_order_relaxed);
-    }
-
-    /// A media clock restart on STREAM_OUTPUT @p stream_index: mr toggles on its next PDU, at least MR_HOLD_PDUS after
-    /// the last toggle (IEEE 1722-2016 Clause 4.4.4.3), and stays; requests before then toggle it once. Any thread,
-    /// lock-free, no allocation. invalid_argument for no open stream of that index.
-    [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
 
     /// STOP_STREAMING gate for one STREAM_OUTPUT descriptor index (kit
     /// phase 5): a stopped stream is treated as gate-closed by
@@ -467,12 +435,8 @@ struct TalkerStreams
         }
     }
 
-    /// The transmit counters of STREAM_OUTPUT @p stream_index (nullptr past
-    /// MAX_ENTITY_STREAMS). Any thread.
-    [[nodiscard]] auto tx_counters(uint16_t const stream_index) const noexcept -> TalkerTxCounters const*
-    {
-        return stream_index < tx_counters_.size() ? &tx_counters_[stream_index] : nullptr;
-    }
+    /// on_frames_changed_ told of STREAM_OUTPUT @p stream_index, if set.
+    void notify_frames_changed(uint16_t stream_index) const noexcept;
 
     /// One CRF PDU whose timestamps start at `base_index` in the media-clock
     /// sample-index domain (callers pass the LIVE position; see crf_aligned_base).
@@ -525,6 +489,11 @@ struct TalkerStreams
     /// told first as for offload_header().
     [[nodiscard]] auto notify_offload_sent(TalkerStreamSlot& slot, bool gate_open, OffloadSent const& sent) noexcept
         -> OffloadHeader;
+    /// offload_header() and notify_offload_sent() for a talker whose slots reformat_stream() may re-shape
+    /// meanwhile: nullopt, nothing counted, while @p slot is being re-shaped (ask again at the next wake).
+    [[nodiscard]] auto try_offload_header(TalkerStreamSlot& slot) noexcept -> std::optional<OffloadHeader>;
+    [[nodiscard]] auto try_notify_offload_sent(TalkerStreamSlot& slot, bool gate_open, OffloadSent const& sent) noexcept
+        -> std::optional<OffloadHeader>;
     /// @p sent counted on @p slot and its stream's TalkerTxCounters, its mr hold run down, its sequence moved on.
     void count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept;
     /// @p slot's header with mr @p mr: its next sequence_num, tu at the wake last told.
@@ -541,13 +510,6 @@ struct TalkerStreams
         std::span<float const> src);
     void serve_crf(TalkerStreamSlot& slot, ptpclient::MediaClockGenerator::Emit const& tick, bool gate_open, size_t samples);
 
-    /// The AVTPDUs a toggled mr stays in its new state for, at least (IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3).
-    static constexpr uint8_t MR_HOLD_PDUS = 8;
-
-    /// The most timestamps one CRF PDU carries: open_stream refuses a CRF
-    /// format declaring more (or none), so the TX paths size their buffers by it.
-    static constexpr uint16_t MAX_CRF_TIMESTAMPS_PER_PDU = 64;
-
     // References / values (bound at construction).
     TalkerStreamsConfig config_;  ///< destructured entity config (rate + VLAN/PCP), by value
     /// The VLAN tag every stream frame carries: the configured one until
@@ -555,16 +517,15 @@ struct TalkerStreams
     /// Atomics: written from the control thread, read per frame on the media thread.
     std::atomic<uint16_t> vlan_id_{config_.vlan_id};
     std::atomic<uint8_t> stream_pcp_{config_.stream_pcp};
-    std::atomic<int64_t> tu_until_ns_{0};  ///< steady-clock end of the post-GM-change tu window
-    std::atomic<bool> gptp_lost_{false};   ///< no grandmaster known: tu on every PDU
+    FramesChangedFn on_frames_changed_{};
+    /// When the AVTPDUs carry tu (notify_grandmaster_*): the reactor writes, the media thread reads.
+    itc::SeqlockValue<TimestampUncertainty> uncertainty_{};
+    /// The media wake now being served (tell_wake_time). Media thread only.
+    RawTimePoint wake_now_{};
     ptpclient::MediaClockGenerator const& media_clock_;
     std::atomic<int64_t> const& last_gptp_ns_;
     std::pmr::memory_resource* mem_resource_;
 
-    /// STREAM_OUTPUT @p stream_index opened: toggles accepted from now on, none pending.
-    void mark_open(uint16_t stream_index) noexcept;
-    /// The mr bit @p slot's next PDU carries: toggled once for the restarts requested since its last. Media thread.
-    [[nodiscard]] auto next_mr(TalkerStreamSlot& slot) noexcept -> bool;
     /// Build @p slot's serializer (and AAF reframer) for @p spec, its stream
     /// @p stream_id: what open_stream and reformat_stream share.
     [[nodiscard]] auto shape(TalkerStreamSlot& slot, StreamSpec const& spec, tsn::StreamId stream_id) -> Status;
@@ -602,6 +563,9 @@ struct TalkerStreams
         Serialize const& serialize) -> bool;
     /// @p slot's 802.1Q-tagged stream header at the start of @p buffer: its length, 0 when it does not fit.
     [[nodiscard]] auto store_stream_header(TalkerStreamSlot const& slot, std::span<uint8_t> buffer) const noexcept -> size_t;
+    /// @p slot's 802.1Q-tagged stream header from @p src_mac: its destination, the VID and PCP in force.
+    [[nodiscard]] auto stream_header(TalkerStreamSlot const& slot, ieee::Eui48 const& src_mac) const noexcept
+        -> ieee::EthernetFrame;
     /// Up to @p length octets of @p buffer after its @p header octets: where the AVTPDU is serialized.
     [[nodiscard]] static auto payload_window(std::span<uint8_t> buffer, size_t header, size_t length) noexcept
         -> std::span<uint8_t>;
@@ -609,8 +573,6 @@ struct TalkerStreams
     /// launch time fixed now, StreamPort::stamp_launch_time), counted on @p slot.
     [[nodiscard]] auto commit_frame(
         TalkerStreamSlot& slot, net::EthernetTxSlot const& frame, size_t header, size_t length, uint64_t launch_time_ns) -> bool;
-    /// One sent AVTPDU @p frame counted on @p slot.
-    void count_sent(TalkerStreamSlot& slot, std::span<uint8_t const> frame) noexcept;
     /// Record @p length bytes of @p slot to the pcap tap when armed, then commit. Under the guard.
     [[nodiscard]] auto commit_stream_frame(net::EthernetTxSlot const& slot, size_t length) -> bool;
 
@@ -623,14 +585,24 @@ struct TalkerStreams
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream transmit counters, by STREAM_OUTPUT index (see tx_counters).
     std::array<TalkerTxCounters, MAX_ENTITY_STREAMS> tx_counters_{};
-    /// Per-stream media clock restart pending (toggle_media_clock_restart): the open generation it was asked of, 0
-    /// for none; it fires only on that generation. By STREAM_OUTPUT index.
-    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_pending_{};
-    /// Each STREAM_OUTPUT index's open generation, bumped by every open_stream (mark_open); 0 before the first.
-    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> open_generation_{};
-    /// A slot is open at this STREAM_OUTPUT index (open_stream), for toggle_media_clock_restart.
-    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> open_{};
-    static_assert(std::atomic<bool>::is_always_lock_free && std::atomic<uint32_t>::is_always_lock_free);
+    /// Per-stream signal presence (set_signal_presence), SIGNAL_PRESENCE_REPORTED set once reported.
+    std::array<std::atomic<uint64_t>, MAX_ENTITY_STREAMS> signal_presence_{};
+    static constexpr uint64_t SIGNAL_PRESENCE_REPORTED = uint64_t{1} << 63U;
+    /// Per-stream media clock restart requests, counted by whichever thread asks (toggle_media_clock_restart).
+    std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_requests_{};
+    /// Whether STREAM_OUTPUT index is open: what toggle_media_clock_restart() may read on any
+    /// thread, where slots_ is the opening thread's. Set by open_stream(), cleared by close_tx().
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_open_{};
+    /// STREAM_OUTPUT @p stream_index is open, or no longer; nothing past MAX_ENTITY_STREAMS.
+    void mark_open(uint16_t stream_index, bool open) noexcept;
+    /// @p slot, opened, joins the slots: the restart requests so far are not its own, and it is
+    /// marked open once it is among them.
+    void keep_opened(TalkerStreamSlot slot);
+    /// The requests counted for STREAM_OUTPUT @p stream_index, 0 past MAX_ENTITY_STREAMS.
+    [[nodiscard]] auto mr_requests(uint16_t stream_index) const noexcept -> uint32_t;
+    /// Whether @p slot owes a toggle of mr: a request or a re-anchor it has not followed. Media thread.
+    [[nodiscard]] auto restart_owed(TalkerStreamSlot const& slot) const noexcept -> bool;
+
     StreamPort* port_{nullptr};  ///< the link (open_tx); borrowed
     /// The TX kick lives on another thread (set_external_kick).
     bool external_kick_{false};
