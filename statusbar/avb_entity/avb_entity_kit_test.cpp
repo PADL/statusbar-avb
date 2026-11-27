@@ -1448,4 +1448,204 @@ TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_inside_the_window_after_
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
 }
 
+//
+// AVTP mr on the wire - IEEE 1722-2016 Clauses 4.4.4.3, 10.4.3
+//
+
+namespace {
+
+/// The mr of each AVTPDU in @p captured.
+auto mrs(std::vector<StreamBits> const& captured) -> std::vector<bool>
+{
+    std::vector<bool> out;
+    std::ranges::transform(captured, std::back_inserter(out), [](StreamBits const& b) { return b.mr; });
+    return out;
+}
+
+/// The mr of @p count AVTPDUs the kit's @p kind output sends in a wake past the tu window, as
+/// captured on @p wire.
+auto send_mr(KitUnderTest& kit, net::TestPortContext& wire, StreamKind const kind, size_t const count) -> std::vector<bool>
+{
+    return mrs(send(kit, wire, kind, count, wake_after(std::chrono::seconds{1})));
+}
+
+/// Runs of mr: each (count, value) in turn.
+auto runs(std::initializer_list<std::pair<size_t, bool>> const parts) -> std::vector<bool>
+{
+    std::vector<bool> out;
+    for (auto const& [count, value] : parts) {
+        out.insert(out.end(), count, value);
+    }
+    return out;
+}
+
+/// The toggles of mr from one AVTPDU to the next in @p sent: what MEDIA_RESET counts of them.
+auto toggles(std::vector<bool> const& sent) -> uint32_t
+{
+    uint32_t count = 0;
+    for (size_t i = 1; i < sent.size(); ++i) {
+        count += sent[i] != sent[i - 1] ? 1U : 0U;
+    }
+    return count;
+}
+
+constexpr size_t HOLD = TalkerStreams::MR_HOLD_PDUS;
+
+/// The tone kit started on a test port with a grandmaster announced, so the AVTPDUs send_mr()
+/// sends carry tu clear and a frame's bits are its mr alone.
+auto start_certain(KitUnderTest& kit, TimePoint const now) -> net::TestPortContext*
+{
+    auto* const wire = start_streaming(kit, now);
+    (void)announce_grandmaster(kit);
+    return wire;
+}
+
+/// SET_CLOCK_SOURCE of clock domain 0 to @p source, as a controller asks it; the status answered.
+auto set_clock_source(KitUnderTest& kit, uint16_t const source) -> uint8_t
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_SET_CLOCK_SOURCE, atdecc::aem::AemClockSourcePayload::LENGTH);
+    header.controller_entity_id = RATE_CONTROLLER_A;
+    atdecc::aem::AemClockSourcePayload const asked{
+        .descriptor_type = atdecc::aem::DESCRIPTOR_CLOCK_DOMAIN, .descriptor_index = 0, .clock_source_index = source};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out).status;
+}
+
+}  // namespace
+
+// A restart toggles mr on the next AVTPDU, which keeps it for eight; one asked inside the hold
+// toggles it back on the first after. MEDIA_RESET counts the toggles the frames carry.
+TEST(avb_entity_kit_mr, a_media_clock_restart_toggles_mr_on_the_wire_and_holds_it_for_eight_avtpdus)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        auto const index = kit->talker().slot_of(kind)->spec.index;
+        auto sent = send_mr(kit, *wire, kind, 2);
+        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
+        auto const first = send_mr(kit, *wire, kind, 1);
+        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
+        auto const rest = send_mr(kit, *wire, kind, HOLD - 1 + HOLD + 1);
+        sent.insert(sent.end(), first.begin(), first.end());
+        sent.insert(sent.end(), rest.begin(), rest.end());
+        EXPECT_TRUE(sent == runs({{2, false}, {HOLD, true}, {HOLD + 1, false}}));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), toggles(sent));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), sent.size());
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+// The media clock re-anchored on a gPTP timeline stepped seconds ahead restarts every stream it
+// times: each kind's next AVTPDU toggles mr and holds it. One that keeps time toggles nothing.
+TEST(avb_entity_kit_mr, a_stepped_re_anchor_toggles_mr_on_every_kind_of_avtpdu)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, 1) == runs({{1, false}}));  // the first AVTPDU knows the clock's steps
+    }
+    (void)kit.media_clock().advance(1'000'125'000, 1.0, 6);  // on time
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, 1) == runs({{1, false}}));
+    }
+    (void)kit.media_clock().advance(9'000'000'000, 1.0, 6);
+    EXPECT_EQ(kit.media_clock().step_count(), 1U);
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD) == runs({{HOLD, true}}));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 1U);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+// SET_CLOCK_SOURCE to another source of clock domain 0 restarts the media clock of the domain's
+// outputs: mr toggles on each kind's next AVTPDU. The source in force named again restarts nothing.
+TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_every_kind_of_avtpdu_and_the_same_one_does_not)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, 2) == runs({{2, false}}));
+    }
+    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD) == runs({{HOLD, true}}));
+    }
+    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, 2) == runs({{2, true}}));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 1U);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+// An accepted SET_SAMPLING_RATE re-times the AAF output, whose next AVTPDU toggles mr; the CRF
+// output it does not move, and a rate the data plane refuses, toggle nothing.
+TEST(avb_entity_kit_mr, an_accepted_sampling_rate_toggles_mr_on_the_retimed_output_alone)
+{
+    KitUnderTest kit{make_rates_config("classic")};
+    auto* const wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    RateControllers controllers{kit};  // after the start, which gives the AEM handler its socket
+    UnitRateRecorder data_plane;
+    data_plane.install(kit);
+    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, 2) == runs({{2, false}}));
+    data_plane.answer = atdecc::AEM_STATUS_STREAM_IS_RUNNING;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_STREAM_IS_RUNNING);
+    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, 2) == runs({{2, false}}));
+    data_plane.answer = atdecc::AEM_STATUS_SUCCESS;
+    EXPECT_EQ(controllers.set_rate(96'000), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::aaf, HOLD) == runs({{HOLD, true}}));
+    EXPECT_TRUE(send_mr(kit, *wire, StreamKind::crf, 2) == runs({{2, false}}));
+    EXPECT_EQ(output_counter(kit, StreamKind::aaf, stream_output_media_reset_bit), 1U);
+    EXPECT_EQ(output_counter(kit, StreamKind::crf, stream_output_media_reset_bit), 0U);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+}
+
+// A stop ends the streams: the next start's first AVTPDUs carry mr clear, whatever the last run
+// sent or asked, and MEDIA_RESET counts no toggle at the reopen.
+TEST(avb_entity_kit_mr, a_stream_reopened_after_a_stop_starts_with_mr_clear)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    auto* wire = start_certain(kit, TimePoint{std::chrono::seconds{1}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        auto const index = kit->talker().slot_of(kind)->spec.index;
+        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());
+        EXPECT_TRUE(send_mr(kit, *wire, kind, 3) == runs({{3, true}}));
+        EXPECT_TRUE(kit->talker().toggle_media_clock_restart(index).has_value());  // inside the hold: owed at the stop
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+
+    wire = start_certain(kit, TimePoint{std::chrono::seconds{3}});
+    EXPECT_TRUE(wire != nullptr);
+    if (wire == nullptr) {
+        return;
+    }
+    for (auto const kind : ALL_KINDS) {
+        EXPECT_TRUE(send_mr(kit, *wire, kind, HOLD + 1) == runs({{HOLD + 1, false}}));
+        EXPECT_EQ(output_counter(kit, kind, stream_output_media_reset_bit), 0U);
+        EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 3U + HOLD + 1);
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
