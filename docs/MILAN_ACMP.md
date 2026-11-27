@@ -343,6 +343,37 @@ What follows from that:
 | Probe answered, timed out or refused | none | when the Probing or ACMP status changed |
 | Talker attribute registered, failed or gone, sink settled | none | at the next tick, to all |
 
+### GET_STREAM_INFO of a stream input (5.4.2.10.1, Table 5.8)
+
+A sink's state decides what GET_STREAM_INFO says of its stream input. The
+kit reads it from the sink and from MSRP (`AvbEntityKit::milan_sink_stream_info`)
+and `avb_entity_stream_info.hpp` turns it into the flags and fields:
+
+| The input is | Flags set | Fields that are not zero |
+|---|---|---|
+| not bound | STREAM_FORMAT_VALID | the format |
+| bound | FAST_CONNECT, SAVED_STATE, CONNECTED; STREAMING_WAIT while it is stopped | |
+| bound, registering no matching Talker attribute | NOT_REGISTERING_SRP | |
+| settled | STREAM_ID_VALID, STREAM_DEST_MAC_VALID, STREAM_VLAN_ID_VALID | the stream's id, destination address and VLAN as the PROBE_TX_RESPONSE gave them |
+| settled, registering a matching Talker Advertise | MSRP_ACC_LAT_VALID | the attribute's accumulated latency |
+| settled, registering a matching Talker Failed | MSRP_ACC_LAT_VALID, SRP_REGISTRATION_FAILED, MSRP_FAILURE_VALID | the latency, the failure's bridge id and code |
+
+"Matching" is the match of 5.3.8.8 the sink itself goes by: the StreamID
+on the destination address and VLAN it probed. `MsrpHandler::registered_talker()`
+gives the attribute with its latency and failure information.
+
+Table 5.20 has a GET_STREAM_INFO notification sent when the stream ID, the
+destination address, the VLAN, the accumulated latency, the registration
+of the Talker attribute, the failure code or bridge, the connected state
+or the started/stopped state of an input changes. All of those are in the
+answer, so the kit compares each input's answer, the format left out,
+with the one it last looked at, once a reactor cycle
+(`AvbEntityKit::end_cycle`), and notifies the registered controllers of an
+input whose answer is another. What changed within one cycle is one
+notification: a bind that settles before the cycle ends is told once,
+settled. START_STREAMING and STOP_STREAMING notify as they are answered,
+and that notification is not sent a second time.
+
 ## The talker
 
 5.5.4 is four responses and no state, so there is no state machine:
@@ -421,6 +452,13 @@ Left open:
   4.4.1. Should its Talker attribute be on another VLAN than the SRP
   Domain's, that VLAN is not declared. A Milan talker names its VLAN
   (Table 5.48), so this is an IEEE 1722.1 talker's case.
+- The accumulated latency GET_STREAM_INFO gives for a stream input is the
+  registered Talker attribute's. 5.4.2.10.1 adds "any internal
+  implementation-dependent max delay" a frame meets before the MAC's
+  ingress buffer; the entity knows of none and adds none.
+- A stream input's GET_STREAM_INFO notification is looked for once a
+  reactor cycle, so two changes inside one cycle are one notification of
+  the later state.
 - A PROBE_TX_COMMAND counts for the 15 seconds of 4.3.3.1 when it is
   answered TALKER_DEST_MAC_FAILED too.
 - A stop and start of the entity kit is a power cycle to a bound sink: it
@@ -486,7 +524,10 @@ Left open:
 
 ## Not done
 
-- GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
-  (settled reads as connected).
+- GET_STREAM_INFO of a stream output has no Table 5.20 notification for
+  the registration of its Listener attribute or the declaration of its
+  Talker attribute, and reports the presentation time offset as its
+  accumulated latency while the Talker attribute declares none (5.4.2.10.2
+  has the two the same).
 - A PROBE_TX_COMMAND is not checked against the interface it arrived on
   (5.5.4.1 step 2): the entity has one AVB interface.

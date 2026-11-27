@@ -2575,6 +2575,199 @@ TEST(avb_entity_kit_mr, another_clock_source_toggles_mr_on_the_domains_outputs_a
 }
 
 //
+// GET_STREAM_INFO of a Milan stream input (Milan v1.3 5.4.2.10.1, Table 5.8)
+// and the notifications of its changes (Table 5.20).
+//
+
+namespace {
+
+namespace info_flag = atdecc::aem::stream_info_flags;
+constexpr uint32_t INFO_BOUND = info_flag::FAST_CONNECT | info_flag::SAVED_STATE | info_flag::CONNECTED;
+constexpr uint32_t INFO_SETTLED = info_flag::STREAM_ID_VALID | info_flag::STREAM_DEST_MAC_VALID | info_flag::STREAM_VLAN_ID_VALID;
+constexpr Eui64 ABSENT_TALKER{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x7E};
+
+/// GET_STREAM_INFO of @p stream, as a controller reads it.
+auto stream_info_of(StreamOf const stream) -> atdecc::aem::AemStreamInfoPayload
+{
+    atdecc::AemDu header{};
+    header.init_command(atdecc::AEM_COMMAND_GET_STREAM_INFO, atdecc::aem::AemGetStreamInfoCommandPayload::LENGTH);
+    header.controller_entity_id = CONTROLLER_ID;
+    atdecc::aem::AemGetStreamInfoCommandPayload const asked{.descriptor_type = stream.type, .descriptor_index = stream.index};
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    auto const result = stream.kit->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
+    EXPECT_EQ(result.status, atdecc::AEM_STATUS_SUCCESS);
+    atdecc::aem::AemStreamInfoPayload info{};
+    span_load(info, std::span<uint8_t const>{out}.first(atdecc::aem::AemStreamInfoPayload::LENGTH));
+    return info;
+}
+
+/// A controller registered for a kit's notifications: the GET_STREAM_INFO ones it is sent for stream inputs.
+struct StreamInfoWatcher
+{
+    std::vector<atdecc::aem::AemStreamInfoPayload> notified{};
+
+    explicit StreamInfoWatcher(KitUnderTest& kit, Eui64 const& entity = LISTENER_ID)
+    {
+        auto& aem = kit->host().components().aem_handler;
+        aem.set_send_response([this](Eui48 const&, std::span<uint8_t const> const frame) {
+            note(frame);
+            return true;
+        });
+        atdecc::AemDu reg{};
+        reg.init_command(atdecc::AEM_COMMAND_REGISTER_UNSOLICITED_NOTIFICATION, atdecc::AemDu::AEM_DATA_LENGTH);
+        reg.target_entity_id = entity;
+        reg.controller_entity_id = OTHER_CONTROLLER_ID;
+        std::array<uint8_t, atdecc::AemDu::LENGTH> frame{};
+        span_store(frame, reg);
+        (void)aem.process_packet(Eui48{0x02, 0, 0, 0, 0, 0x99}, frame, entity);
+    }
+    StreamInfoWatcher(StreamInfoWatcher const&) = delete;
+    auto operator=(StreamInfoWatcher const&) -> StreamInfoWatcher& = delete;
+
+    void note(std::span<uint8_t const> const frame)
+    {
+        atdecc::AemDu header{};
+        span_load(header, frame);
+        if (!header.is_unsolicited() || header.command_code() != atdecc::AEM_COMMAND_GET_STREAM_INFO) {
+            return;
+        }
+        atdecc::aem::AemStreamInfoPayload body{};
+        span_load(body, frame.subspan(atdecc::AemDu::LENGTH).first(atdecc::aem::AemStreamInfoPayload::LENGTH));
+        if (body.descriptor_type.get() == atdecc::aem::DESCRIPTOR_STREAM_INPUT) {
+            notified.push_back(body);
+        }
+    }
+
+    /// The flags of the last notification, the format's bit left out; 0 with none.
+    [[nodiscard]] auto last_flags() const -> uint32_t
+    {
+        return notified.empty() ? 0U : notified.back().flags.get() & ~info_flag::STREAM_FORMAT_VALID;
+    }
+};
+
+/// The listener kit's cycle ends at the pair's time: what changed since the last one is told.
+void end_cycle(KitPair& pair)
+{
+    pair.listener->end_cycle(ns_of(pair.now));
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_stream_info, a_milan_stream_input_reads_as_table_5_8_has_it_from_unbound_to_registered)
+{
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+
+    // Not bound: the format, and nothing else.
+    auto info = stream_info_of(input);
+    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID);
+    EXPECT_EQ(info.stream_id, Eui64{});
+
+    // Bound to a talker that is not there: bound, never settled.
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, ABSENT_TALKER, pair.source, LISTENER_ID, pair.sink));
+    info = stream_info_of(input);
+    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | info_flag::NOT_REGISTERING_SRP);
+    EXPECT_EQ(info.stream_id, Eui64{});
+    EXPECT_EQ(info.stream_dest_mac, Eui48{});
+    EXPECT_EQ(info.stream_vlan_id.get(), 0);
+
+    // Bound to the pair's talker, which answers the probe: settled, its Talker attribute not yet registered.
+    pair.bind();
+    auto const source = pair.talker->host().components().talker_stream(pair.source);
+    info = stream_info_of(input);
+    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | INFO_SETTLED | info_flag::NOT_REGISTERING_SRP);
+    EXPECT_EQ(info.stream_id, source->stream_id);
+    EXPECT_EQ(info.stream_dest_mac, source->stream_dest_mac);
+    EXPECT_EQ(info.stream_vlan_id.get(), source->stream_vlan_id);
+    EXPECT_EQ(info.msrp_accumulated_latency.get(), 0U);
+
+    // MSRP runs: the matching Talker Advertise is registered, and its latency is the talker's.
+    pair.run(2 * ROUNDS_PER_SECOND);
+    info = stream_info_of(input);
+    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID | INFO_BOUND | INFO_SETTLED | info_flag::MSRP_ACC_LAT_VALID);
+    // What the pair's talker declares, which is no latency of its own; a value that is not
+    // zero is followed through MSRP and Table 5.8 in their own tests.
+    auto const declared = pair.talker->make_talker_srp_info(pair.talker.talker_specs()[pair.source]);
+    EXPECT_EQ(info.msrp_accumulated_latency.get(), declared.accumulated_latency);
+    EXPECT_EQ(info.msrp_failure_code.get(), 0);
+
+    // Stopped, then unbound.
+    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((stream_info_of(input).flags.get() & info_flag::STREAMING_WAIT) != 0);
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    info = stream_info_of(input);
+    EXPECT_EQ(info.flags.get(), info_flag::STREAM_FORMAT_VALID);
+    EXPECT_EQ(info.stream_id, Eui64{});
+    EXPECT_EQ(info.msrp_accumulated_latency.get(), 0U);
+}
+
+TEST(avb_entity_kit_stream_info, each_change_of_a_milan_stream_input_is_told_once_at_the_end_of_its_cycle)
+{
+    KitPair pair{"milan13"};
+    auto const input = aaf_input_of(pair);
+    StreamInfoWatcher watcher{pair.listener};
+    end_cycle(pair);  // the first look only looks
+    end_cycle(pair);
+    EXPECT_TRUE(watcher.notified.empty());
+
+    // Bound and settled inside one cycle: one notification, of the state at its end.
+    pair.bind();
+    EXPECT_TRUE(watcher.notified.empty());
+    end_cycle(pair);
+    EXPECT_EQ(watcher.notified.size(), 1U);
+    EXPECT_EQ(watcher.notified.back().descriptor_index.get(), input.index);
+    EXPECT_EQ(watcher.last_flags(), INFO_BOUND | INFO_SETTLED | info_flag::NOT_REGISTERING_SRP);
+    end_cycle(pair);
+    EXPECT_EQ(watcher.notified.size(), 1U);
+
+    // The Talker attribute registers: its registration state changed.
+    pair.run(2 * ROUNDS_PER_SECOND);
+    end_cycle(pair);
+    EXPECT_EQ(watcher.notified.size(), 2U);
+    EXPECT_EQ(watcher.last_flags(), INFO_BOUND | INFO_SETTLED | info_flag::MSRP_ACC_LAT_VALID);
+
+    // STOP_STREAMING is told as it is answered, and not a second time at the end of the cycle.
+    EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(watcher.notified.size(), 3U);
+    EXPECT_TRUE((watcher.last_flags() & info_flag::STREAMING_WAIT) != 0);
+    end_cycle(pair);
+    EXPECT_EQ(watcher.notified.size(), 3U);
+
+    // Unbound: connected state, stream ID, address, VLAN and registration all go in one notification.
+    pair.controller_sends(
+        controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
+    end_cycle(pair);
+    EXPECT_EQ(watcher.last_flags(), 0U);
+    EXPECT_EQ(watcher.notified.back().stream_id, Eui64{});
+    auto const told = watcher.notified.size();
+    end_cycle(pair);
+    EXPECT_EQ(watcher.notified.size(), told);
+}
+
+TEST(avb_entity_kit_stream_info, a_format_change_alone_is_not_told_as_stream_info_and_a_classic_listener_tells_none)
+{
+    {
+        KitPair pair{"milan13"};
+        auto const input = aaf_input_of(pair);
+        StreamInfoWatcher watcher{pair.listener};
+        end_cycle(pair);
+        EXPECT_EQ(set_stream_format(input, aaf_96k_of(2)), atdecc::AEM_STATUS_SUCCESS);
+        end_cycle(pair);
+        EXPECT_TRUE(watcher.notified.empty());
+    }
+    // IEEE 1722.1 connection management: the end of a cycle compares nothing.
+    KitPair classic{"classic"};
+    StreamInfoWatcher watcher{classic.listener};
+    end_cycle(classic);
+    classic.bind();
+    classic.run(2 * ROUNDS_PER_SECOND);
+    end_cycle(classic);
+    EXPECT_TRUE(watcher.notified.empty());
+}
+
+//
 // Clock sources: which the entity runs, and the one chosen kept across a
 // restart (Milan v1.3 5.3.11.1). The model is examples/crf-generator.json.
 //

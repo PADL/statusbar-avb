@@ -262,6 +262,11 @@ constexpr uint32_t STREAMING_WAIT = 0x00000008;
 constexpr uint32_t SUPPORTS_ENCRYPTED = 0x00000010;
 constexpr uint32_t ENCRYPTED_PDU = 0x00000020;
 constexpr uint32_t TALKER_FAILED = 0x00000040;
+/// TALKER_FAILED's bit under the name Milan v1.3 Table 5.8 gives it for a Stream Input.
+constexpr uint32_t SRP_REGISTRATION_FAILED = TALKER_FAILED;
+/// IEEE 1722.1-2021 Table 7-145 bit 7: a STREAM_INPUT that registers neither a Talker Advertise
+/// nor a Talker Failed attribute for its stream.
+constexpr uint32_t NOT_REGISTERING_SRP = 0x01000000;
 constexpr uint32_t STREAM_VLAN_ID_VALID = 0x02000000;
 constexpr uint32_t CONNECTED = 0x04000000;
 constexpr uint32_t MSRP_FAILURE_VALID = 0x08000000;

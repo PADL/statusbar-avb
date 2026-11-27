@@ -107,6 +107,11 @@ struct RegisteredTalker
     uint16_t vlan_id{0};
     /// The attribute is a Talker Failed, not a Talker Advertise.
     bool failed{false};
+    /// The attribute's AccumulatedLatency in nanoseconds (IEEE 802.1Q-2022 35.2.2.8.6).
+    uint32_t accumulated_latency{0};
+    /// A Talker Failed's FailureInformation (35.2.2.8.7); zero for a Talker Advertise.
+    uint8_t failure_code{0};
+    Eui64 failure_bridge_id{};
 };
 
 /// The one Talker attribute a listener stream follows: the destination
@@ -786,7 +791,7 @@ class MsrpHandler
     {
         auto const* failed = participant_.find_registered_talker_failed(stream_id);
         if (failed != nullptr && admitted(only, registered_talker_from(failed->advertise, true))) {
-            return registered_talker_from(failed->advertise, true);
+            return registered_failed_talker_from(*failed);
         }
         auto const* advertise = participant_.find_registered_talker_advertise(stream_id);
         if (advertise != nullptr && admitted(only, registered_talker_from(*advertise, false))) {
@@ -1227,7 +1232,19 @@ class MsrpHandler
         statusbar::srp::msrp::TalkerAdvertiseFirstValue const& value, bool const failed) noexcept -> RegisteredTalker
     {
         return RegisteredTalker{
-            .dest_address = value.destination_address, .vlan_id = value.vlan_identifier.get(), .failed = failed};
+            .dest_address = value.destination_address,
+            .vlan_id = value.vlan_identifier.get(),
+            .failed = failed,
+            .accumulated_latency = value.accumulated_latency.get()};
+    }
+
+    [[nodiscard]] static auto registered_failed_talker_from(statusbar::srp::msrp::TalkerFailedFirstValue const& value) noexcept
+        -> RegisteredTalker
+    {
+        auto talker = registered_talker_from(value.advertise, true);
+        talker.failure_code = value.failure_code.get();
+        talker.failure_bridge_id = value.failure_bridge_id;
+        return talker;
     }
 
     /// A talker stream whose attribute is on the wire.

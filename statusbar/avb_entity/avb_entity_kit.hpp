@@ -34,6 +34,7 @@
 #include "statusbar/avb_entity/avb_entity_maap.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_formats_file.hpp"
+#include "statusbar/avb_entity/avb_entity_stream_info.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
@@ -445,6 +446,24 @@ class AvbEntityKit
     [[nodiscard]] auto own_gptp_state() const noexcept -> atdecc::MilanGptpState;
     /// The Talker attribute SRP registers that matches @p srp (Milan v1.3 5.3.8.8).
     [[nodiscard]] auto talker_registration_for(atdecc::MilanSrpParameters const& srp) const -> atdecc::MilanTalkerRegistration;
+    /// Stream input @p index as Milan v1.3 Table 5.8 reads it: its sink's binding and SRP
+    /// parameters and the matching Talker attribute the port registers. nullopt for an entity
+    /// whose connection management is not Milan's, and for an input it has no sink for.
+    [[nodiscard]] auto milan_sink_stream_info(uint16_t index) const -> std::optional<MilanSinkStreamInfo>;
+    /// Milan v1.3 Table 5.20: a GET_STREAM_INFO notification for each stream input whose stream
+    /// ID, destination address, VLAN, accumulated latency, Talker attribute registration, failure
+    /// code or bridge, connected state or started/stopped state is not what it was at the last
+    /// call. The first call only looks. end_cycle() calls it; nothing is done for an entity whose
+    /// connection management is not Milan's.
+    void tell_changed_input_info();
+    /// tell_changed_input_info() for stream input @p index.
+    void tell_input_info_if_changed(uint16_t index);
+    /// What tell_changed_input_info() compares for stream input @p index: its GET_STREAM_INFO
+    /// answer without the format, which SET_STREAM_FORMAT notifies for itself.
+    [[nodiscard]] auto told_input_info(uint16_t index) -> std::optional<atdecc::aem::AemStreamInfoPayload>;
+    /// A GET_STREAM_INFO notification for stream input @p index now, noted so that
+    /// tell_changed_input_info() does not send what it says a second time.
+    void notify_input_info(uint16_t index);
     /// The AEM third: the GET_COUNTERS and GET_STREAM_INFO fills, and the
     /// presentation offsets of SET and GET_MAX_TRANSIT_TIME.
     void wire_aem_stream_callbacks();
@@ -748,6 +767,8 @@ class AvbEntityKit
     /// The stream inputs and outputs whose counters changed since they were last notified.
     std::array<bool, MAX_ENTITY_STREAMS> input_counters_changed_{};
     std::array<bool, MAX_ENTITY_STREAMS> output_counters_changed_{};
+    /// Each stream input as tell_changed_input_info() last found it; unset before its first look.
+    std::array<std::optional<atdecc::aem::AemStreamInfoPayload>, MAX_ENTITY_STREAMS> input_info_told_{};
     /// Each Milan stream input's bound state as last followed (follow_input_bound).
     std::array<bool, MAX_ENTITY_STREAMS> input_bound_{};
     /// Each stream output's Milan counters, by observation interval (reactor thread).

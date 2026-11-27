@@ -137,6 +137,86 @@ template <typename ListenerSink>
     return flags;
 }
 
+/// An IEEE 1722.1 listener's sink into @p out: copy_connected_sink_identity(), and STREAMING_WAIT
+/// for an input that is stopped. Returns the flags.
+template <typename ListenerSink>
+[[nodiscard]] inline auto fill_ieee_sink_stream_info(
+    ListenerSink const& sink, bool const stopped, atdecc::aem::AemStreamInfoPayload& out) -> uint32_t
+{
+    return copy_connected_sink_identity(sink, out) | (stopped ? atdecc::aem::stream_info_flags::STREAMING_WAIT : 0U);
+}
+
+/// What Milan v1.3 Table 5.8 reads of a stream input: whether its sink is bound and settled, its
+/// started/stopped state, the SRP parameters its talker's PROBE_TX_RESPONSE gave while it is
+/// settled, and the matching Talker attribute the port registers then (5.3.8.8), if any.
+struct MilanSinkStreamInfo
+{
+    bool bound{false};
+    bool settled{false};
+    bool stopped{false};
+    atdecc::MilanSrpParameters srp{};
+    std::optional<nanoavb::RegisteredTalker> talker{};
+
+    /// "Registering either a matching Talker Advertise or a matching Talker Failed attribute".
+    [[nodiscard]] constexpr auto registering() const noexcept -> bool { return settled && talker.has_value(); }
+    /// "Registering a matching Talker Failed attribute".
+    [[nodiscard]] constexpr auto registering_failed() const noexcept -> bool { return registering() && talker->failed; }
+};
+
+/// The flags Table 5.8 sets for a stream input that is bound: FAST_CONNECT, SAVED_STATE and
+/// CONNECTED, STREAMING_WAIT while it is stopped, and NOT_REGISTERING_SRP while it registers
+/// no matching Talker attribute. None for one that is not bound.
+[[nodiscard]] constexpr auto milan_bound_sink_flags(MilanSinkStreamInfo const& sink) noexcept -> uint32_t
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    if (!sink.bound) {
+        return 0;
+    }
+    uint32_t const wait = sink.stopped ? stream_info_flags::STREAMING_WAIT : 0U;
+    uint32_t const srp = sink.registering() ? 0U : stream_info_flags::NOT_REGISTERING_SRP;
+    return stream_info_flags::FAST_CONNECT | stream_info_flags::SAVED_STATE | stream_info_flags::CONNECTED | wait | srp;
+}
+
+/// Every flag of Table 5.8 but STREAM_FORMAT_VALID: those of a bound input, the three that mark
+/// the stream's id, address and VLAN valid "if, and only if, the Stream Input is settled",
+/// MSRP_ACC_LAT_VALID while it registers a matching Talker attribute, and
+/// SRP_REGISTRATION_FAILED with MSRP_FAILURE_VALID while that attribute is a Talker Failed.
+[[nodiscard]] constexpr auto milan_sink_stream_info_flags(MilanSinkStreamInfo const& sink) noexcept -> uint32_t
+{
+    namespace stream_info_flags = atdecc::aem::stream_info_flags;
+    uint32_t const settled = sink.settled
+        ? stream_info_flags::STREAM_ID_VALID | stream_info_flags::STREAM_DEST_MAC_VALID | stream_info_flags::STREAM_VLAN_ID_VALID
+        : 0U;
+    uint32_t const latency = sink.registering() ? stream_info_flags::MSRP_ACC_LAT_VALID : 0U;
+    uint32_t const failure =
+        sink.registering_failed() ? stream_info_flags::SRP_REGISTRATION_FAILED | stream_info_flags::MSRP_FAILURE_VALID : 0U;
+    return milan_bound_sink_flags(sink) | settled | latency | failure;
+}
+
+/// The stream's id, destination address and VLAN into @p out as the PROBE_TX_RESPONSE gave them
+/// while the input is settled, zero otherwise (Milan v1.3 5.4.2.10.1).
+inline void copy_milan_sink_stream(MilanSinkStreamInfo const& sink, atdecc::aem::AemStreamInfoPayload& out) noexcept
+{
+    out.stream_id = sink.settled ? sink.srp.stream_id : ieee::Eui64{};
+    out.stream_dest_mac = sink.settled ? sink.srp.stream_dest_mac : ieee::Eui48{};
+    out.stream_vlan_id = ieee::doublet_t{sink.settled ? sink.srp.stream_vlan_id : uint16_t{0}};
+}
+
+/// The fields of Milan v1.3 5.4.2.10.1 into @p out, each zero where Table 5.8 does not mark it
+/// valid: the stream's id, destination address and VLAN as the PROBE_TX_RESPONSE gave them, the
+/// accumulated latency of the registered Talker attribute, and a Talker Failed's bridge and code.
+/// The entity adds no delay of its own to the latency: it knows none between the wire and its
+/// MAC. Returns milan_sink_stream_info_flags().
+inline auto fill_milan_sink_stream_info(MilanSinkStreamInfo const& sink, atdecc::aem::AemStreamInfoPayload& out) noexcept
+    -> uint32_t
+{
+    copy_milan_sink_stream(sink, out);
+    out.msrp_accumulated_latency = ieee::quadlet_t{sink.registering() ? sink.talker->accumulated_latency : 0U};
+    out.msrp_failure_code = ieee::octet_t{sink.registering_failed() ? sink.talker->failure_code : uint8_t{0}};
+    out.msrp_failure_bridge_id = sink.registering_failed() ? sink.talker->failure_bridge_id : ieee::Eui64{};
+    return milan_sink_stream_info_flags(sink);
+}
+
 /// Fill the GET_STREAM_INFO response for a STREAM_INPUT (listener) index
 /// from the ACMP listener sink state: the connected talker's stream_id /
 /// dest MAC when bound, plus the descriptor's current_format — so a
@@ -145,19 +225,36 @@ template <typename ListenerSink>
 /// STREAMING_WAIT: "1 if the Stream Input is bound and stopped" (Milan v1.3
 /// Table 5.8), and IEEE 1722.1-2021 Table 7-145's stream "stopped with
 /// STOP_STREAMING command".
+///
+/// @p milan is the input as a Milan sink has it (MilanSinkStreamInfo), for an
+/// entity whose connection management is Milan's: the flags and fields are
+/// then Table 5.8's and @p stopped is not read. nullopt for an IEEE 1722.1
+/// listener.
 [[nodiscard]] inline auto fill_listener_stream_info(
-    AvbEntityHost const& host, uint16_t const descriptor_index, bool const stopped, atdecc::aem::AemStreamInfoPayload& out) -> bool
+    AvbEntityHost const& host,
+    uint16_t const descriptor_index,
+    bool const stopped,
+    std::optional<MilanSinkStreamInfo> const& milan,
+    atdecc::aem::AemStreamInfoPayload& out) -> bool
 {
     auto const sink = host.components().listener_sink(descriptor_index);
     if (!sink.has_value()) {
         return false;
     }
-    uint32_t flags = fill_stream_format(host, atdecc::aem::DESCRIPTOR_STREAM_INPUT, descriptor_index, out)
+    uint32_t const format = fill_stream_format(host, atdecc::aem::DESCRIPTOR_STREAM_INPUT, descriptor_index, out)
         ? atdecc::aem::stream_info_flags::STREAM_FORMAT_VALID
         : 0U;
-    flags |= copy_connected_sink_identity(*sink, out);
-    out.flags = ieee::quadlet_t{flags | (stopped ? atdecc::aem::stream_info_flags::STREAMING_WAIT : 0U)};
+    uint32_t const state =
+        milan.has_value() ? fill_milan_sink_stream_info(*milan, out) : fill_ieee_sink_stream_info(*sink, stopped, out);
+    out.flags = ieee::quadlet_t{format | state};
     return true;
+}
+
+/// As above for an IEEE 1722.1 listener.
+[[nodiscard]] inline auto fill_listener_stream_info(
+    AvbEntityHost const& host, uint16_t const descriptor_index, bool const stopped, atdecc::aem::AemStreamInfoPayload& out) -> bool
+{
+    return fill_listener_stream_info(host, descriptor_index, stopped, std::nullopt, out);
 }
 
 /// What STREAM_OUTPUT @p descriptor_index has sent (TalkerTxCounters) as

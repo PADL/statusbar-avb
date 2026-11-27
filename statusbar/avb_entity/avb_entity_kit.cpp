@@ -414,7 +414,64 @@ void AvbEntityKit::set_input_stopped(uint16_t const index, bool const stopped)
         index,
         stopped ? logging::lit("STOPPED: its frames are discarded") : logging::lit("no longer STOPPED"));
     // Table 5.20: the started/stopped state of a stream input is told.
+    notify_input_info(index);
+}
+
+void AvbEntityKit::notify_input_info(uint16_t const index)
+{
+    if (index < input_info_told_.size() && input_info_told_[index].has_value()) {
+        input_info_told_[index] = told_input_info(index);
+    }
     (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+}
+
+auto AvbEntityKit::told_input_info(uint16_t const index) -> std::optional<atdecc::aem::AemStreamInfoPayload>
+{
+    atdecc::aem::AemStreamInfoPayload info{};
+    if (!stream_info(DESCRIPTOR_STREAM_INPUT, index, info)) {
+        return std::nullopt;
+    }
+    info.stream_format = {};
+    return info;
+}
+
+void AvbEntityKit::tell_changed_input_info()
+{
+    if (listener_ == nullptr || !host_.components().acmp_is_milan()) {
+        return;
+    }
+    for (auto const& spec : listener_specs_) {
+        tell_input_info_if_changed(spec.index);
+    }
+}
+
+void AvbEntityKit::tell_input_info_if_changed(uint16_t const index)
+{
+    auto found = told_input_info(index);
+    if (index >= input_info_told_.size() || !found.has_value()) {
+        return;
+    }
+    auto const told = std::exchange(input_info_told_[index], found);
+    if (told.has_value() && *told != *found) {
+        (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_INPUT, index);
+    }
+}
+
+auto AvbEntityKit::milan_sink_stream_info(uint16_t const index) const -> std::optional<MilanSinkStreamInfo>
+{
+    auto const* const listener = host_.components().milan_acmp_listener.get();
+    auto const* const sink = listener != nullptr ? listener->sink(index) : nullptr;
+    if (sink == nullptr) {
+        return std::nullopt;
+    }
+    auto const& srp = sink->context().srp;
+    auto const& msrp = host_.components().msrp_handler;
+    return MilanSinkStreamInfo{
+        .bound = sink->is_bound(),
+        .settled = sink->is_settled(),
+        .stopped = listener_->stream_stopped(index),
+        .srp = srp,
+        .talker = sink->is_settled() ? msrp.registered_talker(srp_stream_id(srp.stream_id), probed_talker(srp)) : std::nullopt};
 }
 
 auto AvbEntityKit::on_stream_format_changed(uint16_t const type, uint16_t const index, uint64_t const format) -> uint8_t
@@ -985,7 +1042,7 @@ auto AvbEntityKit::stream_info(uint16_t const type, uint16_t const index, atdecc
     if (type == DESCRIPTOR_STREAM_OUTPUT) {
         filled = fill_talker_stream_info(host_, index, presentation_offset_ns(index), talker_->stream_stopped(index), out);
     } else if (type == DESCRIPTOR_STREAM_INPUT && listener_ != nullptr) {
-        filled = fill_listener_stream_info(host_, index, listener_->stream_stopped(index), out);
+        filled = fill_listener_stream_info(host_, index, listener_->stream_stopped(index), milan_sink_stream_info(index), out);
     }
     // The fillers read the format the model authors; the one in force is the
     // descriptor's, which a SET_STREAM_FORMAT or a restored format changes.
@@ -1590,6 +1647,7 @@ void AvbEntityKit::end_cycle(int64_t const now_ns)
 {
     poll_counters(now_ns);
     on_admission_timer(raw_at(now_ns));
+    tell_changed_input_info();
 }
 
 void AvbEntityKit::poll_counters(int64_t const now_ns)

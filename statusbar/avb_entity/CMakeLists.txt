@@ -56,6 +56,7 @@ statusbar_add_module(
   avb_entity_tone_generator_test.cpp
   avb_entity_stream_counters_test.cpp
   avb_entity_stream_formats_file_test.cpp
+  avb_entity_stream_info_test.cpp
   avb_entity_stream_spec_test.cpp
   avb_entity_stream_port_test.cpp
   avb_entity_listener_streams_test.cpp

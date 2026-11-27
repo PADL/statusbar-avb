@@ -1742,6 +1742,18 @@ TEST(nanoavb_srp_msrp, the_remote_talker_registered_for_a_stream_is_reported_wit
     EXPECT_EQ(registered->dest_address, (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x77}));
     EXPECT_EQ(registered->vlan_id, 5);
     EXPECT_FALSE(registered->failed);
+    // remote_advertise() gives no latency: one that does is reported with it, and with no failure.
+    auto later = remote_advertise(remote, 0x77, 5);
+    later.accumulated_latency = 123'456;
+    EXPECT_TRUE(link.bridge.withdraw_talker(remote, link.now).has_value());
+    link.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_TRUE(link.bridge.declare_talker_advertise(later, link.now).has_value());
+    link.run(ROUNDS_PER_SECOND);
+    auto const with_latency = link.talker.registered_talker(remote);
+    EXPECT_TRUE(with_latency.has_value());
+    EXPECT_EQ(with_latency->accumulated_latency, 123'456U);
+    EXPECT_EQ(with_latency->failure_code, 0);
+    EXPECT_EQ(with_latency->failure_bridge_id, Eui64{});
 
     told.clear();
     EXPECT_TRUE(link.bridge.withdraw_talker(remote, link.now).has_value());
@@ -1757,6 +1769,8 @@ TEST(nanoavb_srp_msrp, a_registered_talker_failed_is_reported_as_failed)
     statusbar::tsn::StreamId const remote{Eui48{0x00, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e}, 1};
     statusbar::srp::msrp::TalkerFailedFirstValue failed{};
     failed.advertise = remote_advertise(remote, 0x78, 2);
+    failed.advertise.accumulated_latency = 2'000'125;
+    failed.failure_bridge_id = Eui64{0x80, 0x00, 0x00, 0x1c, 0xab, 0x00, 0x00, 0x09};
     failed.set_failure_code(statusbar::srp::msrp::FailureCode::InsufficientBandwidth);
     EXPECT_TRUE(link.bridge.declare_talker_failed(failed, link.now).has_value());
     link.run(ROUNDS_PER_SECOND);
@@ -1765,6 +1779,10 @@ TEST(nanoavb_srp_msrp, a_registered_talker_failed_is_reported_as_failed)
     EXPECT_TRUE(registered->failed);
     EXPECT_EQ(registered->dest_address, (Eui48{0x91, 0xe0, 0xf0, 0x00, 0x12, 0x78}));
     EXPECT_EQ(registered->vlan_id, 2);
+    // The attribute's latency, and its FailureInformation (IEEE 802.1Q-2022 35.2.2.8.7).
+    EXPECT_EQ(registered->accumulated_latency, 2'000'125U);
+    EXPECT_EQ(registered->failure_code, 1);
+    EXPECT_EQ(registered->failure_bridge_id, (Eui64{0x80, 0x00, 0x00, 0x1c, 0xab, 0x00, 0x00, 0x09}));
 }
 
 // REGISTERING_FAILED in a Milan GET_TX_STATE_RESPONSE (v1.3 Table 5.23):
