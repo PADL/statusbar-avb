@@ -514,6 +514,28 @@ dynamic mappings (5.3.10.1, below) gets Milan's check with it: a new
 format that would leave a channel a held mapping names is answered
 BAD_ARGUMENTS (5.4.2.7).
 
+### Streams carried beside the stream port
+
+Something beside the stream port, a NIC that sends or receives a stream
+itself, may carry a stream's frames while the kit's port carries none of
+them. The kit keeps the stream's control state (SRP, ACMP, the gate,
+sequence, mr, tu and the counters); such a data plane follows it through
+the seams below, each of which does nothing until used.
+
+**Frame templates.** Every frame of one talker stream carries the same
+bytes but for sequence_num, avtp_timestamp, mr and tu.
+`TalkerStreams::frame_template()` gives the headers the talker sends for a
+STREAM_OUTPUT now (its destination, the VID and PCP in force, its stream ID
+and format) from a given source address, as a `StreamFrameTemplate`: 42
+octets for AAF, with sequence_num at 20, avtp_timestamp at 30, mr in octet
+19 and tu in octet 21; 38 for CRF, mr and tu both in octet 19, its
+timestamps its payload (IEEE 1722-2016 Clauses 4.4.3, 7.2, 10.4).
+`write()` copies it and stores the four. `aaf_frame_template()` and
+`crf_frame_template()` build one from a serializer's context with the
+header code `transmit_aaf()` and `transmit_crf()` use, and the tag is
+`stream_frame_header()`'s, so a written template is the frame the talker
+sends. AM824 has none.
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one

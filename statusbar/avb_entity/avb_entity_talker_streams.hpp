@@ -26,6 +26,7 @@
 #include "statusbar/avtp/avtp_am824_stream_output.hpp"
 #include "statusbar/avtp/avtp_crf_stream_output.hpp"
 #include "statusbar/ieee/ieee.hpp"
+#include "statusbar/ieee/ieee_protocols.hpp"
 #include "statusbar/itc/itc_seqlock_value.hpp"
 #include "statusbar/ptpclient/ptpclient_media_clock.hpp"
 #include "statusbar/realtime/realtime_clock.hpp"
@@ -112,6 +113,30 @@ struct TalkerTxCounters
 {
     return streaming_changes / 2U;
 }
+
+/// The bytes every frame of one talker stream starts with, its 802.1Q-tagged Ethernet header and AVTPDU header, with
+/// sequence_num, avtp_timestamp, mr and tu zero, and where those four go: write() makes the headers of one frame.
+struct StreamFrameTemplate
+{
+    /// The most header bytes: a tagged AAF frame's.
+    static constexpr size_t CAPACITY = ieee::protocols::ETHERNET_HEADER_SIZE + ieee::VlanTag::LENGTH + avtp::AafPdu::HEADER_LENGTH;
+    /// mr's bit in its octet, and tu's in its (IEEE 1722-2016 Clauses 4.4.3, 7.2, 10.4).
+    static constexpr uint8_t MR_BIT = 0x08U;
+    static constexpr uint8_t TU_BIT = 0x01U;
+
+    std::array<uint8_t, CAPACITY> bytes{};
+    size_t length{0};            ///< header bytes before the payload: 42 for AAF, 38 for CRF
+    size_t sequence_offset{0};   ///< sequence_num's octet
+    size_t timestamp_offset{0};  ///< avtp_timestamp's four octets, big-endian; 0 for CRF, whose timestamps are its payload
+    size_t mr_offset{0};         ///< the octet whose MR_BIT is mr
+    size_t tu_offset{0};         ///< the octet whose TU_BIT is tu
+
+    /// The header bytes, `length` of them.
+    [[nodiscard]] auto header() const noexcept -> std::span<uint8_t const> { return std::span{bytes}.first(length); }
+    /// The headers of the frame with @p sequence, @p timestamp (ignored for CRF), @p mr and @p tu to the start of
+    /// @p out; false, writing nothing, when @p out is shorter than `length`.
+    [[nodiscard]] auto write(uint8_t sequence, uint32_t timestamp, bool mr, bool tu, std::span<uint8_t> out) const noexcept -> bool;
+};
 
 struct TalkerStreams
 {
@@ -296,6 +321,13 @@ struct TalkerStreams
         return stream_index < tx_counters_.size() ? &tx_counters_[stream_index] : nullptr;
     }
 
+    /// STREAM_OUTPUT @p stream_index's frames as this talker sends them now, from @p src_mac: its destination, the
+    /// VID and PCP in force, its stream ID and format. nullopt for no AAF or CRF stream there, or a frame the talker
+    /// would not send. It describes the frames and starts none: a data plane sends a stream only while its gate is open
+    /// (AvbEntityKit::talker_should_transmit()). Reactor thread.
+    [[nodiscard]] auto frame_template(uint16_t stream_index, ieee::Eui48 const& src_mac) const noexcept
+        -> std::optional<StreamFrameTemplate>;
+
     /// Emit this tick's traffic for @p slot from @p src (this stream's
     /// interleaved audio for the tick — per-stream sources are the entity's
     /// business; CRF slots ignore it): AM824 sends the tick's samples
@@ -474,5 +506,20 @@ void fill_crf_timestamps(
     uint32_t sample_stride,
     uint16_t n_ts,
     std::span<uint8_t> ts_data) noexcept;
+
+//
+// Stream frame templates (pure, socket-free)
+//
+
+/// The template of an AAF stream's frames of @p frames frames behind @p header (stream_frame_header()): the AVTPDU
+/// header transmit_aaf() sends for @p ctx's stream, format and channels. nullopt for a format with no byte layout,
+/// no frames, or a frame past an Ethernet payload.
+[[nodiscard]] auto aaf_frame_template(
+    avtp::AafStreamOutputContext const& ctx, uint16_t frames, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>;
+/// The template of a CRF stream's frames behind @p header: the AVTPDU header transmit_crf() sends for @p ctx's
+/// stream, its timestamps the payload. nullopt for none, or more than MAX_CRF_TIMESTAMPS_PER_PDU.
+[[nodiscard]] auto crf_frame_template(avtp::CrfStreamOutputContext const& ctx, ieee::EthernetFrame const& header) noexcept
+    -> std::optional<StreamFrameTemplate>;
 
 }  // namespace statusbar::avb_entity
