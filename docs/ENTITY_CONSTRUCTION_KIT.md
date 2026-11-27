@@ -330,7 +330,20 @@ Everything not listed here is the same under both.
 ### Stream counters
 
 A stream input counts each AVTPDU it receives (`StreamInputCounters`, on
-the RX thread). `AvbEntityKit::end_cycle(now_ns)` ends an
+the RX thread), an audio input and a CRF media clock input alike (Milan
+v1.3 5.3.8.10 asks Table 5.6 "for each Stream Input"). What a CRF AVTPDU
+gives the counters:
+
+| Counter | From a CRF AVTPDU |
+|---|---|
+| FRAMES_RX | every AVTPDU on the stream, a refused one too |
+| SEQ_NUM_MISMATCH, MEDIA_RESET, TIMESTAMP_UNCERTAIN | sequence_num, mr and tu of its header |
+| UNSUPPORTED_FORMAT | its type, base frequency, pull, timestamp interval or number of timestamps is not the input's format's, or the frame is too short for them. Such an AVTPDU reaches no consumer: a clock of another format is not this input's clock |
+| TIMESTAMP_VALID | each accepted one: a CRF AVTPDU always carries its timestamps |
+| LATE_TIMESTAMP, EARLY_TIMESTAMP | its first timestamp against the receive time, as an AAF AVTPDU's avtp_timestamp. A late one is counted and still feeds the clock recovery |
+| MEDIA_LOCKED, MEDIA_UNLOCKED | the steady step between first timestamps, judged at the stream's rate: timestamps a PDU times the timestamp interval over the base frequency, 2 ms for Milan's format whatever the entity's sampling rate |
+
+`AvbEntityKit::end_cycle(now_ns)` ends an
 observation interval on the reactor thread once `COUNTERS_INTERVAL_NS`,
 half a second, has passed since the last: `StreamInputIntervals::fold()`
 makes the Milan values from the running counts, and an input still locked

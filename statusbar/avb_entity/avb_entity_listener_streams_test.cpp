@@ -693,6 +693,184 @@ TEST(listener_crf, a_crf_frame_hands_each_timestamp_to_the_consumer_with_its_rec
 
 namespace {
 
+/// What a CRF talker sends: the clock a CrfInputUnderTest is fed.
+struct CrfClock
+{
+    avtp::CrfType type{avtp::CrfType::audio_sample};
+    uint32_t base_frequency{48000};
+    avtp::CrfPull pull{avtp::CrfPull::multiply_1_0};
+    uint16_t timestamp_interval{96};
+    uint16_t timestamps_per_pdu{1};
+};
+
+/// A listener with one CRF input, STREAM_INPUT 1 in the Milan Clock Reference
+/// Format (48 kHz, one timestamp every 96 samples), connected to STREAM_2,
+/// and a CRF talker whose AVTPDUs it is handed.
+struct CrfInputUnderTest
+{
+    static constexpr avtp::Nanoseconds START{1'795'000'000'000'000'000};
+    static constexpr avtp::Nanoseconds PDU_PERIOD{2'000'000};
+
+    std::unique_ptr<AvbEntityToneGenerator> donor{make_donor()};
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls;
+    avtp::CrfStreamOutputContext talker;
+    avtp::Nanoseconds now{START};
+    int fed{0};      ///< timestamps the CRF consumer was handed
+    bool tu{false};  ///< the tu bit of the AVTPDUs from here on
+    bool mr{false};  ///< their mr bit
+    size_t cut{0};   ///< octets cut off the end of each frame
+
+    explicit CrfInputUnderTest(CrfClock const clock = {}, uint32_t const entity_sample_rate = 48'000)
+        : ls{1'000'000, entity_sample_rate, donor->components(), gptp, nullptr}
+        , talker{tsn::StreamId{}, clock.type, clock.base_frequency, clock.pull, clock.timestamp_interval, clock.timestamps_per_pdu}
+    {
+        StreamSpec spec{};
+        spec.index = 1;
+        spec.format_word = CRF_MILAN_48K;
+        spec.format = decode_stream_format(CRF_MILAN_48K);
+        EXPECT_TRUE(ls.open_stream(spec).has_value());
+        ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+        ls.set_crf(1, [this](uint64_t, uint16_t, int64_t) { ++fed; });
+    }
+    CrfInputUnderTest(CrfInputUnderTest const&) = delete;
+    auto operator=(CrfInputUnderTest const&) -> CrfInputUnderTest& = delete;
+
+    /// The talker's next AVTPDU as the frame the listener receives.
+    [[nodiscard]] auto next_frame() -> std::vector<uint8_t>
+    {
+        std::vector<uint8_t> frame(avtp::CrfPdu::HEADER_LENGTH + (talker.timestamps_per_packet * avtp::CrfPdu::TIMESTAMP_SIZE));
+        avtp::CrfPdu pdu{};
+        auto const data = std::span<uint8_t>{frame}.subspan(avtp::CrfPdu::HEADER_LENGTH);
+        EXPECT_EQ(talker.build_packet(pdu, data, START + PDU_PERIOD), data.size());  // 2 ms ahead of its arrival
+        pdu.set_tu(tu);
+        pdu.set_mr(mr);
+        span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
+        span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_2));
+        frame.resize(frame.size() - cut);
+        return frame;
+    }
+
+    /// @p count AVTPDUs arrive, each 2 ms after the one before.
+    void receive(int const count = 1)
+    {
+        for (int i = 0; i < count; ++i) {
+            ls.on_stream_rx_frame(next_frame(), now);
+            now += PDU_PERIOD;
+        }
+    }
+
+    [[nodiscard]] auto counters() -> StreamInputCounters const& { return ls.slot_for(1)->counters; }
+    [[nodiscard]] auto bad() -> uint64_t { return ls.slot_for(1)->rx_bad.load(); }
+};
+
+}  // namespace
+
+// Milan v1.3 5.3.8.10 asks the counters of Table 5.6 "for each Stream Input": a CRF input counts
+// its AVTPDUs as an AAF input does.
+TEST(listener_crf, a_crf_input_counts_its_avtpdus_and_locks_on_their_steady_step)
+{
+    CrfInputUnderTest crf;
+    crf.receive(20);
+    auto const& c = crf.counters();
+    EXPECT_EQ(crf.fed, 20);
+    EXPECT_EQ(c.frames_rx.load(), 20U);
+    EXPECT_EQ(c.timestamp_valid.load(), 20U);  // a CRF AVTPDU always carries its timestamps
+    EXPECT_EQ(c.timestamp_not_valid.load(), 0U);
+    EXPECT_EQ(c.media_locked.load(), 1U);
+    EXPECT_TRUE(c.is_locked.load());
+    EXPECT_EQ(c.media_unlocked.load(), 0U);
+    EXPECT_EQ(c.seq_num_mismatch.load(), 0U);
+    EXPECT_EQ(c.media_reset.load(), 0U);
+    EXPECT_EQ(c.timestamp_uncertain.load(), 0U);
+    EXPECT_EQ(c.unsupported_format.load(), 0U);
+    EXPECT_EQ(c.late_timestamp.load(), 0U);
+    EXPECT_EQ(c.early_timestamp.load(), 0U);
+    EXPECT_EQ(crf.bad(), 0U);
+}
+
+TEST(listener_crf, the_tu_and_mr_bits_and_the_sequence_number_of_a_crf_avtpdu_are_counted)
+{
+    CrfInputUnderTest crf;
+    crf.receive(12);
+    crf.tu = true;
+    crf.receive(3);
+    crf.tu = false;
+    EXPECT_EQ(crf.counters().timestamp_uncertain.load(), 3U);
+
+    // mr toggles once and stays: one MEDIA_RESET.
+    crf.mr = true;
+    crf.receive(4);
+    EXPECT_EQ(crf.counters().media_reset.load(), 1U);
+
+    // An AVTPDU that never arrives: the next one's sequence number is not the one expected.
+    (void)crf.next_frame();
+    crf.now += CrfInputUnderTest::PDU_PERIOD;
+    crf.receive(2);
+    EXPECT_EQ(crf.counters().seq_num_mismatch.load(), 1U);
+    EXPECT_EQ(crf.counters().frames_rx.load(), 21U);
+    EXPECT_EQ(crf.fed, 21);
+}
+
+TEST(listener_crf, the_lock_step_of_a_crf_input_is_judged_at_the_streams_rate_and_not_the_entitys)
+{
+    // An entity at 192 kHz with Milan's 48 kHz CRF input: a PDU of 96 samples is 2 ms of the
+    // stream's clock and would be 0.5 ms of the entity's, where 2 ms is no plausible step.
+    CrfInputUnderTest crf{CrfClock{}, 192'000};
+    crf.receive(20);
+    EXPECT_EQ(crf.counters().media_locked.load(), 1U);
+    EXPECT_TRUE(crf.counters().is_locked.load());
+}
+
+TEST(listener_crf, a_late_crf_avtpdu_is_counted_and_still_feeds_the_recovery)
+{
+    // IEEE 1722-2016 10.6: a timestamp already past is late; it is a clock sample all the same.
+    CrfInputUnderTest crf;
+    crf.receive(10);
+    crf.now += std::chrono::milliseconds{5};  // the next one arrives 3 ms after its timestamp
+    crf.receive(1);
+    EXPECT_EQ(crf.counters().late_timestamp.load(), 1U);
+    EXPECT_EQ(crf.fed, 11);
+    EXPECT_EQ(crf.counters().unsupported_format.load(), 0U);
+}
+
+TEST(listener_crf, a_crf_avtpdu_that_is_not_of_the_inputs_format_is_unsupported_and_feeds_nothing)
+{
+    using avtp::CrfPull;
+    using avtp::CrfType;
+    // Milan v1.3 Table 7.1: each field of the format, wrong in turn.
+    for (CrfClock const clock :
+         {CrfClock{.base_frequency = 96000},
+          CrfClock{.timestamp_interval = 160},
+          CrfClock{.timestamps_per_pdu = 2},
+          CrfClock{.pull = CrfPull::multiply_1_div_1001},
+          CrfClock{.type = CrfType::video_frame}}) {
+        CrfInputUnderTest crf{clock};
+        crf.receive(12);
+        EXPECT_EQ(crf.fed, 0);
+        EXPECT_EQ(crf.counters().frames_rx.load(), 12U);
+        EXPECT_EQ(crf.counters().unsupported_format.load(), 12U);
+        EXPECT_EQ(crf.counters().timestamp_valid.load(), 0U);
+        EXPECT_EQ(crf.counters().media_locked.load(), 0U);
+        EXPECT_EQ(crf.bad(), 12U);
+    }
+}
+
+TEST(listener_crf, a_crf_frame_cut_short_of_its_timestamp_or_of_its_header_is_unsupported_too)
+{
+    for (size_t const cut : {size_t{1}, avtp::CrfPdu::TIMESTAMP_SIZE, avtp::CrfPdu::TIMESTAMP_SIZE + 3}) {
+        CrfInputUnderTest crf;
+        crf.cut = cut;
+        crf.receive(3);
+        EXPECT_EQ(crf.fed, 0);
+        EXPECT_EQ(crf.counters().frames_rx.load(), 3U);
+        EXPECT_EQ(crf.counters().unsupported_format.load(), 3U);
+        EXPECT_EQ(crf.bad(), 3U);
+    }
+}
+
+namespace {
+
 /// The Milan Base format at 96 kHz (AAF, 32 bit integer, 12 samples per
 /// AVTPDU) with @p channels channels: AAF_96K_INT32_8CH with another count.
 constexpr auto aaf_96k_of(uint64_t const channels) noexcept -> uint64_t

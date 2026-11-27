@@ -689,28 +689,51 @@ void ListenerStreams::receive_aaf_frame(ListenerStreamSlot& slot, std::span<uint
     offer_aaf_to_sink(slot, audio);
 }
 
-auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
+auto ListenerStreams::parse_crf_frame(ListenerStreamSlot& /*slot*/, std::span<uint8_t const> frame) -> std::optional<avtp::CrfPdu>
 {
     if (frame.size() < avtp::CrfPdu::HEADER_LENGTH) {
         return std::nullopt;
     }
     avtp::CrfPdu pdu{};
     span_load(pdu, frame.first(avtp::CrfPdu::HEADER_LENGTH));
-    if (!pdu.is_valid()) {
-        slot.rx_bad.add(1);
-        return std::nullopt;
-    }
-    return pdu;
+    return pdu.is_valid() ? std::optional{pdu} : std::nullopt;
 }
 
-void ListenerStreams::receive_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+namespace {
+
+/// Whether @p pdu, with @p timestamp_octets of timestamp data behind its
+/// header, is a CRF AVTPDU of @p format (IEEE 1722-2016 Clause 10.4; Milan
+/// v1.3 Table 7.1): its type, base frequency, pull and timestamp interval,
+/// and as many timestamps as a PDU of the format carries, all of them there.
+[[nodiscard]] auto crf_pdu_is_of_format(
+    StreamFormatFields const& format, avtp::CrfPdu const& pdu, size_t const timestamp_octets) noexcept -> bool
 {
-    auto pdu = parse_crf_frame(slot, frame);
-    if (!pdu) {
-        return;
+    bool const clock = static_cast<uint8_t>(pdu.get_crf_type()) == format.crf_type &&
+        pdu.base_frequency() == format.crf_base_frequency_hz && static_cast<uint8_t>(pdu.get_pull()) == format.crf_pull &&
+        pdu.timestamp_interval() == format.crf_timestamp_interval;
+    bool const timestamps = pdu.timestamp_count() == format.crf_timestamps_per_pdu &&
+        timestamp_octets >= size_t{pdu.timestamp_count()} * avtp::CrfPdu::TIMESTAMP_SIZE;
+    return clock && timestamps;
+}
+
+}  // namespace
+
+auto ListenerStreams::accepted_crf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+    -> std::optional<avtp::CrfPdu>
+{
+    auto const pdu = parse_crf_frame(slot, frame);
+    if (pdu && crf_pdu_is_of_format(slot.spec.format, *pdu, frame.size() - avtp::CrfPdu::HEADER_LENGTH)) {
+        return pdu;
     }
-    std::span<uint8_t const> const ts_data = frame.subspan(avtp::CrfPdu::HEADER_LENGTH);
-    slot.crf->process_packet(*pdu, ts_data, [&slot, rx_ns = now.count()](uint64_t ts_ns, uint16_t index) {
+    slot.rx_bad.add(1);
+    update_stream_input_counters(slot, 0, 0, false, false, false, /*format_ok=*/false, 0, /*ts_sparse=*/false, now);
+    return std::nullopt;
+}
+
+void ListenerStreams::deliver_crf_timestamps(
+    ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> const timestamp_data, avtp::Nanoseconds const now)
+{
+    slot.crf->process_packet(pdu, timestamp_data, [&slot, rx_ns = now.count()](uint64_t ts_ns, uint16_t index) {
         // Each (CRF timestamp, local receive time) pair feeds media-clock
         // recovery via the registered consumer.
         if (slot.on_crf) {
@@ -719,6 +742,35 @@ void ListenerStreams::receive_crf_frame(ListenerStreamSlot& slot, std::span<uint
     });
     slot.rx_packets.add(1);
     slot.rx_samples.add(slot.crf->last_timestamp_count);
+}
+
+void ListenerStreams::tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, avtp::Nanoseconds const now)
+{
+    auto const& format = slot.spec.format;
+    tally_stream_input_packet(
+        slot.counters,
+        pdu.get_sequence_num(),
+        static_cast<uint32_t>(slot.crf->first_timestamp_ns),  // the low 32 bits, which an avtp_timestamp is of gPTP time
+        /*tv=*/true,
+        pdu.tu(),
+        pdu.mr(),
+        /*format_ok=*/true,
+        uint64_t{format.crf_timestamps_per_pdu} * format.crf_timestamp_interval,
+        /*ts_sparse=*/false,
+        now.count(),
+        lock_tolerance_ns_,
+        format.crf_base_frequency_hz);
+    drop_lock_of_a_lost_stream(slot);
+}
+
+void ListenerStreams::receive_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds const now)
+{
+    auto const pdu = accepted_crf_pdu(slot, frame, now);
+    if (!pdu) {
+        return;
+    }
+    deliver_crf_timestamps(slot, *pdu, frame.subspan(avtp::CrfPdu::HEADER_LENGTH), now);
+    tally_crf_pdu(slot, *pdu, now);
 }
 
 auto ListenerStreams::frame_is_for_listener(uint16_t const stream_index, std::span<uint8_t const> frame) const -> bool
@@ -773,6 +825,11 @@ void ListenerStreams::update_stream_input_counters(
         now.count(),
         lock_tolerance_ns_,
         sample_rate_);
+    drop_lock_of_a_lost_stream(slot);
+}
+
+void ListenerStreams::drop_lock_of_a_lost_stream(ListenerStreamSlot& slot)
+{
     // An AVTPDU taken up just before the input lost its stream may lock it
     // after the reactor thread has dropped the lock (on_listener_disconnected).
     // The reactor clears the stream id first and the lock after, so a lock

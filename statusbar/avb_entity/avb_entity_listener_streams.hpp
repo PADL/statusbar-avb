@@ -271,12 +271,33 @@ struct ListenerStreams
         ListenerStreamSlot& slot, avtp::AafPdu const& pdu, std::span<uint8_t const> audio, avtp::Nanoseconds now) -> uint64_t;
 
     /// One received CRF frame for @p slot: each timestamp to the CRF consumer
-    /// with the receive time. A CRF stream is a media-clock reference and
-    /// carries no audio.
+    /// with the receive time, and the AVTPDU into the input's counters as an
+    /// AAF one is (Milan v1.3 5.3.8.10 asks Table 5.6 of each Stream Input).
+    /// A CRF stream is a media-clock reference and carries no audio.
     void receive_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now);
-    /// The frame's CRF header when it is one; a bad frame is counted and yields nullopt.
+    /// The frame's CRF header when it is one of the input's format: its type,
+    /// base frequency, pull and timestamp interval, and the timestamps a PDU
+    /// of it carries. Any other frame is counted (rx_bad, FRAMES_RX and
+    /// UNSUPPORTED_FORMAT), yields nullopt and reaches no consumer: a clock
+    /// of another format is not this input's clock.
+    [[nodiscard]] auto accepted_crf_pdu(ListenerStreamSlot& slot, std::span<uint8_t const> frame, avtp::Nanoseconds now)
+        -> std::optional<avtp::CrfPdu>;
+    /// The frame's CRF header when it is a CRF AVTPDU at all; nullopt for any other frame.
     [[nodiscard]] static auto parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame)
         -> std::optional<avtp::CrfPdu>;
+    /// The timestamps of an accepted CRF AVTPDU to the consumer, and the slot's packet and sample counts.
+    void deliver_crf_timestamps(
+        ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> timestamp_data, avtp::Nanoseconds now);
+    /// An accepted CRF AVTPDU into the input's counters: sequence_num, mr and
+    /// tu from its header, its first timestamp as an AAF AVTPDU's
+    /// avtp_timestamp is taken (late, early, and the steady step of the media
+    /// lock), the step judged at the stream's own rate: timestamps a PDU
+    /// times the timestamp interval over the base frequency. Every CRF
+    /// AVTPDU carries its timestamps, so each counts TIMESTAMP_VALID. After
+    /// deliver_crf_timestamps().
+    void tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, avtp::Nanoseconds now);
+    /// A lock gained by an AVTPDU that crossed the input's loss of its stream is given up.
+    void drop_lock_of_a_lost_stream(ListenerStreamSlot& slot);
 
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.
