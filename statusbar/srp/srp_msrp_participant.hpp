@@ -975,6 +975,18 @@ class MsrpParticipantT
     /// given tx! as its message is built, through send_pdu.
     void encode_and_send_pdu(TimePoint now, bool leave_all);
 
+    /// Whether a transmit opportunity has a message to carry: an Applicant
+    /// of any attribute type in one of the states Table 10-3 has send a
+    /// message on tx! (VN, AN, AA, LA, VP, AP, LO: the ones that asked for the
+    /// opportunity, note 6). What the quiet and the observer states may send
+    /// is the bracketed [sJ] and [s], of which IEEE 802.1Q 10.7.6.3 and
+    /// 10.7.6.5 say "transmitting the value is not necessary for correct
+    /// protocol operation". An opportunity where nobody owes anything sends
+    /// no PDU; one where somebody does carries the optional values too.
+    /// Every received PDU is followed by an opportunity (finish_receive), so
+    /// without this a participant sent a PDU for every PDU it heard.
+    [[nodiscard]] auto transmit_owed() const noexcept -> bool;
+
     /// The Applicant state of every record as a transmit pass found it: what
     /// a message skipped for space is rolled back to (transmit_attribute_type).
     struct ApplicantSnapshot

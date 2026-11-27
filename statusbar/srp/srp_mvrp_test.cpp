@@ -224,6 +224,129 @@ auto test_mvrp_config() -> MvrpConfig
 }  // namespace
 
 //
+// A transmit opportunity that owes nothing sends nothing (IEEE 802.1Q
+// 10.7.6.3, 10.7.6.5): two participants on one LAN do not answer each other
+//
+
+namespace {
+
+/// What two participants on one LAN sent each other in a stretch of time,
+/// and how often B was told that A's VLAN had left.
+struct LanTraffic
+{
+    int from_a{0};
+    int from_b{0};
+    int leaves_at_b{0};
+};
+
+/// A declares VID 2 and B declares it too or only listens. Twenty seconds to
+/// settle, then @p seconds are counted. Time is told, 10 ms a step.
+auto run_two_on_a_lan(bool const b_declares, int const seconds) -> LanTraffic
+{
+    MvrpTestClock c;
+    MvrpFabric fabric;
+    MvrpParticipant a{test_mvrp_config(), 0x1111};
+    MvrpParticipant b{test_mvrp_config(), 0x2222};
+    LanTraffic seen;
+    bool counting = false;
+    a.set_send_pdu([&](std::span<uint8_t const> pdu) {
+        seen.from_a += counting ? 1 : 0;
+        return fabric.make_a_sender()(pdu);
+    });
+    b.set_send_pdu([&](std::span<uint8_t const> pdu) {
+        seen.from_b += counting ? 1 : 0;
+        return fabric.make_b_sender()(pdu);
+    });
+    Observer watch{};
+    watch.on_vlan_leave = [&](uint16_t) { ++seen.leaves_at_b; };
+    (void)b.subscribe(watch);
+    a.start(c.now);
+    b.start(c.now);
+    (void)a.declare_vlan(2, c.now);
+    if (b_declares) {
+        (void)b.declare_vlan(2, c.now);
+    }
+    for (int ms = 0; ms < (seconds + 20) * 1000; ms += 10) {
+        counting = ms >= 20'000;
+        auto const t = c.advance(std::chrono::milliseconds{10});
+        a.tick(t);
+        fabric.deliver_a_to_b(b, t);
+        b.tick(t);
+        fabric.deliver_b_to_a(a, t);
+    }
+    return seen;
+}
+
+}  // namespace
+
+TEST(mvrp_quiet_opportunity, a_listener_does_not_answer_what_it_hears)
+{
+    // A's periodic Join is about one a second. B declares nothing: it has
+    // nothing to say but its LeaveAll. It used to answer every PDU of A's
+    // with an optional In, and A that with an optional Join: three PDUs a
+    // second from each, for ever.
+    auto const seen = run_two_on_a_lan(/*b_declares=*/false, 60);
+    EXPECT_TRUE(seen.from_a >= 50 && seen.from_a <= 75);
+    EXPECT_TRUE(seen.from_b <= 8);
+    // And A's VLAN never left B's registrar, through every LeaveAll of both.
+    EXPECT_EQ(seen.leaves_at_b, 0);
+}
+
+TEST(mvrp_quiet_opportunity, two_that_declare_the_same_do_not_answer_each_other)
+{
+    auto const seen = run_two_on_a_lan(/*b_declares=*/true, 60);
+    // Between them about one periodic Join a second, whoever's timer runs first.
+    EXPECT_TRUE(seen.from_a + seen.from_b >= 50 && seen.from_a + seen.from_b <= 90);
+    EXPECT_EQ(seen.leaves_at_b, 0);
+}
+
+TEST(mvrp_quiet_opportunity, an_opportunity_nobody_asked_for_sends_nothing)
+{
+    MvrpTestClock c;
+    MvrpFabric fabric;
+    MvrpParticipant p{test_mvrp_config(), 0x1234};
+    p.set_send_pdu(fabric.make_a_sender());
+    p.start(c.now);
+    (void)p.declare_vlan(2, c.now);
+    // The two News of the declaration go out, a JoinTime apart.
+    for (int i = 0; i < 80; ++i) {
+        p.tick(c.advance(std::chrono::milliseconds{10}));
+    }
+    EXPECT_TRUE(!fabric.a_to_b.empty());
+    fabric.a_to_b.clear();
+
+    // Quiet now. An opportunity sends nothing, however often it comes.
+    for (int i = 0; i < 5; ++i) {
+        p.transmit_pending(c.now);
+    }
+    EXPECT_TRUE(fabric.a_to_b.empty());
+}
+
+TEST(mvrp_quiet_opportunity, optional_values_ride_a_pdu_that_goes_out_anyway)
+{
+    MvrpTestClock c;
+    MvrpFabric fabric;
+    MvrpParticipant p{test_mvrp_config(), 0x1234};
+    p.set_send_pdu(fabric.make_a_sender());
+    p.start(c.now);
+    (void)p.declare_vlan(2, c.now);
+    for (int i = 0; i < 80; ++i) {
+        p.tick(c.advance(std::chrono::milliseconds{10}));
+    }
+    size_t const one_vlan = fabric.a_to_b.front().size();
+    fabric.a_to_b.clear();
+
+    // VID 3 is new and owes its New. VID 2 is quiet, and its optional Join
+    // goes in the same PDU: one more vector than a PDU of one VLAN has.
+    (void)p.declare_vlan(3, c.now);
+    for (int i = 0; i < 30 && fabric.a_to_b.empty(); ++i) {
+        p.tick(c.advance(std::chrono::milliseconds{10}));
+    }
+    EXPECT_TRUE(!fabric.a_to_b.empty());
+    EXPECT_TRUE(!fabric.a_to_b.empty() && fabric.a_to_b.front().size() > one_vlan);
+}
+
+//
 // Tests: MvrpParticipant
 //
 

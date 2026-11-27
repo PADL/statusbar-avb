@@ -1743,10 +1743,30 @@ void restore_applicants_of(Table& recs, Saved const& saved)
 template <class Limits>
 void MsrpParticipantT<Limits>::encode_and_send_pdu(TimePoint now, bool leave_all)
 {
+    if (!leave_all && !transmit_owed()) {
+        return;
+    }
     ApplicantSnapshot const before = snapshot_applicants();
     bool la_remaining = false;
     bool const any_message = transmit_pass_shedding_optional(before, leave_all, now, la_remaining);
     finish_pdu(any_message, la_remaining);
+}
+
+namespace {
+/// Whether an Applicant of @p recs is in a state that sends a message on tx!.
+template <class Table>
+auto any_wants_transmit(Table const& recs) noexcept -> bool
+{
+    return std::ranges::any_of(
+        recs, [](auto const& rec) { return applicant_sm::Def::wants_transmit(rec.applicant_sm.current_state()); });
+}
+}  // namespace
+
+template <class Limits>
+auto MsrpParticipantT<Limits>::transmit_owed() const noexcept -> bool
+{
+    return any_wants_transmit(talker_adv_) || any_wants_transmit(talker_failed_) || any_wants_transmit(listeners_) ||
+        any_wants_transmit(domains_);
 }
 
 template <class Limits>

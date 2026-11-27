@@ -404,6 +404,19 @@ A full declare → peer notification → withdraw cycle:
   into lambdas.
 - **Timers via `tick()` + `next_deadline()`**, not OS timerfd. Caller
   owns the event loop and chooses poll/epoll/coroutines/etc.
+- **A transmit opportunity that owes nothing sends nothing.** Every
+  received PDU is followed by an opportunity a JoinTime later, and at
+  an opportunity a quiet Applicant (QA, QP) or an observer (VO, AO, QO)
+  may send the bracketed `[sJ]` or `[s]` of Table 10-3. IEEE 802.1Q
+  10.7.6.3 and 10.7.6.5 say of those that "transmitting the value is
+  not necessary for correct protocol operation": they exist to pack a
+  vector that is going out anyway. So both participants send a PDU at
+  an opportunity only when an Applicant is in a state with a message to
+  send (VN, AN, AA, LA, VP, AP, LO: `transmit_owed()`) or a LeaveAll is
+  due, and the optional values of the others then ride in it. Sending
+  the optional values on their own made a participant answer every PDU
+  it heard: about one a second toward a bridge, and two participants on
+  one LAN answered each other for ever, three PDUs a second each.
 - **Singleton vector encoding.** The participant emits one vector per
   attribute on transmit — no coalescing of contiguous stream IDs into
   a multi-value vector. Decode path handles multi-value receive

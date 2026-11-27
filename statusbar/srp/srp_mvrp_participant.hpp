@@ -559,11 +559,11 @@ class MvrpParticipantT
     /// (IEEE 802.1Q 10.8.2.6: the FirstValue field is present, NumberOfValues 0).
     void build_and_send_pdu(TimePoint now, bool leave_all = false)
     {
+        if (!leave_all && !transmit_owed()) {
+            return;
+        }
         for (auto& rec : vlans_) {
             mrp::dispatch_applicant_tx(rec, now);
-        }
-        if (!any_tx_pending() && !leave_all) {
-            return;
         }
         pdu_buffer_.rewind();
         if (!append_pdu_header()) {
@@ -573,14 +573,25 @@ class MvrpParticipantT
         finish_and_send_pdu();
     }
 
-    [[nodiscard]] auto any_tx_pending() const noexcept -> bool
+    /// Whether a transmit opportunity has a message to carry: an Applicant
+    /// in one of the states Table 10-3 has send a message on tx! (VN, AN, AA,
+    /// LA, VP, AP, LO: the ones that asked for the opportunity, note 6).
+    ///
+    /// What the quiet and the observer states may send on tx! is the
+    /// bracketed [sJ] and [s], and IEEE 802.1Q 10.7.6.3 and 10.7.6.5 say of
+    /// those that "transmitting the value is not necessary for correct
+    /// protocol operation": they are there to pack a vector that is going out
+    /// anyway. So an opportunity where nobody owes anything sends no PDU. One
+    /// where somebody does carries the optional values of the others too.
+    ///
+    /// This matters because every received PDU is followed by an
+    /// opportunity. A participant that answered each with its optional
+    /// values sent a PDU for every PDU it heard, and two of them on one LAN
+    /// answered each other for ever, a JoinTime apart.
+    [[nodiscard]] auto transmit_owed() const noexcept -> bool
     {
-        for (auto const& rec : vlans_) {
-            if (rec.applicant_ctx.tx_pending) {
-                return true;
-            }
-        }
-        return false;
+        return std::ranges::any_of(
+            vlans_, [](auto const& rec) { return applicant_sm::Def::wants_transmit(rec.applicant_sm.current_state()); });
     }
 
     /// ProtocolVersion, AttributeType, AttributeLength.
