@@ -791,7 +791,8 @@ class AemCommandHandler
 
     /// Handle SET_NAME command (IEEE 1722.1 Clause 7.4.17). Routes through
     /// AemEntityModel::apply_set_name -> the handler's symbol-keyed
-    /// on_set_name, echoing the command as the response.
+    /// on_set_name, echoing the command as the response; the name is kept
+    /// and answered zero-filled after its first NUL.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a

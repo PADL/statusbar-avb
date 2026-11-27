@@ -110,7 +110,8 @@ class AemEntityModel
     /// `command_body` is the 72-byte payload following the AemDu header:
     /// descriptor_type (2) + descriptor_index (2) + name_index (2) +
     /// configuration_index (2) + name (64). Returns an AEM_STATUS_* code
-    /// suitable for the response.
+    /// suitable for the response: BAD_ARGUMENTS, the handler not asked, for a
+    /// short body or a name that is not well-formed UTF-8 (RFC 3629 Section 4).
     [[nodiscard]] auto apply_set_name(std::span<uint8_t const> command_body) -> uint8_t;
 
     /// Result of an AEM SET descriptor-value command: the AEM status + the number of

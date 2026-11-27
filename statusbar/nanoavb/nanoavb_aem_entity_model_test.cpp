@@ -1437,6 +1437,74 @@ TEST(entity_name, callback_rejection_keeps_old_name)
     EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"SeedName"});
 }
 
+TEST(entity_name, a_name_that_is_not_utf8_is_refused_and_the_name_in_force_answered)
+{
+    // IEEE 1722.1-2021 Clause 7.4.17: the name is an ATDECC string, UTF-8 (RFC 3629 Section 4).
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    int changes = 0;
+    handler.set_on_entity_name_changed([&changes](AtdeccString const&) {
+        ++changes;
+        return AEM_STATUS_SUCCESS;
+    });
+    AemCommandHandler cmd_handler{handler};
+
+    std::string const cut_at_the_end = std::string(63, 'A') + "\xC3";  // all 64 octets, no NUL
+    for (std::string_view const malformed :
+         {std::string_view{"Caf\xC3"}, std::string_view{"\xC0\xAF"}, std::string_view{cut_at_the_end}}) {
+        auto const set =
+            run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, malformed));
+        EXPECT_EQ(set.status, AEM_STATUS_BAD_ARGUMENTS);
+        EXPECT_EQ(set.bytes.size(), atdecc::aem::AemNamePayload::LENGTH);
+        EXPECT_EQ(name_from_response(set.bytes), std::string{"SeedName"});  // the name in force
+    }
+    EXPECT_EQ(changes, 0);
+    EXPECT_EQ(std::string{handler.entity_name().as_string_view()}, std::string{"SeedName"});
+
+    std::string_view const well_formed{"Caf\xC3\xA9 \xF0\x9F\x8E\xB5"};
+    auto const set =
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, well_formed));
+    EXPECT_EQ(set.status, AEM_STATUS_SUCCESS);
+    EXPECT_EQ(changes, 1);
+    EXPECT_EQ(handler.entity_name().as_string_view(), well_formed);
+}
+
+TEST(entity_name, a_name_is_kept_and_answered_zero_filled_after_its_first_nul)
+{
+    auto blob = make_blob_with_entity("SeedName");
+    auto storage_result = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>(blob));
+    EXPECT_TRUE(storage_result.has_value());
+    DescriptorStorageHandler handler{*storage_result};
+    handler.manage_entity_name(AtdeccString{"SeedName"});
+    std::vector<AtdeccString> told;
+    handler.set_on_entity_name_changed([&told](AtdeccString const& name) {
+        told.push_back(name);
+        return AEM_STATUS_SUCCESS;
+    });
+    AemCommandHandler cmd_handler{handler};
+    cmd_handler.set_profile(AemCommandHandler::Profile::milan13);
+
+    auto const clean = make_set_name_body(DESCRIPTOR_ENTITY, 0, 0, "Stage");
+    auto dirty = clean;
+    dirty[atdecc::aem::AemNameCommandPayload::LENGTH + 9] = 0xFF;  // after the NUL ending "Stage"
+    dirty.back() = 'A';
+    auto const set = run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, dirty);
+    EXPECT_EQ(set.status, AEM_STATUS_SUCCESS);
+    EXPECT_TRUE(set.bytes == clean);
+    EXPECT_EQ(told.size(), size_t{1});
+    EXPECT_TRUE(told.front().value == AtdeccString{"Stage"}.value);
+    EXPECT_TRUE(
+        run_aem_command(cmd_handler, atdecc::AEM_COMMAND_GET_NAME, make_get_name_body(DESCRIPTOR_ENTITY, 0, 0)).bytes == clean);
+
+    // The same name with other octets after its NUL is the name in force: answered, not applied again.
+    dirty[atdecc::aem::AemNameCommandPayload::LENGTH + 20] = 0x7F;
+    EXPECT_TRUE(run_aem_command(cmd_handler, atdecc::AEM_COMMAND_SET_NAME, dirty).bytes == clean);
+    EXPECT_EQ(told.size(), size_t{1});
+}
+
 TEST(entity_name, unmanaged_field_reports_not_implemented)
 {
     auto blob = make_blob_with_entity("SeedName");
