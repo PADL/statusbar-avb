@@ -202,13 +202,6 @@ struct IntegrationFixture
         controller.start();
     }
 
-    /// Bring the link up and let TMR_DELAY (at most 2 s at startup) expire.
-    void advertise()
-    {
-        adp_advertiser.link_up(TimePoint{});
-        adp_advertiser.tick(TimePoint{std::chrono::seconds{2}});
-    }
-
     /// Run one round of entity advertise + relay + tick.
     void run_discovery_round(int64_t now_ns)
     {
@@ -237,7 +230,7 @@ TEST(nanoavb_integration, discovery_via_adp)
     IntegrationFixture f;
 
     // Entity starts advertising
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     EXPECT_EQ(f.discovered_entities.size(), 1u);
@@ -251,7 +244,7 @@ TEST(nanoavb_integration, read_entity_descriptor)
     IntegrationFixture f;
 
     // Discovery
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     // Send READ_DESCRIPTOR for ENTITY
@@ -269,7 +262,7 @@ TEST(nanoavb_integration, read_stream_descriptors)
 {
     IntegrationFixture f;
 
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     // Read all 4 stream descriptors (2 outputs + 2 inputs)
@@ -294,7 +287,7 @@ TEST(nanoavb_integration, read_nonexistent_descriptor_returns_error)
 {
     IntegrationFixture f;
 
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     // Read a stream index that doesn't exist
@@ -311,7 +304,7 @@ TEST(nanoavb_integration, identify_command)
 {
     IntegrationFixture f;
 
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     // Without AEM_IDENTIFY_CONTROL_INDEX_VALID in the ADPDU the controller
@@ -321,8 +314,7 @@ TEST(nanoavb_integration, identify_command)
     // Identify is implemented as SET_CONTROL on the CONTROL descriptor at
     // the index advertised by the ADPDU's identify_control_index field.
     f.adp_advertiser.set_identify_control_index(0);
-    f.adp_advertiser.notify_entity_changed(TimePoint{std::chrono::seconds{2}});
-    f.adp_advertiser.tick(TimePoint{std::chrono::seconds{6}});  // after TMR_DELAY
+    f.adp_advertiser.notify_entity_changed();
     f.run_discovery_round(1'050'000'000);
     EXPECT_TRUE(f.controller.set_identify(ENTITY_ID, true));
     f.run_command_round(1'100'000'000);
@@ -337,7 +329,7 @@ TEST(nanoavb_integration, multiple_descriptor_reads_sequentially)
 {
     IntegrationFixture f;
 
-    f.advertise();
+    (void)f.adp_advertiser.start(TimePoint{});
     f.run_discovery_round(1'000'000'000);
 
     // Read ENTITY, CONFIGURATION, STREAM_OUTPUT(0), STREAM_INPUT(0)

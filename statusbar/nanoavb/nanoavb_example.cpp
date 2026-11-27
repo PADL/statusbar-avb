@@ -151,7 +151,9 @@ struct SupervisedNanoAvb
             // (discovery/enumeration is independent of gPTP/SRP). SRP (MVRP+MSRP)
             // is started in enter_ready() once gPTP is locked.
             gptp.handle_event(gptp_ctx, statusbar::nanoavb::gptp_sm::Def::Event::AsCapableUp, time);
-            components.adp_advertiser.link_up(time);
+            if (auto const result = components.adp_advertiser.start(time); !result) {
+                std::print(stderr, "Warning: ADP start failed: {}\n", result.error().message());
+            }
         };
 
         supervisor_ctx.callbacks.enter_ready = [this](auto& ctx, TimePoint time) {
@@ -173,8 +175,8 @@ struct SupervisedNanoAvb
         supervisor_ctx.callbacks.stop_all = [this, &components](auto& ctx, TimePoint time) {
             (void)ctx;
             std::print("[supervisor] stop_all: Stopping all protocols and engines\n");
-            // ADP: link down, no ENTITY_DEPARTING (Milan v1.2 Section 5.6.3.5.6)
-            components.adp_advertiser.link_down(time);
+            // Stop ADP
+            (void)components.adp_advertiser.stop(time);
             // Stop stream engines, then reset the protocol state machines
             close_stream_gates(time, statusbar::nanoavb::talker_engine_sm::Def::Event::Fatal);
             gptp.reset();
@@ -872,7 +874,9 @@ void print_final_status(
 
     std::print("\n=== Final Status ===\n");
     std::print("  Total ticks:       {}\n", tick_count);
-    std::print("  ADP state:         {}\n", components.adp_advertiser.advertising() ? "Advertising" : "Down");
+    std::print(
+        "  ADP state:         {}\n",
+        components.adp_advertiser.state() == statusbar::nanoavb::AdpAdvertiserState::Stopped ? "Stopped" : "Advertising");
     std::print("  Available index:   {}\n", components.adp_advertiser.available_index());
     std::print("  ADP send failures: {}\n", components.adp_advertiser.consecutive_send_failures());
     std::print("  Protocol recovery: {}/{}\n", supervised.recovery_attempts, SupervisedNanoAvb::MAX_RECOVERY_ATTEMPTS);
@@ -940,7 +944,7 @@ struct Demo
                     announce.grandmaster_priority2.get(),
                     announce.steps_removed.get());
                 auto const sm_now = statusbar::sm::TimePoint{std::chrono::nanoseconds{now_ns}};
-                components().adp_advertiser.set_gptp_info(grandmaster_id, announce.header.domain_number.get(), sm_now);
+                statusbar::nanoavb::report_grandmaster(components(), grandmaster_id, announce.header.domain_number.get(), sm_now);
                 supervised.on_gptp_announce(sm_now, true);
             }});
     }
@@ -1008,7 +1012,8 @@ void shut_down_and_report(Demo& demo, MainLoopResult const& loop_result)
 {
     std::print("\n\nShutting down...\n");
     auto stop_time = statusbar::sm::TimePoint{std::chrono::steady_clock::now().time_since_epoch()};
-    if (demo.components().adp_advertiser.shutdown(stop_time)) {
+    if (demo.components().adp_advertiser.state() != statusbar::nanoavb::AdpAdvertiserState::Stopped) {
+        (void)demo.components().adp_advertiser.stop(stop_time);
         std::print("ADP: Sent Entity Departing\n");
     }
     demo.supervised.on_link_down(stop_time);

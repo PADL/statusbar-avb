@@ -193,8 +193,6 @@ class AtdeccNetHandler : public net::Pollable
         static constexpr std::array<uint8_t, 3> atdecc_subtypes{
             avtp::AvtpSubtype::adp, avtp::AvtpSubtype::aecp, avtp::AvtpSubtype::acmp};
         (void)context_.set_subtype_filter(atdecc_subtypes);
-        // IEEE 1722.1-2021 Clause 6.2.4.2.2: randomDeviceDelay() seeded from the MAC and clock.
-        adp_advertiser_.seed_random(context_.my_mac(), adp_adv_sm::realtime_ns());
     }
 
     /// Check if the handler is valid (socket opened successfully)
@@ -284,6 +282,8 @@ class AtdeccNetHandler : public net::Pollable
     void release_milan_acmp() noexcept;
     /// Give the AEM handler the Milan listener's sinks for the MVU stream input commands.
     void attach_mvu_stream_inputs();
+    /// Send the GET_STREAM_INPUT_INFO_EX notifications that are due (Milan v1.3 Table 5.21).
+    void notify_stream_input_changes();
     /// Send an ACMP PDU to the ACMP multicast address, in the 56-octet form.
     auto send_acmp(atdecc::AcmpCommandResponse const& pdu) -> bool;
     void tick_protocols(sm::TimePoint now);
@@ -332,6 +332,9 @@ struct GptpAnnounceCallbacks
 
 /// Called when GptpAnnounceHandler::path_trace() changes, to another path or to none.
 using PathTraceChangedFn = statusbar::sg14::inplace_function<void(int64_t now_ns), 64>;
+
+/// Called when GptpAnnounceHandler::grandmaster_identity() changes, to another or to none.
+using GrandmasterChangedFn = statusbar::sg14::inplace_function<void(int64_t now_ns), 64>;
 
 /// The PATH_TRACE TLV of the gPTP Announce message @p announce (IEEE 802.1AS-2020 Clause
 /// 10.6.3.3), read only as far as its messageLength; empty when it has none or the TLVs
@@ -533,6 +536,10 @@ struct NanoAvbComponents
     /// are configured and before the net handlers are created. The two
     /// objects are made here, once, so an entity that never asks carries
     /// two null pointers and nothing else. Calling it again does nothing.
+    ///
+    /// It is where an entity becomes one of the Milan profile, so its
+    /// discovery follows: adp_advertiser then advertises as Milan v1.3 5.6
+    /// asks (NanoAvbAdpAdvertiser::use_milan_advertise()).
     void use_milan_acmp();
 
     /// True once use_milan_acmp() has been called.
@@ -766,11 +773,12 @@ template <typename T>
     return ::statusbar::make_const_span(obj);
 }
 
-/// Report @p grandmaster_id in @p domain as the grandmaster in force at @p now: ADP's
+/// Report @p grandmaster_id in @p domain as the grandmaster in force: ADP's
 /// gptp_grandmaster_id follows it (with an ADP re-announce) and the registered
 /// controllers get an unsolicited GET_AVB_INFO (IEEE 1722.1 7.5.2). An unset
 /// identity reports that no grandmaster is in force. One function for the
-/// change and the loss, so the two reports cannot drift apart.
+/// change and the loss, so the two reports cannot drift apart. @p now is not
+/// read: the advertiser times the re-announce at its next tick().
 void report_grandmaster(
     NanoAvbComponents& components, gptp::ClockIdentity const& grandmaster_id, uint8_t domain, sm::TimePoint now);
 
