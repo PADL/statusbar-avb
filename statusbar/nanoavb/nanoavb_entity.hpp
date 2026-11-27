@@ -167,6 +167,11 @@ using AudioMappingsChangedFn = statusbar::sg14::
 /// cleared.
 using IdentifyChangedFn = statusbar::sg14::inplace_function<void(bool active), 64>;
 
+/// Told the system unique id and name in force (Milan v1.3 Section 5.4.4.2) after an accepted
+/// SET_SYSTEM_UNIQUE_ID changed either, before its response is sent, for the entity to save them.
+/// Called on the reactor thread; it must not throw. A later install replaces an earlier one.
+using SystemUniqueIdChangedFn = statusbar::sg14::inplace_function<void(MvuSystemUniqueIdPayload const& in_force), 64>;
+
 /// REBOOT (IEEE 1722.1 7.4.43): decide whether to reboot the target named by
 /// @p descriptor_type / @p descriptor_index (normally ENTITY 0) and return an
 /// AEM status. The callback runs BEFORE the response and the unsolicited
@@ -387,6 +392,19 @@ class AemCommandHandler
     /// What GET_MEDIA_CLOCK_REFERENCE_INFO answers for CLOCK_DOMAIN @p clock_domain_index (Milan
     /// v1.3 Section 5.4.4.5), whether or not the model has it; the defaults past MAX_CLOCK_DOMAINS.
     [[nodiscard]] auto media_clock_reference_info(uint16_t clock_domain_index) const noexcept -> MvuMediaClockReferenceInfoPayload;
+
+    /// What GET_SYSTEM_UNIQUE_ID answers (Milan v1.3 Section 5.4.4.3): the id and name last set or
+    /// restored, 0 and empty until then, the reserved octets and those after the name zero.
+    [[nodiscard]] auto system_unique_id() const noexcept -> MvuSystemUniqueIdPayload
+    {
+        return {.system_unique_id = system_unique_id_, .system_name = system_name_};
+    }
+    /// Put back the system unique id @p id and name @p name the entity saved (Milan v1.3 Section
+    /// 5.4.4.2): on the reactor thread, before the entity starts. Notifies nobody and calls no
+    /// hook. False, and nothing changed, for a name that is not well-formed UTF-8.
+    [[nodiscard]] auto restore_system_unique_id(uint64_t id, aem::AtdeccString const& name) noexcept -> bool;
+    /// Install the hook told each id and name a SET_SYSTEM_UNIQUE_ID puts in force (SystemUniqueIdChangedFn).
+    void set_on_system_unique_id_changed(SystemUniqueIdChangedFn fn) { on_system_unique_id_changed_ = std::move(fn); }
 
     /// Give the handler what answers BIND_STREAM, UNBIND_STREAM and
     /// GET_STREAM_INPUT_INFO_EX, on behalf of @p owner, an address that names
@@ -1356,11 +1374,30 @@ class AemCommandHandler
     [[nodiscard]] auto answer_mvu_command(Eui48 const& src_mac, MvuCommand const& command) -> bool;
 
     /// Dispatch one MVU command that is answered by the handler (Milan v1.3
-    /// 5.4.4): GET_MILAN_INFO from milan_info_, SET and GET_MEDIA_CLOCK_REFERENCE_INFO
+    /// 5.4.4): GET_MILAN_INFO from milan_info_, SET and GET_SYSTEM_UNIQUE_ID from
+    /// system_unique_id(), SET and GET_MEDIA_CLOCK_REFERENCE_INFO
     /// from the clock domains' settings, GET_STREAM_INPUT_INFO_EX from the attached
     /// stream inputs, every other command NOT_IMPLEMENTED with its data given back.
     /// Writes the response's command-specific data into @p out_buffer.
     [[nodiscard]] auto handle_mvu_command(MvuCommand const& command, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+
+    /// GET_SYSTEM_UNIQUE_ID (5.4.4.3): the id in force; PAYLOAD_TOO_SHORT without its reserved octets.
+    [[nodiscard]] auto handle_mvu_get_system_unique_id(MvuCommand const& command, std::span<uint8_t> out_buffer) const
+        -> AemCommandResponse;
+
+    /// SET_SYSTEM_UNIQUE_ID (5.4.4.2): the id and a well-formed UTF-8 name, from a controller the
+    /// lock does not shut out (ENTITY_LOCKED, else BAD_ARGUMENTS). Answers the id in force.
+    [[nodiscard]] auto handle_mvu_set_system_unique_id(MvuCommand const& command, std::span<uint8_t> out_buffer)
+        -> AemCommandResponse;
+
+    /// The status SET_SYSTEM_UNIQUE_ID @p request from @p controller answers, before anything is
+    /// applied: ENTITY_LOCKED, BAD_ARGUMENTS or SUCCESS.
+    [[nodiscard]] auto system_unique_id_set_status(Eui64 const& controller, MvuSystemUniqueIdPayload const& request) const
+        -> uint8_t;
+
+    /// Keep the id and name of @p request; mvu_changed_ says whether they changed anything, and
+    /// then the hook is told.
+    void apply_system_unique_id(MvuSystemUniqueIdPayload const& request) noexcept;
 
     /// GET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.5): a CLOCK_DOMAIN the model lacks is
     /// NO_SUCH_DESCRIPTOR with the command given back.
@@ -1484,6 +1521,11 @@ class AemCommandHandler
         prio.fill(atdecc::MVU_MCR_PRIO_DEFAULT);
         return prio;
     }()};
+    // The system the entity belongs to (SET_SYSTEM_UNIQUE_ID), entity-wide, not per configuration.
+    ieee::octlet_t system_unique_id_{0};
+    aem::AtdeccString system_name_{};
+    // A command off the wire is being dispatched (dispatch_aem_command); a read_back() does not set it.
+    bool dispatching_{false};
     // The MVU command answer_mvu_command() dispatches changed what it names: its response is notified.
     bool mvu_changed_{false};
 
@@ -1571,8 +1613,6 @@ class AemCommandHandler
     /// Send held notification @p n, leaving out the requester_ it was raised with.
     void emit_held(QueuedNotification const& n);
     statusbar::sg14::inplace_vector<QueuedNotification, MAX_QUEUED_NOTIFICATIONS> queued_notifications_{};
-    // A command off the wire is being dispatched (dispatch_aem_command); a read_back() does not set it.
-    bool dispatching_{false};
     // What the dispatched command's hooks left for after its response (call_after_response).
     statusbar::sg14::inplace_vector<AfterResponseFn, MAX_AFTER_RESPONSE> after_response_{};
 
@@ -1594,6 +1634,7 @@ class AemCommandHandler
     // Current configuration
     uint16_t current_configuration_ = 0;
     statusbar::sg14::inplace_function<uint8_t(uint16_t), 64> on_configuration_changed_{};
+    SystemUniqueIdChangedFn on_system_unique_id_changed_{};
 
     // Unsolicited notification registrations.
     // Slot occupancy is tracked by the enclosing SlotTable (its size() is

@@ -290,6 +290,33 @@ static_assert(offsetof(MvuMediaClockReferenceInfoPayload, user_mcr_prio) == 5);
 static_assert(offsetof(MvuMediaClockReferenceInfoPayload, media_clock_domain_name) == 10);
 
 //
+// SET_SYSTEM_UNIQUE_ID / GET_SYSTEM_UNIQUE_ID - 5.4.4.2, 5.4.4.3, Figure 5.7
+//
+
+/// The GET_SYSTEM_UNIQUE_ID command carries two reserved octets after command_type.
+constexpr size_t MVU_GET_SYSTEM_UNIQUE_ID_COMMAND_LENGTH = 2;
+
+/// The command-specific data of a SET_SYSTEM_UNIQUE_ID command and its response, and of a
+/// GET_SYSTEM_UNIQUE_ID response: the system the entity belongs to, by number and name.
+struct MvuSystemUniqueIdPayload
+{
+    static constexpr size_t LENGTH = 74;
+
+    /// Bytes 30-31: reserved, 0.
+    doublet_t reserved{0};
+    /// Bytes 32-39: the system unique id, 0 until a controller sets one.
+    ieee::octlet_t system_unique_id{0};
+    /// Bytes 40-103: the system name, UTF-8.
+    aem::AtdeccString system_name{};
+
+    auto operator<=>(MvuSystemUniqueIdPayload const& rhs) const noexcept -> std::strong_ordering = default;
+};
+
+static_assert(sizeof(MvuSystemUniqueIdPayload) == 74, "MvuSystemUniqueIdPayload must be exactly 74 bytes");
+static_assert(offsetof(MvuSystemUniqueIdPayload, system_unique_id) == 2);
+static_assert(offsetof(MvuSystemUniqueIdPayload, system_name) == 10);
+
+//
 // BIND_STREAM - 5.4.4.6, Figure 5.10
 //
 
@@ -420,6 +447,10 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::M
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuMediaClockReferenceInfoPayload> : std::true_type
+{};
+
+template <>
+struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::MvuSystemUniqueIdPayload> : std::true_type
 {};
 
 template <>

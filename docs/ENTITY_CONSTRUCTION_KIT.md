@@ -574,14 +574,26 @@ held in memory only: `media_clock_reference_info()` reads them, and
 nothing yet reports a change to the entity or restores them, which an
 entity that keeps them across a restart (as Milan asks) would need.
 
+SET_SYSTEM_UNIQUE_ID and GET_SYSTEM_UNIQUE_ID (5.4.4.2, 5.4.4.3) keep the
+system the entity belongs to, a u64 id and a name (Figure 5.7), 0 and
+empty until a controller sets them; they belong to the entity, so a
+configuration switch keeps them. A SET refuses a controller the lock
+shuts out ENTITY_LOCKED and a name that is not well-formed UTF-8
+BAD_ARGUMENTS, answers the id in force, and when it changed it notifies
+the other registered controllers as above. The entity keeps the id
+across power cycles (5.4.4.2) through two calls: the handler tells
+`set_on_system_unique_id_changed()`'s hook each id or name a SET puts in
+force, for the entity to save, and the entity puts the saved one back
+with `restore_system_unique_id()` on the reactor before it starts, which
+notifies nobody. `AemCommandHandler::system_unique_id()` reads the one in
+force.
+
 Every other MVU command answers NOT_IMPLEMENTED with its data given back.
-Milan allows that of SET_SYSTEM_UNIQUE_ID and GET_SYSTEM_UNIQUE_ID, which
-are optional.
 
 Without `entity.milan` the entity is a plain 1722.1 entity and lets every
 MVU command pass unanswered, as 5.4.4.1 recommends of a Configuration
 that is not Milan. The wire structs are in `atdecc_aecp_mvu.hpp`:
-`atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`,
+`atdecc::AecpMvuDu`, `MvuGetMilanInfoResponse`, `MvuSystemUniqueIdPayload`,
 `MvuGetMediaClockReferenceInfoCommand`, `MvuMediaClockReferenceInfoPayload`,
 `MvuBindStream`, `MvuStreamInput` and `MvuGetStreamInputInfoExResponse`.
 

@@ -243,4 +243,23 @@ TEST(aecp_mvu, a_media_clock_reference_info_is_laid_out_as_5_4_4_4_has_it)
     EXPECT_TRUE((get_bytes == std::array<uint8_t, 2>{0x01, 0x02}));
 }
 
+TEST(aecp_mvu, a_system_unique_id_is_laid_out_as_figure_5_7_has_it)
+{
+    MvuSystemUniqueIdPayload id{};
+    id.system_unique_id = uint64_t{0x0102'0304'0506'0708};
+    id.system_name = statusbar::atdecc::aem::AtdeccString{"Stage"};
+    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> bytes{};
+    span_store(std::span<uint8_t>{bytes}, id);
+
+    std::array<uint8_t, 15> const golden{0x00, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 'S', 't', 'a', 'g', 'e'};
+    EXPECT_TRUE(std::ranges::equal(std::span{bytes}.first(golden.size()), golden));
+    EXPECT_TRUE(std::ranges::all_of(std::span{bytes}.subspan(golden.size()), [](uint8_t const b) { return b == 0; }));
+
+    MvuSystemUniqueIdPayload back{};
+    span_load(back, make_const_span(bytes));
+    EXPECT_EQ(back.system_unique_id.get(), uint64_t{0x0102'0304'0506'0708});
+    EXPECT_EQ(back.system_name.as_string_view(), std::string_view{"Stage"});
+    EXPECT_EQ(MVU_GET_SYSTEM_UNIQUE_ID_COMMAND_LENGTH, size_t{2});
+}
+
 TEST_MAIN(statusbar_atdecc, atdecc_aecp_mvu_test)

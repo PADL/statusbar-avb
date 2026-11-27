@@ -3291,8 +3291,9 @@ TEST(nanoavb_entity_mvu, the_other_mvu_commands_are_not_implemented_and_echo_the
     std::vector<CapturedSend> sends;
     capture_sends(handler, sends);
 
+    constexpr uint16_t undefined_command = 0x0008;  // past Milan v1.3 Table 5.15
     std::array<uint8_t, 10> const unique_id{0x00, 0x00, 0x70, 0xB3, 0xD5, 0xED, 0xC0, 0x00, 0x51, 0x1D};
-    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, unique_id, 61));
+    EXPECT_TRUE(inject_mvu(handler, kControllerA, kMacA, undefined_command, unique_id, 61));
     EXPECT_EQ(sends.size(), size_t{1});
     if (sends.size() != 1) {
         return;
@@ -3300,7 +3301,7 @@ TEST(nanoavb_entity_mvu, the_other_mvu_commands_are_not_implemented_and_echo_the
     auto const hdr = mvu_header_of(sends[0]);
     EXPECT_TRUE(hdr.is_response());
     EXPECT_EQ(hdr.common.status(), MVU_STATUS_NOT_IMPLEMENTED);
-    EXPECT_EQ(hdr.command_type(), MVU_COMMAND_GET_SYSTEM_UNIQUE_ID);
+    EXPECT_EQ(hdr.command_type(), undefined_command);
     EXPECT_EQ(hdr.common.sequence_id.get(), 61);
     EXPECT_EQ(hdr.common.control_data_length(), AecpMvuDu::MVU_DATA_LENGTH + unique_id.size());
     auto const body = mvu_body_of(sends[0]);
@@ -5216,6 +5217,190 @@ TEST(nanoavb_entity_mvu_mcr, a_bad_name_an_unknown_domain_or_another_controllers
     EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO, kMacB).empty());
     auto const info = mcr_of(get_mcr(e.handler, e.sends, 0));
     EXPECT_EQ(info.user_mcr_prio.get(), MVU_MCR_PRIO_DEFAULT);
+}
+
+//
+// SET_SYSTEM_UNIQUE_ID / GET_SYSTEM_UNIQUE_ID - Milan v1.3 Sections 5.4.4.2, 5.4.4.3
+//
+
+namespace {
+
+/// A SET_SYSTEM_UNIQUE_ID body of @p id and @p name.
+auto system_unique_id_body(uint64_t const id, std::string_view const name) -> std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH>
+{
+    MvuSystemUniqueIdPayload payload{};
+    payload.system_unique_id = id;
+    payload.system_name = AtdeccString{name};
+    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> body{};
+    span_store(body, payload);
+    return body;
+}
+
+/// The id an MVU SYSTEM_UNIQUE_ID response @p s carries.
+auto system_unique_id_of(CapturedSend const& s) -> MvuSystemUniqueIdPayload
+{
+    MvuSystemUniqueIdPayload payload{};
+    if (mvu_body_of(s).size() >= MvuSystemUniqueIdPayload::LENGTH) {
+        span_load(payload, mvu_body_of(s));
+    }
+    return payload;
+}
+
+/// What GET_SYSTEM_UNIQUE_ID answers @p e's controller A.
+auto get_system_unique_id(McrEntity& e) -> CapturedSend
+{
+    std::array<uint8_t, MVU_GET_SYSTEM_UNIQUE_ID_COMMAND_LENGTH> const reserved{};
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, reserved);
+    return e.sends.back();
+}
+
+}  // namespace
+
+TEST(nanoavb_entity_mvu_system_unique_id, get_answers_zero_and_no_name_until_a_controller_sets_them)
+{
+    McrEntity e;
+    auto const reply = get_system_unique_id(e);
+    EXPECT_EQ(mvu_header_of(reply).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(mvu_body_of(reply).size(), MvuSystemUniqueIdPayload::LENGTH);
+    EXPECT_TRUE(std::ranges::all_of(mvu_body_of(reply), [](uint8_t const b) { return b == 0; }));
+
+    std::array<uint8_t, 1> const short_command{};
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, short_command);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+    EXPECT_TRUE(mvu_body_of(e.sends.back()).empty());
+    auto const set = system_unique_id_body(7, "Stage");
+    (void)inject_mvu(
+        e.handler,
+        kControllerA,
+        kMacA,
+        MVU_COMMAND_SET_SYSTEM_UNIQUE_ID,
+        std::span{set}.first(MvuSystemUniqueIdPayload::LENGTH - 1));
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_PAYLOAD_TOO_SHORT);
+    EXPECT_EQ(system_unique_id_of(get_system_unique_id(e)).system_unique_id.get(), uint64_t{0});
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, a_set_is_answered_with_the_id_in_force_and_notified_to_the_others_once)
+{
+    // Milan v1.3 Section 5.4.5.3: a notification after the response, only when the command changed something.
+    McrEntity e;
+    register_controller(e.handler, kEntity, kControllerA, kMacA);
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+    auto const body = system_unique_id_body(0x0102'0304'0506'0708, "Front of house");
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, body);
+    EXPECT_EQ(e.sends.size(), size_t{2});
+    EXPECT_FALSE(mvu_header_of(e.sends.front()).is_unsolicited());  // the response first
+    EXPECT_EQ(mvu_header_of(e.sends.front()).common.status(), MVU_STATUS_SUCCESS);
+    EXPECT_EQ(system_unique_id_of(e.sends.front()).system_unique_id.get(), uint64_t{0x0102'0304'0506'0708});
+    EXPECT_EQ(system_unique_id_of(e.sends.back()).system_name.as_string_view(), std::string_view{"Front of house"});
+
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, body);  // the same again
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, kMacB) == std::vector<uint16_t>{0});
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, kMacA).empty());
+    auto const in_force = system_unique_id_of(get_system_unique_id(e));
+    EXPECT_EQ(in_force.system_unique_id.get(), uint64_t{0x0102'0304'0506'0708});
+    EXPECT_EQ(in_force.system_name.as_string_view(), std::string_view{"Front of house"});
+    EXPECT_EQ(e.handler.system_unique_id().system_unique_id.get(), uint64_t{0x0102'0304'0506'0708});
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, a_name_alone_changed_is_notified_and_told_to_the_hook)
+{
+    McrEntity e;
+    std::vector<MvuSystemUniqueIdPayload> told;
+    e.handler.set_on_system_unique_id_changed([&told](MvuSystemUniqueIdPayload const& id) { told.push_back(id); });
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Stage"));
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Stage"));
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Studio"));
+    EXPECT_TRUE((mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, kMacB) == std::vector<uint16_t>{0, 1}));
+    EXPECT_EQ(told.size(), size_t{2});
+    EXPECT_EQ(told.back().system_unique_id.get(), uint64_t{7});
+    EXPECT_EQ(told.back().system_name.as_string_view(), std::string_view{"Studio"});
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Caf\xC3"));
+    EXPECT_EQ(told.size(), size_t{2});  // refused: not told
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, the_reserved_octets_and_those_after_the_name_are_answered_zero)
+{
+    McrEntity e;
+    auto body = system_unique_id_body(7, "Stage");
+    body[0] = 0xAA;  // reserved
+    body[1] = 0x55;
+    body[MvuSystemUniqueIdPayload::LENGTH - 1] = 0xFF;  // after the name's NUL
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, body);
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_SUCCESS);
+    auto const expected = system_unique_id_body(7, "Stage");
+    for (auto const& reply : {e.sends.back(), get_system_unique_id(e)}) {
+        EXPECT_TRUE(std::ranges::equal(mvu_body_of(reply), expected));
+    }
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, a_restored_id_is_answered_and_nobody_is_told)
+{
+    // Milan v1.3 Section 5.4.4.2: the id outlasts a power cycle; the entity puts its saved one back.
+    McrEntity e;
+    int told = 0;
+    e.handler.set_on_system_unique_id_changed([&told](MvuSystemUniqueIdPayload const&) { ++told; });
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+    EXPECT_FALSE(e.handler.restore_system_unique_id(9, AtdeccString{"Caf\xC3"}));
+    EXPECT_EQ(e.handler.system_unique_id().system_unique_id.get(), uint64_t{0});
+    EXPECT_TRUE(e.handler.restore_system_unique_id(9, AtdeccString{"Front of house"}));
+    EXPECT_TRUE(e.sends.empty());
+    EXPECT_EQ(told, 0);
+    auto const in_force = system_unique_id_of(get_system_unique_id(e));
+    EXPECT_EQ(in_force.system_unique_id.get(), uint64_t{9});
+    EXPECT_EQ(in_force.system_name.as_string_view(), std::string_view{"Front of house"});
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, a_configuration_switch_keeps_it)
+{
+    // The id names the system the entity belongs to, not one of its configurations.
+    DescriptorEntity entity{};
+    entity.configurations_count = 2;
+    DescriptorConfiguration const config{};
+    DescriptorClockDomain const domain{};
+    EntityModel model = EntityModelBuilder{}.entity(entity).configuration(config).clock_domain(domain).build();
+    AemCommandHandler handler{model};
+    std::vector<CapturedSend> sends;
+    handler.set_entity_id(kEntity);
+    handler.set_milan_info(kMilanInfo);
+    capture_sends(handler, sends);
+    handler.set_on_configuration_changed([](uint16_t) { return AEM_STATUS_SUCCESS; });
+    (void)inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Stage"));
+
+    std::array<uint8_t, AemSetConfigurationPayload::LENGTH> to_1{};
+    span_store(to_1, AemSetConfigurationPayload{.reserved = uint16_t{0}, .configuration_index = uint16_t{1}});
+    inject_command(handler, kEntity, kControllerA, kMacA, AEM_COMMAND_SET_CONFIGURATION, to_1);
+    EXPECT_EQ(handler.current_configuration(), uint16_t{1});
+    std::array<uint8_t, MVU_GET_SYSTEM_UNIQUE_ID_COMMAND_LENGTH> const reserved{};
+    (void)inject_mvu(handler, kControllerA, kMacA, MVU_COMMAND_GET_SYSTEM_UNIQUE_ID, reserved);
+    EXPECT_EQ(system_unique_id_of(sends.back()).system_unique_id.get(), uint64_t{7});
+    EXPECT_EQ(system_unique_id_of(sends.back()).system_name.as_string_view(), std::string_view{"Stage"});
+}
+
+TEST(nanoavb_entity_mvu_system_unique_id, a_bad_name_or_another_controllers_lock_changes_nothing)
+{
+    McrEntity e;
+    register_controller(e.handler, kEntity, kControllerB, kMacB);
+    e.sends.clear();
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Caf\xC3"));
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_BAD_ARGUMENTS);
+    EXPECT_EQ(system_unique_id_of(e.sends.back()).system_unique_id.get(), uint64_t{0});  // the id in force
+
+    auto lock = create_aem_header(AEM_COMMAND_LOCK_ENTITY);
+    lock.controller_entity_id = kControllerB;
+    std::array<uint8_t, 16> const lock_body{};
+    EXPECT_EQ(make_test_result(e.handler, lock, lock_body).status, AEM_STATUS_SUCCESS);
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Stage"));
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    // The lock is asked first: a locked-out controller learns nothing of its arguments.
+    (void)inject_mvu(e.handler, kControllerA, kMacA, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, system_unique_id_body(7, "Caf\xC3"));
+    EXPECT_EQ(mvu_header_of(e.sends.back()).common.status(), MVU_STATUS_ENTITY_LOCKED);
+    EXPECT_EQ(system_unique_id_of(e.sends.back()).system_unique_id.get(), uint64_t{0});
+    EXPECT_TRUE(mvu_unsolicited_sequence_ids(e.sends, MVU_COMMAND_SET_SYSTEM_UNIQUE_ID, kMacB).empty());
+    EXPECT_TRUE(system_unique_id_of(get_system_unique_id(e)).system_name.as_string_view().empty());
 }
 
 // Milan v1.3 Section 7.6: the settings belong to a configuration's CLOCK_DOMAINs; a switch starts
