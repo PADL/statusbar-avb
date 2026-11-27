@@ -1699,7 +1699,18 @@ def test_json_timing_and_ptp_descriptors():
     wire_sources = [
         d.wire_bytes for d in descs if d.descriptor_type == DESCRIPTOR_CLOCK_SOURCE
     ]
-    assert wire_sources[1][-4:] == bytes.fromhex("0040 0000")
+    assert wire_sources[1][-4:] == bytes.fromhex("0026 0000")
+    # IEEE 1722.1-2021 Table 7-1: the three descriptor types, on the wire.
+    assert (DESCRIPTOR_TIMING, DESCRIPTOR_PTP_INSTANCE, DESCRIPTOR_PTP_PORT) == (
+        0x0026,
+        0x0027,
+        0x0028,
+    )
+    assert (timing[0:2], wire_instance[0:2], wire_port[0:2]) == (
+        b"\x00\x26",
+        b"\x00\x27",
+        b"\x00\x28",
+    )
     assert {s.symbol_name for s in syms} >= {"gptp_clock", "gptp_timing"}
     assert read_blob(write_blob(descs, syms))[0] == descs
 
@@ -1718,7 +1729,7 @@ def test_json_timing_and_ptp_descriptors():
     )
     del plural["entity"]["configuration"]["timing"]
     del plural["entity"]["configuration"]["ptp_instance"]
-    plural["entity"]["configuration"]["clock_sources"][1]["location_type"] = 0x0040
+    plural["entity"]["configuration"]["clock_sources"][1]["location_type"] = 0x0026
     plural["entity"]["configuration"]["clock_sources"][1]["identifier"] = (
         "00:1c:ab:00:00:00:00:09"
     )
