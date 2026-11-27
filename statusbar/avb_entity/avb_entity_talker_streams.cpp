@@ -186,6 +186,31 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     return success();
 }
 
+void TalkerStreams::set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
+{
+    bool const moved = vlan_id_.exchange(vlan_id, std::memory_order_relaxed) != vlan_id;
+    if (stream_pcp_.exchange(pcp, std::memory_order_relaxed) == pcp && !moved) {
+        return;
+    }
+    for (auto const& slot : slots_) {
+        if (on_frames_changed_) {
+            on_frames_changed_(slot.spec.index);
+        }
+    }
+}
+
+void TalkerStreams::set_destination(uint16_t const stream_index, ieee::Eui48 const& dest_mac) noexcept
+{
+    auto* const slot = slot_for(stream_index);
+    if (slot == nullptr || slot->dest_mac == dest_mac) {
+        return;
+    }
+    slot->dest_mac = dest_mac;
+    if (on_frames_changed_) {
+        on_frames_changed_(stream_index);
+    }
+}
+
 auto TalkerStreams::slot_for(uint16_t const stream_index) noexcept -> TalkerStreamSlot*
 {
     for (auto& slot : slots_) {

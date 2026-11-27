@@ -955,4 +955,42 @@ TEST(stream_frame_template, a_talker_stream_s_template_follows_its_destination_a
     EXPECT_FALSE(talker.frame_template(3, src).has_value());  // no stream there
 }
 
+TEST(stream_frame_template, each_change_of_a_stream_s_frames_is_told_and_nothing_else)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000, .vlan_id = 2, .stream_pcp = 3},
+        mc,
+        gptp_now,
+        std::pmr::get_default_resource()};
+    std::vector<uint16_t> told;
+    talker.set_on_frames_changed([&told](uint16_t const index) { told.push_back(index); });
+    (void)open_aaf_output(talker, 0);
+    (void)open_aaf_output(talker, 4);
+    EXPECT_TRUE(told.empty());  // not at open
+
+    talker.set_vlan(2, 3);
+    EXPECT_TRUE(told.empty());  // the VLAN in force again
+    talker.set_vlan(0x123, 3);
+    EXPECT_TRUE((told == std::vector<uint16_t>{0, 4}));
+    talker.set_vlan(0x123, 5);  // the priority alone
+    EXPECT_TRUE((told == std::vector<uint16_t>{0, 4, 0, 4}));
+
+    told.clear();
+    ieee::Eui48 const block{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x34};
+    talker.set_destination(4, block);
+    EXPECT_TRUE(told == std::vector<uint16_t>{4});
+    auto const tmpl = talker.frame_template(4, {});
+    EXPECT_TRUE(tmpl.has_value());
+    EXPECT_TRUE(std::ranges::equal(tmpl->header().first(6), block.value));
+    talker.set_destination(4, block);  // no move
+    talker.set_destination(9, block);  // no such stream
+    EXPECT_EQ(told.size(), size_t{1});
+
+    talker.set_on_frames_changed({});
+    talker.set_vlan(7, 3);
+    EXPECT_EQ(told.size(), size_t{1});
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_talker_streams_test)
