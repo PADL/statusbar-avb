@@ -72,6 +72,40 @@ Every model here keeps the Milan v1.3 descriptor rules that a model decides
 | An AAF Media Talker has a CRF Media Clock Input in each clock domain (7.2.2) | every model with an AAF output has a `streams_in` entry in the Milan Clock Reference Format, `"format": "0x041060010000BB80"` |
 | An AAF Media Listener with two or more AAF inputs in a clock domain has a CRF Media Clock Input and Output there (7.2.2, 7.2.3) | no model has two AAF inputs; one that gains a second needs both |
 | Each CRF input is one CLOCK_SOURCE, an INPUT_STREAM located at that STREAM_INPUT, and a configuration with a stream output has an INTERNAL one (5.3.3.6) | `clock_sources`: `"type": "INPUT_STREAM", "location_type": 5, "location_index": <the input>` beside the `"INTERNAL"` entry, both in the clock domain's `sources` |
+| gPTP as a media clock source is an EXTERNAL CLOCK_SOURCE with no flags, located at a TIMING that is SINGLE with one PTP_INSTANCE; that instance is GRANDMASTER_CAPABLE with one PTP_PORT on AVB_INTERFACE 0; the configuration has one AVB_INTERFACE (5.3.3.12 to 5.3.3.14, 7.5) | no shipped model has it yet; see "gPTP as a media clock source" below |
+
+### gPTP as a media clock source
+
+A clock domain that can follow gPTP says so with four descriptors (Milan
+v1.3 7.5). In a model they are a clock source and two more keys of the
+configuration:
+
+```json
+"clock_sources": [
+  { "name": "Internal", "type": "INTERNAL" },
+  { "name": "gPTP", "symbol": "gptp_clock", "type": "EXTERNAL",
+    "location_type": "TIMING", "location_index": 0 }
+],
+"timing": { "localized_description": { "en-US": "gPTP" } },
+"ptp_instance": {
+  "flags": ["GRANDMASTER_CAPABLE"],
+  "ptp_port": { "port_number": 1, "type": "P2P_LINK_LAYER",
+                "avb_interface": 0, "profile_identifier": "00-80-C2-00-01-00" }
+}
+```
+
+- `location_type` takes a descriptor type's name or its number.
+- `timing` (or `timings`, an array) is a TIMING descriptor: `algorithm`
+  is SINGLE unless given, and `ptp_instances` names PTP_INSTANCE 0 unless
+  given.
+- `ptp_instance` (or `ptp_instances`) is a PTP_INSTANCE with the PTP_PORT
+  descriptors it owns in `ptp_port` or `ptp_ports`. PTP_PORT indices run
+  through the instances in order.
+- A model leaves `clock_identity` out. The entity reads the instance with
+  its interface's clock identity, the one the AVB_INTERFACE reports. An
+  instance that names a clock identity keeps it.
+- `verify_models.py` holds a clock source located at a TIMING to the
+  rules of the table above.
 
 `buffer_length` says how much audio the input can hold. The entity kit
 hands received samples on with their presentation time and holds none

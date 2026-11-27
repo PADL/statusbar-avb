@@ -1622,6 +1622,280 @@ def test_json_to_blob():
     print("  [+] JSON to blob: OK")
 
 
+def _gptp_source_model(**changes) -> dict:
+    """A model whose one clock domain can follow gPTP (Milan v1.3 7.5), as a
+    JSON object; @p changes replace keys of its configuration."""
+    config = {
+        "name": "Default",
+        "avb_interface": {"name": "eth0", "flags": ["GPTP_SUPPORTED", "SRP_SUPPORTED"]},
+        "clock_sources": [
+            {"name": "Local", "type": "INTERNAL"},
+            {
+                "name": "gPTP",
+                "symbol": "gptp_clock",
+                "type": "EXTERNAL",
+                "location_type": "TIMING",
+                "location_index": 0,
+            },
+        ],
+        "clock_domain": {"name": "Domain", "source": 0, "sources": [0, 1]},
+        "timing": {"name": "gPTP time", "symbol": "gptp_timing"},
+        "ptp_instance": {
+            "name": "gPTP instance",
+            "flags": ["GRANDMASTER_CAPABLE"],
+            "ptp_port": {
+                "name": "gPTP port",
+                "port_number": 1,
+                "type": "P2P_LINK_LAYER",
+                "flags": ["CAN_SET_ENABLE", "SUPPORTS_ONESTEP_RECEIVE"],
+                "avb_interface": 0,
+                "profile_identifier": "00-80-C2-00-01-00",
+            },
+        },
+    }
+    config.update(changes)
+    return {
+        "entity": {"vendor": "V", "model": "M", "name": "E", "configuration": config}
+    }
+
+
+def test_json_timing_and_ptp_descriptors():
+    """JSON authoring of TIMING, PTP_INSTANCE and PTP_PORT (IEEE 1722.1-2021
+    7.2.34 to 7.2.36), and of a clock source located at a TIMING by name."""
+    from aemxml.json_reader import read_json
+    from aemxml.model import CLOCK_SOURCE_TYPE_NAMES
+
+    entity = read_json(json.dumps(_gptp_source_model()))
+    config = entity.configurations[0]
+    source = config.clock_sources[1]
+    assert source.clock_source_type == CLOCK_SOURCE_TYPE_NAMES["EXTERNAL"]
+    assert source.clock_source_location_type == DESCRIPTOR_TIMING
+    assert source.clock_source_location_index == 0
+    assert source.clock_source_flags == 0
+    assert len(config.timings) == 1
+    assert config.timings[0].algorithm == 0  # SINGLE, the default
+    assert config.timings[0].ptp_instance_indices == [0]  # the default
+    instance = config.ptp_instances[0]
+    assert instance.flags == 0x80000000
+    assert instance.clock_identity == 0  # the running entity's to fill
+    port = instance.ptp_ports[0]
+    assert (port.port_number, port.port_type, port.avb_interface_index) == (1, 0, 0)
+    assert port.flags == 0x40000001
+    assert port.profile_identifier == 0x0080C2000100
+
+    # On the wire: the three descriptors, each at index 0.
+    descs, syms = flatten(entity)
+    by_type = {d.descriptor_type: d.wire_bytes for d in descs}
+    timing = by_type[DESCRIPTOR_TIMING]
+    assert len(timing) == 78
+    assert timing[70:78] == bytes.fromhex("0000 004c 0001 0000")
+    wire_instance = by_type[DESCRIPTOR_PTP_INSTANCE]
+    assert len(wire_instance) == 90
+    assert wire_instance[70:78] == bytes(8)
+    assert wire_instance[78:90] == bytes.fromhex("80000000 0000 0000 0001 0000")
+    wire_port = by_type[DESCRIPTOR_PTP_PORT]
+    assert len(wire_port) == 86
+    assert wire_port[70:86] == bytes.fromhex("0001 0000 40000001 0000 0080c2000100")
+    wire_sources = [
+        d.wire_bytes for d in descs if d.descriptor_type == DESCRIPTOR_CLOCK_SOURCE
+    ]
+    assert wire_sources[1][-4:] == bytes.fromhex("0040 0000")
+    assert {s.symbol_name for s in syms} >= {"gptp_clock", "gptp_timing"}
+    assert read_blob(write_blob(descs, syms))[0] == descs
+
+    # The array forms, numbers for names, and what is given outright.
+    plural = _gptp_source_model(
+        timings=[{"algorithm": "FALLBACK", "ptp_instances": [1, 0]}],
+        ptp_instances=[
+            {
+                "ptp_ports": [
+                    {"port_number": 1},
+                    {"port_number": 2, "type": "E2E_MULTICAST_UDPV4"},
+                ]
+            },
+            {"clock_identity": "0x001cabfffe000001", "ptp_ports": [{"port_number": 7}]},
+        ],
+    )
+    del plural["entity"]["configuration"]["timing"]
+    del plural["entity"]["configuration"]["ptp_instance"]
+    plural["entity"]["configuration"]["clock_sources"][1]["location_type"] = 0x0040
+    plural["entity"]["configuration"]["clock_sources"][1]["identifier"] = (
+        "00:1c:ab:00:00:00:00:09"
+    )
+    config = read_json(json.dumps(plural)).configurations[0]
+    assert config.clock_sources[1].clock_source_location_type == DESCRIPTOR_TIMING
+    assert config.clock_sources[1].clock_source_identifier == 0x001CAB0000000009
+    assert config.timings[0].algorithm == 1
+    assert config.timings[0].ptp_instance_indices == [1, 0]
+    assert [p.port_number for p in config.ptp_instances[0].ptp_ports] == [1, 2]
+    assert config.ptp_instances[0].ptp_ports[1].port_type == 6
+    assert config.ptp_instances[1].clock_identity == 0x001CABFFFE000001
+
+    print("  [+] JSON TIMING / PTP_INSTANCE / PTP_PORT: OK")
+
+
+def test_json_timing_round_trip_and_errors():
+    """write_json gives back what read_json took, and a name that is none is refused."""
+    from aemxml.json_reader import read_json
+    from aemxml.json_writer import write_json
+
+    first = read_json(json.dumps(_gptp_source_model())).configurations[0]
+    again = read_json(write_json(read_json(json.dumps(_gptp_source_model()))))
+    second = again.configurations[0]
+    assert second.timings[0].algorithm == first.timings[0].algorithm
+    assert second.timings[0].ptp_instance_indices == [0]
+    assert second.timings[0].symbol == "gptp_timing"
+    assert second.ptp_instances[0].flags == first.ptp_instances[0].flags
+    assert second.ptp_instances[0].ptp_ports[0].flags == 0x40000001
+    assert second.ptp_instances[0].ptp_ports[0].profile_identifier == 0x0080C2000100
+    assert second.clock_sources[1].clock_source_location_type == DESCRIPTOR_TIMING
+    assert second.clock_sources[1].clock_source_location_index == 0
+    assert second.clock_sources[0].clock_source_location_type == 0
+
+    def refused(**changes) -> bool:
+        try:
+            read_json(json.dumps(_gptp_source_model(**changes)))
+        except ValueError:
+            return True
+        return False
+
+    assert refused(timing={"algorithm": "MAJORITY"})
+    assert refused(ptp_instance={"flags": ["CAN_SET_ENABLE"]})  # a port's flag
+    assert refused(ptp_instance={"ptp_port": {"flags": ["GRANDMASTER_CAPABLE"]}})
+    assert refused(ptp_instance={"ptp_port": {"type": "P2P"}})
+    assert refused(ptp_instance={"clock_identity": "not hex"})
+    assert refused(clock_sources=[{"type": "EXTERNAL", "location_type": "TIMINGS"}])
+    assert not refused()
+
+    print("  [+] JSON TIMING round trip and refusals: OK")
+
+
+def test_aemxml_ptp_port_flags_are_the_ports():
+    """A PTP_PORT's flags are named from Table 7-69, not from the instance's table."""
+    from aemxml.json_reader import read_json
+    from aemxml.model import PTP_PORT_FLAGS_NAMES
+
+    entity = read_json(json.dumps(_gptp_source_model()))
+    xml = write_aemxml(entity, schema_year=2021)
+    port = read_aemxml(xml).configurations[0].ptp_instances[0].ptp_ports[0]
+    assert port.flags == 0x40000001
+    # Written by name, as a hand-made AEMXML may have them.
+    assert xml.count("<flags>40000001</flags>") == 1
+    named = xml.replace(
+        "<flags>40000001</flags>",
+        "<flags>CAN_SET_ENABLE SUPPORTS_ONESTEP_RECEIVE</flags>",
+    )
+    port = read_aemxml(named).configurations[0].ptp_instances[0].ptp_ports[0]
+    assert port.flags == 0x40000001
+    try:
+        read_aemxml(
+            xml.replace(
+                "<flags>40000001</flags>",
+                "<flags>CAN_SET_ENABLE GRANDMASTER_CAPABLE</flags>",
+            )
+        )
+        raise AssertionError("an instance's flag was taken for a port's")
+    except ValueError:
+        pass
+    assert PTP_PORT_FLAGS_NAMES["CAN_OVERRIDE_SYNC_INTERVAL"] == 0x00000080
+    assert PTP_PORT_FLAGS_NAMES["CAN_OVERRIDE_COMPUTE_LINK_DELAY"] == 0x00000800
+    assert len(set(PTP_PORT_FLAGS_NAMES.values())) == len(PTP_PORT_FLAGS_NAMES)
+
+    print("  [+] AEMXML PTP_PORT flags: OK")
+
+
+def _verify_models_module():
+    """examples/verify_models.py, which holds the Milan model rules."""
+    import importlib.util
+
+    path = Path(__file__).parent.parent.parent / "examples" / "verify_models.py"
+    spec = importlib.util.spec_from_file_location("verify_models", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_milan_gptp_clock_source_rules():
+    """Milan v1.3 5.3.3.12 to 5.3.3.14 and 7.5: what verify_models.py holds a
+    model with gPTP as a media clock source to."""
+    from aemxml.json_reader import read_json
+
+    rules = _verify_models_module()
+
+    def faults(**changes) -> list[str]:
+        entity = read_json(json.dumps(_gptp_source_model(**changes)))
+        config = entity.configurations[0]
+        return rules._timing_chain_faults(config) + rules._gptp_clock_source_faults(
+            config
+        )
+
+    def one_fault(text: str, **changes) -> bool:
+        found = faults(**changes)
+        return len(found) == 1 and text in found[0]
+
+    gptp = {"name": "gPTP", "type": "EXTERNAL", "location_type": "TIMING"}
+    port = {"port_number": 1}
+    assert faults() == []
+    # A model with none of it is held to none of it.
+    plain = _gptp_source_model(clock_sources=[{"type": "INTERNAL"}])
+    del plain["entity"]["configuration"]["timing"]
+    del plain["entity"]["configuration"]["ptp_instance"]
+    config = read_json(json.dumps(plain)).configurations[0]
+    assert (
+        rules._timing_chain_faults(config) + rules._gptp_clock_source_faults(config)
+        == []
+    )
+
+    # 7.5.2
+    assert one_fault(
+        "not EXTERNAL with flags 0", clock_sources=[dict(gptp, type="INTERNAL")]
+    )
+    assert one_fault("not EXTERNAL with flags 0", clock_sources=[dict(gptp, flags=1)])
+    assert one_fault("TIMING 3, which", clock_sources=[dict(gptp, location_index=3)])
+    # 7.5.1
+    assert one_fault("2 AVB_INTERFACEs", avb_interfaces=[{"name": "a"}, {"name": "b"}])
+    # 7.5.3
+    assert one_fault("not SINGLE with one", timing={"algorithm": "FALLBACK"})
+    assert one_fault(
+        "not SINGLE with one",
+        timing={"ptp_instances": [0, 0]},
+    )
+    # 7.5.4
+    assert one_fault("not GRANDMASTER_CAPABLE", ptp_instance={"ptp_port": port})
+    assert one_fault(
+        "2 PTP_PORTs",
+        ptp_instance={"flags": ["GRANDMASTER_CAPABLE"], "ptp_ports": [port, port]},
+    )
+    # 7.5.5
+    assert one_fault(
+        "not on AVB_INTERFACE 0",
+        ptp_instance={
+            "flags": ["GRANDMASTER_CAPABLE"],
+            "ptp_port": {"avb_interface": 1},
+        },
+    )
+    # 5.3.3.13, 5.3.3.14
+    assert "PTP_INSTANCE 0 has no PTP_PORT" in faults(
+        ptp_instance={"flags": ["GRANDMASTER_CAPABLE"]}
+    )
+    assert one_fault("names PTP_INSTANCE 4", timing={"ptp_instances": [4]})
+    orphan = _gptp_source_model()
+    del orphan["entity"]["configuration"]["ptp_instance"]
+    config = read_json(json.dumps(orphan)).configurations[0]
+    assert (
+        "a configuration with a TIMING has no PTP_INSTANCE"
+        in rules._timing_chain_faults(config)
+    )
+
+    # The whole rule set takes the model too, and says what a broken one breaks.
+    entity = read_json(json.dumps(_gptp_source_model()))
+    assert rules.milan_model_faults(entity) == []
+    broken = read_json(json.dumps(_gptp_source_model(timing={"algorithm": "COMBINED"})))
+    assert any("not SINGLE" in f for f in rules.milan_model_faults(broken))
+
+    print("  [+] Milan gPTP clock source rules: OK")
+
+
 def test_configuration_counts_list_top_level_types_only():
     """IEEE 1722.1-2021 7.2.2: descriptor_counts names top level types only."""
     from aemxml.json_reader import read_json
@@ -2919,6 +3193,10 @@ def main():
         test_json_read_simple_stereo,
         test_json_round_trip,
         test_json_to_blob,
+        test_json_timing_and_ptp_descriptors,
+        test_json_timing_round_trip_and_errors,
+        test_aemxml_ptp_port_flags_are_the_ports,
+        test_milan_gptp_clock_source_rules,
         test_configuration_counts_list_top_level_types_only,
         test_json_to_xml_round_trip,
         test_json_symbols_to_blob,

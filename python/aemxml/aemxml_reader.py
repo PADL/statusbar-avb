@@ -69,6 +69,7 @@ from .model import (
     JACK_FLAGS_NAMES,
     INTERFACE_FLAGS_NAMES,
     PTP_INSTANCE_FLAGS_NAMES,
+    PTP_PORT_FLAGS_NAMES,
 )
 
 NS = "http://grouper.ieee.org/groups/1722/1/contributions/xml"
@@ -830,7 +831,7 @@ def _parse_ptp_port(el: ET.Element) -> PtpPort:
         localized_description=_parse_localized_string_ref(el, "localized_description"),
         port_number=_hex16(el, "port_number"),
         port_type=_enum16(el, "port_type", PTP_PORT_TYPE_NAMES),
-        flags=_flags32(el, "flags", PTP_INSTANCE_FLAGS_NAMES),
+        flags=_flags32(el, "flags", PTP_PORT_FLAGS_NAMES),
         avb_interface_index=_hex16(el, "avb_interface_index"),
         profile_identifier=prof_int,
         symbol=_symbol(el),

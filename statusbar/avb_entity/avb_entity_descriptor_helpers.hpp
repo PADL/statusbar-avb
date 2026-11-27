@@ -208,6 +208,20 @@ class EntityIdentityDescriptorHandler : public nanoavb::DescriptorStorageHandler
         return true;
     }
 
+    auto on_get_ptp_instance(nanoavb::DescriptorId id, atdecc::aem::DescriptorPtpInstance& desc) -> bool override
+    {
+        if (!DescriptorStorageHandler::on_get_ptp_instance(id, desc)) {
+            return false;
+        }
+        // IEEE 1722.1-2021 7.2.35, Milan v1.3 7.5.4: the instance's
+        // clockIdentity. A model cannot know it and leaves it zero; it is the
+        // one the AVB_INTERFACE reports. A model that names one keeps it.
+        if (patch_avb_ && iface_mac_ && desc.clock_identity == ieee::Eui64{}) {
+            desc.clock_identity = iface_mac_->to_modified_eui64();
+        }
+        return true;
+    }
+
   private:
     ieee::Eui64 entity_id_;
     ieee::Eui64 entity_model_id_;

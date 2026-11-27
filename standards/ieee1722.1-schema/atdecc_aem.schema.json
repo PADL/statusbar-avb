@@ -1000,10 +1000,29 @@
         "type": {
           "$ref": "#/$defs/clock_source_type"
         },
-        "location_type": {
+        "flags": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
           "default": 0,
-          "description": "Descriptor type of the clock source location."
+          "description": "clock_source_flags."
+        },
+        "identifier": {
+          "$ref": "#/$defs/octets",
+          "description": "clock_source_identifier, eight octets."
+        },
+        "location_type": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "$ref": "#/$defs/descriptor_type_name"
+            }
+          ],
+          "default": 0,
+          "description": "Descriptor type of the clock source location, as its number or its name."
         },
         "location_index": {
           "type": "integer",
@@ -1037,6 +1056,258 @@
             "type": "integer"
           },
           "description": "List of valid clock source indices."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "additionalProperties": false
+    },
+    "descriptor_type_name": {
+      "type": "string",
+      "enum": [
+        "ENTITY",
+        "CONFIGURATION",
+        "AUDIO_UNIT",
+        "VIDEO_UNIT",
+        "SENSOR_UNIT",
+        "STREAM_INPUT",
+        "STREAM_OUTPUT",
+        "JACK_INPUT",
+        "JACK_OUTPUT",
+        "AVB_INTERFACE",
+        "CLOCK_SOURCE",
+        "MEMORY_OBJECT",
+        "LOCALE",
+        "STRINGS",
+        "STREAM_PORT_INPUT",
+        "STREAM_PORT_OUTPUT",
+        "EXTERNAL_PORT_INPUT",
+        "EXTERNAL_PORT_OUTPUT",
+        "INTERNAL_PORT_INPUT",
+        "INTERNAL_PORT_OUTPUT",
+        "AUDIO_CLUSTER",
+        "VIDEO_CLUSTER",
+        "SENSOR_CLUSTER",
+        "AUDIO_MAP",
+        "VIDEO_MAP",
+        "SENSOR_MAP",
+        "CONTROL",
+        "SIGNAL_SELECTOR",
+        "MIXER",
+        "MATRIX",
+        "MATRIX_SIGNAL",
+        "SIGNAL_SPLITTER",
+        "SIGNAL_COMBINER",
+        "SIGNAL_DEMULTIPLEXER",
+        "SIGNAL_MULTIPLEXER",
+        "SIGNAL_TRANSCODER",
+        "CLOCK_DOMAIN",
+        "CONTROL_BLOCK",
+        "TIMING",
+        "PTP_INSTANCE",
+        "PTP_PORT",
+        "INVALID"
+      ],
+      "description": "Descriptor type name (IEEE 1722.1-2021 Table 7-1)."
+    },
+    "octets": {
+      "oneOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "string",
+          "pattern": "^(0x)?[0-9A-Fa-f]{2}([:-]?[0-9A-Fa-f]{2})*$"
+        }
+      ],
+      "description": "An EUI-64 or EUI-48: a number, or hex digits with or without a leading 0x and ':' or '-' between the octets."
+    },
+    "timing_algorithm": {
+      "type": "string",
+      "enum": [
+        "SINGLE",
+        "FALLBACK",
+        "COMBINED"
+      ],
+      "description": "TIMING algorithm (IEEE 1722.1-2021 Table 7-64)."
+    },
+    "ptp_port_type": {
+      "type": "string",
+      "enum": [
+        "P2P_LINK_LAYER",
+        "P2P_MULTICAST_UDPV4",
+        "P2P_MULTICAST_UDPV6",
+        "TIMING_MEASUREMENT",
+        "FINE_TIMING_MEASUREMENT",
+        "E2E_LINK_LAYER",
+        "E2E_MULTICAST_UDPV4",
+        "E2E_MULTICAST_UDPV6",
+        "P2P_UNICAST_UDPV4",
+        "P2P_UNICAST_UDPV6",
+        "E2E_UNICAST_UDPV4",
+        "E2E_UNICAST_UDPV6"
+      ],
+      "description": "PTP port type (IEEE 1722.1-2021 Table 7-68)."
+    },
+    "ptp_instance_flag": {
+      "type": "string",
+      "enum": [
+        "CAN_SET_INSTANCE_ENABLE",
+        "CAN_SET_PRIORITY1",
+        "CAN_SET_PRIORITY2",
+        "CAN_SET_DOMAIN_NUMBER",
+        "CAN_SET_EXTERNAL_PORT_CONFIGURATION",
+        "CAN_SET_SLAVE_ONLY",
+        "CAN_ENABLE_PERFORMANCE",
+        "PERFORMANCE_MONITORING",
+        "GRANDMASTER_CAPABLE"
+      ],
+      "description": "PTP instance flag (IEEE 1722.1-2021 Table 7-66)."
+    },
+    "ptp_port_flag": {
+      "type": "string",
+      "enum": [
+        "CAN_SET_ENABLE",
+        "CAN_SET_LINK_DELAY_THRESHOLD",
+        "CAN_SET_DELAY_MECHANISM",
+        "CAN_SET_DELAY_ASYMMETRY",
+        "CAN_SET_INITIAL_MESSAGE_INTERVALS",
+        "CAN_SET_TIMEOUTS",
+        "CAN_OVERRIDE_ANNOUNCE_INTERVAL",
+        "CAN_OVERRIDE_SYNC_INTERVAL",
+        "CAN_OVERRIDE_PDELAY_INTERVAL",
+        "CAN_OVERRIDE_GPTP_CAPABLE_INTERVAL",
+        "CAN_OVERRIDE_COMPUTE_NEIGHBOR",
+        "CAN_OVERRIDE_COMPUTE_LINK_DELAY",
+        "CAN_OVERRIDE_ONESTEP",
+        "SUPPORTS_REMOTE_INTERVAL_SIGNAL",
+        "SUPPORTS_ONESTEP_TRANSMIT",
+        "SUPPORTS_ONESTEP_RECEIVE",
+        "SUPPORTS_UNICAST_NEGOTIATE"
+      ],
+      "description": "PTP port flag (IEEE 1722.1-2021 Table 7-69)."
+    },
+    "timing": {
+      "type": "object",
+      "description": "TIMING descriptor (IEEE 1722.1-2021 7.2.34): which PTP instances time the streams.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Timing name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "algorithm": {
+          "$ref": "#/$defs/timing_algorithm",
+          "default": "SINGLE"
+        },
+        "ptp_instances": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "default": [
+            0
+          ],
+          "description": "Indices of the PTP_INSTANCE descriptors."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ptp_port": {
+      "type": "object",
+      "description": "PTP_PORT descriptor (IEEE 1722.1-2021 7.2.36).",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "PTP port name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "port_number": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535,
+          "default": 1,
+          "description": "The portNumber of the port's portIdentity."
+        },
+        "type": {
+          "$ref": "#/$defs/ptp_port_type",
+          "default": "P2P_LINK_LAYER"
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ptp_port_flag"
+          },
+          "description": "PTP port flags."
+        },
+        "avb_interface": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Index of the AVB_INTERFACE the port sends and receives on."
+        },
+        "profile_identifier": {
+          "$ref": "#/$defs/octets",
+          "description": "The PTP profileIdentifier, six octets."
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ptp_instance": {
+      "type": "object",
+      "description": "PTP_INSTANCE descriptor (IEEE 1722.1-2021 7.2.35) with the PTP_PORT descriptors it owns.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "PTP instance name (object_name)."
+        },
+        "localized_description": {
+          "$ref": "#/$defs/localized_string_ref"
+        },
+        "clock_identity": {
+          "$ref": "#/$defs/octets",
+          "description": "The clockIdentity. Left out, the running entity fills in its own."
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ptp_instance_flag"
+          },
+          "description": "PTP instance flags."
+        },
+        "number_of_controls": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "base_control": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "ptp_port": {
+          "$ref": "#/$defs/ptp_port",
+          "description": "The one PTP port (singular form)."
+        },
+        "ptp_ports": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ptp_port"
+          },
+          "description": "PTP ports (array form)."
         },
         "symbol": {
           "$ref": "#/$defs/symbol"
@@ -1428,6 +1699,48 @@
             "$ref": "#/$defs/clock_domain"
           },
           "description": "Clock domains (array form)."
+        },
+        "timing": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/timing"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/timing"
+              }
+            }
+          ],
+          "description": "Timing (singular) or timings (array)."
+        },
+        "timings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/timing"
+          },
+          "description": "Timings (array form)."
+        },
+        "ptp_instance": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/ptp_instance"
+            },
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/ptp_instance"
+              }
+            }
+          ],
+          "description": "PTP instance (singular) or ptp_instances (array)."
+        },
+        "ptp_instances": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ptp_instance"
+          },
+          "description": "PTP instances (array form)."
         },
         "jacks_in": {
           "type": "array",

@@ -61,6 +61,7 @@ from .model import (
     JACK_FLAGS_NAMES,
     INTERFACE_FLAGS_NAMES,
     PTP_INSTANCE_FLAGS_NAMES,
+    PTP_PORT_FLAGS_NAMES,
 )
 
 NS = "http://grouper.ieee.org/groups/1722/1/contributions/xml"
@@ -795,7 +796,7 @@ def _write_ptp_port(parent: ET.Element, pp: PtpPort) -> None:
     _write_localized_ref(el, "localized_description", pp.localized_description)
     _hex16(el, "port_number", pp.port_number)
     _write_enum16(el, "port_type", pp.port_type, PTP_PORT_TYPE_VALUES)
-    _write_flags32(el, "flags", pp.flags, PTP_INSTANCE_FLAGS_NAMES)
+    _write_flags32(el, "flags", pp.flags, PTP_PORT_FLAGS_NAMES)
     _hex16(el, "avb_interface_index", pp.avb_interface_index)
     prof_bytes = pp.profile_identifier.to_bytes(6, "big")
     _set_text(el, "profile_identifier", ":".join(f"{b:02x}" for b in prof_bytes))

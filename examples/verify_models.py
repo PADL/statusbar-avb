@@ -37,7 +37,10 @@ from aemxml.json_reader import read_json  # noqa: E402
 from aemxml.model import (  # noqa: E402
     CLOCK_SOURCE_TYPE_NAMES,
     DESCRIPTOR_STREAM_INPUT,
+    DESCRIPTOR_TIMING,
     INTERFACE_FLAGS_NAMES,
+    PTP_INSTANCE_FLAGS_NAMES,
+    TIMING_ALGORITHM_NAMES,
 )
 from aemxml.stream_formats import (  # noqa: E402
     AAF_FORMAT_INT_32,
@@ -171,6 +174,92 @@ def _clock_source_faults(config) -> list[str]:
     return faults
 
 
+def _timing_chain_faults(config) -> list[str]:
+    """5.3.3.13 and 5.3.3.14: a configuration with a TIMING has a
+    PTP_INSTANCE, and one with a PTP_INSTANCE has a PTP_PORT. Here every
+    PTP_INSTANCE has a port of its own, and a TIMING names instances there are."""
+    faults = []
+    if config.timings and not config.ptp_instances:
+        faults.append("a configuration with a TIMING has no PTP_INSTANCE")
+    faults += [
+        f"PTP_INSTANCE {i} has no PTP_PORT"
+        for i, instance in enumerate(config.ptp_instances)
+        if not instance.ptp_ports
+    ]
+    faults += [
+        f"TIMING {i} names PTP_INSTANCE {n}, which the configuration lacks"
+        for i, timing in enumerate(config.timings)
+        for n in timing.ptp_instance_indices
+        if n >= len(config.ptp_instances)
+    ]
+    return faults
+
+
+def _gptp_instance_faults(config, instance_index: int) -> list[str]:
+    """7.5.4 and 7.5.5: the PTP_INSTANCE of a gPTP media clock source is
+    GRANDMASTER_CAPABLE and has one PTP_PORT, on AVB_INTERFACE 0."""
+    if instance_index >= len(config.ptp_instances):
+        return []  # _timing_chain_faults says so
+    instance = config.ptp_instances[instance_index]
+    faults = []
+    if not instance.flags & PTP_INSTANCE_FLAGS_NAMES["GRANDMASTER_CAPABLE"]:
+        faults.append(f"PTP_INSTANCE {instance_index} is not GRANDMASTER_CAPABLE")
+    if len(instance.ptp_ports) != 1:
+        faults.append(
+            f"PTP_INSTANCE {instance_index} has {len(instance.ptp_ports)} PTP_PORTs, not one"
+        )
+    elif instance.ptp_ports[0].avb_interface_index != 0:
+        faults.append(
+            f"the PTP_PORT of PTP_INSTANCE {instance_index} is not on AVB_INTERFACE 0"
+        )
+    return faults
+
+
+def _gptp_timing_faults(config, timing_index: int) -> list[str]:
+    """7.5.3: the TIMING a gPTP media clock source is located at is SINGLE
+    with one PTP_INSTANCE."""
+    if timing_index >= len(config.timings):
+        return [
+            f"a CLOCK_SOURCE is located at TIMING {timing_index}, which the "
+            "configuration lacks"
+        ]
+    timing = config.timings[timing_index]
+    if (
+        timing.algorithm != TIMING_ALGORITHM_NAMES["SINGLE"]
+        or len(timing.ptp_instance_indices) != 1
+    ):
+        return [f"TIMING {timing_index} is not SINGLE with one PTP_INSTANCE"]
+    return _gptp_instance_faults(config, timing.ptp_instance_indices[0])
+
+
+def _gptp_clock_source_faults(config) -> list[str]:
+    """5.3.3.6 and 7.5: gPTP as a media clock source. Its CLOCK_SOURCE is
+    EXTERNAL with no flags and located at a TIMING (7.5.2), the configuration
+    has a single AVB_INTERFACE (7.5.1), and the TIMING, its PTP_INSTANCE and
+    its PTP_PORT are as 7.5.3 to 7.5.5 have them."""
+    located = [
+        (i, source)
+        for i, source in enumerate(config.clock_sources)
+        if source.clock_source_location_type == DESCRIPTOR_TIMING
+    ]
+    faults = []
+    for i, source in located:
+        if (
+            source.clock_source_type != CLOCK_SOURCE_TYPE_NAMES["EXTERNAL"]
+            or source.clock_source_flags != 0
+        ):
+            faults.append(
+                f"CLOCK_SOURCE {i} is located at a TIMING and is not EXTERNAL with flags 0"
+            )
+        faults += _gptp_timing_faults(config, source.clock_source_location_index)
+    if located and len(config.avb_interfaces) != 1:
+        faults.append(
+            "gPTP is a media clock source of a configuration with "
+            f"{len(config.avb_interfaces)} AVB_INTERFACEs, not one"
+        )
+    return faults
+
+
 def _current_format_faults(config) -> list[str]:
     """5.3.3.4: current_format is one of the formats the formats list describes."""
     return [
@@ -227,6 +316,8 @@ def milan_model_faults(entity) -> list[str]:
         faults += _current_format_faults(config)
         faults += _media_clock_stream_faults(config)
         faults += _clock_source_faults(config)
+        faults += _timing_chain_faults(config)
+        faults += _gptp_clock_source_faults(config)
         faults += [
             f"STREAM_INPUT '{s.object_name}' buffer_length {s.buffer_length} ns"
             for s in config.streams_input
