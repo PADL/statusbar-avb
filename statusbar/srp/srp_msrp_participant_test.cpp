@@ -3318,6 +3318,105 @@ TEST(msrp_participant, a_leave_skipped_for_space_rides_the_next_pdu)
     EXPECT_TRUE(lv_seen.has_value() && *lv_seen == AttributeEvent::Lv);
 }
 
+//
+// A transmit opportunity that owes nothing sends nothing (IEEE 802.1Q
+// 10.7.6.3, 10.7.6.5): two participants on one LAN do not answer each other
+//
+
+namespace {
+
+struct MsrpLanTraffic
+{
+    int from_a{0};
+    int from_b{0};
+    bool talker_stayed_registered{true};
+};
+
+/// A declares a Domain and a Talker Advertise, B the same Domain: a talker
+/// and another end station on one port. Twenty seconds to settle, then
+/// @p seconds are counted. Time is told, 10 ms a step.
+auto run_two_msrp_on_a_lan(int const seconds) -> MsrpLanTraffic
+{
+    MsrpParticipant a{test_msrp_config(), 0xa001};
+    MsrpParticipant b{test_msrp_config(), 0xb002};
+    Fabric fab{};
+    TestClock clock{};
+    MsrpLanTraffic seen;
+    bool counting = false;
+    a.set_send_pdu([&](std::span<uint8_t const> pdu) {
+        seen.from_a += counting ? 1 : 0;
+        return fab.make_a_sender()(pdu);
+    });
+    b.set_send_pdu([&](std::span<uint8_t const> pdu) {
+        seen.from_b += counting ? 1 : 0;
+        return fab.make_b_sender()(pdu);
+    });
+    a.start(clock.now);
+    b.start(clock.now);
+    (void)a.declare_domain(make_domain(3, 2), clock.now);
+    (void)b.declare_domain(make_domain(3, 2), clock.now);
+    (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
+    for (int ms = 0; ms < (seconds + 20) * 1000; ms += 10) {
+        counting = ms >= 20'000;
+        auto const t = clock.advance(std::chrono::milliseconds{10});
+        a.tick(t);
+        fab.deliver_a_to_b(b, t);
+        b.tick(t);
+        fab.deliver_b_to_a(a, t);
+        bool const registered = b.find_registered_talker_advertise(make_stream_id(0xA001)) != nullptr;
+        seen.talker_stayed_registered = seen.talker_stayed_registered && (!counting || registered);
+    }
+    return seen;
+}
+
+}  // namespace
+
+TEST(msrp_quiet_opportunity, two_on_one_lan_do_not_answer_each_other)
+{
+    // They used to: each PDU heard was answered a JoinTime later with the
+    // optional Joins of everything declared, about three PDUs a second from
+    // each, for ever. What is left is each one's periodic and LeaveAll.
+    auto const seen = run_two_msrp_on_a_lan(60);
+    EXPECT_TRUE(seen.from_a >= 4 && seen.from_a <= 80);
+    EXPECT_TRUE(seen.from_b <= 80);
+    EXPECT_TRUE(seen.from_a + seen.from_b <= 140);
+    EXPECT_TRUE(seen.talker_stayed_registered);  // A's stream stayed registered at B throughout
+}
+
+TEST(msrp_quiet_opportunity, an_opportunity_nobody_asked_for_sends_nothing)
+{
+    MsrpParticipant a{test_msrp_config(), 0xa001};
+    MsrpParticipant peer{test_msrp_config(), 0xb002};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    peer.set_send_pdu(fab.make_b_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    peer.start(clock.now);
+    (void)a.declare_talker_advertise(make_talker_adv(0xA001), clock.now);
+    (void)peer.declare_talker_advertise(make_talker_adv(0xB001), clock.now);
+    // 1.3 s: both have sent their News and their first periodic Join. Neither
+    // hears the other yet.
+    for (int i = 0; i < 130; ++i) {
+        auto const t = clock.advance(std::chrono::milliseconds{10});
+        a.tick(t);
+        peer.tick(t);
+    }
+    EXPECT_TRUE(!fab.a_to_b.empty() && !fab.b_to_a.empty());
+    auto const heard = fab.b_to_a.back();
+    fab.a_to_b.clear();
+
+    // A PDU arrives that asks nothing of us. One opportunity follows it, a
+    // JoinTime later at most (finish_receive), and nothing goes out at it.
+    // 500 ms: past that opportunity and short of the next periodic.
+    a.receive_pdu(heard, clock.now);
+    for (int i = 0; i < 50; ++i) {
+        a.tick(clock.advance(std::chrono::milliseconds{10}));
+    }
+    EXPECT_TRUE(fab.a_to_b.empty());
+    EXPECT_TRUE(a.find_registered_talker_advertise(make_stream_id(0xB001)) != nullptr);  // it was heard
+}
+
 // Foreign Talker Advertises a bridge propagates get only max - reserved slots: our own Talker
 // Advertises, declared later, still declare, and the one our listener stream is bound to registers.
 TEST(msrp_participant, foreign_talker_advertises_cannot_starve_own_declarations)
@@ -3435,8 +3534,6 @@ TEST(msrp_participant, a_registered_talker_is_found_by_destination_and_vid)
     EXPECT_NE(b.find_registered_talker_advertise(group_b, default_sr_class_vid), nullptr);
 }
 
-TEST_MAIN(statusbar_srp, srp_msrp_participant_test)
-
 namespace {
 
 /// One TalkerAdvertise (or TalkerFailed) MSRPDU message: one value, one event.
@@ -3526,3 +3623,5 @@ TEST(msrp_participant, an_lv_on_another_vlan_leaves_the_registered_talker_advert
     EXPECT_EQ(rig.p.find_registered_talker_advertise(ta.stream_id), nullptr);
     EXPECT_EQ(rig.leaves, 1);
 }
+
+TEST_MAIN(statusbar_srp, srp_msrp_participant_test)
