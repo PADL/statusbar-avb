@@ -278,6 +278,7 @@ auto AvbEntityKit::start_or_stop_output(uint16_t const index, bool const stopped
     // Table 7-145), so every subscribed controller is told by an unsolicited
     // GET_STREAM_INFO response (7.5.2), beside the command's own echo.
     talker_->set_stream_stopped(index, stopped);
+    notify_talker_gates();
     (void)host_.components().aem_handler.notify_stream_info_changed(DESCRIPTOR_STREAM_OUTPUT, index);
     return atdecc::AEM_STATUS_SUCCESS;
 }
@@ -608,12 +609,31 @@ void AvbEntityKit::notify_admission(RawTimePoint const now)
 {
     arm_admission_deadline(now);
     auto const admitted = admitted_talker_streams(now);
-    if (std::ranges::equal(admitted, admitted_)) {
-        return;
+    if (!std::ranges::equal(admitted, admitted_)) {
+        admitted_ = admitted;
+        if (on_admission_changed_) {
+            on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+        }
     }
-    admitted_ = admitted;
-    if (on_admission_changed_) {
-        on_admission_changed_(std::span<uint16_t const>{admitted_.data(), admitted_.size()});
+    notify_talker_gates();
+}
+
+auto AvbEntityKit::evaluate_talker_gate(uint16_t const idx) const noexcept -> bool
+{
+    bool const admitted = std::ranges::find(admitted_, idx) != admitted_.end();
+    return admitted && maap_.ready() && talker_->slot_for(idx) != nullptr && !talker_->stream_stopped(idx);
+}
+
+void AvbEntityKit::notify_talker_gates() noexcept
+{
+    for (auto const& spec : talker_specs_) {
+        bool const open = evaluate_talker_gate(spec.index);
+        if (spec.index >= talker_gates_.size() || std::exchange(talker_gates_[spec.index], open) == open) {
+            continue;
+        }
+        if (on_talker_gate_changed_) {
+            on_talker_gate_changed_(spec.index, open);
+        }
     }
 }
 
@@ -1005,6 +1025,7 @@ auto AvbEntityKit::setup_maap_addresses(net::MessageReactor& reactor, TimePoint 
     for (auto const& spec : talker_specs_) {
         (void)indices.try_push_back(spec.index);
     }
+    maap_.set_on_ready_changed([this](bool) { notify_talker_gates(); });
     // On (re)defend: release the ADP start the Link Up held back, and
     // re-declare the MSRP Talker Advertise so listeners reserve against the
     // MAAP address, once the SR-class domain is up.
@@ -1267,6 +1288,7 @@ void AvbEntityKit::finish_start()
         host_.ctl_log().warning("stream_tx.kicker: no stream port to kick; kicking in the media tick");
     }
     report_inert_controls();
+    notify_talker_gates();  // the slots are open: each gate open now is told
 }
 
 void AvbEntityKit::report_inert_controls()
@@ -1300,6 +1322,7 @@ auto AvbEntityKit::stop(TimePoint const now) -> Status
     // port off the reactor), then the control plane. start() builds all
     // three again.
     close_streams();
+    notify_talker_gates();  // no slot: every gate closes
     maap_.stop(now);
     link_up_ = false;  // the next start()'s Link Up is a first one again
     return host_.stop_control_plane(now);

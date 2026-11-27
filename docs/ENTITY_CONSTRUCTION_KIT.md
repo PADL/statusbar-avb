@@ -536,6 +536,19 @@ header code `transmit_aaf()` and `transmit_crf()` use, and the tag is
 `stream_frame_header()`'s, so a written template is the frame the talker
 sends. AM824 has none.
 
+**Gate.** `AvbEntityKit::set_on_talker_gate_changed()` tells, on the
+reactor thread, each change of whether a talker stream streams, as the
+media thread's `transmit_if_due()` finds it and STREAM_START and
+STREAM_STOP count it: its slot open (from `start()` to `stop()`), MAAP
+ready (`MaapAddressAcquirer::set_on_ready_changed()`), admitted, and not
+stopped by STOP_STREAMING, which stops the slot and leaves the admitted set
+as it is. The kit evaluates it at each evaluation of admission (a gate
+input or the admission deadline), at STOP_STREAMING and START_STREAMING,
+at each change of MAAP readiness, at the end of `start()`, which so tells
+each stream that opens, and in `stop()`, which tells each that closes.
+`talker_gate_open()` answers the state in force. The data plane sends a
+stream while its gate is open.
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one

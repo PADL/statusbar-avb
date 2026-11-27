@@ -25,6 +25,7 @@
 #include "statusbar/avtp/avtp_crf.hpp"
 #include "statusbar/avtp/avtp_maap.hpp"
 #include "statusbar/avtp/avtp_maap_handler.hpp"
+#include "statusbar/buffer/span_utils.hpp"
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
@@ -1512,6 +1513,34 @@ auto announce_grandmaster(KitUnderTest& kit) -> nanoavb::GptpAnnounceHandler&
 
 }  // namespace
 
+namespace {
+
+/// Each (stream, open) the kit's gate hook is told.
+struct GateRecorder
+{
+    std::vector<std::pair<uint16_t, bool>> told{};
+
+    void install(KitUnderTest& kit)
+    {
+        kit->set_on_talker_gate_changed([this](uint16_t const idx, bool const open) { told.emplace_back(idx, open); });
+    }
+};
+
+/// A controller's START_STREAMING or STOP_STREAMING (@p command) for STREAM_OUTPUT @p index: the status.
+auto output_streaming_command(KitUnderTest& kit, uint16_t const command, uint16_t const index) -> uint8_t
+{
+    atdecc::AemDu header{};
+    header.init_command(command, atdecc::aem::AemStreamingPayload::LENGTH);
+    header.controller_entity_id = Eui64{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77};
+    atdecc::aem::AemStreamingPayload payload{};
+    payload.descriptor_type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT;
+    payload.descriptor_index = index;
+    std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
+    return kit->host().components().aem_handler.handle_command(header, make_const_span(payload), out).status;
+}
+
+}  // namespace
+
 // A start knows no grandmaster: every AVTPDU of each kind carries tu, and does again once the
 // grandmaster announced is lost; TIMESTAMP_UNCERTAIN counts each of them.
 TEST(avb_entity_kit_tu, every_kind_of_avtpdu_carries_tu_while_no_grandmaster_is_in_force)
@@ -1758,6 +1787,131 @@ TEST(avb_entity_kit_mr, a_stream_reopened_after_a_stop_starts_with_mr_clear)
         EXPECT_EQ(output_counter(kit, kind, stream_output_frames_tx_bit), 3U + HOLD + 1);
     }
     EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{4}}));
+}
+
+// A classic stream streams while it is admitted and not stopped: the hook is told each edge the media
+// thread's transmit_if_due() finds, STOP_STREAMING's included, which leaves the admitted set as it is.
+TEST(avb_entity_kit_talker_gate, the_hook_follows_admission_and_stop_streaming)
+{
+    using G = std::vector<std::pair<uint16_t, bool>>;
+    KitUnderTest kit{make_config(2, "classic")};
+    GateRecorder recorder;
+    recorder.install(kit);
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_TRUE(recorder.told.empty());  // nothing admitted yet
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    EXPECT_TRUE((recorder.told == G{{1, true}}));
+    EXPECT_TRUE(kit->talker_gate_open(1));
+
+    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_STOP_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((recorder.told == G{{1, true}, {1, false}}));
+    EXPECT_TRUE(kit->admitted_talker_streams(ADMIT_T0) == AvbEntityKit::AdmittedStreams{1});  // the slot stops, not the gate
+    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_STOP_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_EQ(recorder.told.size(), size_t{2});  // stopped again: no change
+    EXPECT_EQ(output_streaming_command(kit, atdecc::AEM_COMMAND_START_STREAMING, 1), atdecc::AEM_STATUS_SUCCESS);
+    EXPECT_TRUE((recorder.told == G{{1, true}, {1, false}, {1, true}}));
+    kit->set_on_talker_gate_changed({});
+}
+
+// A grace that runs out with no event closes the gate at the admission deadline, and stop() closes
+// every gate still open; a later install replaces the earlier hook.
+TEST(avb_entity_kit_talker_gate, the_deadline_and_stop_close_the_gate)
+{
+    using G = std::vector<std::pair<uint16_t, bool>>;
+    KitUnderTest kit{make_config(2, "classic")};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 1);
+    acmp_tx_command(kit, atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_COMMAND, 2);
+    kit->notify_listener_ready(talker_sid(kit, 1), true, ADMIT_T0);
+    kit->notify_listener_ready(talker_sid(kit, 2), true, ADMIT_T0);
+    GateRecorder first;
+    first.install(kit);
+    EXPECT_TRUE(first.told.empty());  // the gates in force at install are not told
+    EXPECT_TRUE(kit->talker_gate_open(1) && kit->talker_gate_open(2));
+
+    kit->notify_listener_ready(talker_sid(kit, 1), false, ADMIT_T0 + std::chrono::seconds{1});
+    EXPECT_TRUE(first.told.empty());  // within the grace
+    end_cycle_at(kit, 1, ADMIT_T0 + std::chrono::seconds{1} + TalkerGate::GRACE);
+    EXPECT_TRUE((first.told == G{{1, false}}));
+
+    GateRecorder second;
+    second.install(kit);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+    EXPECT_TRUE((second.told == G{{2, false}}));
+    EXPECT_EQ(first.told.size(), size_t{1});
+    EXPECT_FALSE(kit->talker_gate_open(2));
+    kit->set_on_talker_gate_changed({});
+}
+
+// With the gate off every talker stream streams from start() to stop(): start() tells each one open,
+// stop() each one closed.
+TEST(avb_entity_kit_talker_gate, a_kit_without_a_gate_opens_every_stream_at_start_and_closes_it_at_stop)
+{
+    auto config = make_config(2, "classic");
+    config.gate_talker_on_listener = false;
+    KitUnderTest kit{std::move(config)};
+    GateRecorder recorder;
+    recorder.install(kit);
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    std::vector<std::pair<uint16_t, bool>> opened;
+    std::vector<std::pair<uint16_t, bool>> closed;
+    for (auto const& spec : kit.talker_specs()) {
+        opened.emplace_back(spec.index, true);
+        closed.emplace_back(spec.index, false);
+    }
+    EXPECT_TRUE(recorder.told == opened);
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{2}}));
+    opened.insert(opened.end(), closed.begin(), closed.end());
+    EXPECT_TRUE(recorder.told == opened);
+    kit->set_on_talker_gate_changed({});
+}
+
+// IEEE 1722-2025 Annex B.3: in "maap" address mode a stream streams only while its block is defended. The
+// gate closes when the block is lost and opens when it is defended again, as the media thread finds it.
+TEST(avb_entity_kit_talker_gate, the_gate_follows_the_maap_block)
+{
+    constexpr int64_t SEC = 1'000'000'000;
+    auto config = make_config(2, "classic");
+    config.gate_talker_on_listener = false;
+    config.stream_address_mode = "maap";
+    KitUnderTest kit{std::move(config)};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));  // no MAAP socket: the static addresses stand
+    std::vector<std::pair<uint16_t, bool>> closed;
+    std::vector<std::pair<uint16_t, bool>> opened;
+    for (auto const& spec : kit.talker_specs()) {
+        closed.emplace_back(spec.index, false);
+        opened.emplace_back(spec.index, true);
+    }
+    uint16_t const idx = kit.talker_specs().front().index;
+    auto agree = [&kit, idx] { return kit->talker_gate_open(idx) == kit->talker_should_transmit(idx, ADMIT_T0); };
+    EXPECT_TRUE(kit->talker_gate_open(idx));
+    EXPECT_TRUE(agree());
+    GateRecorder recorder;
+    recorder.install(kit);
+
+    avtp::MaapHandler handler{Eui48{0x02, 0x00, 0x00, 0x00, 0x00, 0x01}, 1};
+    handler.set_send([](Eui48 const&, std::span<uint8_t const>) { return true; });
+    kit->maap().wire_handler(handler, kit->host().components(), kit->talker());
+    handler.prepare(static_cast<uint16_t>(kit.talker_specs().size()));
+    auto defend = [&handler](int64_t const from_ns) {
+        handler.port_operational(from_ns);
+        for (int k = 1; k <= 12 && !handler.is_acquired(); ++k) {
+            handler.tick(from_ns + (k * SEC));
+        }
+    };
+    defend(SEC);
+    EXPECT_TRUE(recorder.told.empty());  // ready already: no change
+    handler.release(20 * SEC);
+    EXPECT_TRUE(recorder.told == closed);
+    EXPECT_FALSE(kit->talker_gate_open(idx));
+    EXPECT_TRUE(agree());
+    defend(30 * SEC);
+    closed.insert(closed.end(), opened.begin(), opened.end());
+    EXPECT_TRUE(recorder.told == closed);
+    EXPECT_TRUE(kit->talker_gate_open(idx));
+    EXPECT_TRUE(agree());
+    kit->set_on_talker_gate_changed({});
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
