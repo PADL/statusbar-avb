@@ -1152,6 +1152,146 @@ TEST(nanoavb_srp_mvrp, withdraw_all_sends_the_leave_at_once)
 }
 
 //
+// Milan v1.3 4.4.1: the VLANs of the settled sinks (set_sink_vlans)
+//
+
+TEST(nanoavb_srp_mvrp, a_sink_vlan_is_declared_while_it_is_in_the_list)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    handler.set_sink_vlans(std::array<uint16_t, 2>{7, 9}, now);
+    EXPECT_TRUE(handler.started());
+    EXPECT_EQ(handler.get_vlan_state(7), VlanState::Pending);
+    EXPECT_EQ(handler.get_vlan_state(9), VlanState::Pending);
+    EXPECT_EQ(handler.sink_vlans().size(), 2U);
+
+    handler.set_sink_vlans(std::array<uint16_t, 1>{9}, now);
+    EXPECT_EQ(handler.get_vlan_state(7), VlanState::Unregistered);
+    EXPECT_EQ(handler.get_vlan_state(9), VlanState::Pending);
+    EXPECT_EQ(handler.sink_vlans().size(), 1U);
+    EXPECT_EQ(handler.sink_vlans().front(), 9);
+
+    handler.set_sink_vlans({}, now);
+    EXPECT_EQ(handler.get_vlan_state(9), VlanState::Unregistered);
+    EXPECT_TRUE(handler.sink_vlans().empty());
+}
+
+TEST(nanoavb_srp_mvrp, a_sink_vlan_is_joined_and_left_on_the_wire)
+{
+    // VID 0x123 as the FirstValue of a VID vector: the two octets, in order.
+    std::vector<std::vector<uint8_t>> sent{};
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}, MvrpCallbacks{.send_packet = [&sent](std::span<uint8_t const> pdu) {
+                            sent.emplace_back(pdu.begin(), pdu.end());
+                            return true;
+                        }}};
+    auto const names_the_vlan = [](std::vector<uint8_t> const& pdu) {
+        std::array<uint8_t, 2> const vid{0x01, 0x23};
+        return !std::ranges::search(pdu, vid).empty();
+    };
+    auto now = TimePoint{std::chrono::seconds{1}};
+    handler.set_sink_vlans(std::array<uint16_t, 1>{0x123}, now);
+    now += std::chrono::milliseconds{250};
+    handler.tick(now);
+    EXPECT_FALSE(sent.empty());
+    EXPECT_TRUE(std::ranges::any_of(sent, names_the_vlan));
+
+    // Out of the list: its Leave goes at the next opportunity.
+    sent.clear();
+    handler.set_sink_vlans({}, now);
+    now += std::chrono::milliseconds{250};
+    handler.tick(now);
+    EXPECT_TRUE(std::ranges::any_of(sent, names_the_vlan));
+}
+
+TEST(nanoavb_srp_mvrp, the_entitys_vlan_outlasts_a_sink_that_leaves_it)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    handler.set_sink_vlans(std::array<uint16_t, 2>{2, 7}, now);
+    EXPECT_EQ(handler.vlans().size(), 2U);
+    handler.set_sink_vlans({}, now);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Pending);
+    EXPECT_EQ(handler.get_vlan_state(7), VlanState::Unregistered);
+
+    // Withdrawn by the entity with no sink on it, it goes.
+    EXPECT_TRUE(handler.withdraw_vlan(2, now).has_value());
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
+}
+
+TEST(nanoavb_srp_mvrp, a_sinks_vlan_outlasts_the_entitys_withdrawal_of_it)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    handler.set_sink_vlans(std::array<uint16_t, 1>{2}, now);
+    EXPECT_TRUE(handler.withdraw_vlan(2, now).has_value());
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Pending);
+
+    // The entity held it once and let go: the sink's leaving takes it away.
+    handler.set_sink_vlans({}, now);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
+
+    // Registered twice and withdrawn once, the entity holds it no more.
+    EXPECT_TRUE(handler.register_vlan(5, now).has_value());
+    EXPECT_TRUE(handler.register_vlan(5, now).has_value());
+    EXPECT_TRUE(handler.withdraw_vlan(5, now).has_value());
+    EXPECT_EQ(handler.get_vlan_state(5), VlanState::Unregistered);
+    handler.set_sink_vlans(std::array<uint16_t, 1>{5}, now);
+    EXPECT_EQ(handler.get_vlan_state(5), VlanState::Pending);
+    handler.set_sink_vlans({}, now);
+    EXPECT_EQ(handler.get_vlan_state(5), VlanState::Unregistered);
+}
+
+TEST(nanoavb_srp_mvrp, a_repeat_and_an_id_that_is_no_vlan_are_left_out_of_the_sinks_list)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    handler.set_sink_vlans(std::array<uint16_t, 5>{7, 0, 7, 4095, 4094}, now);
+    EXPECT_EQ(handler.sink_vlans().size(), 2U);
+    EXPECT_EQ(handler.sink_vlans()[0], 7);
+    EXPECT_EQ(handler.sink_vlans()[1], 4094);
+    EXPECT_EQ(handler.vlans().size(), 2U);
+}
+
+TEST(nanoavb_srp_mvrp, a_sink_vlan_the_table_has_no_room_for_is_taken_once_there_is_room)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    for (uint16_t vid = 1; vid <= 16; ++vid) {
+        EXPECT_TRUE(handler.register_vlan(vid, now).has_value());
+    }
+    handler.set_sink_vlans(std::array<uint16_t, 2>{17, 3}, now);
+    EXPECT_EQ(handler.sink_vlans().size(), 1U);  // 3 is declared already; 17 has no slot
+    EXPECT_EQ(handler.get_vlan_state(17), VlanState::Unregistered);
+
+    EXPECT_TRUE(handler.withdraw_vlan(8, now).has_value());
+    handler.set_sink_vlans(std::array<uint16_t, 2>{17, 3}, now);
+    EXPECT_EQ(handler.sink_vlans().size(), 2U);
+    EXPECT_EQ(handler.get_vlan_state(17), VlanState::Pending);
+    EXPECT_EQ(handler.get_vlan_state(3), VlanState::Pending);
+}
+
+TEST(nanoavb_srp_mvrp, withdraw_all_leaves_nobody_holding_a_vlan)
+{
+    MvrpHandler handler{statusbar::srp::mvrp::MvrpConfig{}};
+    auto const now = TimePoint{std::chrono::seconds{1}};
+    EXPECT_TRUE(handler.register_vlan(2, now).has_value());
+    handler.set_sink_vlans(std::array<uint16_t, 1>{7}, now);
+    handler.withdraw_all(now);
+    EXPECT_TRUE(handler.sink_vlans().empty());
+    EXPECT_EQ(handler.get_vlan_state(7), VlanState::Unregistered);
+
+    // The next run: the sinks' list is declared afresh, and the entity's
+    // hold of VLAN 2 is gone with the run it was made in.
+    handler.set_sink_vlans(std::array<uint16_t, 2>{7, 2}, now);
+    EXPECT_EQ(handler.get_vlan_state(7), VlanState::Pending);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Pending);
+    handler.set_sink_vlans({}, now);
+    EXPECT_EQ(handler.get_vlan_state(2), VlanState::Unregistered);
+}
+
+//
 // Sender lifetime: one trampoline to the callbacks in force
 //
 

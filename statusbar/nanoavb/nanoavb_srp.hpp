@@ -258,6 +258,19 @@ class MvrpHandler
     /// reaches. Nothing registered: nothing sent.
     void withdraw_all(TimePoint now);
 
+    /// The VLANs this entity's settled Milan sinks use, all of them (Milan
+    /// v1.3 4.4.1: a Listener declares a VID attribute for each). A VLAN
+    /// that enters the list is declared and one that leaves it is withdrawn.
+    /// register_vlan() and this hold a VLAN each on their own: it is declared
+    /// while either holds it, so a sink that leaves the entity's own VLAN
+    /// takes nothing away, and withdraw_vlan() leaves a sink's VLAN declared.
+    /// An id outside 1 to 4094, a repeat and an id the table has no room for
+    /// are left out of the list.
+    void set_sink_vlans(std::span<uint16_t const> vlans, TimePoint now);
+
+    /// The VLANs set_sink_vlans() last took.
+    [[nodiscard]] auto sink_vlans() const noexcept -> std::span<uint16_t const> { return sink_vlans_; }
+
     /// Get the registration state of a VLAN
     /// @param vlan_id The VLAN ID to query
     [[nodiscard]] auto get_vlan_state(uint16_t vlan_id) const noexcept -> VlanState;
@@ -298,10 +311,29 @@ class MvrpHandler
         return callbacks_.send_packet ? callbacks_.send_packet(packet) : false;
     }
 
+    using VlanIds = statusbar::sg14::inplace_vector<uint16_t, statusbar::srp::mvrp::DefaultMvrpLimits::max_vlans>;
+
+    /// Declare @p vlan_id, whoever holds it: its slot in vlans_ and the participant's Join.
+    [[nodiscard]] auto declare(uint16_t vlan_id, TimePoint now) -> Status;
+    /// Withdraw @p vlan_id, which nobody holds any more.
+    auto undeclare(uint16_t vlan_id, TimePoint now) -> Status;
+    /// @p vlan_id of a new sink list goes into @p next, declared when nobody held it.
+    void take_sink_vlan(VlanIds& next, uint16_t vlan_id, TimePoint now);
+    /// The end of a run: nobody holds a VLAN.
+    void release_holds() noexcept
+    {
+        entity_vlans_.clear();
+        sink_vlans_.clear();
+    }
+
     MvrpCallbacks callbacks_;
     // Fixed-capacity (no heap): VLAN count per endpoint is tiny in practice.
     // Capacity matches the wrapped MvrpParticipant's compile-time limit.
     statusbar::sg14::inplace_vector<VlanInfo, statusbar::srp::mvrp::DefaultMvrpLimits::max_vlans> vlans_;
+    /// The VLANs register_vlan() holds.
+    VlanIds entity_vlans_{};
+    /// The VLANs set_sink_vlans() holds.
+    VlanIds sink_vlans_{};
     statusbar::srp::mvrp::MvrpParticipant participant_;
     bool started_{false};
 };

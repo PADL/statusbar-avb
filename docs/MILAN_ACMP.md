@@ -125,6 +125,7 @@ takes each answer through a setter, and the entity kit supplies them:
 | Was its talker heard before the bind? | the `heard` argument of `receive_controller_command` and `receive_mvu_binding_command` | `AtdeccNetHandler`, from the ADP discovery it feeds |
 | Look again, SRP changed | `on_srp_changed()` | from `MsrpHandler`'s `on_remote_talker` |
 | Start and stop the reservation | `AcmpListenerCallbacks::on_connect`, `on_disconnect` | `ListenerStreams`: MSRP Listener attach with the same `TalkerMatch`, multicast join |
+| Declare the VLANs of the settled sinks (4.4.1) | `set_on_sink_vlans_changed` | not the kit's: `NanoAvbComponents::use_milan_acmp()` gives the list to `MvrpHandler::set_sink_vlans()` |
 | Save the bindings (5.5.2.4) | `set_on_bindings_changed` | the `listener.bindings` file, written before the controller is answered; then each input's stopped state (5.3.8.7) |
 
 ### The Listener declaration follows what was probed
@@ -144,6 +145,33 @@ therefore follows the attribute on whichever VLAN it is declared; the
 sink still reports 0, the value it was given (5.3.8.9). An IEEE 1722.1
 connection names no match and follows any Talker attribute of its
 StreamID, as before.
+
+### The VLANs of the settled sinks
+
+4.4.1 has a Listener declare an MVRP VID attribute for each VLAN its
+settled sinks use. The listener keeps the VLAN each sink settled on, the
+one its PROBE_TX_RESPONSE named, and tells the list (`sink_vlans()`, each
+VLAN once) through `set_on_sink_vlans_changed` when it changes: before
+`on_connect` for a sink that settles, so the VLAN is asked for before the
+Listener attribute, and after `on_disconnect` for one that leaves its
+settled state. `NanoAvbComponents::use_milan_acmp()` hands the list to
+`MvrpHandler::set_sink_vlans()`, so an entity of the Milan profile has it
+with nothing to do in the kit or the host.
+
+`MvrpHandler` keeps two holders of a VLAN apart: the entity
+(`register_vlan()`, `withdraw_vlan()`: its SRP Domain's VLAN) and the
+sinks. A VLAN is declared while either holds it. A sink that leaves the
+entity's own VLAN takes nothing away, and a change of the SRP Domain's
+VLAN leaves a sink's VLAN declared.
+
+| What happens | MVRP |
+|---|---|
+| a sink settles on a VLAN nobody holds | the VLAN is declared |
+| a sink settles on a VLAN the entity or another sink holds | nothing |
+| the last settled sink on a VLAN leaves, the entity does not hold it | the VLAN is withdrawn |
+| the entity withdraws a VLAN a sink is settled on | nothing: it stays declared |
+| a sink settles on a talker that named VLAN 0 | nothing: the stream is on the SRP Domain's VLAN, the entity's own |
+| the run ends (`withdraw_all()`) | every VLAN is withdrawn and nobody holds one |
 
 ### Bindings across a restart
 
@@ -389,6 +417,10 @@ Left open:
   "Discovery state machine" above).
 - A probe answer naming VLAN 0 (IEEE 1722.1-2021 8.2.1.17: the SRP
   Domain's VLAN) follows the Talker attribute on any VLAN.
+- A sink whose talker named VLAN 0 adds no VLAN to those declared for
+  4.4.1. Should its Talker attribute be on another VLAN than the SRP
+  Domain's, that VLAN is not declared. A Milan talker names its VLAN
+  (Table 5.48), so this is an IEEE 1722.1 talker's case.
 - A PROBE_TX_COMMAND counts for the 15 seconds of 4.3.3.1 when it is
   answered TALKER_DEST_MAC_FAILED too.
 - A stop and start of the entity kit is a power cycle to a bound sink: it
@@ -456,7 +488,5 @@ Left open:
 
 - GET_STREAM_INFO still reports a sink as the IEEE 1722.1 listener would
   (settled reads as connected).
-- MVRP is declared for the Class A Domain's VLAN. A sink settled on
-  another VLAN does not add that one (4.4.1).
 - A PROBE_TX_COMMAND is not checked against the interface it arrived on
   (5.5.4.1 step 2): the entity has one AVB interface.

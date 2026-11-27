@@ -207,6 +207,9 @@ void NanoAvbComponents::use_milan_acmp()
         std::make_unique<NanoAvbMilanAcmpTalker>(acmp_talker.entity_id(), AcmpTalkerCallbacks{}, acmp_talker.max_streams());
     milan_acmp_listener =
         std::make_unique<NanoAvbMilanAcmpListener>(acmp_listener.entity_id(), AcmpListenerCallbacks{}, acmp_listener.max_streams());
+    // Milan v1.3 4.4.1: the VLANs of the settled sinks are declared by MVRP.
+    milan_acmp_listener->set_on_sink_vlans_changed(
+        [this](std::span<uint16_t const> const vlans, sm::TimePoint const now) { mvrp_handler.set_sink_vlans(vlans, now); });
     // Milan v1.3 5.6: such an entity advertises with valid_time 10 and by
     // Milan's advertise state machine.
     adp_advertiser.use_milan_advertise();

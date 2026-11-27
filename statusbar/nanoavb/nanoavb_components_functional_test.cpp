@@ -361,6 +361,36 @@ TEST(nanoavb_components_acmp, a_milan_sinks_picture_is_its_binding_and_its_probe
     EXPECT_EQ(settled->stream_vlan_id, 2);
 }
 
+TEST(nanoavb_components_acmp, a_settled_milan_sinks_vlan_is_declared_by_mvrp_until_the_sink_is_unbound)
+{
+    // Milan v1.3 4.4.1. The builder has declared the entity's own VLAN, 2.
+    auto components = two_stream_components();
+    components->use_milan_acmp();
+    AtdeccOnNoInterface net{*components};
+    auto const& mvrp = components->mvrp_handler;
+    EXPECT_EQ(mvrp.get_vlan_state(2), VlanState::Pending);
+
+    net.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_CONNECT_RX_COMMAND, REMOTE_TALKER, ENTITY));
+    EXPECT_EQ(mvrp.get_vlan_state(7), VlanState::Unregistered);  // bound, not settled
+    auto answer = net.milan_sent.back();
+    answer.set_message_type(atdecc::ACMP_MESSAGE_TYPE_CONNECT_TX_RESPONSE);
+    answer.stream_id = STREAM;
+    answer.stream_dest_mac = DEST;
+    answer.stream_vlan_id = 7;
+    std::array<uint8_t, atdecc::AcmpDu2021::LENGTH> buf{};
+    auto const wire = atdecc::acmp_serialize_2016(answer, buf);
+    net.receive({wire.begin(), wire.end()});
+    EXPECT_TRUE(components->listener_sink(0)->connected);
+    EXPECT_EQ(mvrp.get_vlan_state(7), VlanState::Pending);
+    EXPECT_EQ(mvrp.sink_vlans().size(), 1U);
+
+    net.receive(acmp_frame(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, REMOTE_TALKER, ENTITY));
+    EXPECT_FALSE(components->listener_sink(0)->connected);
+    EXPECT_EQ(mvrp.get_vlan_state(7), VlanState::Unregistered);
+    EXPECT_EQ(mvrp.get_vlan_state(2), VlanState::Pending);
+    EXPECT_TRUE(mvrp.sink_vlans().empty());
+}
+
 TEST(nanoavb_components_acmp, acmp_frames_go_to_the_milan_pair_once_it_is_chosen_and_to_the_ieee_pair_otherwise)
 {
     // IEEE 1722.1: a CONNECT_RX_COMMAND is relayed to the talker and the

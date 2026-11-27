@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -697,6 +698,116 @@ TEST(nanoavb_milan_listener, a_binding_restored_at_start_is_told_at_the_first_lo
             .listener_unique_id = 2, .talker_entity_id = TALKER, .talker_unique_id = 1, .controller_entity_id = CONTROLLER},
         at(0)));
     EXPECT_TRUE((rig.changed() == std::vector<uint16_t>{2}));
+}
+
+//
+// Milan v1.3 4.4.1: the VLANs of the settled sinks
+//
+
+namespace {
+
+/// A ListenerRig that keeps what on_sink_vlans_changed is told, and when.
+struct VlanRig
+{
+    ListenerRig rig{};
+    std::vector<std::vector<uint16_t>> told{};
+    std::vector<TimePoint> when{};
+
+    VlanRig()
+    {
+        rig.listener.set_on_sink_vlans_changed([this](std::span<uint16_t const> const vlans, TimePoint const now) {
+            told.emplace_back(vlans.begin(), vlans.end());
+            when.push_back(now);
+        });
+    }
+    VlanRig(VlanRig const&) = delete;
+    auto operator=(VlanRig const&) -> VlanRig& = delete;
+
+    /// Bind @p sink, and its talker answers the probe with a stream on @p vlan.
+    void settle(uint16_t const sink, uint16_t const vlan, TimePoint const now)
+    {
+        EXPECT_TRUE(rig.bind(sink, now));
+        auto answer = ListenerRig::answer_to(rig.probes.back());
+        answer.stream_vlan_id = vlan;
+        EXPECT_TRUE(rig.listener.receive_talker_response(answer, now));
+    }
+
+    void unbind(uint16_t const sink, TimePoint const now)
+    {
+        EXPECT_TRUE(rig.listener.receive_controller_command(
+            command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER, 1, LISTENER, sink), now));
+    }
+};
+
+}  // namespace
+
+TEST(nanoavb_milan_listener, the_vlans_of_the_settled_sinks_are_told_when_the_list_changes)
+{
+    VlanRig vlans;
+    EXPECT_TRUE(vlans.rig.listener.sink_vlans().empty());
+    vlans.settle(0, 7, at(5));
+    EXPECT_TRUE((vlans.told == std::vector<std::vector<uint16_t>>{{7}}));
+    EXPECT_EQ(vlans.when.back(), at(5));
+
+    // A second sink on the same VLAN: the list is as it was.
+    vlans.settle(1, 7, at(10));
+    EXPECT_EQ(vlans.told.size(), 1U);
+    vlans.settle(2, 9, at(20));
+    EXPECT_TRUE((vlans.told.back() == std::vector<uint16_t>{7, 9}));
+
+    // One of the two on VLAN 7 goes and 7 stays; the other goes and 7 goes.
+    vlans.unbind(0, at(30));
+    EXPECT_EQ(vlans.told.size(), 2U);
+    vlans.unbind(1, at(40));
+    EXPECT_TRUE((vlans.told.back() == std::vector<uint16_t>{9}));
+    EXPECT_EQ(vlans.when.back(), at(40));
+    vlans.unbind(2, at(50));
+    EXPECT_TRUE(vlans.told.back().empty());
+    EXPECT_EQ(vlans.told.size(), 4U);
+    EXPECT_TRUE(vlans.rig.listener.sink_vlans().empty());
+}
+
+TEST(nanoavb_milan_listener, a_sink_that_is_bound_and_not_settled_adds_no_vlan)
+{
+    VlanRig vlans;
+    EXPECT_TRUE(vlans.rig.bind(0, at(0)));
+    EXPECT_TRUE(vlans.told.empty());
+    EXPECT_TRUE(vlans.rig.listener.sink_vlans().empty());
+}
+
+TEST(nanoavb_milan_listener, a_talker_that_names_no_vlan_adds_none)
+{
+    // IEEE 1722.1-2021 8.2.1.17: 0 is the VLAN of the SRP Domain, which the
+    // entity declares for itself.
+    VlanRig vlans;
+    vlans.settle(0, 0, at(0));
+    EXPECT_TRUE(vlans.rig.listener.is_settled(0));
+    EXPECT_TRUE(vlans.told.empty());
+    EXPECT_TRUE(vlans.rig.listener.sink_vlans().empty());
+}
+
+TEST(nanoavb_milan_listener, a_restart_takes_the_sinks_vlans_away)
+{
+    VlanRig vlans;
+    vlans.settle(0, 7, at(0));
+    vlans.rig.listener.restart(at(1000));
+    EXPECT_EQ(vlans.told.size(), 2U);
+    EXPECT_TRUE(vlans.told.back().empty());
+    EXPECT_EQ(vlans.when.back(), at(1000));
+}
+
+TEST(nanoavb_milan_listener, the_vlan_is_told_before_the_connect_and_taken_away_after_the_disconnect)
+{
+    VlanRig vlans;
+    std::vector<std::string> order{};
+    vlans.rig.listener.set_connection_callbacks(
+        [&order](uint16_t, Eui64 const&, Eui48, TimePoint) { order.emplace_back("connect"); },
+        [&order](uint16_t, TimePoint) { order.emplace_back("disconnect"); });
+    vlans.rig.listener.set_on_sink_vlans_changed(
+        [&order](std::span<uint16_t const> const list, TimePoint) { order.emplace_back(list.empty() ? "no vlan" : "vlan"); });
+    vlans.settle(0, 7, at(0));
+    vlans.unbind(0, at(10));
+    EXPECT_TRUE((order == std::vector<std::string>{"vlan", "connect", "disconnect", "no vlan"}));
 }
 
 TEST(nanoavb_milan_listener, its_own_random_delay_stays_within_a_second_and_varies)

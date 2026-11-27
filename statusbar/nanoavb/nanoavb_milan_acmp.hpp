@@ -26,6 +26,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <utility>
 
 namespace statusbar::nanoavb {
@@ -229,6 +230,24 @@ class NanoAvbMilanAcmpListener
     /// bindings() to non-volatile memory (5.5.2.4).
     void set_on_bindings_changed(statusbar::sg14::inplace_function<void(), 64> fn) { on_bindings_changed_ = std::move(fn); }
 
+    /// The VLANs of the settled sinks, each once.
+    using SinkVlans = statusbar::sg14::inplace_vector<uint16_t, MAX_STREAMS>;
+
+    /// Called with sink_vlans() when that list changes: before on_connect
+    /// for a sink that settles, after on_disconnect for one that leaves its
+    /// settled state. The place to declare them by MVRP (Milan v1.3 4.4.1,
+    /// MvrpHandler::set_sink_vlans).
+    void set_on_sink_vlans_changed(statusbar::sg14::inplace_function<void(std::span<uint16_t const> vlans, TimePoint now), 64> fn)
+    {
+        on_sink_vlans_changed_ = std::move(fn);
+    }
+
+    /// The VLAN of each settled sink, as its talker's PROBE_TX_RESPONSE
+    /// named it, each once. A talker that named none (0, an IEEE 1722.1
+    /// talker's "the VLAN of the SRP Domain", IEEE 1722.1-2021 8.2.1.17)
+    /// adds none: that VLAN is the entity's own to declare.
+    [[nodiscard]] auto sink_vlans() const -> SinkVlans;
+
     [[nodiscard]] auto max_streams() const noexcept -> size_t { return sinks_.size(); }
 
     // Bindings
@@ -342,6 +361,9 @@ class NanoAvbMilanAcmpListener
     [[nodiscard]] auto draw_delay() noexcept -> std::chrono::milliseconds;
     [[nodiscard]] auto is_locked_out(Eui64 const& controller) const -> bool;
     [[nodiscard]] auto mutable_sink(uint16_t stream_index) noexcept -> atdecc::MilanSink*;
+    /// Sink @p index settled on @p vlan_id, or left its settled state (0):
+    /// on_sink_vlans_changed_ is told when sink_vlans() is another list for it.
+    void note_sink_vlan(uint16_t index, uint16_t vlan_id, TimePoint now);
 
     AcmpListenerCallbacks callbacks_;
     void const* sender_owner_{nullptr};    ///< see attach_senders
@@ -350,7 +372,10 @@ class NanoAvbMilanAcmpListener
     statusbar::sg14::inplace_function<bool(Eui64 const&), 64> locked_out_{};
     statusbar::sg14::inplace_function<atdecc::MilanGptpState(), 64> gptp_state_{};
     statusbar::sg14::inplace_function<void(), 64> on_bindings_changed_{};
+    statusbar::sg14::inplace_function<void(std::span<uint16_t const>, TimePoint), 64> on_sink_vlans_changed_{};
     statusbar::sg14::inplace_vector<atdecc::MilanSink, MAX_STREAMS> sinks_{};
+    /// The VLAN each sink is settled on; 0 for one that is not settled or whose talker named none.
+    statusbar::sg14::inplace_vector<uint16_t, MAX_STREAMS> sink_vlan_{};
     /// Each sink as tell_stream_input_changes() last found it.
     statusbar::sg14::inplace_vector<atdecc::MilanStreamInputNotified, MAX_STREAMS> told_{};
     uint32_t random_state_{0};

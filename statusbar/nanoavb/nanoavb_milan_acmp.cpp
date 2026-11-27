@@ -102,6 +102,7 @@ NanoAvbMilanAcmpListener::NanoAvbMilanAcmpListener(Eui64 const entity_id, AcmpLi
     env_.my_id = entity_id;
     wire_env();
     sinks_.resize(std::min(max_streams, MAX_STREAMS));
+    sink_vlan_.resize(sinks_.size());
     for (size_t i = 0; i < sinks_.size(); ++i) {
         sinks_[i].attach(env_, static_cast<uint16_t>(i));
         told_.push_back(atdecc::milan_stream_input_notified(sinks_[i].context()));
@@ -115,6 +116,8 @@ void NanoAvbMilanAcmpListener::wire_env()
     env_.tx_command = [this](AcmpCommandResponse const& pdu) { return callbacks_.tx_command ? callbacks_.tx_command(pdu) : false; };
     env_.tx_response = [this](AcmpCommandResponse const& pdu) { return answer_controller(pdu); };
     env_.start_srp = [this](uint16_t const index, atdecc::MilanSrpParameters const& srp, TimePoint const now) {
+        // Milan v1.3 4.4.1. The VLAN first: the stream cannot come before this port is in it.
+        note_sink_vlan(index, srp.stream_vlan_id, now);
         if (callbacks_.on_connect) {
             callbacks_.on_connect(index, srp.stream_id, srp.stream_dest_mac, now);
         }
@@ -123,6 +126,7 @@ void NanoAvbMilanAcmpListener::wire_env()
         if (callbacks_.on_disconnect) {
             callbacks_.on_disconnect(index, now);
         }
+        note_sink_vlan(index, 0, now);
     };
     env_.binding_changed = [this](uint16_t /*index*/) {
         if (on_bindings_changed_) {
@@ -130,6 +134,30 @@ void NanoAvbMilanAcmpListener::wire_env()
         }
     };
     env_.random_delay = [this]() { return draw_delay(); };
+}
+
+void NanoAvbMilanAcmpListener::note_sink_vlan(uint16_t const index, uint16_t const vlan_id, TimePoint const now)
+{
+    if (index >= sink_vlan_.size()) {
+        return;
+    }
+    auto const before = sink_vlans();
+    sink_vlan_[index] = vlan_id;
+    auto const vlans = sink_vlans();
+    if (vlans != before && on_sink_vlans_changed_) {
+        on_sink_vlans_changed_(vlans, now);
+    }
+}
+
+auto NanoAvbMilanAcmpListener::sink_vlans() const -> SinkVlans
+{
+    SinkVlans vlans{};
+    for (uint16_t const vlan_id : sink_vlan_) {
+        if (vlan_id != 0 && std::ranges::find(vlans, vlan_id) == vlans.end()) {
+            vlans.push_back(vlan_id);
+        }
+    }
+    return vlans;
 }
 
 auto NanoAvbMilanAcmpListener::answer_controller(AcmpCommandResponse const& pdu) -> bool
