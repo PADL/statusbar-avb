@@ -245,28 +245,6 @@ TEST(aecp_mvu, a_media_clock_reference_info_is_laid_out_as_5_4_4_4_has_it)
     span_store(std::span<uint8_t>{get_bytes}, get);
     EXPECT_TRUE((get_bytes == std::array<uint8_t, 2>{0x01, 0x02}));
 }
-// Figure 5.5 (v1.2): system_unique_id is one quadlet at 32; v1.3 Figure 5.7:
-// a u64 number at 32 and the name at 40
-TEST(aecp_mvu, system_unique_id_layouts)
-{
-    MvuSystemUniqueIdPayload v12{};
-    v12.system_unique_id = uint32_t{0x01020304};
-    std::array<uint8_t, MvuSystemUniqueIdPayload::LENGTH> b12{};
-    span_store(b12, v12);
-    std::array<uint8_t, 6> const expected{0x00, 0x00, 0x01, 0x02, 0x03, 0x04};
-    EXPECT_TRUE(b12 == expected);
-
-    MvuSystemUniqueIdPayloadV13 v13{};
-    v13.number = uint64_t{0x0102030405060708};
-    v13.name = statusbar::atdecc::aem::AtdeccString{"S"};
-    std::array<uint8_t, MvuSystemUniqueIdPayloadV13::LENGTH> b13{};
-    span_store(b13, v13);
-    size_t constexpr BASE = AecpMvuDu::LENGTH;
-    EXPECT_EQ(b13[32 - BASE], uint8_t{0x01});
-    EXPECT_EQ(b13[39 - BASE], uint8_t{0x08});
-    EXPECT_EQ(b13[40 - BASE], uint8_t{'S'});
-}
-
 TEST(aecp_mvu, a_system_unique_id_is_laid_out_as_figure_5_7_has_it)
 {
     MvuSystemUniqueIdPayload id{};

@@ -398,43 +398,8 @@ struct AemStreamInfoPayload
 static_assert(sizeof(AemStreamInfoPayload) == 48, "AemStreamInfoPayload must be 48 bytes");
 static_assert(offsetof(AemStreamInfoPayload, ip_flags) == 46, "ip_flags at SET/GET_STREAM_INFO octet 46");
 
-/// The Milan v1.2 tail of a GET_STREAM_INFO response (Section 5.4.2.10, Figure 5.1), after the
-/// 48 octets of AemStreamInfoPayload: a 56-octet response, told from 2013 (48) and 2021 (84) forms
-/// by control_data_length.
-struct AemStreamInfoMilanExtension
-{
-    static constexpr size_t LENGTH = 8;
-
-    /// Bytes 48-51: stream_info_flags_ex
-    quadlet_t flags_ex{0};
-
-    /// Byte 52: pbsta (3 bits, the most significant) and acmpsta (5 bits)
-    octet_t pbsta_acmpsta{0};
-
-    /// Bytes 53-55: Reserved
-    std::array<octet_t, 3> reserved{};
-
-    [[nodiscard]] constexpr auto probing_status() const noexcept -> uint8_t { return probing_status_for(pbsta_acmpsta.get()); }
-    [[nodiscard]] constexpr auto acmp_status() const noexcept -> uint8_t { return acmp_status_for(pbsta_acmpsta.get()); }
-    /// pbsta per Table 5.5; acmpsta an ACMP status (defined only while
-    /// probing actively, else 0).
-    constexpr void set_probing(uint8_t const pbsta, uint8_t const acmpsta) noexcept
-    {
-        pbsta_acmpsta = pack_probing(pbsta, acmpsta);
-    }
-
-    auto operator<=>(AemStreamInfoMilanExtension const&) const noexcept = default;
-};
-
-static_assert(sizeof(AemStreamInfoMilanExtension) == 8, "AemStreamInfoMilanExtension must be 8 bytes");
-static_assert(offsetof(AemStreamInfoMilanExtension, pbsta_acmpsta) == 4, "pbsta/acmpsta at Milan GET_STREAM_INFO octet 52");
-
-/// A Milan v1.2 GET_STREAM_INFO response's length: the IEEE 1722.1-2013 form
-/// and the Milan tail.
-inline constexpr size_t AEM_STREAM_INFO_MILAN_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoMilanExtension::LENGTH;
-
-/// The IEEE 1722.1-2021 tail of SET/GET_STREAM_INFO (Clause 7.4.15.1, Figure 7-40) after the
-/// 48 octets of AemStreamInfoPayload (which ends with ip_flags): an 84-octet form.
+/// The IEEE 1722.1-2021 tail of SET/GET_STREAM_INFO (Clause 7.4.15.1) after the 48 octets of
+/// AemStreamInfoPayload: the IP transport's ports and addresses, zero for a stream over AVTP alone.
 struct AemStreamInfoIpExtension
 {
     static constexpr size_t LENGTH = 36;
@@ -445,7 +410,7 @@ struct AemStreamInfoIpExtension
     /// Bytes 50-51: destination_port
     doublet_t destination_port{0};
 
-    /// Bytes 52-67: source_ip_address (IPv4 as RFC 4291 Section 2.5.5.2 maps it)
+    /// Bytes 52-67: source_ip_address (an IPv4 one IPv4-mapped, RFC 4291 Section 2.5.5.2)
     ip::IPv6Address source_ip_address{};
 
     /// Bytes 68-83: destination_ip_address
@@ -455,36 +420,13 @@ struct AemStreamInfoIpExtension
 };
 
 static_assert(sizeof(AemStreamInfoIpExtension) == 36, "AemStreamInfoIpExtension must be 36 bytes");
-static_assert(offsetof(AemStreamInfoIpExtension, source_port) == 0, "source_port at octet 48");
 static_assert(offsetof(AemStreamInfoIpExtension, destination_port) == 2, "destination_port at octet 50");
 static_assert(offsetof(AemStreamInfoIpExtension, source_ip_address) == 4, "source_ip_address at octet 52");
 static_assert(offsetof(AemStreamInfoIpExtension, destination_ip_address) == 20, "destination_ip_address at octet 68");
 
-/// An IEEE 1722.1-2021 GET_STREAM_INFO response's length.
+/// The length of an IEEE 1722.1-2021 SET/GET_STREAM_INFO payload, the 48 octets of 1722.1-2013 and the IP tail.
 inline constexpr size_t AEM_STREAM_INFO_2021_LENGTH = AemStreamInfoPayload::LENGTH + AemStreamInfoIpExtension::LENGTH;
-
-/// The GET_STREAM_INFO response form an entity sends, which a controller tells by its length
-/// (Milan v1.3 Section 5.4.2.10.2): it also gives an output's msrp_accumulated_latency.
-enum class StreamInfoLayout : uint8_t
-{
-    ieee_2013,   ///< 48 octets, IEEE 1722.1-2013
-    milan_v1_2,  ///< 56 octets, Milan v1.2 Figure 5.1: an output reports its presentation time offset
-    ieee_2021,   ///< 84 octets, IEEE 1722.1-2021 Clause 7.4.16.2 (Milan v1.3): the declared latency
-};
-
-/// The response length of @p layout in octets.
-[[nodiscard]] constexpr auto stream_info_length(StreamInfoLayout const layout) noexcept -> size_t
-{
-    switch (layout) {
-        case StreamInfoLayout::milan_v1_2:
-            return AEM_STREAM_INFO_MILAN_LENGTH;
-        case StreamInfoLayout::ieee_2021:
-            return AEM_STREAM_INFO_2021_LENGTH;
-        case StreamInfoLayout::ieee_2013:
-        default:
-            return AemStreamInfoPayload::LENGTH;
-    }
-}
+static_assert(AEM_STREAM_INFO_2021_LENGTH == 84);
 
 //
 // SET_NAME / GET_NAME - Clause 7.4.17 / 7.4.18
@@ -1529,10 +1471,6 @@ struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::a
 
 template <>
 struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoPayload> : std::true_type
-{};
-
-template <>
-struct statusbar::traits::is_serializable_wire_fixed_struct<statusbar::atdecc::aem::AemStreamInfoMilanExtension> : std::true_type
 {};
 
 template <>

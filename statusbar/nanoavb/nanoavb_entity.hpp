@@ -92,12 +92,8 @@ using GetCountersFn = statusbar::sg14::inplace_function<
 /// Milan listeners (e.g. the DSP processor) query GET_STREAM_INFO on a talker's
 /// STREAM_OUTPUT after connecting to verify the stream's format/identity, and
 /// tear the connection down if the talker answers NOT_IMPLEMENTED.
-///
-/// @p ext is Milan v1.2's tail (flags_ex, pbsta, acmpsta; Section 5.4.2.10):
-/// sent only in the 56-octet StreamInfoLayout::milan_v1_2 form.
-using GetStreamInfoFn = statusbar::sg14::inplace_function<
-    bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out, AemStreamInfoMilanExtension& ext),
-    64>;
+using GetStreamInfoFn =
+    statusbar::sg14::inplace_function<bool(uint16_t descriptor_type, uint16_t descriptor_index, AemStreamInfoPayload& out), 64>;
 
 /// One MSRP mapping of a GET_AVB_INFO response (IEEE 1722.1 7.4.40.2): the
 /// traffic class, priority code point and VLAN of one SR class.
@@ -277,6 +273,13 @@ struct MvuStreamInputCallbacks
     /// The GET_STREAM_INPUT_INFO_EX response data of STREAM_INPUT @p index,
     /// nullopt when the entity has no such stream input.
     statusbar::sg14::inplace_function<std::optional<atdecc::MvuGetStreamInputInfoExResponse>(uint16_t index), 64> stream_input_info;
+
+    /// The binding parameters of STREAM_INPUT @p index (5.3.8.3), nullopt
+    /// while it is not bound or the entity has no such stream input. It is
+    /// how the handler knows that a BIND_STREAM or UNBIND_STREAM changed the
+    /// entity's state, which is when 5.4.5.3 has the command notified to the
+    /// other registered controllers. Unset, none is notified.
+    statusbar::sg14::inplace_function<std::optional<atdecc::MilanBinding>(uint16_t index), 64> binding;
 };
 
 /// Parameters for building acquire/lock response packets
@@ -404,15 +407,11 @@ class AemCommandHandler
     void set_profile(Profile const profile) noexcept { profile_ = profile; }
     [[nodiscard]] auto profile() const noexcept -> Profile { return profile_; }
 
-    /// The GET_STREAM_INFO response form (StreamInfoLayout); unset, the profile's: IEEE
-    /// 1722.1-2021's under milan13 (Milan v1.3 Section 5.4.2.10), 1722.1-2013's under classic.
-    void set_stream_info_layout(std::optional<StreamInfoLayout> const layout) noexcept { stream_info_layout_ = layout; }
-    [[nodiscard]] auto stream_info_layout() const noexcept -> StreamInfoLayout
+    /// The GET_STREAM_INFO response length in octets: IEEE 1722.1-2021's 84 under milan13
+    /// (Milan v1.3 Section 5.4.2.10), 1722.1-2013's 48 under classic, for older controllers.
+    [[nodiscard]] auto stream_info_length() const noexcept -> size_t
     {
-        if (stream_info_layout_) {
-            return *stream_info_layout_;
-        }
-        return profile_ == Profile::milan13 ? StreamInfoLayout::ieee_2021 : StreamInfoLayout::ieee_2013;
+        return profile_ == Profile::milan13 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
     }
 
     /// What a Milan PAAD-AE says of itself in GET_MILAN_INFO (Milan v1.3
@@ -452,16 +451,18 @@ class AemCommandHandler
     [[nodiscard]] auto restore_media_clock_reference_info(
         uint16_t clock_domain_index, uint8_t user_mcr_prio, aem::AtdeccString const& domain_name) noexcept -> bool;
 
-    /// The system unique id (Milan v1.3 Section 5.4.4.2): its number and name, 0 and empty
-    /// until a controller or set_system_unique_id() gives them.
-    [[nodiscard]] auto system_unique_id() const noexcept -> uint64_t { return system_unique_id_; }
-    [[nodiscard]] auto system_unique_name() const noexcept -> aem::AtdeccString const& { return system_unique_name_; }
-    /// Put a saved system unique id back; nobody is notified.
-    void set_system_unique_id(uint64_t const id, aem::AtdeccString const& name = {}) noexcept
+    /// What GET_SYSTEM_UNIQUE_ID answers (Milan v1.3 Section 5.4.4.3): the id and name last set or
+    /// restored, 0 and empty until then, the reserved octets and those after the name zero.
+    [[nodiscard]] auto system_unique_id() const noexcept -> MvuSystemUniqueIdPayload
     {
-        system_unique_id_ = id;
-        system_unique_name_ = name;
+        return {.system_unique_id = system_unique_id_, .system_name = system_name_};
     }
+    /// Put back the system unique id @p id and name @p name the entity saved (Milan v1.3 Section
+    /// 5.4.4.2): on the reactor thread, before the entity starts. Notifies nobody and calls no
+    /// hook. False, and nothing changed, for a name that is not well-formed UTF-8.
+    [[nodiscard]] auto restore_system_unique_id(uint64_t id, aem::AtdeccString const& name) noexcept -> bool;
+    /// Install the hook told each id and name a SET_SYSTEM_UNIQUE_ID puts in force (SystemUniqueIdChangedFn).
+    void set_on_system_unique_id_changed(SystemUniqueIdChangedFn fn) { on_system_unique_id_changed_ = std::move(fn); }
 
     /// Give the handler what answers BIND_STREAM, UNBIND_STREAM and
     /// GET_STREAM_INPUT_INFO_EX, on behalf of @p owner, an address that names
@@ -762,6 +763,14 @@ class AemCommandHandler
     /// or a send_response callback.
     void emit_mvu_unsolicited(uint16_t command_type, std::span<uint8_t const> body);
 
+    /// Something Milan v1.3 Table 5.21 names of STREAM_INPUT @p stream_input_index has changed
+    /// (its talker, its Probing status, its ACMP status, the registration of its Talker
+    /// attribute): send its GET_STREAM_INPUT_INFO_EX response, as the attached stream inputs
+    /// give it now, to every registered controller as an MVU notification
+    /// (emit_mvu_unsolicited()). False, and nothing sent, when no stream inputs are attached
+    /// or they have no such input.
+    auto notify_stream_input_info_ex(uint16_t stream_input_index) -> bool;
+
     /// Work a hook leaves for after its command's response, such as more notifications than
     /// MAX_QUEUED_NOTIFICATIONS holds.
     using AfterResponseFn = statusbar::sg14::inplace_function<void(), 32>;
@@ -769,9 +778,9 @@ class AemCommandHandler
     static constexpr size_t MAX_AFTER_RESPONSE = 4;
 
     /// Run @p fn once the command being dispatched is answered and its held notifications are
-    /// sent, in the order given, the command's controller left out of what it notifies. Outside
-    /// a command off the wire (a local change, tick()), or past MAX_AFTER_RESPONSE, it runs at
-    /// once. Reactor thread.
+    /// sent, in the order given. What it notifies goes to every registered controller, the
+    /// command's controller included (Milan v1.3 Section 5.4.5.3). Outside a command off the wire (a
+    /// local change, tick()), or past MAX_AFTER_RESPONSE, it runs at once. Reactor thread.
     void call_after_response(AfterResponseFn fn);
 
     /// Push an unsolicited GET_COUNTERS response for (@p descriptor_type,
@@ -780,11 +789,15 @@ class AemCommandHandler
     /// events) but says nothing about rate, so the application decides when to
     /// call this: on a state change such as MEDIA_LOCKED, or at most a few times
     /// a second per descriptor. Counters are read through the get_counters
-    /// callback. Once tick() has run, at most one goes a second per descriptor
-    /// (COUNTERS_NOTIFICATION_INTERVAL): a change is held for tick() and SUCCESS
-    /// answered. Returns the AEM status: NOT_IMPLEMENTED without a callback,
+    /// callback. With set_counters_notification_hold(true), once tick() has run, at most one goes a
+    /// second per descriptor (COUNTERS_NOTIFICATION_INTERVAL): a change is held for tick() and
+    /// SUCCESS answered. Returns the AEM status: NOT_IMPLEMENTED without a callback,
     /// NO_SUCH_DESCRIPTOR when the callback declines.
     [[nodiscard]] auto notify_counters_changed(uint16_t descriptor_type, uint16_t descriptor_index) -> uint8_t;
+
+    /// Hold GET_COUNTERS notifications to one a second per descriptor, whoever asks for them
+    /// (Milan v1.3 Table 5.20); off (the default), each is sent when asked and the caller paces.
+    void set_counters_notification_hold(bool const hold) noexcept { hold_counters_notifications_ = hold; }
 
     /// Push an unsolicited GET_AVB_INFO response for AVB_INTERFACE
     /// @p descriptor_index (IEEE 1722.1 7.5.2: a grandmaster, asCapable or
@@ -890,6 +903,8 @@ class AemCommandHandler
     /// on_set_name, echoing the command as the response; the name is kept
     /// and answered zero-filled after its first NUL.
     [[nodiscard]] auto handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
+    /// handle_set_name() once the settings hook knows whether the name is the one in force.
+    [[nodiscard]] auto answer_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
 
     /// AVDECC exclusive-access gate (IEEE 1722.1 7.4). Returns the AEM status a
     /// mutating command must be rejected with when the entity is acquired or locked
@@ -1060,19 +1075,18 @@ class AemCommandHandler
     /// NO_SUCH_DESCRIPTOR if the descriptor is not one of this entity's streams.
     [[nodiscard]] auto handle_get_stream_info(
         AemDu const& header, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
-    /// GET_STREAM_INFO @p cmd answered from the get_stream_info callback into @p out_buffer:
-    /// NOT_IMPLEMENTED without one, NO_SUCH_DESCRIPTOR when it declines.
+    /// GET_STREAM_INFO of the stream @p cmd names into @p out_buffer: NOT_IMPLEMENTED without the
+    /// get_stream_info callback, NO_SUCH_DESCRIPTOR when it declines the stream.
     [[nodiscard]] auto answer_stream_info(AemGetStreamInfoCommandPayload const& cmd, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
-    /// GET_STREAM_INFO's response in stream_info_layout()'s form: @p ext only in Milan v1.2's,
-    /// a zero IP tail in IEEE 1722.1-2021's. NOT_SUPPORTED when @p out_buffer is too short.
-    [[nodiscard]] auto store_stream_info(
-        AemStreamInfoPayload const& resp, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> out_buffer) const
+    /// @p resp at the head of @p out_buffer in stream_info_length() octets, zero past its 48;
+    /// NOT_SUPPORTED when @p out_buffer is shorter.
+    [[nodiscard]] auto store_stream_info(AemStreamInfoPayload const& resp, std::span<uint8_t> out_buffer) const
         -> AemCommandResponse;
 
     /// SET_STREAM_INFO per Milan v1.2 Section 5.4.2.9: only MSRP_ACC_LAT_VALID on a STREAM_OUTPUT
-    /// (the presentation time offset); anything else NOT_SUPPORTED. In the IEEE 1722.1-2021 layout
-    /// MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9) and the echo 84 octets.
+    /// (the presentation time offset); anything else NOT_SUPPORTED. Answered in stream_info_length()
+    /// octets; at 84 (milan13) MSRP_ACC_LAT_VALID is BAD_ARGUMENTS (Milan v1.3 Section 5.4.2.9).
     [[nodiscard]] auto handle_set_stream_info(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer)
         -> AemCommandResponse;
     /// SET_STREAM_INFO's answer @p r: a failure answers the values in force (Clause 7.4.15.1), or
@@ -1080,7 +1094,7 @@ class AemCommandHandler
     [[nodiscard]] auto stream_info_set_answer(
         AemCommandResponse r, std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse;
     /// SET_STREAM_INFO's checks of @p cmd before its sub-commands: BAD_ARGUMENTS for
-    /// MSRP_ACC_LAT_VALID in the IEEE 1722.1-2021 layout, else max_transit_time_target's.
+    /// MSRP_ACC_LAT_VALID in the 84-octet form, else max_transit_time_target's.
     [[nodiscard]] auto stream_info_target(AemStreamInfoPayload const& cmd, uint32_t& current) const -> uint8_t;
     /// SET_STREAM_INFO's sub-commands of @p cmd on a stream output whose offset is @p current,
     /// @p response (the echoed command) already in the output buffer.
@@ -1568,15 +1582,6 @@ class AemCommandHandler
     [[nodiscard]] auto handle_mvu_get_mcr_info(MvuCommand const& command, std::span<uint8_t> out_buffer) const
         -> AemCommandResponse;
 
-    /// GET_SYSTEM_UNIQUE_ID (5.4.4.3): the number and name in force (Figure 5.7).
-    [[nodiscard]] auto handle_mvu_get_system_unique_id(std::span<uint8_t> out_buffer) const -> AemCommandResponse;
-    /// SET_SYSTEM_UNIQUE_ID (5.4.4.2): refused ENTITY_LOCKED for another's lock and BAD_ARGUMENTS for a
-    /// name that is not well-formed UTF-8; answered with the id in force.
-    [[nodiscard]] auto handle_mvu_set_system_unique_id(MvuCommand const& command, std::span<uint8_t> out_buffer)
-        -> AemCommandResponse;
-    /// The system unique id in force as the SET and GET responses carry it.
-    [[nodiscard]] auto system_unique_id_payload() const noexcept -> MvuSystemUniqueIdPayloadV13;
-
     /// SET_MEDIA_CLOCK_REFERENCE_INFO (5.4.4.4): the fields its flags mark, a well-formed UTF-8
     /// name, from a controller the lock does not shut out. Answers the settings in force, the
     /// command given back for a CLOCK_DOMAIN the model lacks.
@@ -1703,13 +1708,6 @@ class AemCommandHandler
     // The MVU command answer_mvu_command() dispatches changed what it names: its response is notified.
     bool mvu_changed_{false};
 
-    // The system unique id (SET_SYSTEM_UNIQUE_ID), its number and name.
-    uint64_t system_unique_id_{0};
-    aem::AtdeccString system_unique_name_{};
-
-    // The GET_STREAM_INFO response form set; unset, the profile's.
-    std::optional<StreamInfoLayout> stream_info_layout_{};
-
     // GET_COUNTERS notification hold-off per descriptor (COUNTERS_NOTIFICATION_INTERVAL).
     struct CountersNotification
     {
@@ -1722,6 +1720,8 @@ class AemCommandHandler
     SlotTable<CountersNotification, MAX_COUNTERS_NOTIFICATIONS> counters_notifications_{};
     // A tick() has run: the hold-off has a clock.
     bool have_now_{false};
+    // GET_COUNTERS notifications held to COUNTERS_NOTIFICATION_INTERVAL (set_counters_notification_hold).
+    bool hold_counters_notifications_{false};
 
     // The command being dispatched succeeded without changing a persistent setting
     // (a SET to the value in force): answer_aem_command does not report it to on_settings_changed.

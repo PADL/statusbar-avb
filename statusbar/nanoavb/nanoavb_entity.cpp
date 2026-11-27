@@ -96,20 +96,6 @@ namespace {
     return common.subtype.get() == AvtpSubtype::aecp && defined && common.target_entity_id == our_entity_id;
 }
 
-/// GET_STREAM_INFO's octets after the first 48 in @p layout: Milan v1.2's @p ext, or IEEE
-/// 1722.1-2021's IP fields, zero without IP transport (Clause 7.4.15.1).
-void store_stream_info_tail(
-    StreamInfoLayout const layout, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> const tail) noexcept
-{
-    if (layout == StreamInfoLayout::milan_v1_2) {
-        span_store(tail, ext);
-        return;
-    }
-    if (layout == StreamInfoLayout::ieee_2021) {
-        span_store(tail, AemStreamInfoIpExtension{});
-    }
-}
-
 /// What SET_STREAM_INFO with sub-commands @p flags answers before setting the presentation
 /// time offset, or nullopt to set it (Milan v1.2 Section 5.4.2.9).
 [[nodiscard]] auto set_stream_info_refusal(uint32_t const flags) noexcept -> std::optional<uint8_t>
@@ -123,19 +109,11 @@ void store_stream_info_tail(
     return std::nullopt;
 }
 
-/// SET_STREAM_INFO's response length in @p layout: 84 octets in IEEE 1722.1-2021's, else 48
-/// (Milan v1.2's extension is GET_STREAM_INFO's only).
-[[nodiscard]] constexpr auto set_stream_info_length(StreamInfoLayout const layout) noexcept -> size_t
+/// SET_STREAM_INFO's response at the head of @p out: @p command echoed in @p size octets (the
+/// GET_STREAM_INFO length, stream_info_length()), zero past it. Empty when @p out is short.
+[[nodiscard]] auto echo_stream_info(size_t const size, std::span<uint8_t const> const command, std::span<uint8_t> const out)
+    -> std::span<uint8_t const>
 {
-    return layout == StreamInfoLayout::ieee_2021 ? AEM_STREAM_INFO_2021_LENGTH : AemStreamInfoPayload::LENGTH;
-}
-
-/// SET_STREAM_INFO's response in @p layout's form at the head of @p out: @p command echoed,
-/// zero-padded to 84 octets in IEEE 1722.1-2021's, else its 48. Empty when @p out is short.
-[[nodiscard]] auto echo_stream_info(
-    StreamInfoLayout const layout, std::span<uint8_t const> const command, std::span<uint8_t> const out) -> std::span<uint8_t const>
-{
-    size_t const size = set_stream_info_length(layout);
     if (out.size() < size) {
         return {};
     }
@@ -216,6 +194,26 @@ template <typename T>
     return payload.subspan(AemDu::LENGTH).first(std::min(payload.size() - AemDu::LENGTH, declared));
 }
 
+/// Where a SET_NAME body's name begins: after its AemNameCommandPayload head (IEEE 1722.1-2021 Clause 7.4.17.1).
+constexpr size_t SET_NAME_NAME_OFFSET = aem::AemNameCommandPayload::LENGTH;
+static_assert(offsetof(aem::AemNamePayload, name) == SET_NAME_NAME_OFFSET);
+
+/// SET_NAME body @p command_data copied into @p out with its name zero-filled after its first NUL, the
+/// form the name is kept, compared and answered in; a body too short for a name, or too long for
+/// @p out, is given back as it is.
+[[nodiscard]] auto name_zero_filled(std::span<uint8_t const> const command_data, std::span<uint8_t> const out)
+    -> std::span<uint8_t const>
+{
+    if (command_data.size() < aem::AemNamePayload::LENGTH || command_data.size() > out.size()) {
+        return command_data;
+    }
+    auto const kept = out.first(command_data.size());
+    span_copy(kept, command_data);
+    auto const name = kept.subspan(SET_NAME_NAME_OFFSET, AtdeccString::LENGTH);
+    std::fill(std::ranges::find(name, uint8_t{0}), name.end(), uint8_t{0});
+    return kept;
+}
+
 }  // namespace
 
 auto AemCommandHandler::answer_other_than_aem(Eui48 const& src_mac, std::span<uint8_t const> payload, Eui64 const& our_entity_id)
@@ -286,7 +284,7 @@ auto AemCommandHandler::answer_aem_command(
     // The response, then the notifications the command raised (Milan v1.3 Section 5.4.5.3).
     bool const sent = send_response(src_mac, header, response.status, body);
     flush_notifications();
-    run_after_response(header.controller_entity_id);
+    run_after_response();
     // Then let the entity save a changed setting (after the response: a
     // write to non-volatile storage must not delay it).
     if (response.status == AEM_STATUS_SUCCESS && !setting_unchanged_) {
@@ -295,10 +293,10 @@ auto AemCommandHandler::answer_aem_command(
     return sent;
 }
 
-void AemCommandHandler::run_after_response(Eui64 const& requester)
+void AemCommandHandler::run_after_response()
 {
-    // As the command's dispatch would: its controller is left out of what the work notifies.
-    Eui64 const outer = std::exchange(requester_, requester);
+    // Changes beyond what the controller asked: every registered controller is told (Milan v1.3 Section 5.4.5.3).
+    Eui64 const outer = std::exchange(requester_, Eui64{});
     for (auto& fn : std::exchange(after_response_, {})) {
         fn();
     }
@@ -632,6 +630,11 @@ auto AemCommandHandler::echo_command(std::span<uint8_t const> command_data, std:
 auto AemCommandHandler::handle_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
 {
     setting_unchanged_ = name_in_force(command_data);  // a rename to the name in force: nothing to save
+    return answer_set_name(command_data, out_buffer);
+}
+
+auto AemCommandHandler::answer_set_name(std::span<uint8_t const> command_data, std::span<uint8_t> out_buffer) -> AemCommandResponse
+{
     // Per-call model; the handler applies the name by (descriptor, name_index,
     // symbol). A name that was set is echoed back; one that was not is answered
     // with the name in force (7.4.17.1). Either is zero-filled after its first NUL.
@@ -780,7 +783,7 @@ auto AemCommandHandler::value_in_force(
     }
     auto const n = read_back(*twin, command_data.first(request_size), out_buffer);
     // GET_STREAM_INFO's Milan v1.2 extension is not SET_STREAM_INFO's.
-    return set_command_type == AEM_COMMAND_SET_STREAM_INFO ? std::min(n, set_stream_info_length(stream_info_layout())) : n;
+    return set_command_type == AEM_COMMAND_SET_STREAM_INFO ? std::min(n, stream_info_length()) : n;
 }
 
 auto AemCommandHandler::value_is_in_force(uint16_t const command_type, std::span<uint8_t const> command_data) -> bool
@@ -1030,9 +1033,9 @@ void AemCommandHandler::emit_lock_released()
 
 auto AemCommandHandler::notify_counters_changed(uint16_t const descriptor_type, uint16_t const descriptor_index) -> uint8_t
 {
-    // Milan v1.2 Table 5.22: at most one GET_COUNTERS notification per descriptor per second,
-    // sent from tick(); before the first tick there is no clock, so send at once.
-    if (!have_now_) {
+    // Held (set_counters_notification_hold): at most one per descriptor per second (Milan v1.3
+    // Table 5.20), sent from tick(); before the first tick there is no clock, so send at once.
+    if (!hold_counters_notifications_ || !have_now_) {
         return send_counters_notification(descriptor_type, descriptor_index);
     }
     if (auto const status = counters_of(descriptor_type, descriptor_index).response.status; status != AEM_STATUS_SUCCESS) {
@@ -1619,25 +1622,22 @@ auto AemCommandHandler::answer_stream_info(AemGetStreamInfoCommandPayload const&
     }
     // Echo descriptor_type/index back; the app fills the rest plus the flag bits.
     AemStreamInfoPayload resp{.descriptor_type = cmd.descriptor_type, .descriptor_index = cmd.descriptor_index};
-    AemStreamInfoMilanExtension ext{};
-    if (!callbacks_.get_stream_info(cmd.descriptor_type.get(), cmd.descriptor_index.get(), resp, ext)) {
+    if (!callbacks_.get_stream_info(cmd.descriptor_type.get(), cmd.descriptor_index.get(), resp)) {
         return {.status = AEM_STATUS_NO_SUCH_DESCRIPTOR, .size = 0};
     }
-    return store_stream_info(resp, ext, out_buffer);
+    return store_stream_info(resp, out_buffer);
 }
 
-auto AemCommandHandler::store_stream_info(
-    AemStreamInfoPayload const& resp, AemStreamInfoMilanExtension const& ext, std::span<uint8_t> const out_buffer) const
+auto AemCommandHandler::store_stream_info(AemStreamInfoPayload const& resp, std::span<uint8_t> const out_buffer) const
     -> AemCommandResponse
 {
-    auto const layout = stream_info_layout();
-    size_t const size = stream_info_length(layout);
+    // The IEEE 1722.1-2021 form's IP fields stay zero: the streams are AVTP over Ethernet.
+    size_t const size = stream_info_length();
     if (out_buffer.size() < size) {
         return {.status = AEM_STATUS_NOT_SUPPORTED, .size = 0};
     }
     std::ranges::fill(out_buffer.first(size), uint8_t{0});
     span_store(out_buffer.first(AemStreamInfoPayload::LENGTH), resp);
-    store_stream_info_tail(layout, ext, out_buffer.first(size).subspan(AemStreamInfoPayload::LENGTH));
     return {.status = AEM_STATUS_SUCCESS, .size = size};
 }
 
@@ -1645,7 +1645,7 @@ auto AemCommandHandler::handle_set_stream_info(std::span<uint8_t const> command_
     -> AemCommandResponse
 {
     auto const cmd = load_payload<AemStreamInfoPayload>(command_data);
-    auto const response = echo_stream_info(stream_info_layout(), command_data, out_buffer);
+    auto const response = echo_stream_info(stream_info_length(), command_data, out_buffer);
     if (!cmd || response.empty()) {
         return reject_command(AEM_STATUS_BAD_ARGUMENTS, command_data, out_buffer);
     }
@@ -1673,7 +1673,7 @@ auto AemCommandHandler::stream_info_target(AemStreamInfoPayload const& cmd, uint
 {
     // Milan v1.3 Section 5.4.2.9: SET_MAX_TRANSIT_TIME sets the offset in this layout.
     bool const latency = (cmd.flags.get() & stream_info_flags::MSRP_ACC_LAT_VALID) != 0;
-    if (latency && stream_info_layout() == StreamInfoLayout::ieee_2021) {
+    if (latency && stream_info_length() == AEM_STREAM_INFO_2021_LENGTH) {
         return AEM_STATUS_BAD_ARGUMENTS;
     }
     // Milan v1.2 Section 5.4.2.9: "The PAAD-AE shall not implement the SET_STREAM_INFO command on Stream Inputs".
@@ -2995,7 +2995,7 @@ auto AemCommandHandler::handle_mvu_command(MvuCommand const& command, std::span<
         case MVU_COMMAND_SET_SYSTEM_UNIQUE_ID:
             return handle_mvu_set_system_unique_id(command, out_buffer);
         case MVU_COMMAND_GET_SYSTEM_UNIQUE_ID:
-            return handle_mvu_get_system_unique_id(out_buffer);
+            return handle_mvu_get_system_unique_id(command, out_buffer);
         case MVU_COMMAND_SET_MEDIA_CLOCK_REFERENCE_INFO:
             return handle_mvu_set_mcr_info(command, out_buffer);
         case MVU_COMMAND_GET_MEDIA_CLOCK_REFERENCE_INFO:
@@ -3102,39 +3102,6 @@ auto AemCommandHandler::handle_mvu_set_mcr_info(MvuCommand const& command, std::
     }
     span_store(out_buffer, mcr_info_answer(*request));
     return {.status = status, .size = MvuMediaClockReferenceInfoPayload::LENGTH};
-}
-
-auto AemCommandHandler::system_unique_id_payload() const noexcept -> MvuSystemUniqueIdPayloadV13
-{
-    return MvuSystemUniqueIdPayloadV13{.number = system_unique_id_, .name = system_unique_name_};
-}
-
-auto AemCommandHandler::handle_mvu_get_system_unique_id(std::span<uint8_t> const out_buffer) const -> AemCommandResponse
-{
-    // The reserved field is ignored, as for GET_MILAN_INFO.
-    span_store(out_buffer, system_unique_id_payload());
-    return {.status = MVU_STATUS_SUCCESS, .size = MvuSystemUniqueIdPayloadV13::LENGTH};
-}
-
-auto AemCommandHandler::handle_mvu_set_system_unique_id(MvuCommand const& command, std::span<uint8_t> const out_buffer)
-    -> AemCommandResponse
-{
-    // Milan v1.3 Figure 5.7: a u64 number and a 64-octet name.
-    auto const request = load_payload<MvuSystemUniqueIdPayloadV13>(command.data);
-    if (!request) {
-        return {.status = MVU_STATUS_PAYLOAD_TOO_SHORT, .size = 0};
-    }
-    uint8_t status = MVU_STATUS_SUCCESS;
-    if (exclusive_access_status(command.header.common.controller_entity_id)) {
-        status = MVU_STATUS_ENTITY_LOCKED;
-    } else if (!atdecc::utf8_well_formed(request->name.as_string_view())) {
-        status = MVU_STATUS_BAD_ARGUMENTS;
-    } else {
-        mvu_changed_ = request->number.get() != system_unique_id_ || request->name.value != system_unique_name_.value;
-        set_system_unique_id(request->number.get(), request->name);
-    }
-    span_store(out_buffer, system_unique_id_payload());
-    return {.status = status, .size = MvuSystemUniqueIdPayloadV13::LENGTH};
 }
 
 auto AemCommandHandler::mcr_info_answer(MvuMediaClockReferenceInfoPayload const& request) const -> MvuMediaClockReferenceInfoPayload
@@ -3460,7 +3427,7 @@ void AemCommandHandler::handle_aem_response(AemDu const& header)
         return;
     }
     // The acquire handshake asked the holder whether it is still there: it is.
-    if (pending_acquire_.active && acquired_ && header.target_entity_id == acquiring_controller_) {
+    if (answers_pending_acquire(header)) {
         controller_available_response_received();
     }
     // The monitor's question, answered with any status (Milan v1.3 Section 5.4.5.4).
