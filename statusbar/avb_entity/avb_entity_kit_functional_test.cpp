@@ -2181,18 +2181,18 @@ TEST(avb_entity_kit_input_counters, a_milan_input_is_notified_at_every_second_in
         CountersWatcher const watcher{pair.listener};
         AafSender talker{pair};
         int64_t t = 1'000'000'000;
-        pair.listener->poll_counters(t);  // the first interval starts
+        pair.listener->end_cycle(t);  // the first interval starts
 
         talker.send(50);
         talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
-        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS - 1);
+        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS - 1);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the interval is not over
-        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), size_t{0});  // the first end of an interval: half a second
 
         // A second interval with nothing received: the stream stopped while locked. Its end is the
         // second, and the changes of both are told at once.
-        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
         auto const counters = counters_of(input);
         EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
@@ -2200,15 +2200,15 @@ TEST(avb_entity_kit_input_counters, a_milan_input_is_notified_at_every_second_in
         EXPECT_EQ(counters.counters[I::STREAM_INTERRUPTED].get(), 2U);
 
         // Two more that change nothing: nothing is told.
-        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
 
         // A change in the interval after a notification waits for the second end after it.
         talker.send(50);
-        pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), told);
-        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
         EXPECT_EQ(watcher.of_input(AAF_STREAM), 2 * told);
         EXPECT_TRUE(pair.listener.stop(pair.now));
         EXPECT_TRUE(pair.talker.stop(pair.now));
@@ -2225,11 +2225,11 @@ TEST(avb_entity_kit_input_counters, a_stopped_milan_input_loses_its_lock_without
     pair.run(2 * ROUNDS_PER_SECOND);
     AafSender talker{pair};
     int64_t t = 1'000'000'000;
-    pair.listener->poll_counters(t);
+    pair.listener->end_cycle(t);
     talker.send(30);
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(streaming_command(input, atdecc::AEM_COMMAND_STOP_STREAMING), atdecc::AEM_STATUS_SUCCESS);
-    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     auto const counters = counters_of(input);
     EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 1U);
     EXPECT_EQ(counters.counters[I::MEDIA_UNLOCKED].get(), 1U);
@@ -2251,14 +2251,14 @@ TEST(avb_entity_kit_input_counters, a_milan_input_counts_intervals_and_a_classic
         pair.run(2 * ROUNDS_PER_SECOND);
         AafSender talker{pair};
         int64_t const t = 1'000'000'000;
-        pair.listener->poll_counters(t);  // the first interval starts
+        pair.listener->end_cycle(t);  // the first interval starts
 
         talker.send(50);
         talker.send(49, 1);  // one AVTPDU lost: the lock goes and comes back
         auto counters = counters_of(input);
         EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);  // at once
         EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), milan ? 0U : 99U);
-        pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+        pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
         counters = counters_of(input);
         EXPECT_EQ(counters.counters_valid.get(), milan ? I::VALID : 0x0000'0FFFU);
         EXPECT_EQ(counters.counters[I::MEDIA_LOCKED].get(), 2U);
@@ -2282,17 +2282,17 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an
     CountersWatcher const watcher{pair.listener};
     AafSender talker{pair};
     int64_t t = 1'000'000'000;
-    pair.listener->poll_counters(t);
+    pair.listener->end_cycle(t);
     talker.send(20);
     talker.send(20, 1);
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(counters_of(input).counters[I::FRAMES_RX].get(), 1U);
     EXPECT_EQ(counters_of(input).counters[I::SEQ_NUM_MISMATCH].get(), 1U);
 
     pair.controller_sends(
         controller_command(atdecc::ACMP_MESSAGE_TYPE_DISCONNECT_RX_COMMAND, TALKER_ID, pair.source, LISTENER_ID, pair.sink));
     EXPECT_EQ(counters_of(input).counters[I::MEDIA_UNLOCKED].get(), 2U);  // at once, not at the interval's end
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     auto counters = counters_of(input);
     EXPECT_EQ(counters.counters[I::FRAMES_RX].get(), 1U);
     EXPECT_EQ(counters.counters[I::SEQ_NUM_MISMATCH].get(), 1U);
@@ -2305,9 +2305,9 @@ TEST(avb_entity_kit_input_counters, a_bind_zeroes_a_milan_inputs_counters_and_an
     counters = counters_of(input);
     EXPECT_TRUE(std::ranges::all_of(counters.counters, [](ieee::quadlet_t const v) { return v.get() == 0; }));
     // Told at the second end of an interval after the last notification, as any change is.
-    pair.listener->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of_input(AAF_STREAM), notified);
-    pair.listener->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.listener->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of_input(AAF_STREAM), notified + 1);
     EXPECT_TRUE(pair.listener.stop(pair.now));
     EXPECT_TRUE(pair.talker.stop(pair.now));
@@ -2375,7 +2375,7 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
         }
     };
     int64_t t = 1'000'000'000;
-    pair.talker->poll_counters(t);
+    pair.talker->end_cycle(t);
 
     pair.bind();
     pair.run(2 * ROUNDS_PER_SECOND);
@@ -2383,14 +2383,14 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     auto counters = counters_of(output);
     EXPECT_EQ(counters.counters[O::STREAM_START].get(), 1U);  // at once
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 0U);     // when the interval ends
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     counters = counters_of(output);
     EXPECT_EQ(counters.counters_valid.get(), O::VALID);
     EXPECT_EQ(counters.counters[O::STREAM_START].get(), 1U);
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 1U);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{0});  // the first end of an interval
     media_tick(100);
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(counters_of(output).counters[O::FRAMES_TX].get(), 2U);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), size_t{1});  // the second: told
 
@@ -2400,7 +2400,7 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     pair.run(ROUNDS_PER_SECOND);
     media_tick(0);
     EXPECT_EQ(counters_of(output).counters[O::STREAM_STOP].get(), 1U);  // at once
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     counters = counters_of(output);
     EXPECT_EQ(counters.counters[O::STREAM_STOP].get(), 1U);
     EXPECT_EQ(counters.counters[O::FRAMES_TX].get(), 2U);
@@ -2409,7 +2409,7 @@ TEST(avb_entity_kit_output_counters, a_milan_output_counts_intervals_and_starts_
     pair.bind();
     pair.run(2 * ROUNDS_PER_SECOND);
     media_tick(100);
-    pair.talker->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     counters = counters_of(output);
     EXPECT_EQ(counters.counters[O::STREAM_START].get(), 2U);
     EXPECT_EQ(counters.counters[O::STREAM_STOP].get(), 1U);
@@ -2448,7 +2448,7 @@ TEST(avb_entity_kit_output_counters, a_milan_output_answers_the_signal_presence_
     StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
     CountersWatcher const watcher{pair.talker, TALKER_ID};
     int64_t t = 1'000'000'000;
-    pair.talker->poll_counters(t);
+    pair.talker->end_cycle(t);
     EXPECT_EQ(counters_of(output).counters_valid.get(), O::VALID);  // not reported
     size_t const notified = watcher.of(AAF_STREAM, output.type);
 
@@ -2459,18 +2459,18 @@ TEST(avb_entity_kit_output_counters, a_milan_output_answers_the_signal_presence_
     EXPECT_EQ(counters.counters_valid.get(), O::VALID | presence_valid);
     EXPECT_EQ(counters.counters[23].get(), 0x8100'0000U);  // channels 0 and 7; 8 and 59 dropped
     EXPECT_EQ(counters.counters[22].get(), 0U);
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified);  // the first end of an interval
     EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, uint64_t{1} << 7U).has_value());
     EXPECT_EQ(counters_of(output).counters[23].get(), 0x0100'0000U);  // the latest, between folds
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);  // the second: told once
     EXPECT_EQ(watcher.notified.back().counters[23].get(), 0x0100'0000U);
 
     // A channel the stream does not have is no change.
     EXPECT_TRUE(talker.set_signal_presence(AAF_STREAM, (uint64_t{1} << 7U) | (uint64_t{1} << 40U)).has_value());
-    pair.talker->poll_counters(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
-    pair.talker->poll_counters(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t += AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(t + AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(watcher.of(AAF_STREAM, output.type), notified + 1);
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
@@ -2481,8 +2481,8 @@ TEST(avb_entity_kit_output_counters, a_classic_output_reports_no_signal_presence
     KitPair pair{"classic"};
     StreamOf const output{.kit = pair.talker, .index = AAF_STREAM, .type = atdecc::aem::DESCRIPTOR_STREAM_OUTPUT};
     EXPECT_TRUE(pair.talker->talker().set_signal_presence(AAF_STREAM, 1).has_value());
-    pair.talker->poll_counters(1'000'000'000);
-    pair.talker->poll_counters(1'000'000'000 + AvbEntityKit::COUNTERS_INTERVAL_NS);
+    pair.talker->end_cycle(1'000'000'000);
+    pair.talker->end_cycle(1'000'000'000 + AvbEntityKit::COUNTERS_INTERVAL_NS);
     EXPECT_EQ(counters_of(output).counters_valid.get(), stream_output_counters_valid);
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }

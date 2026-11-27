@@ -151,8 +151,8 @@ class AvbEntityKit
     /// or less when a MAAP probe or announce, an MRP timer or the admission
     /// deadline falls due sooner, told the reactor-clock @p now_ns the loop
     /// read and the gate's clock @p raw_now. From the admission deadline on it
-    /// answers 0 until on_admission_timer() runs: an entity that forwards this
-    /// must forward admission_deadline() and on_admission_timer() too. Reactor thread only.
+    /// answers 0 until end_cycle() runs: an entity that forwards this must
+    /// forward end_cycle() too. Reactor thread only.
     [[nodiscard]] auto poll_timeout_ms(int max_ms, int64_t now_ns, TalkerGate::RawTimePoint raw_now) const noexcept -> int;
     /// As above for a loop that holds the reactor clock alone: the gate's
     /// clock at @p now_ns is the pair last told (tell_cycle_time) carried
@@ -189,14 +189,14 @@ class AvbEntityKit
     /// many of them are never under the second Table 5.20 asks for.
     static constexpr unsigned COUNTERS_NOTIFY_FOLDS = 2;
     static_assert(COUNTERS_INTERVAL_NS * COUNTERS_NOTIFY_FOLDS >= 1'000'000'000);
-    /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS
-    /// has passed since the last, at reactor-clock @p now_ns. Under the Milan
-    /// profile, at every COUNTERS_NOTIFY_FOLDS-th end, each stream descriptor
-    /// whose counters changed since it was last told is notified (GET_COUNTERS);
-    /// an IEEE 1722.1 entity notifies none, and a controller reads them. The
-    /// first call starts the first interval. Call it each reactor cycle, its
-    /// wait bounded by poll_timeout_ms(). Reactor thread only.
-    void poll_counters(int64_t now_ns);
+    /// The one call the loop owes the kit each reactor cycle, after the reactor
+    /// served it, at reactor-clock @p now_ns: ends the stream counters'
+    /// observation interval when due (the first call starts the first; under the
+    /// Milan profile every COUNTERS_NOTIFY_FOLDS-th end notifies the descriptors
+    /// whose counters changed) and, from the admission deadline on, re-evaluates
+    /// admission at raw_at(@p now_ns) on the gate's clock. The loop bounds its
+    /// wait by poll_timeout_ms(), which counts both deadlines. Reactor thread only.
+    void end_cycle(int64_t now_ns);
 
     // --- Media-thread (RT) calls ----------------------------------------------
     /// Whether talker stream @p idx should put its AVTP stream on the wire this
@@ -240,10 +240,6 @@ class AvbEntityKit
     /// The earliest instant the grace of a stream still admitted runs out (TalkerGate::grace_ends),
     /// armed at each evaluation of admission; nullopt while no such grace runs.
     [[nodiscard]] auto admission_deadline() const noexcept -> std::optional<RawTimePoint> { return admission_deadline_; }
-    /// Reactor thread, each loop cycle while admission_deadline() is armed: at or past it (@p now on
-    /// the gate's clock), re-evaluate admission, so a grace that runs out with no MSRP or ACMP
-    /// event still leaves the set and is told to the hook. Before it, nothing.
-    void on_admission_timer(RawTimePoint now);
 
     /// The media-clock rate for this tick: @p base_r (the entity's own pacing —
     /// 1.0 for gPTP-locked, or its GPS tracker ratio) unless the CRF-input
@@ -372,6 +368,10 @@ class AvbEntityKit
     void notify_admission(RawTimePoint now);
     /// Arm the admission deadline at the earliest grace end after @p now (none: disarmed).
     void arm_admission_deadline(RawTimePoint now) noexcept;
+    /// At or past the admission deadline (@p now on the gate's clock), re-evaluate admission, so a
+    /// grace that runs out with no MSRP or ACMP event still leaves the set and is told to the hook.
+    /// Before it, nothing. end_cycle() calls it.
+    void on_admission_timer(RawTimePoint now);
     /// IEEE 1722.1 ACMP: probes, the talker connection log and gate, the listener's connect and disconnect.
     void wire_ieee_acmp_callbacks();
     /// Milan ACMP: what its talker and its listener ask of SRP, MAAP, gPTP and the AEM lock.
@@ -502,6 +502,11 @@ class AvbEntityKit
     void follow_milan_bindings();
     void follow_inputs_bound();
     void follow_input_bound(uint16_t index);
+    /// End the stream counters' observation interval once COUNTERS_INTERVAL_NS has passed since
+    /// the last, at reactor-clock @p now_ns; under the Milan profile, at every COUNTERS_NOTIFY_FOLDS-th
+    /// end, notify each stream descriptor whose counters changed since it was last told (GET_COUNTERS).
+    /// The first call starts the first interval. end_cycle() calls it.
+    void poll_counters(int64_t now_ns);
     /// End the observation interval of every stream's counters, and at every
     /// COUNTERS_NOTIFY_FOLDS-th one notify those that changed.
     void fold_stream_counters();
@@ -668,7 +673,7 @@ class AvbEntityKit
     std::optional<RawTimePoint> admission_deadline_{};  ///< see admission_deadline()
     /// The reactor-clock half of the pair last told (tell_cycle_time); the gate holds the RAW half.
     int64_t cycle_ns_{0};
-    /// The end of the counters' observation interval (poll_counters), unset before the first.
+    /// The end of the counters' observation interval (end_cycle), unset before the first.
     std::optional<int64_t> next_counters_fold_ns_{};
     /// The intervals ended since the descriptors were last notified (fold_stream_counters).
     unsigned counters_folds_{0};
