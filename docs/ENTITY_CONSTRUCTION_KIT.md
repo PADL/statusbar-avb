@@ -549,6 +549,40 @@ each stream that opens, and in `stop()`, which tells each that closes.
 `talker_gate_open()` answers the state in force. The data plane sends a
 stream while its gate is open.
 
+**Sequence, mr and tu.** The media thread calls
+`TalkerStreams::notify_offload_sent(slot, gate_open, sent)` for
+such a stream where it would call `transmit_if_due()`, with the gate it
+would pass and what the data plane sent since: the AVTPDUs, those with tu set
+(counted at most all of them), and the next sequence_num. They are counted
+in `tx_counters()` as the kit's own, so GET_COUNTERS goes on; the stream
+starts and stops as `transmit_if_due()` would count it; the serializer's
+sequence moves to the one given, and the AAF reframer and the CRF schedule
+are left empty, so a stream handed back to the kit goes on from there. It
+answers the header the next AVTPDUs carry: the sequence, mr with a
+pending `toggle_media_clock_restart()` or media clock re-anchor applied as
+`next_mr()` applies it for the kit's next AVTPDU, and tu as
+`wake_timestamp_uncertain()` has it at the media wake last told, as the
+kit's own AVTPDUs have theirs. The data plane is told the wake as the
+port's sender is: through `AvbEntityKit::talker_should_transmit()`, or
+`tell_wake_time()` if it does not ask the gate; the talker reads no
+clock for it. On a tick the stream does not stream,
+mr stays as it stands: the kit's own path asks `next_mr()` only for an
+AVTPDU it sends, so restarts owed while nothing goes toggle mr once, when
+the stream starts. `offload_header()` answers the header without a
+report, as a stream starts. The mr hold runs down by the AVTPDUs reported:
+with `OffloadSent::last_mr`, the mr of the last AVTPDU sent, only by those
+known to carry the new mr (none before the wire shows it, the last one of
+the report where it first does, all after), so it may last longer than
+`MR_HOLD_PDUS`, never less (IEEE 1722-2016 Clause 4.4.4.3), and the toggle
+is counted when the wire carries it; without it every AVTPDU reported
+counts with the mr last answered. A report holds at most one toggle: mr
+changes only at a header.
+
+**One writer.** The media thread owns each stream's mr, its hold and its
+`TalkerTxCounters`. Both calls are made on it, in `transmit_if_due()`'s
+place, so a stream has one writer whichever path sends it: the media
+thread calls one of the two for a stream each tick, never both.
+
 ### Saved state
 
 What an entity must find again after a restart is kept in files, in one

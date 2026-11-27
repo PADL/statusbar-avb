@@ -515,6 +515,193 @@ TEST(talker_tx_counters, signal_presence_is_unreported_until_set_and_kept_to_six
     EXPECT_FALSE(talker.signal_presence(past).has_value());
 }
 
+// --- A talker stream sent beside the stream port ---
+
+namespace {
+
+using Sent = avb_entity::TalkerStreams::OffloadSent;
+
+/// STREAM_START and STREAM_STOP of STREAM_OUTPUT @p index.
+auto starts_stops_for(avb_entity::TalkerStreams const& talker, uint16_t const index) -> std::array<uint32_t, 2>
+{
+    uint32_t const changes = talker.tx_counters(index)->streaming_changes.load();
+    return {avb_entity::stream_starts(changes), avb_entity::stream_stops(changes)};
+}
+
+}  // namespace
+
+TEST(talker_offload, the_data_plane_starts_at_the_kit_s_sequence_with_a_pending_restart_applied)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));
+    EXPECT_TRUE(slot.aaf.has_value());
+    slot.aaf->sequence_num = 42;  // where the kit's own path left it
+
+    auto header = talker.offload_header(slot);
+    EXPECT_EQ(header.sequence_num, uint8_t{42});
+    EXPECT_FALSE(header.mr);
+    EXPECT_FALSE(header.tu);
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    header = talker.offload_header(slot);
+    EXPECT_TRUE(header.mr);  // toggled as for the kit's next AVTPDU, and held
+    EXPECT_EQ(slot.mr_hold, avb_entity::TalkerStreams::MR_HOLD_PDUS);
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    EXPECT_EQ(talker.tx_counters(3)->pdus.load(), 2U);  // a header sends nothing
+}
+
+TEST(talker_offload, what_it_sent_counts_as_the_kit_s_own_and_the_kit_goes_on_from_its_sequence)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(slot.aaf.has_value() && slot.reframer.has_value());
+    auto& aaf = *slot.aaf;
+    auto& reframer = *slot.reframer;
+    std::array<float, 12> const audio{};
+    reframer.push(audio, 6, 0);  // a block the kit's own path held
+
+    auto const header = talker.notify_offload_sent(slot, true, Sent{.pdus = 10, .tu_pdus = 3, .next_sequence = 10});
+    EXPECT_EQ(header.sequence_num, uint8_t{10});
+    auto const* const c = talker.tx_counters(3);
+    EXPECT_EQ(c->pdus.load(), 10U);
+    EXPECT_EQ(c->tu_pdus.load(), 3U);
+    EXPECT_EQ(slot.tx_packets, 10U);
+    EXPECT_EQ(slot.aaf->sequence_num, uint8_t{10});          // the kit's own path goes on from it
+    EXPECT_EQ(slot.reframer->buffered_frames(), size_t{0});  // and starts clean
+
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .tu_pdus = 5, .next_sequence = 12});
+    EXPECT_EQ(c->tu_pdus.load(), 5U);  // at most the AVTPDUs sent
+    (void)talker.notify_offload_sent(slot, true, Sent{});
+    EXPECT_EQ(aaf.sequence_num, uint8_t{12});  // nothing sent: nothing moves
+    EXPECT_EQ(c->pdus.load(), 12U);
+    EXPECT_EQ(c->mr_toggles.load(), 0U);
+}
+
+TEST(talker_offload, the_stream_starts_and_stops_as_its_gate_and_stop_streaming_have_it)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 2);
+    (void)talker.notify_offload_sent(slot, false, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{0U, 0U}));
+    (void)talker.notify_offload_sent(slot, true, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{1U, 0U}));
+    talker.set_stream_stopped(2, true);
+    (void)talker.notify_offload_sent(slot, true, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{1U, 1U}));
+    talker.set_stream_stopped(2, false);
+    (void)talker.notify_offload_sent(slot, true, {});
+    (void)talker.notify_offload_sent(slot, false, {});
+    EXPECT_TRUE((starts_stops_for(talker, 2) == std::array{2U, 2U}));
+}
+
+// IEEE 1722-2016 Clause 4.4.4.3: a toggle holds for MR_HOLD_PDUS AVTPDUs sent; a restart within the hold
+// toggles mr at the first header after it, and MEDIA_RESET counts each toggle the AVTPDUs carry.
+TEST(talker_offload, the_mr_hold_runs_down_by_the_avtpdus_reported)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 4});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 5, .next_sequence = 9}).mr);
+    EXPECT_EQ(slot.mr_hold, uint8_t{3});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .next_sequence = 11}).mr);   // still held
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 12}).mr);  // the hold is over
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 1U);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 13});
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 2U);
+}
+
+// With last_mr, a toggle is counted, and its hold run down, only by the AVTPDUs the wire shows carrying it.
+TEST(talker_offload, with_last_mr_a_toggle_counts_once_the_wire_carries_it)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 4, .last_mr = false});
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_TRUE(talker.offload_header(slot).mr);
+    auto const* const c = talker.tx_counters(3);
+
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 8, .last_mr = false});
+    EXPECT_EQ(c->mr_toggles.load(), 0U);  // latched before the new mr
+    EXPECT_EQ(slot.mr_hold, avb_entity::TalkerStreams::MR_HOLD_PDUS);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 12, .last_mr = true});
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+    EXPECT_EQ(slot.mr_hold, uint8_t{7});  // the last of the four carried it
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 7, .next_sequence = 19, .last_mr = true});
+    EXPECT_EQ(slot.mr_hold, uint8_t{0});
+    EXPECT_EQ(c->mr_toggles.load(), 1U);
+}
+
+// IEEE 1722-2016 Clause 4.4.4.3: restarts owed while nothing is sent toggle mr once, at the first AVTPDU
+// after; reports on closed ticks run no hold down and arm none, so no second toggle follows.
+TEST(talker_offload, restarts_owed_while_the_gate_is_closed_toggle_mr_once_when_it_opens)
+{
+    ptpclient::MediaClockGenerator mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    (void)mc.advance(1'000'000'000, 1.0, 6);
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, {}).mr);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 2, .next_sequence = 2}).mr);
+
+    (void)mc.advance(9'000'000'000, 1.0, 6);  // gPTP stepped: a re-anchor, on one closed tick
+    EXPECT_FALSE(talker.notify_offload_sent(slot, false, {}).mr);
+    (void)mc.advance(1'000'000'000, 1.0, 6);  // and another, on the next
+    EXPECT_FALSE(talker.notify_offload_sent(slot, false, {}).mr);
+    EXPECT_EQ(slot.mr_hold, uint8_t{0});
+    EXPECT_EQ(mc.step_count(), 2U);
+
+    EXPECT_TRUE(talker.notify_offload_sent(slot, true, {}).mr);  // the gate opens: one toggle
+    for (uint8_t seq = 2; seq < 26; seq += 8) {
+        EXPECT_TRUE(talker.notify_offload_sent(slot, true, Sent{.pdus = 8, .next_sequence = static_cast<uint8_t>(seq + 8)}).mr);
+    }
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 1U);  // MEDIA_RESET
+}
+
+// Milan v1.3 Section 4.3.5.2 and Annex B.1.1: the header carries tu as the kit's own AVTPDUs would.
+TEST(talker_offload, the_header_carries_tu_while_the_kit_s_avtpdus_would)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    using Raw = avb_entity::TalkerStreams::RawTimePoint;
+    using std::chrono::nanoseconds;
+    using std::chrono::seconds;
+    constexpr nanoseconds WINDOW{avb_entity::TalkerStreams::TU_AFTER_GM_CHANGE_NS};
+    talker.tell_wake_time(Raw{seconds{300}});
+    EXPECT_FALSE(talker.offload_header(slot).tu);  // before the first grandmaster notice
+    talker.notify_grandmaster_lost();
+    EXPECT_TRUE(talker.offload_header(slot).tu);
+
+    talker.notify_grandmaster_changed(Raw{seconds{301}});  // the reactor cycle's instant
+    talker.tell_wake_time(Raw{seconds{301}} + WINDOW - nanoseconds{1});
+    EXPECT_TRUE(talker.offload_header(slot).tu);  // a wake within the window after the change
+    talker.tell_wake_time(Raw{seconds{301}} + WINDOW);
+    EXPECT_FALSE(talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 1}).tu);  // one from its end
+    talker.tell_wake_time(Raw{});
+    EXPECT_FALSE(talker.offload_header(slot).tu);  // a wake never told is in no window
+}
+
 // --- Stream frame templates: IEEE 1722-2016 Clauses 4.4.3, 7.2 and 10.4 ---
 
 namespace {
