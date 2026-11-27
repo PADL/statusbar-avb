@@ -259,7 +259,7 @@ def _serialize_stream(stream: Stream, desc_type: int, desc_index: int) -> bytes:
     formats_offset = 138
     # The redundant-streams list follows the formats list. With no redundant trailer,
     # emit 0 (as the C++ generator + the spec convention do) rather than an offset
-    # pointing past the descriptor -- a strict controller (Hive) would otherwise read a
+    # pointing past the descriptor -- a strict controller would otherwise read a
     # redundant list at that offset and mis-enumerate.
     redundant_offset = (formats_offset + 8 * n_formats) if n_redundant > 0 else 0
     parts = [

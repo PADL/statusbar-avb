@@ -5,7 +5,7 @@
 #include <string_view>
 
 // Build version baked into the entities' ENTITY descriptor firmware_version
-// -- what controllers (macOS box info, Hive-style tools) display as the
+// -- what controllers (macOS box info, third-party tools) display as the
 // device firmware, and what the runtime patches into the served descriptor
 // (avb_entity_descriptor_helpers.hpp). The build injects STATUSBAR_AVB_VERSION
 // from the repo release tag (see CMakeLists.txt's version block); a build
