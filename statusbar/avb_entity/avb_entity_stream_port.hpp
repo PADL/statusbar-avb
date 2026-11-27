@@ -35,6 +35,7 @@
 #include "statusbar/itc/itc_spin_lock.hpp"
 #include "statusbar/net/net_any_ethernet_port.hpp"
 #include "statusbar/net/net_error.hpp"
+#include "statusbar/net/net_test_port.hpp"
 #include "statusbar/net/net_xdp_avtp_rules.hpp"
 #include "statusbar/status/status.hpp"
 
@@ -141,6 +142,19 @@ class StreamPort
         }
         return status;
     }
+    /// Open an in-process test port (net::AnyEthernetPort::open_test) in place of a backend, for a
+    /// unit test of what sends and receives through this port; test_port() captures and injects.
+    [[nodiscard]] auto open_test(net::TestPortConfig const& config) -> Status
+    {
+        auto status = port_.open_test(config);
+        serialize_ = status.has_value() && !port_.tx_rx_independent();
+        if (status) {
+            ++generation_;
+        }
+        return status;
+    }
+    /// The test port open_test() opened, nullptr on any other port or none.
+    [[nodiscard]] auto test_port() noexcept -> net::TestPortContext* { return port_.as<net::TestPortContext>(); }
     void close() noexcept
     {
         port_.close();

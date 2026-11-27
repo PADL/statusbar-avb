@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 
 // StreamPort: the backend name is parsed and refused when it is not one,
-// the guard is free on a closed port, and the frame builder writes the
-// tagged header the stream entities have always put on the wire.
+// the guard is free on a closed port, a test port carries frames in process,
+// and the frame builder writes the tagged header the stream entities have
+// always put on the wire.
 
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 
@@ -13,6 +14,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 
 using namespace statusbar;
@@ -38,6 +40,29 @@ TEST(stream_port, a_closed_port_is_not_serialised_and_its_guard_is_free)
     }
     EXPECT_FALSE(port.serialized());
     EXPECT_FALSE(port.port().tx_start().has_value());
+}
+
+TEST(stream_port, a_test_port_opens_in_process_and_captures_the_frames_sent)
+{
+    StreamPort port;
+    EXPECT_TRUE(port.test_port() == nullptr);
+    EXPECT_TRUE(port.open_test({.hardware_address = ieee::Eui48{0x02, 0, 0, 0, 0, 1}}).has_value());
+    EXPECT_TRUE(port.valid());
+    EXPECT_EQ(port.generation(), 1U);
+    EXPECT_TRUE(port.describe().starts_with("test"));
+    auto* const wire = port.test_port();
+    EXPECT_TRUE(wire != nullptr);
+    {
+        StreamPort::Guard const guard{port};
+        auto const slot = port.port().tx_start();
+        EXPECT_TRUE(slot.has_value() && port.port().tx_commit(slot->handle, 60).has_value());
+    }
+    auto const sent = wire != nullptr ? wire->pop_tx() : std::nullopt;
+    EXPECT_EQ(sent.has_value() ? sent->frame.size() : 0, size_t{60});
+
+    port.close();
+    EXPECT_FALSE(port.valid());
+    EXPECT_TRUE(port.test_port() == nullptr);
 }
 
 TEST(stream_port, build_stream_frame_writes_a_tagged_avtp_header_then_the_payload)
