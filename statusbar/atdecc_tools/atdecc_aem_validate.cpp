@@ -134,6 +134,24 @@ void check_jacks(std::vector<RawDescriptor> const& descs, Add const& add)
     }
 }
 
+/// A descriptor with more formats than a 2021 one has room for (47 with the
+/// formats at 132) is valid, and is told that a reader of the 2021 layout
+/// sees one fewer.
+void note_formats_left_out(Add const& add, std::string const& where, std::span<uint8_t const> const data)
+{
+    auto const sent = received_stream_formats(data);
+    if (sent && sent->left_out() != 0) {
+        add(Severity::Info,
+            where,
+            std::format(
+                "carries {} formats, {} more than a descriptor with its formats at 138 (IEEE 1722.1-2021) has room for; "
+                "all {} were read.",
+                sent->count,
+                sent->left_out(),
+                sent->count));
+    }
+}
+
 /// One STREAM descriptor: formats that lie inside it, a usable current_format
 /// and a format list. The formats are read from where formats_offset says
 /// (IEEE 1722.1-2021 7.2.6), and a sender that keeps them elsewhere than that
@@ -156,6 +174,7 @@ void check_stream(Add const& add, std::string const& where, std::span<uint8_t co
             where,
             std::format("formats_offset is {} where IEEE 1722.1-2021 has 138; the formats were read from there.", sent->offset));
     }
+    note_formats_left_out(add, where, data);
 }
 
 /// STREAMs: a usable current_format and a format list.

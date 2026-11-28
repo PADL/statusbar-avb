@@ -1586,6 +1586,102 @@ TEST(aem_stream_formats_offset, a_2013_descriptor_has_its_formats_at_132)
     EXPECT_EQ(loaded->timing.get(), 0);
 }
 
+// A descriptor is at most 508 octets. With its formats at 132, as IEEE
+// 1722.1-2013 has them, that is room for 47; at 138, as IEEE 1722.1-2021
+// has them, for 46, which is what DescriptorStream holds.
+TEST(aem_stream_formats_offset, a_descriptor_has_room_for_the_formats_that_fit_behind_its_offset)
+{
+    EXPECT_EQ(stream_formats_room(132), size_t{47});
+    EXPECT_EQ(stream_formats_room(136), size_t{46});
+    EXPECT_EQ(stream_formats_room(138), DescriptorStream::MAX_STREAM_FORMATS);
+    EXPECT_EQ(stream_formats_room(500), size_t{1});
+    EXPECT_EQ(stream_formats_room(501), size_t{0});
+    EXPECT_EQ(stream_formats_room(508), size_t{0});
+    EXPECT_EQ(stream_formats_room(60000), size_t{0});
+}
+
+// The 47th format of a full 2013 descriptor was dropped without a word: the
+// count was held to what the 2021 layout holds. It is counted, read by its
+// index and printed; the loaded descriptor has the 46 it has room for.
+TEST(aem_stream_formats_offset, a_full_2013_descriptor_has_forty_seven_formats_and_every_one_is_read)
+{
+    auto const formats = test_formats(47);
+    auto const wire = stream_wire(132, formats);
+    EXPECT_EQ(wire.size(), AEM_DESCRIPTOR_SIZE);
+
+    auto const sent = received_stream_formats(wire);
+    EXPECT_TRUE(sent.has_value());
+    EXPECT_EQ(sent->count, size_t{47});
+    EXPECT_EQ(sent->held(), size_t{46});
+    EXPECT_EQ(sent->left_out(), size_t{1});
+    EXPECT_EQ(sent->end(), AEM_DESCRIPTOR_SIZE);
+    for (size_t i = 0; i < formats.size(); ++i) {
+        auto const format = received_stream_format(wire, i);
+        EXPECT_TRUE(format.has_value() && *format == formats[i]);
+    }
+    EXPECT_FALSE(received_stream_format(wire, 47).has_value());
+
+    auto const loaded = load_stream_descriptor(wire);
+    EXPECT_TRUE(loaded.has_value());
+    EXPECT_EQ(loaded->number_of_formats.get(), 46);
+    EXPECT_TRUE(holds(*loaded, std::span<Eui64 const>{formats}.first(46)));
+    EXPECT_EQ(loaded->wire_size(), AEM_DESCRIPTOR_SIZE - 2);  // a 2021 descriptor of 46 formats
+
+    auto const text = formatted(wire);
+    EXPECT_TRUE(text.find("formats: count=47 offset=132") != std::string::npos);
+    EXPECT_TRUE(text.find("[46] = " + text_of(formats[46])) != std::string::npos);
+    EXPECT_TRUE(text.find("[47]") == std::string::npos);
+    EXPECT_TRUE(parse_descriptor(wire).has_value());
+}
+
+// A full 2021 descriptor has 46 and none is left out; what it prints is what it printed.
+TEST(aem_stream_formats_offset, a_full_2021_descriptor_has_forty_six_formats_and_leaves_none_out)
+{
+    auto const formats = test_formats(46);
+    auto const wire = stream_wire(138, formats);
+    auto const sent = received_stream_formats(wire);
+    EXPECT_TRUE(sent.has_value() && sent->count == 46 && sent->left_out() == 0);
+    auto const loaded = load_stream_descriptor(wire);
+    EXPECT_TRUE(loaded.has_value() && holds(*loaded, formats));
+    auto const last = received_stream_format(wire, 45);
+    EXPECT_TRUE(last.has_value() && *last == formats[45]);
+    EXPECT_FALSE(received_stream_format(wire, 46).has_value());
+    auto const text = formatted(wire);
+    EXPECT_TRUE(text.find("formats: count=46 offset=138") != std::string::npos);
+    EXPECT_TRUE(text.find("[45] = " + text_of(formats[45])) != std::string::npos);
+}
+
+// A count no descriptor could carry is held to the room behind the offset,
+// as it was held to 46: the formats that are there are read.
+TEST(aem_stream_formats_offset, a_count_past_what_a_descriptor_has_room_for_is_held_to_the_room)
+{
+    auto const formats = test_formats(47);
+    auto wire = stream_wire(132, formats);
+    span_store(make_span(wire, {.start = offsetof(DescriptorStream, number_of_formats), .length = 2}), doublet_t{60});
+    auto const sent = received_stream_formats(wire);
+    EXPECT_TRUE(sent.has_value() && sent->count == 47);
+
+    auto at_138 = stream_wire(138, std::span<Eui64 const>{formats}.first(46));
+    span_store(make_span(at_138, {.start = offsetof(DescriptorStream, number_of_formats), .length = 2}), doublet_t{47});
+    auto const held = received_stream_formats(at_138);
+    EXPECT_TRUE(held.has_value() && held->count == 46);
+}
+
+// Formats claimed where a descriptor has no room for one are no formats of a descriptor.
+TEST(aem_stream_formats_offset, an_offset_that_leaves_no_room_for_a_format_is_refused)
+{
+    auto const formats = test_formats(1);
+    auto wire = stream_wire(138, formats);
+    wire.resize(600, uint8_t{0});
+    span_store(make_span(wire, {.start = offsetof(DescriptorStream, formats_offset), .length = 2}), doublet_t{504});
+    EXPECT_FALSE(received_stream_formats(wire).has_value());
+    EXPECT_FALSE(load_stream_descriptor(wire).has_value());
+    EXPECT_FALSE(received_stream_format(wire, 0).has_value());
+    // With no formats claimed the offset is not looked at, as before.
+    span_store(make_span(wire, {.start = offsetof(DescriptorStream, number_of_formats), .length = 2}), doublet_t{0});
+    EXPECT_TRUE(load_stream_descriptor(wire).has_value());
+}
+
 TEST(aem_stream_formats_offset, formats_past_the_end_are_refused)
 {
     auto const formats = test_formats(4);
@@ -1594,6 +1690,7 @@ TEST(aem_stream_formats_offset, formats_past_the_end_are_refused)
     wire.pop_back();
     EXPECT_FALSE(load_stream_descriptor(wire).has_value());
     EXPECT_FALSE(received_stream_formats(wire).has_value());
+    EXPECT_FALSE(received_stream_format(wire, 0).has_value());
     EXPECT_FALSE(parse_descriptor(wire).has_value());
 }
 

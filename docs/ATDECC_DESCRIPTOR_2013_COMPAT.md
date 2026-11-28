@@ -123,6 +123,32 @@ formats by the same offset, `format_descriptor()` prints through the
 loader and shows the offset that was sent, and the model validator reads
 through it.
 
+### How many formats
+
+A descriptor is at most 508 octets, so the offset decides how many formats
+it has room for (`stream_formats_room()`):
+
+| `formats_offset` | Layout | Room |
+| --- | --- | --- |
+| 132 | IEEE 1722.1-2013 | 47 |
+| 136 | the 2021 fields without timing | 46 |
+| 138 | IEEE 1722.1-2021 | 46 |
+
+`DescriptorStream` is the 2021 layout and holds 46. A 2013 descriptor
+filled to its 508 octets carries one more, and that one is not lost:
+
+- `received_stream_formats()` gives the count as sent, 47, with `held()`
+  and `left_out()` saying what the loaded descriptor has and has not.
+- `received_stream_format(wire, index)` reads any format straight from the
+  received octets, so a walk from 0 to the count sees them all.
+- `load_stream_descriptor()` holds the first 46.
+- `format_descriptor()` prints all 47 with the count as sent, and the model
+  validator notes a descriptor that carries more than the 2021 layout has
+  room for.
+
+A count larger than the room behind the offset is held to the room, and
+formats claimed where there is room for none are refused.
+
 ## Why not fix it globally?
 
 Three architectural fixes would eliminate this class of bug instead of

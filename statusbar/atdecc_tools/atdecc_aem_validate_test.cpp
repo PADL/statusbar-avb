@@ -137,6 +137,39 @@ TEST(aem_validate, a_2013_stream_descriptor_with_formats_is_not_truncated)
     EXPECT_TRUE(has_msg(validate_aem_model(descs), "STREAM_INPUT[0]", Severity::Error));
 }
 
+// A 2013 descriptor filled to its 508 octets carries 47 formats, one more
+// than the 2021 layout has room for. It is valid, and it is told.
+TEST(aem_validate, a_2013_stream_descriptor_with_forty_seven_formats_is_told_it_has_one_more)
+{
+    auto d = stream(DESCRIPTOR_STREAM_INPUT, 0, /*with_format=*/true);
+    d.formats_offset = static_cast<uint16_t>(DescriptorStream::MINIMUM_LENGTH);
+    auto const wire_with = [&d](uint16_t const count) {
+        d.number_of_formats = count;
+        std::vector<uint8_t> wire(DescriptorStream::MINIMUM_LENGTH + (count * sizeof(Eui64)));
+        span_copy(make_span(wire), make_const_span(d, {.start = 0, .length = DescriptorStream::MINIMUM_LENGTH}));
+        for (size_t i = 0; i < count; ++i) {
+            size_t const at = DescriptorStream::MINIMUM_LENGTH + (i * sizeof(Eui64));
+            span_copy(make_span(wire, {.start = at, .length = sizeof(Eui64)}), d.current_format.span());
+        }
+        return wire;
+    };
+    auto const told = [](std::vector<ModelFinding> const& findings) {
+        return std::ranges::count_if(findings, [](ModelFinding const& f) {
+            return f.severity == Severity::Info && f.message.find("carries 47 formats, 1 more") != std::string::npos;
+        });
+    };
+
+    std::vector<RawDescriptor> descs;
+    descs.push_back({.type = DESCRIPTOR_STREAM_INPUT, .index = 0, .data = wire_with(47)});
+    auto const full = validate_aem_model(descs);
+    EXPECT_FALSE(has_msg(full, "STREAM_INPUT[0]", Severity::Error));
+    EXPECT_FALSE(has_msg(full, "STREAM_INPUT[0]", Severity::Warn));
+    EXPECT_EQ(told(full), 1);
+
+    descs[0].data = wire_with(46);
+    EXPECT_EQ(told(validate_aem_model(descs)), 0);
+}
+
 TEST(aem_validate, a_2013_stream_descriptor_with_no_formats_is_not_truncated)
 {
     // The 132 octets of IEEE 1722.1-2013 and nothing after them.

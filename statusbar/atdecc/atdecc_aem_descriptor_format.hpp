@@ -226,31 +226,67 @@ auto format_to(OutputIt out, DescriptorSensorUnit const& d) -> OutputIt
 /// @param d Stream descriptor to format
 /// @param type_name Human-readable stream type name
 template <typename OutputIt>
-auto format_stream_descriptor(OutputIt out, DescriptorStream const& d, char const* type_name) -> OutputIt
+auto format_stream_identity(OutputIt out, DescriptorStream const& d, char const* type_name) -> OutputIt
 {
     out = std::format_to(out, "        {} Descriptor [{}]:\n", type_name, d.descriptor_index.get());
     out = std::format_to(out, "          object_name: \"{}\"\n", d.object_name.as_string_view());
     out = std::format_to(out, "          clock_domain_index: {}\n", d.clock_domain_index.get());
     out = std::format_to(out, "          stream_flags: {:#06x}\n", d.stream_flags.get());
+    return out;
+}
+
+/// The current_format line and the line that heads the format list, with
+/// @p count formats at @p offset.
+template <typename OutputIt>
+auto format_stream_formats_head(OutputIt out, DescriptorStream const& d, size_t const count, size_t const offset) -> OutputIt
+{
     out = std::format_to(out, "          current_format: ");
     for (size_t i = 0; i < 8; ++i) {
         out = std::format_to(out, "{:02x} ", d.current_format.span()[i]);
     }
     out = std::format_to(out, "\n");
-    out = std::format_to(out, "          formats: count={} offset={}\n", d.number_of_formats.get(), d.formats_offset.get());
+    return std::format_to(out, "          formats: count={} offset={}\n", count, offset);
+}
+
+/// One line of the format list.
+template <typename OutputIt>
+auto format_stream_format(OutputIt out, size_t const index, Eui64 const& format) -> OutputIt
+{
+    out = std::format_to(out, "            [{}] = ", index);
+    out = ieee::format_to(out, format);
+    return std::format_to(out, "\n");
+}
+
+template <typename OutputIt>
+auto format_stream_descriptor(OutputIt out, DescriptorStream const& d, char const* type_name) -> OutputIt
+{
+    out = format_stream_identity(out, d, type_name);
+    out = format_stream_formats_head(out, d, d.number_of_formats.get(), d.formats_offset.get());
     auto const formats = d.used_stream_formats();
     for (size_t i = 0; i < formats.size(); ++i) {
-        out = std::format_to(out, "            [{}] = ", i);
-        out = ieee::format_to(out, formats[i]);
-        out = std::format_to(out, "\n");
+        out = format_stream_format(out, i, formats[i]);
     }
-    out = std::format_to(out, "          avb_interface_index: {}\n", d.avb_interface_index.get());
+    return std::format_to(out, "          avb_interface_index: {}\n", d.avb_interface_index.get());
+}
+
+/// The format list of the received STREAM descriptor @p wire: its heading
+/// with the count and the offset as sent, and every format read from @p wire.
+template <typename OutputIt>
+auto format_received_stream_formats(
+    OutputIt out, DescriptorStream const& stream, std::span<uint8_t const> const wire, StreamFormatsExtent const& sent) -> OutputIt
+{
+    out = format_stream_formats_head(out, stream, sent.count, sent.offset);
+    for (size_t i = 0; i < sent.count; ++i) {
+        out = format_stream_format(out, i, received_stream_format(wire, i).value_or(Eui64{}));
+    }
     return out;
 }
 
 /// Format a STREAM_INPUT or STREAM_OUTPUT descriptor as it was received: its
 /// formats are read from where its formats_offset says they are (IEEE
-/// 1722.1-2021 7.2.6), and the offset printed is the one the sender used.
+/// 1722.1-2021 7.2.6), every one it carries (a 2013 descriptor may carry one
+/// more than DescriptorStream holds), and the count and the offset printed
+/// are the sender's.
 /// @param out Output iterator to write formatted text to
 /// @param wire The descriptor's octets, from descriptor_type on
 /// @param type_name Human-readable stream type name
@@ -262,10 +298,11 @@ auto format_received_stream(OutputIt out, std::span<uint8_t const> const wire, c
     if (!stream || !sent) {
         return std::format_to(out, "        {} Descriptor: its formats do not lie inside it\n", type_name);
     }
-    // The loader has the formats where the 2021 layout keeps them. What is
-    // shown is the descriptor as it came, so the offset is put back.
-    stream->formats_offset = static_cast<uint16_t>(sent->offset);
-    return format_stream_descriptor(out, *stream, type_name);
+    // The loader has the formats where the 2021 layout keeps them, and as
+    // many as it has room for. What is shown is the descriptor as it came.
+    out = format_stream_identity(out, *stream, type_name);
+    out = format_received_stream_formats(out, *stream, wire, *sent);
+    return std::format_to(out, "          avb_interface_index: {}\n", stream->avb_interface_index.get());
 }
 
 /// @param out Output iterator to write formatted text to

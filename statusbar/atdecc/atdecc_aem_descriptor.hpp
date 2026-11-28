@@ -848,11 +848,27 @@ static_assert(
 struct StreamFormatsExtent
 {
     size_t offset{0};  ///< formats_offset as received
-    size_t count{0};   ///< number_of_formats, at most DescriptorStream::MAX_STREAM_FORMATS
+    /// The formats the descriptor carries: number_of_formats, at most what a
+    /// descriptor of AEM_DESCRIPTOR_SIZE octets has room for behind @p offset.
+    /// With the formats at 132 (IEEE 1722.1-2013) that is 47, one more than
+    /// DescriptorStream holds; received_stream_format() reads every one.
+    size_t count{0};
 
     /// The octet just past the last format.
     [[nodiscard]] constexpr auto end() const noexcept -> size_t { return offset + (count * sizeof(Eui64)); }
+    /// How many of the formats DescriptorStream has room for: the first held().
+    [[nodiscard]] constexpr auto held() const noexcept -> size_t { return std::min(count, DescriptorStream::MAX_STREAM_FORMATS); }
+    /// How many it has no room for: load_stream_descriptor() leaves them out.
+    [[nodiscard]] constexpr auto left_out() const noexcept -> size_t { return count - held(); }
 };
+
+/// How many formats a STREAM descriptor of AEM_DESCRIPTOR_SIZE octets has
+/// room for when they start at @p formats_offset: 46 at 138 (IEEE
+/// 1722.1-2021) and at 136, 47 at 132 (IEEE 1722.1-2013), none past the end.
+[[nodiscard]] constexpr auto stream_formats_room(size_t const formats_offset) noexcept -> size_t
+{
+    return formats_offset > AEM_DESCRIPTOR_SIZE ? size_t{0} : (AEM_DESCRIPTOR_SIZE - formats_offset) / sizeof(Eui64);
+}
 
 /// The formats of a received STREAM descriptor, found through its
 /// formats_offset field.
@@ -863,18 +879,23 @@ struct StreamFormatsExtent
 /// an IEEE 1722.1-2013 descriptor and 138 in a 2021 one, and devices send 136
 /// too: the 2021 fields without timing.
 ///
+/// The count is the descriptor's own, held to what a descriptor has room for
+/// behind the offset (stream_formats_room()), and not to what DescriptorStream
+/// holds: a 2013 descriptor may carry 47 formats and all 47 are in the extent.
+///
 /// @param head A descriptor whose first MINIMUM_LENGTH octets are valid. No
 ///             later octet is read, so it may be laid over a received buffer.
 /// @return nullopt when the descriptor has formats and the offset points into
-///         the fields every revision has.
+///         the fields every revision has, or leaves no room for one format.
 [[nodiscard]] inline auto stream_formats_extent(DescriptorStream const& head) noexcept -> std::optional<StreamFormatsExtent>
 {
-    size_t const count = std::min(static_cast<size_t>(head.number_of_formats.get()), DescriptorStream::MAX_STREAM_FORMATS);
+    size_t const claimed = head.number_of_formats.get();
     size_t const offset = head.formats_offset.get();
-    if (count != 0 && offset < DescriptorStream::MINIMUM_LENGTH) {
+    size_t const room = stream_formats_room(offset);
+    if (claimed != 0 && (offset < DescriptorStream::MINIMUM_LENGTH || room == 0)) {
         return std::nullopt;
     }
-    return StreamFormatsExtent{.offset = offset, .count = count};
+    return StreamFormatsExtent{.offset = offset, .count = std::min(claimed, room)};
 }
 
 namespace detail {
@@ -898,18 +919,19 @@ namespace detail {
 }
 
 /// Copy the fields past the 2013 length and the formats of @p wire into
-/// @p d, each to its place in the IEEE 1722.1-2021 layout.
+/// @p d, each to its place in the IEEE 1722.1-2021 layout. Formats @p d has
+/// no room for (StreamFormatsExtent::left_out()) stay in @p wire.
 inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const wire, StreamFormatsExtent const& formats) noexcept
 {
     size_t const fixed = stream_fixed_length(formats, wire.size());
     octet_range_t const newer{.start = DescriptorStream::MINIMUM_LENGTH, .length = fixed - DescriptorStream::MINIMUM_LENGTH};
     span_copy(make_span(d, newer), newer.apply(wire));
     if (formats.count != 0) {
-        size_t const octets = formats.count * sizeof(Eui64);
+        size_t const octets = formats.held() * sizeof(Eui64);
         span_copy(make_span(d, {.start = DescriptorStream::LENGTH, .length = octets}), wire.subspan(formats.offset, octets));
     }
     d.formats_offset = static_cast<uint16_t>(DescriptorStream::LENGTH);
-    d.number_of_formats = static_cast<uint16_t>(formats.count);
+    d.number_of_formats = static_cast<uint16_t>(formats.held());
 }
 
 }  // namespace detail
@@ -929,6 +951,24 @@ inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const
     return inside ? formats : std::nullopt;
 }
 
+/// Format @p index of the received STREAM descriptor @p wire, read from
+/// where its formats_offset says the formats are. Every format the descriptor
+/// carries can be read so, the one DescriptorStream has no room for too: walk
+/// 0 .. received_stream_formats(wire)->count.
+/// @return nullopt when the formats of @p wire do not lie inside it (see
+///         received_stream_formats()), or it carries no format @p index.
+[[nodiscard]] inline auto received_stream_format(std::span<uint8_t const> const wire, size_t const index) noexcept
+    -> std::optional<Eui64>
+{
+    auto const formats = received_stream_formats(wire);
+    if (!formats || index >= formats->count) {
+        return std::nullopt;
+    }
+    Eui64 format{};
+    span_copy(make_span(format), wire.subspan(formats->offset + (index * sizeof(Eui64)), sizeof(Eui64)));
+    return format;
+}
+
 /// Load a received STREAM_INPUT or STREAM_OUTPUT descriptor into the
 /// IEEE 1722.1-2021 layout, whichever layout it was sent in.
 ///
@@ -938,6 +978,11 @@ inline void load_stream_tail(DescriptorStream& d, std::span<uint8_t const> const
 /// so used_stream_formats() is right for it. redundant_offset is kept as
 /// received: it counts octets of the received descriptor, and the list it
 /// points at is not held here.
+///
+/// DescriptorStream holds MAX_STREAM_FORMATS formats, the most a 2021
+/// descriptor carries. A 2013 descriptor may carry one more: the result then
+/// has the first MAX_STREAM_FORMATS, and received_stream_formats() says how
+/// many were left out; received_stream_format() reads them all.
 ///
 /// @return nullopt when @p wire is shorter than a 2013 descriptor, or its
 ///         formats do not lie inside it.
