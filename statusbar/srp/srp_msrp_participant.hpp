@@ -325,6 +325,21 @@ class MsrpParticipantT
     /// LeaveAll periods before its new value may be declared.
     [[nodiscard]] auto talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool;
 
+    /// The Talker Advertise this station declared for a StreamID before it
+    /// restarted, as it last was, told at the start of the new run. The
+    /// registration the old run removed (or left to time out) is as much "the
+    /// existing Stream registration" of 35.2.2.8 as one this participant
+    /// withdrew itself, and nothing in a participant just started remembers
+    /// it: so another value declared under the StreamID within two LeaveAll
+    /// periods of @p now waits them out, as after withdraw_talker(), and
+    /// talker_change_pending() is true meanwhile. The value @p previous may be
+    /// declared at once: it is the same registration.
+    ///
+    /// Nothing is declared and nothing is sent by this call. A StreamID this
+    /// participant already has a Talker Advertise record for is left as it
+    /// is: what this run did with it decides.
+    auto hold_talker_value_after_restart(TalkerAdvertiseFirstValue const& previous, TimePoint now) -> Status;
+
     /// Declare a Talker Failed attribute (used when a previously
     /// advertised talker cannot meet reservation requirements).
     auto declare_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status;

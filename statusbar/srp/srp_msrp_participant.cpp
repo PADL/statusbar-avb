@@ -570,6 +570,21 @@ auto MsrpParticipantT<Limits>::declare_new_talker_failed(TalkerFailedFirstValue 
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::hold_talker_value_after_restart(TalkerAdvertiseFirstValue const& previous, TimePoint now) -> Status
+{
+    if (find_talker_advertise(previous.stream_id) != nullptr) {
+        return success();
+    }
+    auto* const rec = find_or_create_talker_advertise(previous.stream_id);
+    if (rec == nullptr) {
+        return failure(make_error_code(tsn::TsnError::attribute_table_full));
+    }
+    rec->first_value = previous;
+    rec->pending_not_before = now + talker_value_hold();
+    return success();
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool
 {
     for (auto const& rec : talker_adv_) {

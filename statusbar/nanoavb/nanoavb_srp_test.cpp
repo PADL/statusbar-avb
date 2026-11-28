@@ -1580,6 +1580,54 @@ TEST(nanoavb_srp_msrp, an_address_in_conflict_withdraws_the_talker_and_its_repla
     EXPECT_EQ(link.bridge.find_registered_talker_advertise(link.sid)->destination_address.to_uint64() & 0xFFU, 0x35U);
 }
 
+// A talker that comes back from a restart with another destination address
+// under its StreamID, as one does whose MAAP block changed: told what the old
+// run declared, the handler holds the Talker Advertise back for two LeaveAll
+// periods from the start (IEEE 802.1Q 35.2.2.8), talker_held() says so, and
+// the attribute then reaches the bridge with the new address.
+TEST(nanoavb_srp_msrp, a_talker_restarted_with_another_address_holds_its_advertise_two_leaveall_periods)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    TalkerLink link{};
+    auto const started_at = link.now;
+    EXPECT_TRUE(link.talker.talker_hold_after_restart(link.info(0x34), link.now).has_value());
+    EXPECT_FALSE(link.talker.talker_held(link.sid));  // nothing asked for yet
+    (void)link.talker.talker_advertise(link.info(0x35), link.now);
+    EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::Ready, link.now).has_value());
+    link.run(2 * ROUNDS_PER_SECOND);
+    EXPECT_EQ(link.state(), TalkerReservationState::Advertising);  // wanted,
+    EXPECT_TRUE(link.talker.talker_held(link.sid));                // and held back
+    EXPECT_FALSE(link.registered());
+
+    while (link.now - started_at < std::chrono::milliseconds{29'875}) {
+        link.run(1);
+        EXPECT_FALSE(link.registered());
+    }
+    link.run(16 * ROUNDS_PER_SECOND);  // the first PDU after the thirty seconds carries it
+    EXPECT_TRUE(link.registered());
+    EXPECT_FALSE(link.talker.talker_held(link.sid));
+    EXPECT_EQ(link.bridge.find_registered_talker_advertise(link.sid)->destination_address.to_uint64() & 0xFFU, 0x35U);
+}
+
+// With the parameters the old run declared nothing waits: the bridge has the
+// attribute within the second. A changed AccumulatedLatency is no change of
+// the attribute (35.2.2.8.6) and waits no more.
+TEST(nanoavb_srp_msrp, a_talker_restarted_with_the_same_parameters_is_declared_at_once)
+{
+    using statusbar::srp::msrp::ListenerDeclaration;
+    for (uint32_t const latency : {0U, 2'000'000U}) {
+        TalkerLink link{};
+        auto previous = link.info(0x34);
+        previous.accumulated_latency = latency;
+        EXPECT_TRUE(link.talker.talker_hold_after_restart(previous, link.now).has_value());
+        (void)link.talker.talker_advertise(link.info(0x34), link.now);
+        EXPECT_TRUE(link.bridge.declare_listener(link.sid, ListenerDeclaration::Ready, link.now).has_value());
+        link.run(ROUNDS_PER_SECOND);
+        EXPECT_FALSE(link.talker.talker_held(link.sid));
+        EXPECT_TRUE(link.registered());
+    }
+}
+
 // A stream the entity has withdrawn (a Link Down) is not the handler's to
 // declare: a probe leaves it Idle until the entity advertises it again.
 TEST(nanoavb_srp_msrp, a_probe_does_not_declare_a_stream_the_entity_withdrew)

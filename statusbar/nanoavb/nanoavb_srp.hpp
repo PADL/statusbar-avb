@@ -625,6 +625,31 @@ class MsrpHandler
         return idx;
     }
 
+    /// The parameters this station declared for a talker stream before it
+    /// restarted (an entity keeps them in its state directory), told before
+    /// the stream is handed to talker_advertise(). When the stream now has
+    /// other parameters under the same StreamID, its Talker Advertise is held
+    /// back for two LeaveAll periods from @p now (IEEE 802.1Q 35.2.2.8), as it
+    /// is after a change within one run; with the same parameters nothing
+    /// waits. AccumulatedLatency is no part of the comparison. Nothing is
+    /// declared here.
+    [[nodiscard]] auto talker_hold_after_restart(TalkerStreamSrpInfo const& previous, TimePoint const now) -> Status
+    {
+        statusbar::srp::msrp::TalkerAdvertiseFirstValue fv{};
+        fill_talker_frames_and_tspec(previous, fv);
+        fill_talker_priority_and_latency(previous, fv);
+        return participant_.hold_talker_value_after_restart(fv, now);
+    }
+
+    /// Whether @p stream_id's Talker Advertise is held back: handed to
+    /// talker_advertise() with parameters that have to wait out the value
+    /// they replace. A stream so held has no Talker attribute of ours on the
+    /// wire and is not to be sent.
+    [[nodiscard]] auto talker_held(StreamId const& stream_id) const noexcept -> bool
+    {
+        return participant_.talker_change_pending(stream_id);
+    }
+
     [[nodiscard]] auto talker_withdraw(StreamId const& stream_id, TimePoint now) -> Status
     {
         for (auto& stream : talker_streams_) {

@@ -1575,6 +1575,108 @@ TEST(msrp_participant, another_value_after_a_withdrawal_waits_two_leaveall_perio
     EXPECT_TRUE(told_new);
 }
 
+// A station that restarts has removed its registration as surely as one that
+// withdrew it, and the participant of the new run remembers nothing. Told the
+// value the old run declared, it holds another value under the StreamID for
+// two LeaveAll periods from the start (IEEE 802.1Q 35.2.2.8) and then
+// declares it New; nothing of the stream is sent meanwhile.
+TEST(msrp_participant, after_a_restart_another_value_than_the_old_runs_waits_two_leaveall_periods)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc021};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(make_talker_adv(1), clock.now)));
+    run_quarters(a, clock, 4);
+    EXPECT_TRUE(all_talkers_carried(fab.a_to_b).empty());  // the call declares nothing
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+
+    auto changed = make_talker_adv(1);
+    changed.destination_address = statusbar::ieee::Eui48{0x91, 0xe0, 0xf0, 0x00, 0x77, 0x77};
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(changed, clock.now)));
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+
+    run_quarters(a, clock, 115);  // to a quarter second short of thirty from the start
+    EXPECT_TRUE(a.talker_change_pending(make_stream_id(1)));
+    for (auto const& carried : all_talkers_carried(fab.a_to_b)) {
+        EXPECT_FALSE(declares(carried.event));
+    }
+    fab.a_to_b.clear();
+
+    run_quarters(a, clock, 64);  // the first PDU after the thirty seconds completes it
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    bool told_new = false;
+    for (auto const& carried : all_talkers_carried(fab.a_to_b)) {
+        told_new = told_new || carried.event == AttributeEvent::New;
+    }
+    EXPECT_TRUE(told_new);
+    auto const* const declared = a.find_talker_advertise(make_stream_id(1));
+    EXPECT_TRUE(declared != nullptr && declared->destination_address == changed.destination_address);
+}
+
+// The value the old run declared is the same registration in the new run: it
+// is declared at once. So is one that differs in AccumulatedLatency alone.
+TEST(msrp_participant, after_a_restart_the_old_runs_value_is_declared_at_once)
+{
+    for (uint32_t const latency : {0U, 1500U}) {
+        MsrpParticipant a{test_msrp_config(), 0xc022};
+        Fabric fab{};
+        a.set_send_pdu(fab.make_a_sender());
+        TestClock clock{};
+        a.start(clock.now);
+        EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(make_talker_adv(1), clock.now)));
+        auto same = make_talker_adv(1);
+        same.accumulated_latency = same.accumulated_latency.get() + latency;
+        EXPECT_TRUE(is_success(a.declare_talker_advertise(same, clock.now)));
+        EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+        a.transmit_pending(clock.now);
+        auto const sent = all_talkers_carried(fab.a_to_b);
+        EXPECT_TRUE(!sent.empty() && sent.front().event == AttributeEvent::New);
+    }
+}
+
+// A hold nobody needed is forgotten when its time is up, and the record with
+// it: the StreamID is then free for any value, at once.
+TEST(msrp_participant, a_hold_after_a_restart_ends_by_itself_and_then_any_value_is_declared_at_once)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc023};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(make_talker_adv(1), clock.now)));
+    run_quarters(a, clock, 200);  // fifty seconds: past the hold and a LeaveAll of ours
+    fab.a_to_b.clear();
+
+    auto changed = make_talker_adv(1);
+    changed.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(changed, clock.now)));
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+    a.transmit_pending(clock.now);
+    auto const sent = all_talkers_carried(fab.a_to_b);
+    EXPECT_TRUE(!sent.empty() && sent.front().event == AttributeEvent::New && sent.front().max_frame_size == 300U);
+}
+
+// What this run has done with a StreamID decides: a value told of the old run
+// after the stream is declared changes nothing.
+TEST(msrp_participant, a_hold_told_for_a_stream_this_run_has_declared_is_ignored)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc024};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(1), clock.now)));
+    a.transmit_pending(clock.now);
+    auto older = make_talker_adv(1);
+    older.max_frame_size = 300;
+    EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(older, clock.now)));
+    auto const* const declared = a.find_talker_advertise(make_stream_id(1));
+    EXPECT_TRUE(declared != nullptr && declared->max_frame_size.get() == make_talker_adv(1).max_frame_size.get());
+    EXPECT_FALSE(a.talker_change_pending(make_stream_id(1)));
+}
+
 // The value that was withdrawn is the same registration when it comes back:
 // it is declared again at once, however short the time since the withdrawal.
 TEST(msrp_participant, the_withdrawn_value_may_be_declared_again_at_once)
