@@ -1433,23 +1433,32 @@ TEST(aem_sensor_map_list, format_to_emits_each_entry)
     EXPECT_TRUE(buf.find("stream[4]sig5 -> cluster[6]") != std::string::npos);
 }
 
+namespace {
+
+/// The payload of a command that carries none: no octets, at an address that
+/// is one. A received command's payload starts behind its header and is never
+/// a null pointer, which the data() of an empty std::array may be; the parsed
+/// payload is a reference into it.
+auto no_octets_of_a_frame() -> std::span<uint8_t const>
+{
+    static constexpr std::array<uint8_t, 4> FRAME{};
+    return std::span<uint8_t const>{FRAME}.first(0);
+}
+
+}  // namespace
+
 // Security regression: a GET_CONFIGURATION *command* carries no configuration_index
 // (min_length 0), yet parse_aem accepts a zero-length payload. Formatting the command
 // direction must NOT read the 4-byte set_configuration struct off that short payload
 // (OOB read on the print/analyzer path). The command now formats no fields.
 TEST(aem_print, format_get_configuration_command_does_not_read_payload)
 {
-    std::array<uint8_t, 0> empty{};
-    auto parsed = parse_aem(AEM_COMMAND_GET_CONFIGURATION, /*is_response=*/false, std::span<uint8_t const>(empty));
+    auto const empty = no_octets_of_a_frame();
+    auto parsed = parse_aem(AEM_COMMAND_GET_CONFIGURATION, /*is_response=*/false, empty);
     EXPECT_TRUE(parsed.has_value());  // min_length 0 -> accepted
     if (parsed.has_value()) {
         std::string result;
-        format_aem(
-            std::back_inserter(result),
-            AEM_COMMAND_GET_CONFIGURATION,
-            /*is_response=*/false,
-            **parsed,
-            std::span<uint8_t const>(empty));
+        format_aem(std::back_inserter(result), AEM_COMMAND_GET_CONFIGURATION, /*is_response=*/false, **parsed, empty);
         EXPECT_TRUE(result.empty());  // no set_configuration fields read/printed
     }
 }
@@ -1458,17 +1467,12 @@ TEST(aem_print, format_get_configuration_command_does_not_read_payload)
 // 8-byte operation_status struct.
 TEST(aem_print, format_operation_status_command_does_not_read_payload)
 {
-    std::array<uint8_t, 0> empty{};
-    auto parsed = parse_aem(AEM_COMMAND_OPERATION_STATUS, /*is_response=*/false, std::span<uint8_t const>(empty));
+    auto const empty = no_octets_of_a_frame();
+    auto parsed = parse_aem(AEM_COMMAND_OPERATION_STATUS, /*is_response=*/false, empty);
     EXPECT_TRUE(parsed.has_value());
     if (parsed.has_value()) {
         std::string result;
-        format_aem(
-            std::back_inserter(result),
-            AEM_COMMAND_OPERATION_STATUS,
-            /*is_response=*/false,
-            **parsed,
-            std::span<uint8_t const>(empty));
+        format_aem(std::back_inserter(result), AEM_COMMAND_OPERATION_STATUS, /*is_response=*/false, **parsed, empty);
         EXPECT_TRUE(result.empty());
     }
 }
