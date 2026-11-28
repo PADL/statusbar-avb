@@ -190,6 +190,15 @@ struct ListenerStreams
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
     /// semantics as set_consume. RX-thread callback.
     void set_crf(uint16_t stream_index, StreamCrfFn fn);
+
+    /// How often the media clock that CRF input @p stream_index carries restarted or was disrupted:
+    /// the toggles of mr in its AVTPDUs, its interruptions, and the times it was given a stream or
+    /// lost the one it had. It is what the stream outputs that take their timestamps from the CRF
+    /// stream have to follow (IEEE 1722-2025 4.7.4.4: such streams "shall toggle the mr bit if a
+    /// disruption of the CRF stream occurs or if the mr bit in the CRF stream has been toggled";
+    /// 10.4.3). A count that only grows; a CONNECT repeated for the stream the input is on adds
+    /// nothing. nullopt for an index that is no open CRF input. Any thread.
+    [[nodiscard]] auto crf_media_clock_events(uint16_t stream_index) const noexcept -> std::optional<uint32_t>;
     /// set_crf() for a consumer that accepts no source generation. Same semantics.
     template <typename Fn>
         requires(

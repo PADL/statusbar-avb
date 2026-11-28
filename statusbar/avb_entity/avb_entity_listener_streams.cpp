@@ -749,6 +749,17 @@ void ListenerStreams::deliver_crf_timestamps(
     slot.rx_samples.add(slot.crf->last_timestamp_count);
 }
 
+auto ListenerStreams::crf_media_clock_events(uint16_t const stream_index) const noexcept -> std::optional<uint32_t>
+{
+    auto const* const slot = slot_for(stream_index);
+    if (slot == nullptr || !slot->crf) {
+        return std::nullopt;
+    }
+    auto const& c = slot->counters;
+    return c.media_reset.load(std::memory_order_relaxed) + c.stream_interrupted.load(std::memory_order_relaxed) +
+        slot->stream_changes.load(std::memory_order_acquire);
+}
+
 auto ListenerStreams::crf_source_for(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu) noexcept -> uint32_t
 {
     uint64_t const stream_id = pdu.stream_id().to_uint64();

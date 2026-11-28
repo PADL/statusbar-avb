@@ -2023,6 +2023,86 @@ TEST(avb_entity_kit_crf, the_recovery_follows_the_input_the_crf_clock_source_loc
     EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{1});
 }
 
+namespace {
+
+constexpr ieee::Eui64 CRF_TALKER_STREAM{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00, 0x00, 0x09};
+constexpr ieee::Eui48 CRF_GROUP{0x91, 0xE0, 0xF0, 0x00, 0x12, 0x39};
+
+}  // namespace
+
+// IEEE 1722-2025 4.7.4.4: "If a Clock Reference Format (CRF) stream ... is being received by a
+// Talker, then any streams deriving timestamps from the CRF stream shall toggle the mr bit if a
+// disruption of the CRF stream occurs or if the mr bit in the CRF stream has been toggled." The kit
+// looks once a cycle at the CRF input its media clock follows and asks a restart of every stream
+// output of the clock domain; a CONNECT repeated for the input's stream asks none.
+TEST(avb_entity_kit_crf, a_restart_or_a_disruption_of_the_crf_stream_the_media_clock_follows_restarts_the_domains_outputs)
+{
+    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto const output = kit.talker_specs().front().index;
+    auto const asked = [&kit, output] { return kit->talker().media_clock_restart_requests(output); };
+    auto* const input = kit->listener()->slot_for(1);
+    EXPECT_TRUE(input != nullptr);
+    int64_t now_ns = 2'000'000'000;
+    auto const cycle = [&kit, &now_ns] { kit->end_cycle(now_ns += 1'000'000); };
+
+    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);  // the CRF source comes into force
+    uint32_t const at_selection = asked();
+    cycle();  // the first look takes the count
+    EXPECT_EQ(asked(), at_selection);
+
+    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{3}});
+    EXPECT_EQ(asked(), at_selection);  // nothing before the cycle ends
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 1);  // the input was given its stream
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 1);  // once
+
+    input->counters.media_reset.fetch_add(1);  // what an AVTPDU with a toggled mr counts
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 2);
+
+    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{4}});
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 2);  // the CONNECT again: the same stream, the same clock
+
+    kit->listener()->on_listener_disconnected(1, TimePoint{std::chrono::seconds{5}}, StreamInputLoss::released);
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 3);  // the stream is lost
+}
+
+// While another clock source is in force the stream outputs take nothing from the CRF stream, and
+// what happens to it restarts nothing. Coming back to the CRF source is the change of source's own
+// restart and no second one for what the stream did meanwhile.
+TEST(avb_entity_kit_crf, a_crf_stream_the_media_clock_does_not_follow_restarts_nothing)
+{
+    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    auto const output = kit.talker_specs().front().index;
+    auto const asked = [&kit, output] { return kit->talker().media_clock_restart_requests(output); };
+    auto* const input = kit->listener()->slot_for(1);
+    int64_t now_ns = 2'000'000'000;
+    auto const cycle = [&kit, &now_ns] { kit->end_cycle(now_ns += 1'000'000); };
+
+    EXPECT_EQ(set_clock_source(kit, 0), atdecc::AEM_STATUS_SUCCESS);
+    uint32_t const before = asked();
+    cycle();
+    kit->listener()->on_listener_connected(1, CRF_TALKER_STREAM, CRF_GROUP, TimePoint{std::chrono::seconds{3}});
+    input->counters.media_reset.fetch_add(1);
+    cycle();
+    EXPECT_EQ(asked(), before);
+
+    EXPECT_EQ(set_clock_source(kit, 1), atdecc::AEM_STATUS_SUCCESS);
+    uint32_t const at_selection = asked();
+    EXPECT_EQ(at_selection, before + 1);  // the change of source
+    cycle();
+    cycle();
+    EXPECT_EQ(asked(), at_selection);
+    input->counters.media_reset.fetch_add(1);
+    cycle();
+    EXPECT_EQ(asked(), at_selection + 1);
+}
+
 TEST(avb_entity_kit_crf, without_a_crf_clock_source_the_recovery_follows_the_first_crf_input)
 {
     KitUnderTest kit{crf_inputs_config()};

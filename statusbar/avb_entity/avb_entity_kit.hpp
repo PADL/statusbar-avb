@@ -329,6 +329,14 @@ class AvbEntityKit
     using UnitRateFn = sg14::inplace_function<uint8_t(uint32_t rate, std::span<RetimedFormat const> streams), 32>;
     void set_on_unit_rate_changed(UnitRateFn fn) noexcept { on_unit_rate_changed_ = std::move(fn); }
 
+    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream
+    /// outputs (IEEE 1722-2025 4.7.4.4), on the next AVTPDU of each. The kit calls it when another
+    /// clock source comes into force and when the CRF stream its media clock follows restarts or
+    /// is disrupted (end_cycle()). An entity calls it for a restart only it can see: a data plane
+    /// that receives the CRF stream itself and is told of a toggled mr. Reactor thread; from
+    /// another thread, TalkerStreams::toggle_media_clock_restart() per stream.
+    void restart_media_clock(uint16_t domain);
+
     // --- CRF-input media-clock slaving (kit phase 3c) -------------------------
     /// The CLOCK_DOMAIN's active clock-source index (runtime SET_CLOCK_SOURCE
     /// state; the blob's authored default until a controller changes it).
@@ -560,8 +568,12 @@ class AvbEntityKit
     /// One saved clock source to its domain, when the model still lists it and the entity can
     /// still run it; a status line says so when not.
     void restore_clock_source(SavedClockSource const& saved);
-    /// The media clock of clock domain @p domain restarted: mr toggles on each of its open stream outputs.
-    void restart_media_clock(uint16_t domain);
+    /// Once a reactor cycle: when the CRF stream the media clock follows restarted its media clock
+    /// or was disrupted since the last look, clock domain 0's media clock restarted with it.
+    void follow_crf_media_clock();
+    /// ListenerStreams::crf_media_clock_events() of the CRF input the media clock follows, nullopt
+    /// while it follows none: the CRF clock source is not the one in force, or locates no CRF input.
+    [[nodiscard]] auto crf_media_clock_events() const -> std::optional<uint32_t>;
     /// START_STREAMING or STOP_STREAMING was accepted for a stream.
     [[nodiscard]] auto on_streaming_changed(uint16_t type, uint16_t index, bool streaming) -> uint8_t;
     /// START_STREAMING (@p stopped false) or STOP_STREAMING for STREAM_OUTPUT
@@ -754,6 +766,8 @@ class AvbEntityKit
     ClockSourceKinds clock_source_kinds_;
     /// The External clock sources run_clock_source() named, by descriptor index.
     std::bitset<MAX_CLOCK_SOURCES> external_clock_sources_run_{};
+    /// crf_media_clock_events() at the last cycle's look; nullopt while the media clock followed no CRF input.
+    std::optional<uint32_t> crf_media_clock_events_seen_{};
 
     /// Each talker stream's presentation offset a controller set (reactor thread); unset,
     /// the configured one.

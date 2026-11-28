@@ -435,11 +435,32 @@ requests are counted, and the media thread compares that count with the
 one it last followed, so no side waits or writes another's state. A
 stream opened again after a stop starts
 with mr clear, and a restart asked of the run that stopped is not carried
-into the next. MEDIA_RESET counts each toggle sent. The kit asks for a
-restart on each stream output of clock domain 0 when SET_CLOCK_SOURCE
-makes another source active there (the source in force named again is
-none), and on each stream output a SET_SAMPLING_RATE re-times, once the
-entity's data plane has accepted the rate.
+into the next. MEDIA_RESET counts each toggle sent.
+
+`AvbEntityKit::restart_media_clock(domain)` asks for a restart on each
+open stream output of a clock domain. The kit calls it:
+
+| When | Why |
+|---|---|
+| SET_CLOCK_SOURCE makes another source active in clock domain 0 (the source in force named again is none) | the media clock's source changed |
+| the CRF stream the media clock follows toggled mr, was interrupted, or the CRF input lost its stream or was given one | IEEE 1722-2025 4.7.4.4: "any streams deriving timestamps from the CRF stream shall toggle the mr bit if a disruption of the CRF stream occurs or if the mr bit in the CRF stream has been toggled" (10.4.3 says the same of a CRF listener) |
+
+and, per stream output and not per domain, when a SET_SAMPLING_RATE
+re-times it, once the entity's data plane has accepted the rate.
+
+The CRF row is looked at once a reactor cycle (`end_cycle()`): the CRF
+input counts those events on the RX path
+(`ListenerStreams::crf_media_clock_events()`), and the kit follows the
+count only while the CRF clock source is the one in force, which is when
+`media_rate()` takes the recovery's rate. Several events inside one cycle
+are one restart. The first look after the CRF source came into force only
+takes the count, since the change of source has toggled mr already, and a
+CONNECT repeated for the stream the input is on is no event at all.
+
+`restart_media_clock()` is public for an entity whose data plane sees a
+restart the kit cannot: one that receives the CRF stream itself and is
+told of a toggled mr. It is the reactor's; from another thread the call is
+`TalkerStreams::toggle_media_clock_restart()` per stream.
 
 ### The talker's transmit gate
 

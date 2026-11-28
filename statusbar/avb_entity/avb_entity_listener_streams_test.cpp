@@ -936,6 +936,39 @@ TEST(listener_crf, the_crf_source_is_new_when_the_input_is_given_a_stream_and_no
     EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 1, 2, 2, 2, 3}));
 }
 
+// IEEE 1722-2025 4.7.4.4: the streams that take their timestamps from a CRF stream toggle mr "if a
+// disruption of the CRF stream occurs or if the mr bit in the CRF stream has been toggled". The
+// input counts both for whoever times streams by it: a toggle of mr, the input losing its stream
+// or being given one, an interruption. A CONNECT repeated for its stream is none of them.
+TEST(listener_crf, a_crf_input_counts_the_restarts_and_disruptions_of_the_media_clock_it_carries)
+{
+    CrfInputUnderTest crf;
+    auto const events = [&crf] { return crf.ls.crf_media_clock_events(1).value_or(0xFFFF'FFFFU); };
+    uint32_t const connected = events();
+    crf.receive(10);
+    EXPECT_EQ(events(), connected);  // a steady stream: nothing
+    crf.mr = true;
+    crf.receive(2);
+    EXPECT_EQ(events(), connected + 1);  // mr toggled once and stays
+    crf.ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+    EXPECT_EQ(events(), connected + 1);  // the CONNECT again: the same stream
+    crf.ls.on_listener_disconnected(1, sm::TimePoint{}, StreamInputLoss::released);
+    EXPECT_EQ(events(), connected + 2);  // lost
+    crf.ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+    EXPECT_EQ(events(), connected + 3);  // given again
+    crf.receive(20);                     // locked again
+    EXPECT_TRUE(crf.counters().is_locked.load());
+    crf.ls.on_listener_disconnected(1, sm::TimePoint{}, StreamInputLoss::talker_lost);
+    EXPECT_EQ(events(), connected + 5);  // interrupted, and lost
+
+    EXPECT_FALSE(crf.ls.crf_media_clock_events(7).has_value());  // no such input
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams audio{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(audio.open_stream(make_aaf_spec(0)).has_value());
+    EXPECT_FALSE(audio.crf_media_clock_events(0).has_value());  // an audio input carries no media clock reference
+}
+
 // An AVTPDU of the old stream matched before the new connection was published, and delivered after
 // the connection was counted, opens a new source; the new stream's AVTPDUs then open another.
 TEST(listener_crf, an_avtpdu_of_another_stream_id_than_the_last_is_a_new_source)

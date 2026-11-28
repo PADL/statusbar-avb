@@ -1668,9 +1668,34 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
     }
 }
 
+auto AvbEntityKit::crf_media_clock_events() const -> std::optional<uint32_t>
+{
+    // The stream outputs take their timestamps from the CRF stream while its clock source is the
+    // one in force: the condition media_rate() takes the recovery's rate under.
+    bool const followed = crf_clock_source_index_.has_value() && active_clock_source() == *crf_clock_source_index_;
+    auto const input = followed ? crf_recovery_input() : std::nullopt;
+    return input.has_value() && listener_ != nullptr ? listener_->crf_media_clock_events(*input) : std::nullopt;
+}
+
+void AvbEntityKit::follow_crf_media_clock()
+{
+    // IEEE 1722-2025 4.7.4.4: "any streams deriving timestamps from the CRF stream shall toggle
+    // the mr bit if a disruption of the CRF stream occurs or if the mr bit in the CRF stream has
+    // been toggled." The first look after the CRF source came into force only takes the count:
+    // the change of source has toggled mr already (change_clock_source).
+    auto const events = crf_media_clock_events();
+    bool const restarted =
+        events.has_value() && crf_media_clock_events_seen_.has_value() && *events != *crf_media_clock_events_seen_;
+    crf_media_clock_events_seen_ = events;
+    if (restarted) {
+        restart_media_clock(0);
+    }
+}
+
 void AvbEntityKit::end_cycle(int64_t const now_ns)
 {
     poll_counters(now_ns);
+    follow_crf_media_clock();  // after the fold: an interruption it counted is followed in this cycle
     on_admission_timer(raw_at(now_ns));
     tell_changed_input_info();
 }
