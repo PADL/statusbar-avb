@@ -60,6 +60,11 @@ auto TalkerGate::stamp(uint16_t const idx, bool const ready, RawTimePoint const 
 
 auto TalkerGate::admitted(uint16_t const idx, RawTimePoint const now) const noexcept -> bool
 {
+    // Before anything else, the disabled gate too: a stream whose Talker
+    // Advertise is held back has no attribute on the wire to send under.
+    if (idx < advertise_held_.size() && advertise_held_[idx].load(std::memory_order_relaxed)) {
+        return false;
+    }
     if (!gate_enabled_) {
         // Gate disabled: transmit unconditionally. NOTE: this puts the stream on the
         // SR class with NO ACMP connection and NO reservation, which is not AVB-spec

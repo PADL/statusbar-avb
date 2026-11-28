@@ -737,6 +737,7 @@ different programs on one machine never share a file
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/listener-bindings
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/maap-range
 /var/lib/statusbar-avb/2ccf67fffe0a0b0c/stream-formats
+/var/lib/statusbar-avb/2ccf67fffe0a0b0c/talker-advertises
 ```
 
 | File | Written | By default |
@@ -745,6 +746,39 @@ different programs on one machine never share a file
 | `listener-bindings` | the stream inputs' bindings (Milan v1.3 5.3.8.3) | under the Milan profile. The IEEE 1722.1 listener's fast-connect memory changes what a restart does, so it is saved only where `listener.bindings` names a file |
 | `maap-range` | the MAAP block the entity defended, probed first at the next start | wherever the addresses come from MAAP: `stream.address_mode = "maap"` under either profile, and the Milan profile when the key is left empty |
 | `stream-formats` | the current format of each stream input (Milan v1.3 5.3.8.1), one line per input | under either profile, from the first time a controller changes a format; an entity nobody has set a format on has no such file |
+| `talker-advertises` | the Talker Advertise of each stream output as it was last handed to MSRP, without its latency, one line per output (below) | under either profile, about a second after the stream addresses are final |
+
+### A stream output held back after a restart
+
+IEEE 802.1Q-2022 35.2.2.8: "MSRP does not support changes in any of the
+FirstValue fields for an existing StreamID", and a Talker that brings a
+stream up again with another FirstValue under the same StreamID must
+leave "at least two LeaveAllTime ... time periods between when the
+Talker removes the existing Stream registration and declares the new
+Stream", or "the FDB may allow the new Stream data to start flowing while
+the old Stream bandwidth constraints are still configured".
+
+Within one run the MSRP participant keeps that wait itself. Across a
+restart only the state directory can say that a stream's destination
+address, VLAN, TSpec or priority is no longer what the bridges last had
+registered (`avb_entity_talker_advertises.hpp`):
+
+| When | What the kit does |
+|---|---|
+| At each start | reads `talker-advertises` and tells the MSRP handler what each stream output declared in the last run (`MsrpHandler::talker_hold_after_restart()`) |
+| A stream handed to MSRP with the parameters of the last run | declared as ever; nothing waits |
+| A stream handed to MSRP with other parameters | its Talker Advertise is held back two LeaveAll periods from the start and goes out with the first PDU after them, 30 to 45 s after the start. A status line says so at both ends |
+| While a stream is held back | its gate is shut (`TalkerGate::note_advertise_held()`), with `gate_talker_on_listener` off too, so `talker_should_transmit()` and the gate hook say so and no frame of the stream is sent |
+| About once a second | writes the file again when a stream's parameters changed, but keeps a stream's old line while a wait is running for it: a restart inside the wait holds the stream back again |
+
+A changed AccumulatedLatency holds nothing back: it is the one field a
+Talker may change in place (35.2.2.8.6), and the file does not keep it.
+A file that cannot be read holds nothing back and is replaced; with no
+state directory nothing is kept and nothing is held back.
+
+The usual way to meet this is a MAAP block that changed between two
+runs. Keeping `maap-range` (above) is what makes it rare: the entity
+probes the block it defended last time first.
 
 A key that names a file (`listener.bindings`, `stream.maap_range_file`)
 is used as given and the state directory is left alone for that kind. A

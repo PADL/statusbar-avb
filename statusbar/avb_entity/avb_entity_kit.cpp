@@ -1298,7 +1298,128 @@ void AvbEntityKit::restore_control_state(TimePoint const now)
     // MVRP must say what the MSRP Domain declares.
     (void)host_.components().mvrp_handler.register_vlan(current_vlan_id(), now);
     restart_milan_sinks(now);
+    restore_saved_state(now);
+}
+
+void AvbEntityKit::restore_saved_state(TimePoint const now)
+{
     restore_clock_sources();
+    restore_talker_holds(now);
+}
+
+auto AvbEntityKit::talker_advertises_file(bool const make) -> std::string
+{
+    if (make) {
+        return state_file(std::string{}, entity_state_file::TALKER_ADVERTISES, true);
+    }
+    if (config_.state_dir.empty()) {
+        return {};
+    }
+    auto const dir = entity_state_dir_path(config_.state_dir, host_.components().acmp_listener.entity_id());
+    return entity_state_file_path(dir, entity_state_file::TALKER_ADVERTISES);
+}
+
+void AvbEntityKit::restore_talker_holds(TimePoint const now)
+{
+    // IEEE 802.1Q 35.2.2.8: a stream that comes back with another FirstValue
+    // under its StreamID waits two LeaveAll periods. Only what the last run
+    // left in the state directory can say that the value changed.
+    talker_streams_handed_ = false;
+    auto const path = talker_advertises_file(false);
+    auto const saved = path.empty() ? success(SavedTalkerAdvertises{}) : load_talker_advertises(path);
+    if (!saved.has_value()) {
+        host_.ctl_log().error(
+            "state: the saved Talker Advertises cannot be read (error {}); no stream is held back", saved.error().value());
+        return;
+    }
+    kept_talker_advertises_ = *saved;
+    for (auto const& one : kept_talker_advertises_) {
+        (void)host_.components().msrp_handler.talker_hold_after_restart(talker_srp_info(one), now);
+    }
+}
+
+void AvbEntityKit::follow_talker_holds(RawTimePoint const now)
+{
+    bool changed = false;
+    for (auto const& spec : talker_specs_) {
+        changed = follow_talker_hold(spec) || changed;
+    }
+    if (changed) {
+        notify_admission(now);
+    }
+}
+
+auto AvbEntityKit::follow_talker_hold(StreamSpec const& spec) -> bool
+{
+    auto const stream_id = make_talker_srp_info(spec).stream_id;
+    bool const held = host_.components().msrp_handler.talker_held(stream_id);
+    if (!gate_.note_advertise_held(spec.index, held)) {
+        return false;
+    }
+    host_.ctl_log().status("srp: talker stream {} Talker Advertise {}", spec.index, talker_hold_words(stream_id, held));
+    return true;
+}
+
+auto AvbEntityKit::talker_hold_words(nanoavb::StreamId const& stream_id, bool const held) const -> logging::StrLit
+{
+    if (held) {
+        return logging::lit("held back two LeaveAll periods: its parameters are not those of the last run (IEEE 802.1Q 35.2.2.8)");
+    }
+    // A hold ends with the value declared, or, where the handler waits for a
+    // listener, with nobody wanting the stream any more: then nothing went out.
+    auto const* const stream = host_.components().msrp_handler.get_talker_stream(stream_id);
+    bool const declared = stream != nullptr && stream->state == nanoavb::TalkerReservationState::Advertising;
+    return declared ? logging::lit("no longer held back: declared")
+                    : logging::lit("no longer held back: no listener wants the stream now");
+}
+
+void AvbEntityKit::save_talker_advertises(int64_t const now_ns)
+{
+    static constexpr int64_t LOOK_EVERY_NS = 1'000'000'000;
+    if (!talker_streams_handed_ || now_ns < talker_advertises_look_ns_) {
+        return;
+    }
+    talker_advertises_look_ns_ = now_ns + LOOK_EVERY_NS;
+    auto const kept = talker_advertises_to_keep();
+    if (!std::ranges::equal(kept, kept_talker_advertises_)) {
+        write_talker_advertises(kept);
+    }
+}
+
+auto AvbEntityKit::talker_advertises_to_keep() const -> SavedTalkerAdvertises
+{
+    SavedTalkerAdvertises kept{};
+    for (auto const& spec : talker_specs_) {
+        if (auto const one = talker_advertise_to_keep(make_talker_srp_info(spec)); one.has_value()) {
+            (void)kept.try_push_back(*one);
+        }
+    }
+    return kept;
+}
+
+auto AvbEntityKit::talker_advertise_to_keep(nanoavb::TalkerStreamSrpInfo const& info) const -> std::optional<SavedTalkerAdvertise>
+{
+    // While a wait runs for the stream, the bridges last had the value of
+    // before: the file keeps that line, so a restart inside the wait holds
+    // the stream back again.
+    if (!host_.components().msrp_handler.talker_hold_running(info.stream_id)) {
+        return saved_talker_advertise(info);
+    }
+    auto const* const before =
+        std::ranges::find(kept_talker_advertises_, info.stream_id.to_uint64(), &SavedTalkerAdvertise::stream_id);
+    return before != kept_talker_advertises_.end() ? std::optional{*before} : std::nullopt;
+}
+
+void AvbEntityKit::write_talker_advertises(SavedTalkerAdvertises const& kept)
+{
+    kept_talker_advertises_ = kept;
+    auto const path = talker_advertises_file(true);
+    if (path.empty()) {
+        return;
+    }
+    if (auto const saved = avb_entity::save_talker_advertises(path, kept); !saved) {
+        host_.ctl_log().error("state: the Talker Advertises were not saved (error {})", saved.error().value());
+    }
 }
 
 void AvbEntityKit::restart_milan_sinks(TimePoint const now)
@@ -1666,6 +1787,7 @@ void AvbEntityKit::advertise_talker_streams(TimePoint const time)
             host_.ctl_log().warning("msrp: talker_advertise (stream {}) failed: errno {}", spec.index, result.error().value());
         }
     }
+    talker_streams_handed_ = true;  // what MSRP now has is what the state directory keeps for the next start
 }
 
 auto AvbEntityKit::crf_media_clock_events() const -> std::optional<uint32_t>
@@ -1696,8 +1818,10 @@ void AvbEntityKit::end_cycle(int64_t const now_ns)
 {
     poll_counters(now_ns);
     follow_crf_media_clock();  // after the fold: an interruption it counted is followed in this cycle
+    follow_talker_holds(raw_at(now_ns));
     on_admission_timer(raw_at(now_ns));
     tell_changed_input_info();
+    save_talker_advertises(now_ns);
 }
 
 void AvbEntityKit::poll_counters(int64_t const now_ns)

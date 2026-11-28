@@ -106,6 +106,16 @@ struct TalkerGate
     /// The instant last told (tell_time); RawTimePoint{} before the first.
     [[nodiscard]] auto told_time() const noexcept -> RawTimePoint { return told_now_; }
 
+    /// Reactor thread: talker stream @p idx's Talker Advertise is held back (a
+    /// changed value waiting out the one it replaces, IEEE 802.1Q 35.2.2.8) or
+    /// no longer. A held stream is not admitted, with the gate disabled too:
+    /// no frame goes out of a stream whose attribute is being kept off the
+    /// wire. Returns whether that changed; out-of-range indices change nothing.
+    auto note_advertise_held(uint16_t const idx, bool const held) noexcept -> bool
+    {
+        return idx < advertise_held_.size() && advertise_held_[idx].exchange(held, std::memory_order_relaxed) != held;
+    }
+
     /// Any thread: mark talker stream @p idx Started (@p started true) or Stopped.
     /// Stopped suppresses transmit without tearing down the ACMP connection or the
     /// reservation. Defaults Started; out-of-range indices are ignored.
@@ -163,6 +173,9 @@ struct TalkerGate
     /// until it first is, and while the gate has been told no time. Written by
     /// note_listener_ready (reactor) alone.
     std::array<std::atomic<int64_t>, STREAM_COUNT> ready_raw_ns_{};
+    /// Whether each stream's Talker Advertise is held back (note_advertise_held,
+    /// reactor); read by admitted() on any thread.
+    std::array<std::atomic<bool>, STREAM_COUNT> advertise_held_{};
     /// Stream Started state, per stream (defaults true; see the constructor). A
     /// Stopped stream is not admitted even when connected + Listener Ready.
     std::array<std::atomic<bool>, STREAM_COUNT> stream_started_{};

@@ -329,7 +329,8 @@ struct TalkerStreams
     /// STREAM_OUTPUT @p stream_index's frames as this talker sends them now, from @p src_mac: its destination, the
     /// VID and PCP in force, its stream ID and format. nullopt for no AAF or CRF stream there, or a frame the talker
     /// would not send. It describes the frames and starts none: a data plane sends a stream only while its gate is open
-    /// (AvbEntityKit::talker_should_transmit()). Reactor thread.
+    /// (AvbEntityKit::talker_should_transmit()), and the gate is shut while the stream's Talker Advertise is held back
+    /// after a restart or a change (IEEE 802.1Q 35.2.2.8). Reactor thread.
     [[nodiscard]] auto frame_template(uint16_t stream_index, ieee::Eui48 const& src_mac) const noexcept
         -> std::optional<StreamFrameTemplate>;
     /// Called with an open stream's index at each change of its frame_template(): a VID or PCP set_vlan() moves (every

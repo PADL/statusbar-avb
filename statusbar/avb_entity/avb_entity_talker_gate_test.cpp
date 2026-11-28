@@ -97,6 +97,29 @@ TEST(talker_gate, a_disabled_gate_admits_every_stream)
     EXPECT_TRUE(gate.should_transmit(3, T0));
 }
 
+// IEEE 802.1Q 35.2.2.8: a stream whose changed Talker Advertise is waiting out
+// the value it replaces has no attribute on the wire. It is not admitted,
+// whatever else holds, and a disabled gate does not let it through either.
+TEST(talker_gate, a_stream_whose_advertise_is_held_back_is_not_admitted_with_the_gate_disabled_too)
+{
+    MsrpGate msrp{};
+    msrp.gate.note_listener_ready(sid(1), true, T0);
+    EXPECT_TRUE(msrp.gate.admitted(1, T0));
+    EXPECT_TRUE(msrp.gate.note_advertise_held(1, true));
+    EXPECT_FALSE(msrp.gate.note_advertise_held(1, true));  // told again: no change
+    EXPECT_FALSE(msrp.gate.admitted(1, T0));
+    EXPECT_FALSE(msrp.gate.should_transmit(1, T0));
+    EXPECT_TRUE(msrp.gate.note_advertise_held(1, false));
+    EXPECT_TRUE(msrp.gate.admitted(1, T0));
+
+    auto const components = components_with_talkers();
+    TalkerGate open{false, *components};
+    EXPECT_TRUE(open.note_advertise_held(2, true));
+    EXPECT_FALSE(open.admitted(2, T0));
+    EXPECT_TRUE(open.admitted(1, T0));  // the stream beside it is not held
+    EXPECT_FALSE(open.note_advertise_held(static_cast<uint16_t>(TalkerGate::STREAM_COUNT), true));
+}
+
 TEST(talker_gate, an_index_beyond_the_gate_is_ignored)
 {
     MsrpGate const msrp;

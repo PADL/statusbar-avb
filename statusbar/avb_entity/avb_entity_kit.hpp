@@ -38,6 +38,7 @@
 #include "statusbar/avb_entity/avb_entity_stream_port.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
+#include "statusbar/avb_entity/avb_entity_talker_advertises.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_gate.hpp"
 #include "statusbar/avb_entity/avb_entity_talker_streams.hpp"
 #include "statusbar/nanoavb/nanoavb_aem_descriptor_storage_handler.hpp"
@@ -565,6 +566,30 @@ class AvbEntityKit
     void save_clock_sources(uint16_t domain, uint16_t source);
     /// The clock sources saved before the last stop, back in force.
     void restore_clock_sources();
+
+    // --- The Talker Advertises of the last run (IEEE 802.1Q 35.2.2.8) -------
+    /// The file the stream outputs' declared Talker Advertises are kept in, empty when the machine
+    /// has no state directory; @p make as for clock_sources_file().
+    [[nodiscard]] auto talker_advertises_file(bool make) -> std::string;
+    /// At a start: the MSRP handler is told what each stream output declared in the last run, so a
+    /// stream whose parameters changed since is held back two LeaveAll periods from @p now.
+    void restore_talker_holds(TimePoint now);
+    /// Once a reactor cycle: each stream's held state to the gate, and the gate hooks told a change.
+    void follow_talker_holds(RawTimePoint now);
+    /// Stream @p spec's held state to the gate; whether it changed (a status line says so).
+    [[nodiscard]] auto follow_talker_hold(StreamSpec const& spec) -> bool;
+    /// What the status line says of a stream whose held state became @p held.
+    [[nodiscard]] auto talker_hold_words(nanoavb::StreamId const& stream_id, bool held) const -> logging::StrLit;
+    /// About once a second: the file is written again when what it should hold has changed.
+    void save_talker_advertises(int64_t now_ns);
+    /// What the file should hold now: each stream's parameters as handed to MSRP, or, while a
+    /// wait is running for the stream, the line the file already has for it.
+    [[nodiscard]] auto talker_advertises_to_keep() const -> SavedTalkerAdvertises;
+    /// What is kept for a stream with the parameters @p info, nullopt for nothing.
+    [[nodiscard]] auto talker_advertise_to_keep(nanoavb::TalkerStreamSrpInfo const& info) const
+        -> std::optional<SavedTalkerAdvertise>;
+    /// @p kept written to the file (when there is a state directory) and remembered as what it holds.
+    void write_talker_advertises(SavedTalkerAdvertises const& kept);
     /// One saved clock source to its domain, when the model still lists it and the entity can
     /// still run it; a status line says so when not.
     void restore_clock_source(SavedClockSource const& saved);
@@ -657,6 +682,9 @@ class AvbEntityKit
     /// What every start puts back: the configured Domain, valid stream
     /// addresses, the stream callbacks, the VID, and Milan sinks at startup.
     void restore_control_state(TimePoint now);
+    /// What the state directory kept of the last run and a start reads back: the clock sources,
+    /// and the Talker Advertises a changed stream has to wait out.
+    void restore_saved_state(TimePoint now);
     void restart_milan_sinks(TimePoint now);
     /// The talker's tu follows the grandmaster of this start's Announce handler, none at first.
     void follow_grandmaster();
@@ -768,6 +796,13 @@ class AvbEntityKit
     std::bitset<MAX_CLOCK_SOURCES> external_clock_sources_run_{};
     /// crf_media_clock_events() at the last cycle's look; nullopt while the media clock followed no CRF input.
     std::optional<uint32_t> crf_media_clock_events_seen_{};
+
+    /// What the talker-advertises file holds: read at the start, then what was last written.
+    SavedTalkerAdvertises kept_talker_advertises_{};
+    /// The stream outputs have been handed to MSRP with their final addresses in this run.
+    bool talker_streams_handed_{false};
+    /// When save_talker_advertises() next looks (reactor cycle time, ns).
+    int64_t talker_advertises_look_ns_{0};
 
     /// Each talker stream's presentation offset a controller set (reactor thread); unset,
     /// the configured one.

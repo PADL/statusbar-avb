@@ -1747,6 +1747,140 @@ TEST(avb_entity_kit_state, where_the_state_directory_is_not_there_a_milan_kit_ma
     EXPECT_TRUE(pair.talker.stop(pair.now));
 }
 
+namespace {
+
+/// The kit's own talker-advertises file inside @p dir.
+auto talker_advertises_path(StateDir const& dir, AvbEntityAudioIOConfig const& config) -> std::string
+{
+    return (dir.state / entity_state_dir_name(config.entity_id) / entity_state_file::TALKER_ADVERTISES).string();
+}
+
+/// A classic kit on static addresses with @p dir as its state directory and the SRP gate as @p gated.
+auto talker_config(StateDir const& dir, bool const gated) -> AvbEntityAudioIOConfig
+{
+    auto config = make_config(2, "classic");
+    config.state_dir = dir.state.string();
+    config.gate_talker_on_listener = gated;
+    return config;
+}
+
+/// One reactor cycle of @p kit ends at @p seconds.
+void end_cycle_at(KitUnderTest& kit, int64_t const seconds)
+{
+    kit->end_cycle(seconds * 1'000'000'000LL);
+}
+
+}  // namespace
+
+// IEEE 802.1Q 35.2.2.8 needs two LeaveAll periods between a stream's old value
+// and another under its StreamID, and a restarted entity knows the old value
+// only if it kept it. The kit writes what it hands to MSRP into its state
+// directory, one line per stream output.
+TEST(avb_entity_kit_talker_hold, a_kit_keeps_what_it_declares_for_its_next_start)
+{
+    StateDir const dir{"statusbar_state_dir_talker_keep_functional_test"};
+    auto const config = talker_config(dir, true);
+    KitUnderTest kit{config};
+    // Nothing is kept of streams MSRP has not been handed yet: before the
+    // link is up and a grandmaster is there, their parameters are not final.
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    end_cycle_at(kit, 1);
+    EXPECT_FALSE(std::filesystem::exists(talker_advertises_path(dir, config)));
+    kit->on_link_up(TimePoint{std::chrono::seconds{2}});
+    kit->on_gptp_announce(TimePoint{std::chrono::seconds{3}}, true);
+    EXPECT_FALSE(std::filesystem::exists(talker_advertises_path(dir, config)));  // nor before a cycle has looked
+    end_cycle_at(kit, 4);
+    auto const kept = load_talker_advertises(talker_advertises_path(dir, config));
+    EXPECT_TRUE(kept.has_value());
+    EXPECT_EQ(kept->size(), kit.talker_specs().size());
+    for (size_t i = 0; i < kept->size() && i < kit.talker_specs().size(); ++i) {
+        EXPECT_TRUE((*kept)[i] == saved_talker_advertise(kit->make_talker_srp_info(kit.talker_specs()[i])));
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
+// Started again with the parameters it kept, the kit holds nothing back.
+// Started with another destination address than the last run declared for
+// one stream, it holds that stream's Advertise back: MSRP says so, the gate
+// is shut for it though the SRP gate is off, the stream beside it runs, and
+// the file keeps the old line until the wait is over, so that a restart
+// inside the wait would hold the stream back again.
+TEST(avb_entity_kit_talker_hold, a_kit_restarted_with_another_address_holds_that_stream_back_and_no_other)
+{
+    StateDir const dir{"statusbar_state_dir_talker_hold_functional_test"};
+    auto const config = talker_config(dir, false);
+    auto const raw = [](int64_t const seconds) { return realtime::MonotonicRawClock::time_point{std::chrono::seconds{seconds}}; };
+    SavedTalkerAdvertises declared{};
+    {
+        KitUnderTest first{config};
+        bring_up(first);
+        end_cycle_at(first, 4);
+        declared = *load_talker_advertises(talker_advertises_path(dir, config));
+        EXPECT_TRUE(declared.size() >= 2);
+        EXPECT_TRUE(first.stop(TimePoint{std::chrono::seconds{5}}));
+    }
+    {
+        KitUnderTest same{config};
+        bring_up(same);
+        end_cycle_at(same, 4);
+        for (auto const& spec : same.talker_specs()) {
+            EXPECT_FALSE(same->host().components().msrp_handler.talker_held(same->make_talker_srp_info(spec).stream_id));
+            EXPECT_TRUE(same->talker_should_transmit(spec.index, raw(4)));
+        }
+        EXPECT_TRUE(same.stop(TimePoint{std::chrono::seconds{5}}));
+    }
+
+    // What the last run is said to have declared for the first stream: another address.
+    auto before = declared;
+    before[0].dest_address ^= 0x40U;
+    EXPECT_TRUE(save_talker_advertises(talker_advertises_path(dir, config), before).has_value());
+
+    KitUnderTest changed{config};
+    bring_up(changed);
+    end_cycle_at(changed, 4);
+    auto const& msrp = changed->host().components().msrp_handler;
+    auto const& held = changed.talker_specs()[0];
+    auto const& beside = changed.talker_specs()[1];
+    EXPECT_TRUE(msrp.talker_held(changed->make_talker_srp_info(held).stream_id));
+    EXPECT_FALSE(msrp.talker_held(changed->make_talker_srp_info(beside).stream_id));
+    EXPECT_FALSE(changed->talker_should_transmit(held.index, raw(4)));
+    EXPECT_TRUE(changed->talker_should_transmit(beside.index, raw(4)));
+    auto const kept = load_talker_advertises(talker_advertises_path(dir, config));
+    EXPECT_TRUE(kept.has_value() && kept->size() == before.size() && (*kept)[0] == before[0]);
+    EXPECT_TRUE(changed.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
+// A file that cannot be read holds nothing back, and is written afresh.
+TEST(avb_entity_kit_talker_hold, a_corrupt_file_holds_nothing_back_and_is_replaced)
+{
+    StateDir const dir{"statusbar_state_dir_talker_corrupt_functional_test"};
+    auto const config = talker_config(dir, false);
+    std::filesystem::create_directories(std::filesystem::path{talker_advertises_path(dir, config)}.parent_path());
+    std::ofstream{talker_advertises_path(dir, config)} << "not the file\n";
+
+    KitUnderTest kit{config};
+    bring_up(kit);
+    end_cycle_at(kit, 4);
+    for (auto const& spec : kit.talker_specs()) {
+        EXPECT_FALSE(kit->host().components().msrp_handler.talker_held(kit->make_talker_srp_info(spec).stream_id));
+    }
+    auto const kept = load_talker_advertises(talker_advertises_path(dir, config));
+    EXPECT_TRUE(kept.has_value() && kept->size() == kit.talker_specs().size());
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
+// With no state directory nothing is kept and nothing is held back.
+TEST(avb_entity_kit_talker_hold, with_no_state_directory_nothing_is_kept)
+{
+    KitUnderTest kit{make_config(2, "classic")};
+    bring_up(kit);
+    end_cycle_at(kit, 4);
+    for (auto const& spec : kit.talker_specs()) {
+        EXPECT_FALSE(kit->host().components().msrp_handler.talker_held(kit->make_talker_srp_info(spec).stream_id));
+    }
+    EXPECT_TRUE(kit.stop(TimePoint{std::chrono::seconds{5}}));
+}
+
 TEST(avb_entity_kit_state, a_maap_kit_has_its_state_directory_for_the_range_it_defends)
 {
     // The interface does not exist, so no block is acquired here; the place its range would be saved is the entity's.

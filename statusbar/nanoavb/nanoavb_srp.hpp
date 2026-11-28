@@ -650,6 +650,16 @@ class MsrpHandler
         return participant_.talker_change_pending(stream_id);
     }
 
+    /// Whether a wait is running for @p stream_id's Talker Advertise, a value
+    /// waiting or not (MsrpParticipant::talker_hold_running()). While it is,
+    /// what the bridges last had registered for the StreamID is the value
+    /// from before: an entity that keeps its declared values for the next
+    /// start keeps that one until the wait is over.
+    [[nodiscard]] auto talker_hold_running(StreamId const& stream_id) const noexcept -> bool
+    {
+        return participant_.talker_hold_running(stream_id);
+    }
+
     [[nodiscard]] auto talker_withdraw(StreamId const& stream_id, TimePoint now) -> Status
     {
         for (auto& stream : talker_streams_) {

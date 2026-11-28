@@ -340,6 +340,13 @@ class MsrpParticipantT
     /// is: what this run did with it decides.
     auto hold_talker_value_after_restart(TalkerAdvertiseFirstValue const& previous, TimePoint now) -> Status;
 
+    /// Whether a wait is running for @p stream_id's Talker Advertise: a value
+    /// is waiting (talker_change_pending()), or another value than the one
+    /// last declared would have to wait, as it does after a change, a
+    /// withdrawal or a restart told by hold_talker_value_after_restart().
+    /// While it is, the value the bridges last had registered is the old one.
+    [[nodiscard]] auto talker_hold_running(tsn::StreamId const& stream_id) const noexcept -> bool;
+
     /// Declare a Talker Failed attribute (used when a previously
     /// advertised talker cannot meet reservation requirements).
     auto declare_talker_failed(TalkerFailedFirstValue const& fv, TimePoint now) -> Status;

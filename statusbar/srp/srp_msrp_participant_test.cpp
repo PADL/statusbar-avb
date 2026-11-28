@@ -1658,6 +1658,35 @@ TEST(msrp_participant, a_hold_after_a_restart_ends_by_itself_and_then_any_value_
     EXPECT_TRUE(!sent.empty() && sent.front().event == AttributeEvent::New && sent.front().max_frame_size == 300U);
 }
 
+// A wait is running from the moment the old run's value is told, a value
+// waiting or not, until the first PDU after its two LeaveAll periods; and
+// after a withdrawal in the same way. An entity keeps the old value for its
+// next start as long.
+TEST(msrp_participant, a_wait_is_running_from_the_restart_or_a_withdrawal_until_its_two_leaveall_periods_are_over)
+{
+    MsrpParticipant a{test_msrp_config(), 0xc025};
+    Fabric fab{};
+    a.set_send_pdu(fab.make_a_sender());
+    TestClock clock{};
+    a.start(clock.now);
+    EXPECT_FALSE(a.talker_hold_running(make_stream_id(1)));
+    EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(make_talker_adv(1), clock.now)));
+    EXPECT_TRUE(a.talker_hold_running(make_stream_id(1)));
+    EXPECT_FALSE(a.talker_hold_running(make_stream_id(2)));
+    run_quarters(a, clock, 110);
+    EXPECT_TRUE(a.talker_hold_running(make_stream_id(1)));
+    run_quarters(a, clock, 74);  // past the thirty seconds and a LeaveAll of ours
+    EXPECT_FALSE(a.talker_hold_running(make_stream_id(1)));
+
+    // The old run's value declared again ends the wait at once.
+    EXPECT_TRUE(is_success(a.hold_talker_value_after_restart(make_talker_adv(2), clock.now)));
+    EXPECT_TRUE(is_success(a.declare_talker_advertise(make_talker_adv(2), clock.now)));
+    EXPECT_FALSE(a.talker_hold_running(make_stream_id(2)));
+    a.transmit_pending(clock.now);
+    EXPECT_TRUE(is_success(a.withdraw_talker(make_stream_id(2), clock.now)));
+    EXPECT_TRUE(a.talker_hold_running(make_stream_id(2)));
+}
+
 // What this run has done with a StreamID decides: a value told of the old run
 // after the stream is declared changes nothing.
 TEST(msrp_participant, a_hold_told_for_a_stream_this_run_has_declared_is_ignored)

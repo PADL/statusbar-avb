@@ -585,6 +585,17 @@ auto MsrpParticipantT<Limits>::hold_talker_value_after_restart(TalkerAdvertiseFi
 }
 
 template <class Limits>
+auto MsrpParticipantT<Limits>::talker_hold_running(tsn::StreamId const& stream_id) const noexcept -> bool
+{
+    for (auto const& rec : talker_adv_) {
+        if (rec.first_value.stream_id == stream_id) {
+            return rec.pending_first_value.has_value() || rec.pending_not_before.has_value();
+        }
+    }
+    return false;
+}
+
+template <class Limits>
 auto MsrpParticipantT<Limits>::talker_change_pending(tsn::StreamId const& stream_id) const noexcept -> bool
 {
     for (auto const& rec : talker_adv_) {
