@@ -571,6 +571,13 @@ arguments before the source generation. `CrfClockRecovery`'s consumer
 starts its estimate again on a toggle of mr or a new source, and
 `restart()` publishes the unlocked estimate at once.
 
+`start()` binds `crf_recovery()` to one CRF input: the one the CRF clock
+source locates, or the first CRF input when the entity names no CRF clock
+source. A CRF clock source that locates no CRF input binds it to none,
+since `media_rate()` follows that source alone. It leaves alone an input
+the host bound with `ListenerStreams::set_crf()` before `start()`, and
+the other CRF inputs are the host's.
+
 The source chosen is saved in `clock-sources` (below) at each accepted
 SET_CLOCK_SOURCE and put back in force at the next start (Milan v1.3
 5.3.11.1). A saved source the model no longer lists, or one the entity

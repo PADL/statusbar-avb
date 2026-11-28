@@ -127,6 +127,19 @@ template <typename T>
     }
 }
 
+/// The STREAM_INPUT that CLOCK_SOURCE @p clock_source_index locates (IEEE 1722.1-2021 Clause 7.2.9),
+/// the inverse of find_input_stream_clock_source(); nullopt for a source located elsewhere, or none.
+[[nodiscard]] inline auto located_stream_input(nanoavb::DescriptorStorage const& storage, uint16_t const clock_source_index)
+    -> std::optional<uint16_t>
+{
+    auto const cs =
+        load_descriptor<atdecc::aem::DescriptorClockSource>(storage, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, clock_source_index);
+    if (!cs || cs->clock_source_location_type != atdecc::aem::DESCRIPTOR_STREAM_INPUT) {
+        return std::nullopt;
+    }
+    return cs->clock_source_location_index.get();
+}
+
 /// The CLOCK_DOMAIN 0 authored default clock-source selection (0 when the
 /// model declares no clock domain).
 [[nodiscard]] inline auto authored_clock_source(nanoavb::DescriptorStorage const& storage) -> uint16_t

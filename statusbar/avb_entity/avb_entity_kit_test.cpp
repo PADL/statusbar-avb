@@ -29,6 +29,7 @@
 #include "statusbar/gptp/gptp.hpp"
 #include "statusbar/ieee/ieee.hpp"
 #include "statusbar/itc/itc_stop_token.hpp"
+#include "statusbar/nanoavb/nanoavb_aem_blob_writer.hpp"
 #include "statusbar/nanoavb/nanoavb_components.hpp"
 #include "statusbar/nanoavb/nanoavb_srp.hpp"
 #include "statusbar/net/net_message_reactor.hpp"
@@ -93,7 +94,7 @@ struct FakeClock
 class KitUnderTest
 {
   public:
-    explicit KitUnderTest(AvbEntityAudioIOConfig config)
+    explicit KitUnderTest(AvbEntityAudioIOConfig config, std::optional<uint16_t> const crf_clock_source = std::nullopt)
         : config_{std::move(config)}
         , storage_{*atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{config_.descriptor_storage_blob})}
         , handler_{storage_, config_.entity_id, config_.entity_model_id, "1.0", "kit test", std::nullopt, true}
@@ -106,7 +107,7 @@ class KitUnderTest
               listener_specs_,
               48000,
               0,
-              std::nullopt,
+              crf_clock_source,
               media_clock_,
               last_gptp_ns_,
               nullptr,
@@ -1962,6 +1963,99 @@ TEST(avb_entity_kit_acquire, the_configured_acquire_mode_reaches_the_handler_and
     std::array<uint8_t, nanoavb::MAX_AEM_RESPONSE_SIZE> out{};
     auto const answered = milan->host().components().aem_handler.handle_command(header, make_const_span(asked), out);
     EXPECT_EQ(answered.status, atdecc::AEM_STATUS_NOT_SUPPORTED);
+}
+
+//
+// The kit's CRF media clock recovery and the host's CRF consumers
+//
+
+namespace {
+
+/// The tone AAF model (examples/tone-aaf.json) with its CRF STREAM_INPUT 0 three times over, and its
+/// INPUT_STREAM CLOCK_SOURCE 1 located at STREAM_INPUT @p located.
+auto crf_inputs_blob(uint16_t const located) -> std::vector<uint8_t>
+{
+    auto const base = load_file(std::filesystem::path{__FILE__}.parent_path() / "testdata" / "entity_tone_aaf.bin");
+    auto const storage = atdecc::aem::DescriptorStorage::create(std::span<uint8_t const>{base});
+    auto source = *load_descriptor<atdecc::aem::DescriptorClockSource>(*storage, 0, atdecc::aem::DESCRIPTOR_CLOCK_SOURCE, 1);
+    source.clock_source_location_index = located;
+    nanoavb::AemBlobWriter w;
+    for (uint16_t type = 0; type <= atdecc::aem::DESCRIPTOR_CONTROL_BLOCK; ++type) {
+        for (uint16_t index = 0; storage->get_descriptor(0, type, index).has_value(); ++index) {
+            bool const relocated = type == atdecc::aem::DESCRIPTOR_CLOCK_SOURCE && index == 1;
+            w.add(0, type, index, relocated ? make_const_span(source) : *storage->get_descriptor(0, type, index));
+        }
+    }
+    for (uint16_t const index : {uint16_t{1}, uint16_t{2}}) {
+        w.add(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, index, *storage->get_descriptor(0, atdecc::aem::DESCRIPTOR_STREAM_INPUT, 0));
+    }
+    return w.write();
+}
+
+/// A classic entity's configuration over crf_inputs_blob(@p located).
+auto crf_inputs_config(uint16_t const located = 1) -> AvbEntityAudioIOConfig
+{
+    auto config = make_config(2, "classic");
+    config.descriptor_storage_blob = crf_inputs_blob(located);
+    return config;
+}
+
+/// Hand STREAM_INPUT @p index's CRF consumer one timestamp, as the RX path does; false with none bound.
+auto feed_crf(KitUnderTest& kit, uint16_t const index) -> bool
+{
+    auto* const slot = kit->listener()->slot_for(index);
+    if (slot == nullptr || !slot->on_crf) {
+        return false;
+    }
+    slot->on_crf(1'000'000'000ULL, 0, 1'000'000'000, false, 1);
+    return true;
+}
+
+}  // namespace
+
+TEST(avb_entity_kit_crf, the_recovery_follows_the_input_the_crf_clock_source_locates_and_no_other)
+{
+    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_FALSE(feed_crf(kit, 0));
+    EXPECT_FALSE(feed_crf(kit, 2));
+    EXPECT_TRUE(feed_crf(kit, 1));
+    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{1});
+}
+
+TEST(avb_entity_kit_crf, without_a_crf_clock_source_the_recovery_follows_the_first_crf_input)
+{
+    KitUnderTest kit{crf_inputs_config()};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    EXPECT_TRUE(feed_crf(kit, 0));
+    EXPECT_FALSE(feed_crf(kit, 1));
+    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{1});
+}
+
+// A CRF clock source that locates no CRF input feeds the recovery from none: media_rate() follows
+// that source alone, so another input must not stand in for it.
+TEST(avb_entity_kit_crf, a_crf_clock_source_at_no_crf_input_binds_the_recovery_to_none)
+{
+    KitUnderTest kit{crf_inputs_config(/*located=*/7), /*crf_clock_source=*/1};
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    for (uint16_t index = 0; index < 3; ++index) {
+        EXPECT_FALSE(feed_crf(kit, index));
+    }
+}
+
+TEST(avb_entity_kit_crf, a_consumer_the_host_binds_before_start_is_kept)
+{
+    KitUnderTest kit{crf_inputs_config(), /*crf_clock_source=*/1};
+    std::array<int, 3> host_calls{};
+    for (uint16_t index = 0; index < 3; ++index) {
+        kit->listener()->set_crf(index, [&host_calls, index](uint64_t, uint16_t, int64_t, bool) { ++host_calls.at(index); });
+    }
+    EXPECT_TRUE(kit.start(TimePoint{std::chrono::seconds{1}}));
+    for (uint16_t index = 0; index < 3; ++index) {
+        EXPECT_TRUE(feed_crf(kit, index));
+        EXPECT_EQ(host_calls.at(index), 1);
+    }
+    EXPECT_EQ(kit->crf_recovery().estimate().samples, uint64_t{0});
 }
 
 TEST_MAIN(statusbar_avb_entity, avb_entity_kit_test)
