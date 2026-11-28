@@ -567,7 +567,9 @@ stream_id, and the listener never hands one out twice, so a consumer kept
 across `close_rx()` and `open_stream()` sees a new one too. mr alone does
 not show that another talker's timestamps follow, or the same talker's
 after a new connection. `set_crf()` also accepts a consumer of the four
-arguments before the source generation.
+arguments before the source generation. `CrfClockRecovery`'s consumer
+starts its estimate again on a toggle of mr or a new source, and
+`restart()` publishes the unlocked estimate at once.
 
 The source chosen is saved in `clock-sources` (below) at each accepted
 SET_CLOCK_SOURCE and put back in force at the next start (Milan v1.3

@@ -93,4 +93,69 @@ TEST(crf_recovery, consumer_adapter_feeds_the_filter)
     EXPECT_TRUE(rec.estimate().samples == 32U);
 }
 
+// IEEE 1722-2016 Clause 10.4.3: a toggled mr is a media clock restart, so the estimate starts
+// again; an mr that stays, set or clear, is none.
+TEST(crf_recovery, a_toggled_mr_restarts_the_estimate)
+{
+    CrfClockRecovery rec{};
+    auto consumer = rec.make_consumer();
+    int64_t rx = 1'000'000'000;
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 1);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    consumer(static_cast<uint64_t>(rx), 0, rx, true, 1);
+    rx += kRxStep;
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
+    for (int i = 0; i < 31; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, true, 1);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 32U);
+}
+
+// A new source generation (the input connected again, or to another talker) starts the estimate
+// again, and so does a second consumer of the same recovery (the recovery moved to another input).
+TEST(crf_recovery, a_new_source_or_a_new_consumer_restarts_the_estimate)
+{
+    CrfClockRecovery rec{};
+    auto consumer = rec.make_consumer();
+    int64_t rx = 1'000'000'000;
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 1);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    consumer(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    rx += kRxStep;
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
+
+    for (int i = 0; i < 32; ++i, rx += kRxStep) {
+        consumer(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    }
+    EXPECT_TRUE(rec.estimate().locked);
+    auto moved = rec.make_consumer();
+    moved(static_cast<uint64_t>(rx), 0, rx, false, 2);
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 1U);
+}
+
+// restart() publishes the unlocked estimate itself, so a host that restarts with no timestamp to
+// follow (the talker gone) does not leave the old rate in force.
+TEST(crf_recovery, a_restart_publishes_an_unlocked_estimate_at_once)
+{
+    CrfClockRecovery rec{};
+    drive(rec, 1.0 + 50e-6, 0, 32);
+    EXPECT_TRUE(rec.estimate().locked);
+    rec.restart();
+    auto const est = rec.estimate();
+    EXPECT_FALSE(est.locked);
+    EXPECT_TRUE(est.samples == 0U);
+    EXPECT_TRUE(est.r == 1.0);
+    drive(rec, 1.0, 0, 15, 2'000'000'000);
+    EXPECT_FALSE(rec.estimate().locked);
+    EXPECT_TRUE(rec.estimate().samples == 15U);
+}
+
 TEST_MAIN(statusbar_avb_entity, avb_entity_crf_clock_recovery_test)

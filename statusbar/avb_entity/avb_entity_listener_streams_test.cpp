@@ -13,6 +13,7 @@
 
 #include "statusbar/avb_entity/avb_entity_listener_streams.hpp"
 
+#include "statusbar/avb_entity/avb_entity_crf_clock_recovery.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_counters.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_rx_sink.hpp"
 #include "statusbar/avb_entity/avb_entity_stream_spec.hpp"
@@ -966,6 +967,28 @@ TEST(listener_crf, a_reopened_input_hands_its_kept_consumer_a_new_source)
     crf.ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
     crf.receive(1);
     EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2}));
+}
+
+// The kit's recovery kept across close_rx() and open_stream() starts its estimate again with the
+// reopened input's first timestamp, not on top of the run before.
+TEST(listener_crf, a_recovery_kept_across_a_reopen_of_its_input_restarts)
+{
+    CrfInputUnderTest crf;
+    CrfClockRecovery rec{};
+    crf.ls.set_crf(1, rec.make_consumer());
+    crf.receive(20);
+    EXPECT_TRUE(rec.estimate().samples == 20U);
+    crf.ls.close_rx();
+    StreamSpec spec{};
+    spec.index = 1;
+    spec.format_word = CRF_MILAN_48K;
+    spec.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(crf.ls.open_stream(spec).has_value());
+    crf.ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+    crf.receive(1);
+    auto const est = rec.estimate();
+    EXPECT_TRUE(est.samples == 1U);
+    EXPECT_FALSE(est.locked);
 }
 
 TEST(listener_crf, a_crf_frame_cut_short_of_its_timestamp_or_of_its_header_is_unsupported_too)
