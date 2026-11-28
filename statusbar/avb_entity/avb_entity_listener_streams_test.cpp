@@ -911,9 +911,10 @@ TEST(listener_crf, each_crf_timestamp_reaches_the_consumer_with_its_avtpdus_mr_b
     EXPECT_EQ(crf.counters().media_reset.load(), 2U);
 }
 
-// The source generation is the same from the first AVTPDU on and new with each ACMP connection of
-// the input, to another talker stream or to the same one again; a toggle of mr leaves it.
-TEST(listener_crf, the_crf_source_is_new_with_each_connection_and_not_with_an_mr_toggle)
+// The source generation is the same from the first AVTPDU on and new when the input is given a
+// stream: another talker stream, or its own again after losing it. A toggle of mr leaves it, and
+// so does a CONNECT repeated for the stream the input is on: the same talker, the same media clock.
+TEST(listener_crf, the_crf_source_is_new_when_the_input_is_given_a_stream_and_not_with_a_repeated_connect_or_an_mr_toggle)
 {
     CrfInputUnderTest crf;
     std::vector<uint32_t> sources;
@@ -927,9 +928,12 @@ TEST(listener_crf, the_crf_source_is_new_with_each_connection_and_not_with_an_mr
     crf.receive(1);  // still STREAM_2's: not this input's any more
     crf.stream = STREAM_1;
     crf.receive(2);
-    crf.ls.on_listener_connected(1, STREAM_1, GROUP, sm::TimePoint{});
+    crf.ls.on_listener_connected(1, STREAM_1, GROUP, sm::TimePoint{});  // the CONNECT again: nothing moved
     crf.receive(1);
-    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 1, 2, 2, 3}));
+    crf.ls.on_listener_disconnected(1, sm::TimePoint{}, StreamInputLoss::released);
+    crf.ls.on_listener_connected(1, STREAM_1, GROUP, sm::TimePoint{});  // lost and given again
+    crf.receive(1);
+    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 1, 2, 2, 2, 3}));
 }
 
 // An AVTPDU of the old stream matched before the new connection was published, and delivered after

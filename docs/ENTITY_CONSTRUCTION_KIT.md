@@ -562,11 +562,13 @@ A CRF stream input hands each timestamp to its `StreamCrfFn` with the mr
 bit of the AVTPDU that carried it, so a consumer sees the talker's media
 clock restart as a toggle of mr (IEEE 1722-2016 Clause 10.4.3), and with a
 source generation. That is never 0 and new for the input's first AVTPDU,
-after each ACMP connection of the input and on a change of the AVTPDUs'
-stream_id, and the listener never hands one out twice, so a consumer kept
-across `close_rx()` and `open_stream()` sees a new one too. mr alone does
-not show that another talker's timestamps follow, or the same talker's
-after a new connection. `set_crf()` also accepts a consumer of the four
+when the input is given a stream (another one, or its own again after
+losing it) and on a change of the AVTPDUs' stream_id, and the listener
+never hands one out twice, so a consumer kept across `close_rx()` and
+`open_stream()` sees a new one too. A CONNECT repeated for the stream the
+input is on steps nothing: it is the same talker and the same media
+clock. mr alone does not show that another talker's timestamps follow, or
+the same talker's after the input lost its stream. `set_crf()` also accepts a consumer of the four
 arguments before the source generation. `CrfClockRecovery`'s consumer
 starts its estimate again on a toggle of mr or a new source, and
 `restart()` publishes the unlocked estimate at once.

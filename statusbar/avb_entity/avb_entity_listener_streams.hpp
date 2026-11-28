@@ -112,12 +112,14 @@ struct ListenerStreamSlot
     /// the local receive time, the PDU's mr bit and its source generation —
     /// feed for media-clock recovery. CRF slots only.
     StreamCrfFn on_crf{};
-    /// ACMP connections made to this input (publish_connection): the reactor adds, the RX thread reads.
-    std::atomic<uint32_t> connection_count{0};
-    /// The stream_id and connection_count of the last CRF AVTPDU delivered, and the source
+    /// How often this input was given a stream or lost the one it had (publish_rx_stream): the
+    /// reactor adds, the RX thread reads. A CONNECT repeated for the stream the input is on gives
+    /// it nothing new and is not counted.
+    std::atomic<uint32_t> stream_changes{0};
+    /// The stream_id and stream_changes of the last CRF AVTPDU delivered, and the source
     /// generation handed with its timestamps (crf_source_for). RX thread.
     uint64_t crf_stream_id{0};
-    uint32_t crf_connection{0};
+    uint32_t crf_stream_change{0};
     uint32_t crf_source{0};
 
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
@@ -321,8 +323,10 @@ struct ListenerStreams
     /// A lock gained by an AVTPDU that crossed the input's loss of its stream is given up.
     void drop_lock_of_a_lost_stream(ListenerStreamSlot& slot);
     /// The source generation of @p pdu's timestamps: never 0, and a new one, not used before by this
-    /// listener, for @p slot's first AVTPDU, after an ACMP connection of it, or when the stream_id
-    /// changed; so a change of stream may step it twice. RX thread.
+    /// listener, for @p slot's first AVTPDU, after the input was given a stream (another, or its
+    /// own again after losing it), or when the stream_id changed; so a change of stream may step
+    /// it twice. A CONNECT repeated for the stream the input is on is the same talker and the same
+    /// media clock: the source stays. RX thread.
     [[nodiscard]] auto crf_source_for(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu) noexcept -> uint32_t;
 
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,

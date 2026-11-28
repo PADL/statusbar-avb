@@ -733,6 +733,9 @@ auto ListenerStreams::accepted_crf_pdu(ListenerStreamSlot& slot, std::span<uint8
 void ListenerStreams::deliver_crf_timestamps(
     ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> const timestamp_data, avtp::Nanoseconds const now)
 {
+    if (!slot.crf) {
+        return;  // no CRF input: the dispatcher sends none here, and a direct caller gets nothing
+    }
     uint32_t const source = crf_source_for(slot, pdu);
     slot.crf->process_packet(
         pdu, timestamp_data, [&slot, rx_ns = now.count(), mr = pdu.mr(), source](uint64_t ts_ns, uint16_t index) {
@@ -749,10 +752,10 @@ void ListenerStreams::deliver_crf_timestamps(
 auto ListenerStreams::crf_source_for(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu) noexcept -> uint32_t
 {
     uint64_t const stream_id = pdu.stream_id().to_uint64();
-    uint32_t const connection = slot.connection_count.load(std::memory_order_acquire);
-    if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || connection != slot.crf_connection) {
+    uint32_t const change = slot.stream_changes.load(std::memory_order_acquire);
+    if (slot.crf_source == 0 || stream_id != slot.crf_stream_id || change != slot.crf_stream_change) {
         slot.crf_stream_id = stream_id;
-        slot.crf_connection = connection;
+        slot.crf_stream_change = change;
         slot.crf_source = ++crf_sources_;
     }
     return slot.crf_source;
@@ -1078,15 +1081,17 @@ void ListenerStreams::on_listener_connected(
 void ListenerStreams::publish_connection(ListenerStreamSlot& slot, ieee::Eui64 const& stream_id, bool const settled)
 {
     slot.connection.settled = settled;
-    // The count before the stream: an AVTPDU matched by the new stream_id is then delivered as a new
-    // source. One of the old stream delivered after the count is caught by crf_source_for's stream_id.
-    slot.connection_count.fetch_add(1, std::memory_order_release);
     publish_rx_stream(slot, stream_id.to_uint64());  // the RX thread may match its frames from here on
 }
 
 void ListenerStreams::publish_rx_stream(ListenerStreamSlot& slot, uint64_t const stream_id) noexcept
 {
     bool const moved = slot.rx_stream_id.load() != stream_id;
+    if (moved) {
+        // The count before the stream: an AVTPDU matched by the new stream_id is then delivered as a new
+        // source. One of the old stream delivered after the count is caught by crf_source_for's stream_id.
+        slot.stream_changes.fetch_add(1, std::memory_order_release);
+    }
     slot.rx_stream_id.publish(stream_id);
     if (moved) {
         notify_input_changed(slot);
