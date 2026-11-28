@@ -472,7 +472,9 @@ struct TalkerStreams
     {
         uint32_t pdus{0};          ///< AVTPDUs sent
         uint32_t tu_pdus{0};       ///< of them, those with tu set; counted at most pdus
-        uint8_t next_sequence{0};  ///< the sequence_num of the next it sends; read when pdus is not 0
+        uint8_t next_sequence{0};  ///< the sequence_num of the next it sends; read when pdus or dropped is not 0
+        /// AVTPDUs it numbered but did not send (its link down at their time): counted nowhere, the sequence moved on.
+        uint32_t dropped{0};
         /// The mr of the last AVTPDU it sent, when it knows it: a toggle is then counted, and its hold run down, only
         /// once the wire carries it. Without it every AVTPDU reported counts with the mr last answered.
         std::optional<bool> last_mr{};

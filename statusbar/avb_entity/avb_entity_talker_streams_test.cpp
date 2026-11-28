@@ -685,6 +685,27 @@ TEST(talker_offload, what_it_sent_counts_as_the_kit_s_own_and_the_kit_goes_on_fr
     EXPECT_EQ(c->mr_toggles.load(), 0U);
 }
 
+// AVTPDUs the data plane numbered but did not send move the sequence on, as a lost AVTPDU's would, and count nowhere
+TEST(talker_offload, dropped_avtpdus_move_the_sequence_and_count_nowhere)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_TRUE(slot.aaf.has_value());
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 4, .next_sequence = 4});
+    auto const header = talker.notify_offload_sent(slot, true, Sent{.next_sequence = 7, .dropped = 3});
+    EXPECT_EQ(header.sequence_num, uint8_t{7});
+    EXPECT_EQ(slot.aaf->sequence_num, uint8_t{7});  // the kit's own path goes on past them
+    auto const* const c = talker.tx_counters(3);
+    EXPECT_EQ(c->pdus.load(), 4U);
+    EXPECT_EQ(slot.tx_packets, 4U);
+    (void)talker.notify_offload_sent(slot, true, Sent{.pdus = 1, .next_sequence = 10, .dropped = 2});
+    EXPECT_EQ(slot.aaf->sequence_num, uint8_t{10});
+    EXPECT_EQ(c->pdus.load(), 5U);
+}
+
 TEST(talker_offload, the_stream_starts_and_stops_as_its_gate_and_stop_streaming_have_it)
 {
     ptpclient::MediaClockGenerator const mc{};
