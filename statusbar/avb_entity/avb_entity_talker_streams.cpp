@@ -1196,11 +1196,14 @@ void TalkerStreams::empty_own_schedule(TalkerStreamSlot& slot) noexcept
 
 void TalkerStreams::count_offload_sent(TalkerStreamSlot& slot, OffloadSent const& sent) noexcept
 {
+    if (sent.pdus == 0 && sent.dropped == 0) {
+        return;
+    }
+    set_sequence(slot, sent.next_sequence);  // past the dropped ones too: the stream shows them lost
     if (sent.pdus == 0) {
         return;
     }
     slot.tx_packets += sent.pdus;
-    set_sequence(slot, sent.next_sequence);
     if (slot.spec.index < tx_counters_.size()) {
         auto& c = tx_counters_[slot.spec.index];
         slot.mr_hold -= static_cast<uint8_t>(std::min<uint32_t>(slot.mr_hold, pdus_carrying(c, slot.mr, sent)));
