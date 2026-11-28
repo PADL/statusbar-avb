@@ -365,6 +365,9 @@ class AvbEntityKit
     {
         return clock_source_kind(index) != ClockSourceKind::External || external_clock_sources_run_.test(index);
     }
+    /// The recovery start() binds to one CRF input, the one the CRF clock source locates, or the
+    /// first with no CRF clock source; not where the host bound its own consumer with
+    /// ListenerStreams::set_crf() before start().
     [[nodiscard]] auto crf_recovery() noexcept -> CrfClockRecovery& { return crf_recovery_; }
 
     // --- The owned collaborators (entities + tools reach through) -------------
@@ -656,6 +659,14 @@ class AvbEntityKit
     [[nodiscard]] auto open_listener_streams(net::MessageReactor& reactor) -> Status;
     /// Open stream input @p spec; the group it joins from the start (zero: none).
     [[nodiscard]] auto open_listener_stream(StreamSpec const& spec) -> StatusValue<ieee::Eui48>;
+    /// crf_recovery() to opened input @p spec when it is crf_recovery_input() and the host bound none.
+    void bind_crf_recovery(StreamSpec const& spec);
+    /// The STREAM_INPUT the CRF clock source locates when it is of the InputStream kind; nullopt
+    /// otherwise, and with no CRF clock source.
+    [[nodiscard]] auto crf_clock_source_input() const -> std::optional<uint16_t>;
+    /// The CRF STREAM_INPUT crf_recovery() follows: the one an InputStream CRF clock source locates,
+    /// none when that is no CRF input, and the first CRF input with no CRF clock source.
+    [[nodiscard]] auto crf_recovery_input() const -> std::optional<uint16_t>;
     void attach_listener_rx(std::span<ieee::Eui48 const> rx_groups, net::MessageReactor& reactor);
     /// The TX path, the diagnostics, then each talker gate open now told.
     void finish_start();
