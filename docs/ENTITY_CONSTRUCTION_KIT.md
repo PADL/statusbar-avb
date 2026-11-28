@@ -558,6 +558,17 @@ asked.
 follow now; it may be read on the media thread. `media_rate()` still
 knows one source by itself, the CRF input it recovers.
 
+A CRF stream input hands each timestamp to its `StreamCrfFn` with the mr
+bit of the AVTPDU that carried it, so a consumer sees the talker's media
+clock restart as a toggle of mr (IEEE 1722-2016 Clause 10.4.3), and with a
+source generation. That is never 0 and new for the input's first AVTPDU,
+after each ACMP connection of the input and on a change of the AVTPDUs'
+stream_id, and the listener never hands one out twice, so a consumer kept
+across `close_rx()` and `open_stream()` sees a new one too. mr alone does
+not show that another talker's timestamps follow, or the same talker's
+after a new connection. `set_crf()` also accepts a consumer of the four
+arguments before the source generation.
+
 The source chosen is saved in `clock-sources` (below) at each accepted
 SET_CLOCK_SOURCE and put back in force at the next start (Milan v1.3
 5.3.11.1). A saved source the model no longer lists, or one the entity

@@ -97,7 +97,9 @@ class CrfClockRecovery
     /// The recovery must outlive the listener.
     [[nodiscard]] auto make_consumer() noexcept -> StreamCrfFn
     {
-        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns) { on_crf_timestamp(ts_ns, rx_gptp_ns); };
+        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool /*mr*/, uint32_t /*source*/) {
+            on_crf_timestamp(ts_ns, rx_gptp_ns);
+        };
     }
 
   private:

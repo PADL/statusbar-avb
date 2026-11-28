@@ -5,7 +5,7 @@
 // the per-stream consume registration mechanics (pending-before-open, direct
 // rebind after open), and the menu/selection principle — a registration for a
 // stream index the model never declares stays pending and inert, never an
-// error. CRF input slots are rejected until media-clock recovery (phase 3).
+// error. A CRF slot hands each timestamp, its PDU's mr bit and its source generation to its consumer.
 //
 // Positive frame->consume delivery requires a connected ACMP listener + live
 // frames and is exercised on hardware; the decode paths themselves are
@@ -381,11 +381,11 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
     static int calls = 0;
     last_ts = 0;
     calls = 0;
-    ls.set_crf(1, [](uint64_t ts, uint16_t /*idx*/, int64_t /*rx*/) {
+    ls.set_crf(1, [](uint64_t ts, uint16_t /*idx*/, int64_t /*rx*/, bool /*mr*/) {
         last_ts = ts;
         ++calls;
     });
-    ls.set_crf(9, [](uint64_t, uint16_t, int64_t) { ++calls; });
+    ls.set_crf(9, [](uint64_t, uint16_t, int64_t, bool) { ++calls; });
 
     StreamSpec crf{};
     crf.index = 1;
@@ -399,7 +399,7 @@ TEST(listener_crf, crf_input_slot_delivers_timestamps)
 
     // The bound consumer is the slot's delivery path (frame->consume delivery
     // itself requires a connected ACMP listener; covered on hardware).
-    slot->on_crf(123456789ULL, 0, 1000);
+    slot->on_crf(123456789ULL, 0, 1000, false, 1);
     EXPECT_EQ(calls, 1);
     EXPECT_EQ(last_ts, 123456789ULL);
 }
@@ -708,7 +708,7 @@ TEST(listener_crf, a_crf_frame_hands_each_timestamp_to_the_consumer_with_its_rec
     int calls = 0;
     uint64_t told_ts = 0;
     int64_t told_rx = 0;
-    ls.set_crf(1, [&](uint64_t ts, uint16_t index, int64_t rx) {
+    ls.set_crf(1, [&](uint64_t ts, uint16_t index, int64_t rx, bool /*mr*/) {
         ++calls;
         told_ts = ts;
         told_rx = rx;
@@ -753,10 +753,11 @@ struct CrfInputUnderTest
     ListenerStreams ls;
     avtp::CrfStreamOutputContext talker;
     avtp::Nanoseconds now{START};
-    int fed{0};      ///< timestamps the CRF consumer was handed
-    bool tu{false};  ///< the tu bit of the AVTPDUs from here on
-    bool mr{false};  ///< their mr bit
-    size_t cut{0};   ///< octets cut off the end of each frame
+    int fed{0};                    ///< timestamps the CRF consumer was handed
+    bool tu{false};                ///< the tu bit of the AVTPDUs from here on
+    bool mr{false};                ///< their mr bit
+    size_t cut{0};                 ///< octets cut off the end of each frame
+    ieee::Eui64 stream{STREAM_2};  ///< the stream_id the AVTPDUs carry
 
     explicit CrfInputUnderTest(CrfClock const clock = {}, uint32_t const entity_sample_rate = 48'000)
         : ls{1'000'000, entity_sample_rate, donor->components(), gptp, nullptr}
@@ -768,7 +769,7 @@ struct CrfInputUnderTest
         spec.format = decode_stream_format(CRF_MILAN_48K);
         EXPECT_TRUE(ls.open_stream(spec).has_value());
         ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
-        ls.set_crf(1, [this](uint64_t, uint16_t, int64_t) { ++fed; });
+        ls.set_crf(1, [this](uint64_t, uint16_t, int64_t, bool) { ++fed; });
     }
     CrfInputUnderTest(CrfInputUnderTest const&) = delete;
     auto operator=(CrfInputUnderTest const&) -> CrfInputUnderTest& = delete;
@@ -783,7 +784,7 @@ struct CrfInputUnderTest
         pdu.set_tu(tu);
         pdu.set_mr(mr);
         span_store(std::span<uint8_t>{frame}.first(avtp::CrfPdu::HEADER_LENGTH), pdu);
-        span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(STREAM_2));
+        span_copy(std::span<uint8_t>{frame}.subspan(4, 8), make_const_span(stream));
         frame.resize(frame.size() - cut);
         return frame;
     }
@@ -891,6 +892,80 @@ TEST(listener_crf, a_crf_avtpdu_that_is_not_of_the_inputs_format_is_unsupported_
         EXPECT_EQ(crf.counters().media_locked.load(), 0U);
         EXPECT_EQ(crf.bad(), 12U);
     }
+}
+
+// IEEE 1722-2016 Clause 10.4.3: each timestamp of a CRF AVTPDU reaches the consumer with the
+// AVTPDU's mr bit, so the consumer sees a media clock restart as the bit toggles.
+TEST(listener_crf, each_crf_timestamp_reaches_the_consumer_with_its_avtpdus_mr_bit)
+{
+    CrfInputUnderTest crf;
+    std::vector<bool> seen;
+    crf.ls.set_crf(1, [&seen](uint64_t, uint16_t, int64_t, bool const mr) { seen.push_back(mr); });
+    crf.receive(2);
+    crf.mr = true;
+    crf.receive(2);
+    crf.mr = false;
+    crf.receive(1);
+    EXPECT_TRUE(seen == (std::vector<bool>{false, false, true, true, false}));
+    EXPECT_EQ(crf.counters().media_reset.load(), 2U);
+}
+
+// The source generation is the same from the first AVTPDU on and new with each ACMP connection of
+// the input, to another talker stream or to the same one again; a toggle of mr leaves it.
+TEST(listener_crf, the_crf_source_is_new_with_each_connection_and_not_with_an_mr_toggle)
+{
+    CrfInputUnderTest crf;
+    std::vector<uint32_t> sources;
+    crf.ls.set_crf(1, [&sources](uint64_t, uint16_t, int64_t, bool, uint32_t const source) { sources.push_back(source); });
+    crf.receive(2);
+    crf.mr = true;
+    crf.receive(1);
+
+    crf.ls.on_listener_disconnected(1, sm::TimePoint{}, StreamInputLoss::released);
+    crf.ls.on_listener_connected(1, STREAM_1, GROUP, sm::TimePoint{});
+    crf.receive(1);  // still STREAM_2's: not this input's any more
+    crf.stream = STREAM_1;
+    crf.receive(2);
+    crf.ls.on_listener_connected(1, STREAM_1, GROUP, sm::TimePoint{});
+    crf.receive(1);
+    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 1, 2, 2, 3}));
+}
+
+// An AVTPDU of the old stream matched before the new connection was published, and delivered after
+// the connection was counted, opens a new source; the new stream's AVTPDUs then open another.
+TEST(listener_crf, an_avtpdu_of_another_stream_id_than_the_last_is_a_new_source)
+{
+    CrfInputUnderTest crf;
+    std::vector<uint32_t> sources;
+    crf.ls.set_crf(1, [&sources](uint64_t, uint16_t, int64_t, bool, uint32_t const source) { sources.push_back(source); });
+    auto& slot = *crf.ls.slot_for(1);
+    std::array<uint8_t, avtp::CrfPdu::TIMESTAMP_SIZE> const data{};
+    for (uint16_t const unique_id : {uint16_t{2}, uint16_t{2}, uint16_t{7}}) {
+        avtp::CrfPdu pdu{};
+        pdu.init_audio_sample(
+            tsn::StreamId{ieee::Eui48{0x00, 0x1C, 0xAB, 0x00, 0x00, 0x00}, unique_id}, 48000, avtp::CrfPull::multiply_1_0, 96, 1);
+        crf.ls.deliver_crf_timestamps(slot, pdu, data, crf.now);
+    }
+    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2}));
+}
+
+// A consumer kept across close_rx() and open_stream() is handed a source it has not seen, so it
+// can tell the reopened input's talker from the one before.
+TEST(listener_crf, a_reopened_input_hands_its_kept_consumer_a_new_source)
+{
+    CrfInputUnderTest crf;
+    std::vector<uint32_t> sources;
+    crf.ls.set_crf(1, [&sources](uint64_t, uint16_t, int64_t, bool, uint32_t const source) { sources.push_back(source); });
+    crf.receive(2);
+    crf.ls.close_rx();
+    StreamSpec spec{};
+    spec.index = 1;
+    spec.format_word = CRF_MILAN_48K;
+    spec.format = decode_stream_format(CRF_MILAN_48K);
+    EXPECT_TRUE(crf.ls.open_stream(spec).has_value());
+    crf.ls.on_listener_connected(1, STREAM_2, GROUP, sm::TimePoint{});
+    crf.receive(1);
+    EXPECT_TRUE(sources == (std::vector<uint32_t>{1, 1, 2}));
 }
 
 TEST(listener_crf, a_crf_frame_cut_short_of_its_timestamp_or_of_its_header_is_unsupported_too)

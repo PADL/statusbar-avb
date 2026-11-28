@@ -19,7 +19,7 @@
 /// AM824/AAF contexts — it is a vector of slots derived from StreamSpecs
 /// (see avb_entity_stream_spec.hpp), and a frame is matched to its slot by
 /// the connected stream_id, so an entity's RX shape follows its declarative
-/// model. CRF input slots are not yet supported (kit phase 3).
+/// model. A CRF slot hands each timestamp to its StreamCrfFn (set_crf).
 ///
 /// Reads the entity's config / gPTP-now through references and the ACMP/MSRP
 /// state through a NanoAvbComponents reference (all bound at construction).
@@ -50,6 +50,8 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <type_traits>
+#include <utility>
 
 namespace statusbar::avb_entity {
 
@@ -107,8 +109,16 @@ struct ListenerStreamSlot
     StreamTimedConsumeFn consume_timed{};
 
     /// Per-stream CRF ingest (kit phase 3): receives each CRF timestamp with
-    /// the local receive time — feed for media-clock recovery. CRF slots only.
+    /// the local receive time, the PDU's mr bit and its source generation —
+    /// feed for media-clock recovery. CRF slots only.
     StreamCrfFn on_crf{};
+    /// ACMP connections made to this input (publish_connection): the reactor adds, the RX thread reads.
+    std::atomic<uint32_t> connection_count{0};
+    /// The stream_id and connection_count of the last CRF AVTPDU delivered, and the source
+    /// generation handed with its timestamps (crf_source_for). RX thread.
+    uint64_t crf_stream_id{0};
+    uint32_t crf_connection{0};
+    uint32_t crf_source{0};
 
     /// Per-slot data-plane counters (written on the reactor/RX thread, read for status).
     itc::TelemetryCounter<uint64_t> rx_packets{};
@@ -178,6 +188,17 @@ struct ListenerStreams
     /// @p stream_index (a CRF input slot). Same menu/selection + pending
     /// semantics as set_consume. RX-thread callback.
     void set_crf(uint16_t stream_index, StreamCrfFn fn);
+    /// set_crf() for a consumer that accepts no source generation. Same semantics.
+    template <typename Fn>
+        requires(
+            std::is_invocable_v<Fn&, uint64_t, uint16_t, int64_t, bool> &&
+            !std::is_invocable_v<Fn&, uint64_t, uint16_t, int64_t, bool, uint32_t>)
+    void set_crf(uint16_t const stream_index, Fn fn)
+    {
+        set_crf(stream_index, StreamCrfFn{[fn = std::move(fn)](uint64_t ts, uint16_t index, int64_t rx, bool mr, uint32_t) mutable {
+                    fn(ts, index, rx, mr);
+                }});
+    }
 
     /// The slot whose spec.index == @p stream_index (the STREAM_INPUT
     /// descriptor index == ACMP listener unique id), or nullptr.
@@ -285,7 +306,8 @@ struct ListenerStreams
     /// The frame's CRF header when it is a CRF AVTPDU at all; nullopt for any other frame.
     [[nodiscard]] static auto parse_crf_frame(ListenerStreamSlot& slot, std::span<uint8_t const> frame)
         -> std::optional<avtp::CrfPdu>;
-    /// The timestamps of an accepted CRF AVTPDU to the consumer, and the slot's packet and sample counts.
+    /// The timestamps of an accepted CRF AVTPDU to the consumer with its mr bit and source generation,
+    /// and the slot's packet and sample counts.
     void deliver_crf_timestamps(
         ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, std::span<uint8_t const> timestamp_data, avtp::Nanoseconds now);
     /// An accepted CRF AVTPDU into the input's counters: sequence_num, mr and
@@ -298,6 +320,10 @@ struct ListenerStreams
     void tally_crf_pdu(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu, avtp::Nanoseconds now);
     /// A lock gained by an AVTPDU that crossed the input's loss of its stream is given up.
     void drop_lock_of_a_lost_stream(ListenerStreamSlot& slot);
+    /// The source generation of @p pdu's timestamps: never 0, and a new one, not used before by this
+    /// listener, for @p slot's first AVTPDU, after an ACMP connection of it, or when the stream_id
+    /// changed; so a change of stream may step it twice. RX thread.
+    [[nodiscard]] auto crf_source_for(ListenerStreamSlot& slot, avtp::CrfPdu const& pdu) noexcept -> uint32_t;
 
     /// Update STREAM_INPUT counters for one received packet (delegates to the pure,
     /// unit-tested tally_stream_input_packet). See the entity-level doc for ts_sparse.
@@ -553,6 +579,9 @@ struct ListenerStreams
         StreamCrfFn fn{};
     };
     sg14::inplace_vector<PendingCrf, MAX_ENTITY_STREAMS> pending_crf_{};
+    /// The last source generation crf_source_for() handed out, over every slot: it outlives
+    /// close_rx() and open_stream(), so a consumer kept across them sees a new source. RX thread.
+    uint32_t crf_sources_{0};
     /// Per-stream stopped states (see set_stream_stopped).
     std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_stopped_{};
     /// Per-stream format words (see set_stream_format); 0 = as opened.
