@@ -22,6 +22,7 @@
 #include <cstdint>
 #include <memory_resource>
 #include <span>
+#include <thread>
 #include <vector>
 
 using namespace statusbar;
@@ -415,6 +416,58 @@ TEST(talker_mr, a_stream_not_open_refuses_a_restart_and_a_reopened_one_starts_cl
     auto& slot = open_aaf_output(talker, 3);
     EXPECT_TRUE(send_mr(talker, slot, 3) == std::vector<bool>(3, false));
     EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 0U);
+}
+
+// A data plane that re-steps a media clock on its own thread asks for the restart there, while the
+// reactor may be asking too: every request is counted, none is lost to another thread's, and mr
+// toggles once for all that came before the AVTPDU that carries it.
+TEST(talker_mr, restarts_asked_from_several_threads_at_once_are_all_counted)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    auto& slot = open_aaf_output(talker, 3);
+    EXPECT_EQ(talker.media_clock_restart_requests(3), 0U);
+    EXPECT_TRUE(send_mr(talker, slot, 2) == std::vector<bool>(2, false));  // the stream runs: a toggle shows
+
+    constexpr uint32_t THREADS = 4;
+    constexpr uint32_t EACH = 50'000;
+    std::atomic<uint32_t> refused{0};
+    std::vector<std::thread> askers{};
+    for (uint32_t t = 0; t < THREADS; ++t) {
+        askers.emplace_back([&talker, &refused] {
+            for (uint32_t i = 0; i < EACH; ++i) {
+                refused.fetch_add(talker.toggle_media_clock_restart(3).has_value() ? 0U : 1U);
+            }
+        });
+    }
+    for (auto& asker : askers) {
+        asker.join();
+    }
+    EXPECT_EQ(refused.load(), 0U);
+    EXPECT_EQ(talker.media_clock_restart_requests(3), THREADS * EACH);
+    EXPECT_EQ(talker.media_clock_restart_requests(2), 0U);  // another stream's count is its own
+    EXPECT_EQ(talker.media_clock_restart_requests(static_cast<uint16_t>(avb_entity::MAX_ENTITY_STREAMS)), 0U);
+    EXPECT_TRUE(send_mr(talker, slot, 3) == std::vector<bool>(3, true));
+    EXPECT_EQ(talker.tx_counters(3)->mr_toggles.load(), 1U);
+}
+
+// What says a stream is open is set when it is opened and cleared when the talker is closed, so a
+// thread that asks after the close is refused without looking at the slots.
+TEST(talker_mr, a_restart_is_taken_from_the_open_to_the_close_of_a_stream_and_refused_outside)
+{
+    ptpclient::MediaClockGenerator const mc{};
+    std::atomic<int64_t> const gptp_now{0};
+    avb_entity::TalkerStreams talker{
+        avb_entity::TalkerStreamsConfig{.sample_rate = 48'000}, mc, gptp_now, std::pmr::get_default_resource()};
+    EXPECT_FALSE(talker.toggle_media_clock_restart(3).has_value());
+    (void)open_aaf_output(talker, 3);
+    EXPECT_TRUE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_FALSE(talker.toggle_media_clock_restart(2).has_value());  // not the stream that is open
+    talker.close_tx();
+    EXPECT_FALSE(talker.toggle_media_clock_restart(3).has_value());
+    EXPECT_EQ(talker.media_clock_restart_requests(3), 1U);  // the refused ones were not counted
 }
 
 TEST(talker_mr, a_media_clock_re_anchored_on_a_stepped_gptp_timeline_toggles_mr)

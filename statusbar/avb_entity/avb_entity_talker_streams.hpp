@@ -178,8 +178,17 @@ struct TalkerStreams
 
     /// A media clock restart on open STREAM_OUTPUT @p stream_index: mr toggles on its next AVTPDU,
     /// or the first after MR_HOLD_PDUS since the last toggle, and keeps its new state; requests
-    /// before then toggle it once. invalid_argument for a stream not open. Reactor thread, the one writer.
+    /// before then toggle it once. invalid_argument for a stream not open.
+    ///
+    /// Any thread, and several at once, a real-time one too: one atomic load and one atomic add,
+    /// no lock, no clock, no system call. So a data plane that re-steps a media clock on its own
+    /// thread asks here at the step, and mr goes out with the first AVTPDU after it. A request
+    /// that meets the stream's close is refused or counted for the run that ends; the next run
+    /// starts clear either way (open_stream()).
     [[nodiscard]] auto toggle_media_clock_restart(uint16_t stream_index) noexcept -> Status;
+    /// The restarts asked of STREAM_OUTPUT @p stream_index since this object was made, counted
+    /// over all its runs; 0 past MAX_ENTITY_STREAMS. Any thread.
+    [[nodiscard]] auto media_clock_restart_requests(uint16_t stream_index) const noexcept -> uint32_t;
     /// The mr bit @p slot's next AVTPDU carries, toggled when a restart is owed (a request, or the
     /// media clock re-anchored on a stepped gPTP timeline) and the hold is over. Media thread; call
     /// once per AVTPDU sent (count_sent runs the hold down).
@@ -465,8 +474,16 @@ struct TalkerStreams
     /// Per-stream signal presence (set_signal_presence), SIGNAL_PRESENCE_REPORTED set once reported.
     std::array<std::atomic<uint64_t>, MAX_ENTITY_STREAMS> signal_presence_{};
     static constexpr uint64_t SIGNAL_PRESENCE_REPORTED = uint64_t{1} << 63U;
-    /// Per-stream media clock restart requests, counted by the reactor (toggle_media_clock_restart).
+    /// Per-stream media clock restart requests, counted by whichever thread asks (toggle_media_clock_restart).
     std::array<std::atomic<uint32_t>, MAX_ENTITY_STREAMS> mr_requests_{};
+    /// Whether STREAM_OUTPUT index is open: what toggle_media_clock_restart() may read on any
+    /// thread, where slots_ is the opening thread's. Set by open_stream(), cleared by close_tx().
+    std::array<std::atomic<bool>, MAX_ENTITY_STREAMS> stream_open_{};
+    /// STREAM_OUTPUT @p stream_index is open, or no longer; nothing past MAX_ENTITY_STREAMS.
+    void mark_open(uint16_t stream_index, bool open) noexcept;
+    /// @p slot, opened, joins the slots: the restart requests so far are not its own, and it is
+    /// marked open once it is among them.
+    void keep_opened(TalkerStreamSlot slot);
     /// The requests counted for STREAM_OUTPUT @p stream_index, 0 past MAX_ENTITY_STREAMS.
     [[nodiscard]] auto mr_requests(uint16_t stream_index) const noexcept -> uint32_t;
     /// Whether @p slot owes a toggle of mr: a request or a re-anchor it has not followed. Media thread.

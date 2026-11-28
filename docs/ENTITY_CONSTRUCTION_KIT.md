@@ -427,10 +427,13 @@ STREAM_OUTPUT. The next AVTPDU carries the
 toggled mr, and so does every one after it until the next restart. A
 toggle holds for at least `MR_HOLD_PDUS` (eight) AVTPDUs sent; a restart
 owed within the hold toggles mr on the first AVTPDU after it, and
-restarts owed before an AVTPDU carries them toggle it once. The reactor
-thread is the one that asks: it counts the requests, and the media thread
-compares that count with the one it last followed, so neither side waits
-or writes the other's state. A stream opened again after a stop starts
+restarts owed before an AVTPDU carries them toggle it once. Any thread
+may ask, several at once and a real-time one too: a request is one atomic
+load and one atomic add, with no lock and no system call, so a data plane
+that re-steps a media clock on its own thread asks at the step. The
+requests are counted, and the media thread compares that count with the
+one it last followed, so no side waits or writes another's state. A
+stream opened again after a stop starts
 with mr clear, and a restart asked of the run that stopped is not carried
 into the next. MEDIA_RESET counts each toggle sent. The kit asks for a
 restart on each stream output of clock domain 0 when SET_CLOCK_SOURCE

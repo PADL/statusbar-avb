@@ -181,9 +181,23 @@ auto TalkerStreams::open_stream(StreamSpec const& spec, tsn::StreamId const stre
     if (auto opened = open_kind(slot, spec, stream_id, mem_resource_); !opened) {
         return opened;
     }
-    slot.mr_requests_seen = mr_requests(spec.index);  // a request made of an earlier run is not this one's
-    slots_.push_back(std::move(slot));
+    keep_opened(std::move(slot));
     return success();
+}
+
+void TalkerStreams::keep_opened(TalkerStreamSlot slot)
+{
+    uint16_t const index = slot.spec.index;
+    slot.mr_requests_seen = mr_requests(index);  // a request made of an earlier run is not this one's
+    slots_.push_back(std::move(slot));
+    mark_open(index, true);  // last: a restart asked from here on is this run's
+}
+
+void TalkerStreams::mark_open(uint16_t const stream_index, bool const open) noexcept
+{
+    if (stream_index < stream_open_.size()) {
+        stream_open_[stream_index].store(open, std::memory_order_release);
+    }
 }
 
 void TalkerStreams::set_vlan(uint16_t const vlan_id, uint8_t const pcp) noexcept
@@ -406,6 +420,7 @@ void TalkerStreams::close_tx() noexcept
     port_ = nullptr;
     external_kick_ = false;
     for (uint16_t idx = 0; idx < MAX_ENTITY_STREAMS; ++idx) {
+        mark_open(idx, false);
         stream_stopped_[idx].store(false, std::memory_order_release);
         follow_streaming(idx, false);       // the media thread has stopped: so has the stream
         tx_counters_[idx].have_mr = false;  // a reopened stream's first mr is no toggle
@@ -414,11 +429,17 @@ void TalkerStreams::close_tx() noexcept
 
 auto TalkerStreams::toggle_media_clock_restart(uint16_t const stream_index) noexcept -> Status
 {
-    if (stream_index >= mr_requests_.size() || slot_for(stream_index) == nullptr) {
+    // The open flag and not slot_for(): the slots are the opening thread's, and this may be any.
+    if (stream_index >= mr_requests_.size() || !stream_open_[stream_index].load(std::memory_order_acquire)) {
         return failure(std::errc::invalid_argument);
     }
-    bump(mr_requests_[stream_index]);
+    (void)mr_requests_[stream_index].fetch_add(1, std::memory_order_relaxed);  // several writers: a real add
     return success();
+}
+
+auto TalkerStreams::media_clock_restart_requests(uint16_t const stream_index) const noexcept -> uint32_t
+{
+    return mr_requests(stream_index);
 }
 
 auto TalkerStreams::set_signal_presence(uint16_t const stream_index, uint64_t const channels) noexcept -> Status
