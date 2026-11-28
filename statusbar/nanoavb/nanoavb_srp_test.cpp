@@ -690,6 +690,71 @@ TEST(nanoavb_srp_msrp, a_listener_follows_any_vlan_when_its_match_names_none_and
     EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 2);
 }
 
+// An input already on a stream is given another Talker attribute to follow,
+// as a Milan sink that settles again on another VLAN or destination address
+// is (Milan v1.3 5.3.8.5: Ready goes with a Talker Advertise "with matching
+// SRP parameters"). The Ready it held for the attribute left behind is
+// withdrawn, the input stays attached once, and the declaration comes back
+// when it is told to follow what is registered.
+TEST(nanoavb_srp_msrp, an_attached_listener_told_to_follow_another_talker_attribute_leaves_the_one_it_was_ready_for)
+{
+    using statusbar::srp::mrp::AttributeEvent;
+    using statusbar::srp::msrp::ListenerDeclaration;
+    ListenerLink link{};
+    auto on_vlan_3 = link.advertise();
+    on_vlan_3.vlan_identifier = 3;
+    EXPECT_TRUE(link.talker.declare_talker_advertise(on_vlan_3, link.now).has_value());
+    link.run(8);
+    TalkerMatch const vlan_3{.dest_address = on_vlan_3.destination_address, .vlan_id = 3};
+    TalkerMatch const vlan_2{.dest_address = on_vlan_3.destination_address, .vlan_id = 2};
+    auto const attached = link.listener.listener_attach(link.sid, link.now, vlan_3);
+    EXPECT_TRUE(attached.has_value() && *attached == ListenerReservationState::Ready);
+    link.run(30);
+    (void)link.take_sent();
+
+    // The same attribute again: nothing changes and nothing is sent for it.
+    EXPECT_EQ(link.listener.listener_follow(link.sid, vlan_3, link.now), ListenerReservationState::Ready);
+    link.run(4);
+    auto const same = link.take_sent();
+    EXPECT_TRUE(std::ranges::none_of(
+        same, [](auto const& value) { return value.event == AttributeEvent::Lv || value.event == AttributeEvent::New; }));
+
+    // Another one, which the talker does not declare: the Ready goes.
+    EXPECT_EQ(link.listener.listener_follow(link.sid, vlan_2, link.now), ListenerReservationState::Waiting);
+    EXPECT_EQ(link.state(), ListenerReservationState::Waiting);
+    EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 1);
+    auto const follows = link.listener.get_listener_stream(link.sid)->follows;
+    EXPECT_TRUE(follows.has_value() && follows->vlan_id == 2);
+    link.run(30);
+    auto const left = link.take_sent();
+    EXPECT_TRUE(std::ranges::any_of(left, [](auto const& value) { return value.event == AttributeEvent::Lv; }));
+
+    // The registered one again: declared anew.
+    EXPECT_EQ(link.listener.listener_follow(link.sid, vlan_3, link.now), ListenerReservationState::Ready);
+    link.run(30);
+    auto const again = link.take_sent();
+    EXPECT_TRUE(!again.empty() && again.front().event == AttributeEvent::New);
+    EXPECT_TRUE(!again.empty() && again.front().declaration == ListenerDeclaration::Ready);
+
+    // No attribute named: any of the StreamID, as an IEEE 1722.1 connection follows.
+    EXPECT_EQ(link.listener.listener_follow(link.sid, vlan_2, link.now), ListenerReservationState::Waiting);
+    EXPECT_EQ(link.listener.listener_follow(link.sid, std::nullopt, link.now), ListenerReservationState::Ready);
+    EXPECT_FALSE(link.listener.get_listener_stream(link.sid)->follows.has_value());
+
+    // The caller is handed the state; the hook is for what the network changes.
+    EXPECT_TRUE(link.states.empty());
+
+    // One input was attached all along: one withdrawal lets the stream go.
+    EXPECT_TRUE(link.listener.listener_withdraw(link.sid, link.now).has_value());
+    EXPECT_EQ(link.state(), ListenerReservationState::Idle);
+    // A stream no input is attached to follows nothing and is not attached by the call.
+    EXPECT_EQ(link.listener.listener_follow(link.sid, vlan_3, link.now), ListenerReservationState::Idle);
+    EXPECT_EQ(link.listener.get_listener_stream(link.sid)->attached, 0);
+    EXPECT_FALSE(link.listener.get_listener_stream(link.sid)->follows.has_value());
+    statusbar::tsn::StreamId const unknown{Eui48{0x00, 0x01, 0x02, 0x03, 0x04, 0x05}, 77};
+    EXPECT_EQ(link.listener.listener_follow(unknown, vlan_3, link.now), ListenerReservationState::Idle);
+}
+
 // A Talker Failed is followed by the same match as a Talker Advertise.
 TEST(nanoavb_srp_msrp, a_listener_that_follows_one_talker_attribute_asks_failed_only_for_a_talker_failed_that_is_it)
 {

@@ -443,10 +443,16 @@ struct ListenerStreams
     /// Declare @p stream_id to MSRP, following @p only when it names a
     /// Talker attribute; true when the reservation is Ready.
     auto attach_ready(ieee::Eui64 const& stream_id, sm::TimePoint now, std::optional<nanoavb::TalkerMatch> const& only) -> bool;
-    /// Whether the declaration already standing for @p stream_id is Ready.
-    [[nodiscard]] auto held_ready(ieee::Eui64 const& stream_id) const -> bool;
-    /// Declare @p stream_id when @p held is not on it yet, else ask after the
-    /// standing declaration: true when the reservation is Ready.
+    /// The declaration already standing for @p stream_id follows @p only from
+    /// now on (MsrpHandler::listener_follow); true when the reservation is
+    /// Ready under it.
+    auto follow_ready(ieee::Eui64 const& stream_id, sm::TimePoint now, std::optional<nanoavb::TalkerMatch> const& only) -> bool;
+    /// Declare @p stream_id when @p held is not on it yet. A slot already on
+    /// it attaches nothing again; its standing declaration is told what to
+    /// follow, so a connection that names another Talker attribute than the
+    /// last one (a sink that settled again on another destination address or
+    /// VLAN) is not left Ready for the attribute it no longer receives. True
+    /// when the reservation is Ready.
     auto attach_or_held_ready(
         ListenerConnection const& held,
         ieee::Eui64 const& stream_id,

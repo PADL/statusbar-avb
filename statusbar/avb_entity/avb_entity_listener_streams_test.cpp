@@ -143,6 +143,43 @@ TEST(listener_connection, a_settled_sink_hands_what_it_probed_to_msrp_and_a_conn
     ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
 }
 
+// A slot already on a stream is connected to it again with another Talker
+// attribute, as a sink that settled again on another destination address
+// would be. The stream's one declaration follows the new attribute and the
+// slot is still attached once: one disconnect withdraws it.
+TEST(listener_connection, a_slot_connected_again_to_its_stream_follows_the_talker_attribute_of_the_last_connection)
+{
+    auto donor = make_donor();
+    std::atomic<int64_t> gptp{0};
+    ListenerStreams ls{1'000'000, 96'000, donor->components(), gptp, nullptr};
+    EXPECT_TRUE(ls.open_stream(make_aaf_spec(0)).has_value());
+    auto const record = [&donor](ieee::Eui64 const& stream) {
+        nanoavb::StreamId sid{};
+        sid.from_uint64(stream.to_uint64());
+        return *donor->components().msrp_handler.get_listener_stream(sid);
+    };
+    constexpr ieee::Eui48 OTHER_GROUP{0x91, 0xE0, 0xF0, 0x00, 0x56, 0x78};
+
+    ls.on_listener_connected(0, STREAM_1, GROUP, sm::TimePoint{}, nanoavb::TalkerMatch{.dest_address = GROUP, .vlan_id = 2});
+    EXPECT_TRUE(record(STREAM_1).follows.has_value() && record(STREAM_1).follows->dest_address == GROUP);
+
+    ls.on_listener_connected(
+        0, STREAM_1, OTHER_GROUP, sm::TimePoint{}, nanoavb::TalkerMatch{.dest_address = OTHER_GROUP, .vlan_id = 3});
+    auto const moved = record(STREAM_1);
+    EXPECT_TRUE(moved.follows.has_value() && moved.follows->dest_address == OTHER_GROUP && moved.follows->vlan_id == 3);
+    EXPECT_EQ(moved.attached, 1);
+    EXPECT_TRUE(ls.slot_for(0)->connection.settled);
+
+    // A CONNECT repeated with no attribute named follows any, and attaches nothing more.
+    ls.on_listener_connected(0, STREAM_1, OTHER_GROUP, sm::TimePoint{});
+    EXPECT_FALSE(record(STREAM_1).follows.has_value());
+    EXPECT_EQ(record(STREAM_1).attached, 1);
+
+    ls.on_listener_disconnected(0, sm::TimePoint{}, StreamInputLoss::released);
+    EXPECT_EQ(record(STREAM_1).attached, 0);
+    EXPECT_EQ(record(STREAM_1).state, nanoavb::ListenerReservationState::Idle);
+}
+
 // The disconnect works from what the slot recorded at connect time, not from
 // the ACMP state machine's copy of the stream, which it has cleared by the
 // time the hook runs: the declaration withdrawn is the one that was made.

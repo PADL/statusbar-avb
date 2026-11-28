@@ -877,7 +877,8 @@ class MsrpHandler
     /// VLAN leaves it Waiting. A Milan sink attaches so, with what it probed
     /// (Milan v1.3 5.3.8.5: Listener Ready goes with a Talker Advertise "with
     /// matching SRP parameters"). All inputs of a stream share its record,
-    /// and the last attach decides what the record follows.
+    /// and the last attach, or listener_follow(), decides what the record
+    /// follows.
     [[nodiscard]] auto listener_attach(
         StreamId const& stream_id, TimePoint now, std::optional<TalkerMatch> const& only = std::nullopt)
         -> StatusValue<ListenerReservationState>
@@ -888,6 +889,33 @@ class MsrpHandler
         }
         listener_streams_[listener_index(stream_id)].follows = only;
         return success(want);
+    }
+
+    /// An attached stream follows @p only from @p now on, with no input
+    /// attached or let go: what an input already on the stream calls when it
+    /// is given another Talker attribute to follow, as a Milan sink that
+    /// settles again on another destination address or VLAN is (Milan v1.3
+    /// 5.3.8.5: Listener Ready goes with a Talker Advertise "with matching
+    /// SRP parameters"). The declaration is re-derived at once from what is
+    /// registered: a Ready held for the attribute left behind is withdrawn
+    /// unless the new one is registered too, and it is declared again when
+    /// that one arrives. Returns the state held, as listener_attach() does,
+    /// and calls no on_listener_state_change hook; Idle, and nothing done,
+    /// for a stream no input is attached to.
+    [[nodiscard]] auto listener_follow(StreamId const& stream_id, std::optional<TalkerMatch> const& only, TimePoint const now)
+        -> ListenerReservationState
+    {
+        size_t const idx = listener_index(stream_id);
+        if (idx == listener_streams_.size() || !listener_is_attached(listener_streams_[idx].state)) {
+            return ListenerReservationState::Idle;
+        }
+        auto& stream = listener_streams_[idx];
+        stream.follows = only;
+        if (auto const want = listener_state_wanted(stream_id, only); want != stream.state) {
+            last_event_time_ = now;
+            move_attached_listener(stream, want);
+        }
+        return stream.state;
     }
 
     auto receive_packet(std::span<uint8_t const> packet, TimePoint now) -> void

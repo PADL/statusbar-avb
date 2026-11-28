@@ -1032,20 +1032,16 @@ auto ListenerStreams::attach_or_held_ready(
     std::optional<nanoavb::TalkerMatch> const& only) -> bool
 {
     // One attachment per stream a slot holds: a slot already on this stream
-    // re-declares nothing, so attach and withdraw stay one-for-one however
-    // many times a controller repeats the CONNECT.
-    return held.stream_id != stream_id ? attach_ready(stream_id, now, only) : held_ready(stream_id);
+    // attaches nothing again, so attach and withdraw stay one-for-one however
+    // many times a controller repeats the CONNECT. What the declaration
+    // follows is the last connection's all the same.
+    return held.stream_id != stream_id ? attach_ready(stream_id, now, only) : follow_ready(stream_id, now, only);
 }
 
-auto ListenerStreams::held_ready(ieee::Eui64 const& stream_id) const -> bool
+auto ListenerStreams::follow_ready(
+    ieee::Eui64 const& stream_id, sm::TimePoint const now, std::optional<nanoavb::TalkerMatch> const& only) -> bool
 {
-    auto const sid = to_stream_id(stream_id);
-    for (auto const& stream : components_.msrp_handler.listener_streams()) {
-        if (stream.stream_id == sid) {
-            return stream.state == nanoavb::ListenerReservationState::Ready;
-        }
-    }
-    return false;
+    return components_.msrp_handler.listener_follow(to_stream_id(stream_id), only, now) == nanoavb::ListenerReservationState::Ready;
 }
 
 void ListenerStreams::on_listener_connected(
