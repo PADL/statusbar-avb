@@ -1373,19 +1373,44 @@ auto AvbEntityKit::open_listener_stream(StreamSpec const& spec) -> StatusValue<i
     if (auto status = listener_->open_stream(spec); !status) {
         return failure(status.error());
     }
-    if (spec.format.kind == StreamKind::crf) {
-        listener_->set_crf(spec.index, crf_recovery_.make_consumer());
-    }
+    bind_crf_recovery(spec);
     bool const is_audio = spec.format.kind == StreamKind::am824 || spec.format.kind == StreamKind::aaf;
     auto const* slot = is_audio ? talker_->slot_of(spec.format.kind) : nullptr;
     return success(slot != nullptr ? slot->dest_mac : ieee::Eui48{});
 }
 
+void AvbEntityKit::bind_crf_recovery(StreamSpec const& spec)
+{
+    auto const* slot = listener_->slot_for(spec.index);
+    if (slot != nullptr && !slot->on_crf && crf_recovery_input() == spec.index) {
+        listener_->set_crf(spec.index, crf_recovery_.make_consumer());
+    }
+}
+
+auto AvbEntityKit::crf_clock_source_input() const -> std::optional<uint16_t>
+{
+    bool const of_input = crf_clock_source_index_ && clock_source_kind(*crf_clock_source_index_) == ClockSourceKind::InputStream;
+    return of_input ? located_stream_input(storage_handler_.storage(), *crf_clock_source_index_) : std::nullopt;
+}
+
+auto AvbEntityKit::crf_recovery_input() const -> std::optional<uint16_t>
+{
+    if (!crf_clock_source_index_) {
+        auto const* const first =
+            std::ranges::find(listener_specs_, StreamKind::crf, [](StreamSpec const& spec) { return spec.format.kind; });
+        return first != listener_specs_.end() ? std::optional{first->index} : std::nullopt;
+    }
+    auto const input = crf_clock_source_input();
+    bool const is_crf = std::ranges::any_of(
+        listener_specs_, [input](StreamSpec const& spec) { return spec.index == input && spec.format.kind == StreamKind::crf; });
+    return is_crf ? input : std::nullopt;
+}
+
 auto AvbEntityKit::open_listener_streams(net::MessageReactor& reactor) -> Status
 {
-    // RX slots per blob-declared stream input. CRF inputs feed the media-clock
-    // recovery (kit phase 3c); the ACMP listener callbacks (wired at start)
-    // drive the MSRP attach + the multicast join per connection.
+    // RX slots per blob-declared stream input. One CRF input feeds the media-clock
+    // recovery unless the host bound its own consumer there (kit phase 3c); the ACMP
+    // listener callbacks (wired at start) drive the MSRP attach + the multicast join per connection.
     if (listener_ == nullptr) {
         return success();
     }
