@@ -92,14 +92,31 @@ class CrfClockRecovery
     /// Latest recovered estimate. Wait-free; media thread (single reader).
     [[nodiscard]] auto estimate() noexcept -> Estimate { return published_.consume(); }
 
-    /// This recovery as a ListenerStreams CRF consumer:
+    /// This recovery as a ListenerStreams CRF consumer, starting afresh on its first timestamp, on
+    /// each toggle of mr (IEEE 1722-2016 Clause 10.4.3) and on a new source generation:
     ///   listener.set_crf(crf_input_index, recovery.make_consumer());
     /// The recovery must outlive the listener.
     [[nodiscard]] auto make_consumer() noexcept -> StreamCrfFn
     {
-        return [this](uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool /*mr*/, uint32_t /*source*/) {
+        return [this, last_source = uint32_t{0}, last_mr = false](
+                   uint64_t ts_ns, uint16_t /*index*/, int64_t rx_gptp_ns, bool mr, uint32_t source) mutable {
+            if (source != last_source || mr != last_mr) {
+                restart();  // also on this consumer's first timestamp: a source is never 0
+            }
+            last_source = source;
+            last_mr = mr;
             on_crf_timestamp(ts_ns, rx_gptp_ns);
         };
+    }
+
+    /// Start the estimate afresh, as after a media clock restart or a new talker: the filter and
+    /// the sample count are reset and the unlocked estimate is published. RX thread, as on_crf_timestamp().
+    void restart() noexcept
+    {
+        kalman_.reset();
+        last_rx_ns_ = 0;
+        samples_ = 0;
+        published_.publish(Estimate{});
     }
 
   private:
