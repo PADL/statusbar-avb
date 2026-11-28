@@ -194,6 +194,60 @@ TEST(nanoavb_adp_advertiser, departing_available_index_zero)
     EXPECT_EQ(captured_departing.available_index.get(), 0U);
 }
 
+// IEEE 1722.1-2021 6.2.2.15: available_index "is reset to zero (0) when
+// transmitting an ENTITY_DEPARTING". The entity that comes back starts a new
+// availability cycle: its first ENTITY_AVAILABLE carries 0 and the count goes
+// on from there, and whoever follows the index (the ENTITY descriptor) is
+// told of the reset.
+TEST(nanoavb_adp_advertiser, an_entity_that_departed_advertises_again_from_available_index_zero)
+{
+    auto entity = create_test_entity_descriptor();
+    std::vector<uint32_t> available{};
+    std::vector<uint32_t> told{};
+    AdpAdvertiserCallbacks callbacks;
+    callbacks.send_adpdu = [&](AdpDu const& adpdu) {
+        if (adpdu.is_entity_available()) {
+            available.push_back(adpdu.available_index.get());
+        }
+        return true;
+    };
+    callbacks.on_available_index_change = [&](uint32_t const index) { told.push_back(index); };
+
+    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+    auto t = TimePoint{};
+    (void)advertiser.start(t);
+    t += std::chrono::seconds(65);
+    advertiser.tick(t);
+    t += std::chrono::seconds(65);
+    advertiser.tick(t);
+    EXPECT_TRUE(available.size() >= 2 && available.back() + 1 == available.size());
+    EXPECT_TRUE(advertiser.available_index() >= 2);
+
+    (void)advertiser.stop(t);
+    EXPECT_EQ(advertiser.available_index(), 0U);
+    EXPECT_TRUE(!told.empty() && told.back() == 0U);
+
+    size_t const before = available.size();
+    (void)advertiser.start(t + std::chrono::seconds(1));
+    EXPECT_TRUE(available.size() > before && available[before] == 0U);
+    EXPECT_EQ(advertiser.available_index(), 1U);
+}
+
+// A departing that could not be sent ends the cycle all the same.
+TEST(nanoavb_adp_advertiser, a_departing_that_fails_to_send_still_resets_available_index)
+{
+    auto entity = create_test_entity_descriptor();
+    bool link_up = true;
+    AdpAdvertiserCallbacks callbacks;
+    callbacks.send_adpdu = [&](AdpDu const&) { return link_up; };
+    NanoAvbAdpAdvertiser advertiser{entity, callbacks};
+    (void)advertiser.start(TimePoint{});
+    EXPECT_EQ(advertiser.available_index(), 1U);
+    link_up = false;
+    (void)advertiser.stop(TimePoint{});
+    EXPECT_EQ(advertiser.available_index(), 0U);
+}
+
 TEST(nanoavb_adp_advertiser, stop_idempotent)
 {
     auto entity = create_test_entity_descriptor();

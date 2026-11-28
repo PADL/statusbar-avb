@@ -308,9 +308,16 @@ class NanoAvbAdpAdvertiser
     /// @return true if send succeeded, false if send failed or no callback
     auto send_entity_available() -> bool;
 
-    /// Send Entity Departing message
+    /// Send Entity Departing message. An availability cycle ends with it:
+    /// available_index starts again from zero (IEEE 1722.1-2021 6.2.2.15),
+    /// so the first ENTITY_AVAILABLE after it carries 0, as after a power
+    /// cycle, whether or not the PDU could be sent.
     /// @return true if send succeeded, false if send failed or no callback
     auto send_entity_departing() -> bool;
+    /// The ENTITY_DEPARTING PDU of this entity: available_index zero on transmit.
+    [[nodiscard]] auto departing_adpdu() const -> AdpDu;
+    /// available_index back to zero, in the PDU and for whoever follows it (the ENTITY descriptor).
+    void restart_available_index();
 
     DescriptorEntity entity_;  // Owned snapshot (~312 bytes) — see ctor for rationale
     AdpAdvertiserCallbacks callbacks_;

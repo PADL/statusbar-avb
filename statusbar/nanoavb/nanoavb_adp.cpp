@@ -222,19 +222,35 @@ auto NanoAvbAdpAdvertiser::send_entity_departing() -> bool
         return false;
     }
 
-    // Create a departing message
-    AdpDu departing = adpdu_;
-    departing.init_entity_departing(entity_.entity_id);
-    departing.available_index = quadlet_t{0};
-    bool const send_ok = callbacks_.send_adpdu(departing);
+    bool const send_ok = callbacks_.send_adpdu(departing_adpdu());
 
     if (send_ok) {
         consecutive_send_failures_ = 0;
     } else {
         ++consecutive_send_failures_;
     }
+    restart_available_index();
 
     return send_ok;
+}
+
+auto NanoAvbAdpAdvertiser::departing_adpdu() const -> AdpDu
+{
+    AdpDu departing = adpdu_;
+    departing.init_entity_departing(entity_.entity_id);
+    departing.available_index = quadlet_t{0};
+    return departing;
+}
+
+void NanoAvbAdpAdvertiser::restart_available_index()
+{
+    // IEEE 1722.1-2021 6.2.2.15: "reset to zero (0) when transmitting an
+    // ENTITY_DEPARTING or after a power cycle".
+    available_index_ = 0;
+    adpdu_.available_index = available_index_;
+    if (callbacks_.on_available_index_change) {
+        callbacks_.on_available_index_change(available_index_);
+    }
 }
 
 //
